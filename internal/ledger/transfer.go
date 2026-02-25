@@ -1,0 +1,274 @@
+// Package ledger implements the AetherNet dual-ledger system.
+//
+// The Transfer Ledger records value moving between agents. Each entry corresponds
+// to a single EventTypeTransfer event in the causal DAG and mirrors its OCS
+// settlement lifecycle: Optimistic → Settled | Adjusted.
+//
+// Balance semantics follow OCS conservatism: only Settled inflows are treated as
+// spendable, while both Settled and Optimistic outflows are reserved immediately
+// to prevent double-spend under the optimistic execution model.
+package ledger
+
+import (
+	"errors"
+	"fmt"
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/aethernet/core/internal/crypto"
+	"github.com/aethernet/core/internal/event"
+)
+
+// Sentinel errors returned by TransferLedger methods.
+var (
+	// ErrNotTransfer is returned when Record receives an event whose Type is not
+	// EventTypeTransfer.
+	ErrNotTransfer = errors.New("ledger: event is not a Transfer")
+
+	// ErrDuplicateEntry is returned when Record receives an event whose ID is
+	// already present in the ledger.
+	ErrDuplicateEntry = errors.New("ledger: event already recorded")
+
+	// ErrEntryNotFound is returned when Settle references an EventID not present
+	// in the ledger.
+	ErrEntryNotFound = errors.New("ledger: entry not found")
+
+	// ErrInvalidTransition is returned when Settle requests a settlement state
+	// progression that violates the OCS lifecycle rules.
+	ErrInvalidTransition = errors.New("ledger: invalid settlement state transition")
+)
+
+// TransferEntry is a single record in the Transfer Ledger. It captures the
+// economic fields of a TransferPayload together with the event's causal position
+// and OCS state at the time of recording.
+type TransferEntry struct {
+	// EventID is the content-addressed ID of the originating Transfer event.
+	EventID event.EventID
+
+	// FromAgent is the sending agent's identity.
+	FromAgent crypto.AgentID
+
+	// ToAgent is the receiving agent's identity.
+	ToAgent crypto.AgentID
+
+	// Amount is the quantity transferred, in micro-AET (or the smallest unit of
+	// Currency if non-AET). Copied directly from TransferPayload.Amount.
+	Amount uint64
+
+	// Currency identifies the token transferred (e.g., "AET", "USDC").
+	Currency string
+
+	// Memo is the optional human-readable annotation from the payload.
+	Memo string
+
+	// Timestamp is the Lamport causal clock value of the originating event.
+	// Used to establish a deterministic causal ordering for History queries.
+	Timestamp uint64
+
+	// Settlement mirrors the OCS state of the originating event and is updated
+	// by Settle as the event progresses through the lifecycle.
+	Settlement event.SettlementState
+
+	// RecordedAt is the wall-clock time at which Record was called. Used only
+	// for operational observability; not used in any balance or ordering logic.
+	RecordedAt time.Time
+}
+
+// TransferLedger is a concurrent, in-memory record of all Transfer events recorded
+// on this node. It is safe for simultaneous use by multiple goroutines.
+type TransferLedger struct {
+	mu      sync.RWMutex
+	entries map[event.EventID]*TransferEntry
+}
+
+// NewTransferLedger returns an empty, ready-to-use TransferLedger.
+func NewTransferLedger() *TransferLedger {
+	return &TransferLedger{
+		entries: make(map[event.EventID]*TransferEntry),
+	}
+}
+
+// Record adds a Transfer event to the ledger.
+//
+// It returns ErrNotTransfer if the event type is not EventTypeTransfer, an error
+// if the payload cannot be decoded as TransferPayload, and ErrDuplicateEntry if
+// the event ID has already been recorded. On success the entry is stored with the
+// event's current SettlementState (typically Optimistic).
+func (l *TransferLedger) Record(e *event.Event) error {
+	if e.Type != event.EventTypeTransfer {
+		return fmt.Errorf("%w: got %q", ErrNotTransfer, e.Type)
+	}
+
+	// Accept both value and pointer forms of TransferPayload so callers are not
+	// constrained by how they constructed the event.
+	var p event.TransferPayload
+	switch v := e.Payload.(type) {
+	case event.TransferPayload:
+		p = v
+	case *event.TransferPayload:
+		if v == nil {
+			return fmt.Errorf("ledger: Transfer event %s has nil payload", e.ID)
+		}
+		p = *v
+	default:
+		return fmt.Errorf("ledger: Transfer event %s payload has unexpected type %T", e.ID, e.Payload)
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if _, exists := l.entries[e.ID]; exists {
+		return fmt.Errorf("%w: %s", ErrDuplicateEntry, e.ID)
+	}
+
+	l.entries[e.ID] = &TransferEntry{
+		EventID:    e.ID,
+		FromAgent:  crypto.AgentID(p.FromAgent),
+		ToAgent:    crypto.AgentID(p.ToAgent),
+		Amount:     p.Amount,
+		Currency:   p.Currency,
+		Memo:       p.Memo,
+		Timestamp:  e.CausalTimestamp,
+		Settlement: e.SettlementState,
+		RecordedAt: time.Now(),
+	}
+	return nil
+}
+
+// validLedgerTransitions mirrors the OCS lifecycle defined in event.Transition.
+// Keeping a local copy avoids mutating the live event just to validate a transition.
+var validLedgerTransitions = map[event.SettlementState]map[event.SettlementState]bool{
+	event.SettlementOptimistic: {
+		event.SettlementSettled:  true,
+		event.SettlementAdjusted: true,
+	},
+	event.SettlementSettled: {
+		event.SettlementAdjusted: true,
+	},
+	event.SettlementAdjusted: {},
+}
+
+// Settle updates the settlement state of a previously recorded entry.
+//
+// The requested state must be a valid forward transition in the OCS lifecycle:
+// Optimistic → {Settled, Adjusted} and Settled → Adjusted. Adjusted is terminal.
+// Returns ErrEntryNotFound if the EventID is unknown and ErrInvalidTransition if
+// the state change is not permitted.
+func (l *TransferLedger) Settle(eventID event.EventID, state event.SettlementState) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	entry, ok := l.entries[eventID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrEntryNotFound, eventID)
+	}
+
+	allowed, known := validLedgerTransitions[entry.Settlement]
+	if !known {
+		return fmt.Errorf("%w: unrecognized current state %q", ErrInvalidTransition, entry.Settlement)
+	}
+	if !allowed[state] {
+		return fmt.Errorf("%w: cannot transition from %q to %q", ErrInvalidTransition, entry.Settlement, state)
+	}
+
+	entry.Settlement = state
+	return nil
+}
+
+// Balance returns the spendable balance for agentID in all currencies combined
+// as a single micro-AET equivalent.
+//
+// The formula is: sum(incoming Settled) − sum(outgoing Settled + Optimistic).
+//
+// Only Settled inflows are counted as spendable because Optimistic inflows may
+// still be challenged and adjusted. Both Settled and Optimistic outflows are
+// reserved immediately to prevent double-spend under the optimistic model.
+// Adjusted entries are excluded from both sides. If outgoing reservations exceed
+// Settled inflows the result is clamped to zero (uint64 cannot represent negative
+// values, and the caller can use PendingOutgoing to inspect the pending position).
+func (l *TransferLedger) Balance(agentID crypto.AgentID) (uint64, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	var inSettled, outReserved uint64
+	for _, e := range l.entries {
+		if e.ToAgent == agentID && e.Settlement == event.SettlementSettled {
+			inSettled += e.Amount
+		}
+		if e.FromAgent == agentID &&
+			(e.Settlement == event.SettlementSettled || e.Settlement == event.SettlementOptimistic) {
+			outReserved += e.Amount
+		}
+	}
+
+	if outReserved >= inSettled {
+		return 0, nil
+	}
+	return inSettled - outReserved, nil
+}
+
+// PendingOutgoing returns the total outgoing amount across all Optimistic
+// (not yet settled) transfers initiated by agentID.
+//
+// This represents value that has left the agent's control under the optimistic
+// model but whose final settlement status has not yet been determined.
+func (l *TransferLedger) PendingOutgoing(agentID crypto.AgentID) (uint64, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	var total uint64
+	for _, e := range l.entries {
+		if e.FromAgent == agentID && e.Settlement == event.SettlementOptimistic {
+			total += e.Amount
+		}
+	}
+	return total, nil
+}
+
+// History returns a page of TransferEntry records in which agentID appears as
+// either sender or receiver, ordered by causal timestamp descending (most recent
+// first). Entries with identical timestamps are further ordered by EventID
+// descending to ensure a deterministic, stable ordering regardless of map
+// iteration order.
+//
+// offset skips the first N matching entries; limit caps the number returned.
+// A limit of 0 (or negative) returns all remaining entries after the offset.
+// Returns an empty (non-nil) slice when no entries match the page parameters.
+func (l *TransferLedger) History(agentID crypto.AgentID, limit int, offset int) ([]*TransferEntry, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	var matched []*TransferEntry
+	for _, e := range l.entries {
+		if e.FromAgent == agentID || e.ToAgent == agentID {
+			matched = append(matched, e)
+		}
+	}
+
+	// Stable deterministic order: causal timestamp descending, EventID descending
+	// as tiebreaker. EventID is a hex content hash so lexicographic ordering is
+	// arbitrary but stable — the important property is reproducibility.
+	sort.Slice(matched, func(i, j int) bool {
+		if matched[i].Timestamp != matched[j].Timestamp {
+			return matched[i].Timestamp > matched[j].Timestamp
+		}
+		return matched[i].EventID > matched[j].EventID
+	})
+
+	total := len(matched)
+
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= total {
+		return []*TransferEntry{}, nil
+	}
+	matched = matched[offset:]
+
+	if limit > 0 && limit < len(matched) {
+		matched = matched[:limit]
+	}
+
+	return matched, nil
+}
