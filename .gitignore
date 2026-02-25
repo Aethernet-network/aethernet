@@ -1,0 +1,28 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go
+*.test
+*.out
+go.sum
+
+# OS
+.DS_Store
+.DS_Store?
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# AetherNet specific
+data/
+*.db
+*.log
+node_keys/
