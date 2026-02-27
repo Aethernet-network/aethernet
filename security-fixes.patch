@@ -1,0 +1,1454 @@
+diff -ruN '--exclude=.git' aethernet-main/internal/consensus/voting.go aethernet-fixed/internal/consensus/voting.go
+--- aethernet-main/internal/consensus/voting.go	2026-02-26 01:15:06.000000000 +0000
++++ aethernet-fixed/internal/consensus/voting.go	2026-02-27 00:22:51.000000000 +0000
+@@ -39,6 +39,7 @@
+ import (
+ 	"errors"
+ 	"fmt"
++	"math/big"
+ 	"sync"
+ 	"time"
+ 
+@@ -47,6 +48,10 @@
+ 	"github.com/aethernet/core/internal/identity"
+ )
+ 
++// bigDivisor is the constant 10000 used for weight normalization, pre-allocated
++// as a *big.Int so it is not re-created on every computeWeight call.
++var bigDivisor = big.NewInt(10000)
++
+ // Sentinel errors for programmatic handling by callers.
+ var (
+ 	// ErrEventNotFound is returned by GetRecord, IsFinalized, FinalOrder, and
+@@ -208,10 +213,23 @@
+ 	if err != nil {
+ 		return 0, fmt.Errorf("consensus: agent %s not in registry: %w", agentID, err)
+ 	}
+-	// Integer-first arithmetic: multiply before dividing to preserve precision.
+-	// If either ReputationScore or StakedAmount is zero the product is zero,
+-	// giving weight zero as specified.
+-	return fp.ReputationScore * fp.StakedAmount / 10000, nil
++	// Overflow-safe arithmetic using math/big: the intermediate product of
++	// ReputationScore × StakedAmount can exceed uint64 for large stakes.
++	// Using big.Int for the multiplication avoids silent wraparound.
++	// If either factor is zero, return zero immediately (short-circuit).
++	if fp.ReputationScore == 0 || fp.StakedAmount == 0 {
++		return 0, nil
++	}
++	product := new(big.Int).Mul(
++		new(big.Int).SetUint64(fp.ReputationScore),
++		new(big.Int).SetUint64(fp.StakedAmount),
++	)
++	result := new(big.Int).Div(product, bigDivisor)
++	// If the result exceeds uint64 range, saturate at MaxUint64.
++	if !result.IsUint64() {
++		return ^uint64(0), nil
++	}
++	return result.Uint64(), nil
+ }
+ 
+ // RegisterVote records a vote from voterID for the given eventID and immediately
+diff -ruN '--exclude=.git' aethernet-main/internal/consensus/voting_test.go aethernet-fixed/internal/consensus/voting_test.go
+--- aethernet-main/internal/consensus/voting_test.go	2026-02-26 01:15:06.000000000 +0000
++++ aethernet-fixed/internal/consensus/voting_test.go	2026-02-27 00:26:31.000000000 +0000
+@@ -402,3 +402,48 @@
+ 		t.Errorf("want %d finalized events, got %d", numGoroutines, got)
+ 	}
+ }
++
++// ---------------------------------------------------------------------------
++// Fix 1: Overflow-safe weight computation
++// ---------------------------------------------------------------------------
++
++func TestComputeWeight_NoOverflow(t *testing.T) {
++	// Use values that would overflow uint64 under naive multiplication:
++	// 10000 * 1_844_674_407_370_955_300 = 1.84e22, exceeding uint64 max (1.84e19).
++	// The math/big implementation must produce the correct result.
++	reg := identity.NewRegistry()
++	const rep = uint64(10000)                      // max reputation
++	const stake = uint64(1_844_674_407_370_955_300) // near uint64 max / 10000
++	registerAgent(t, reg, "whale", rep, stake)
++	vr := newRound(reg)
++
++	w, err := vr.ComputeWeight("whale")
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	// Expected: 10000 * 1_844_674_407_370_955_300 / 10000 = 1_844_674_407_370_955_300
++	if w != stake {
++		t.Errorf("want weight %d, got %d (overflow detected!)", stake, w)
++	}
++}
++
++func TestComputeWeight_LargeValues_NoWrapAround(t *testing.T) {
++	// Values that definitely overflow a uint64 multiplication:
++	// 10000 * MaxUint64 = overflow. Result should saturate, not wrap.
++	reg := identity.NewRegistry()
++	registerAgent(t, reg, "mega", 10000, ^uint64(0))
++	vr := newRound(reg)
++
++	w, err := vr.ComputeWeight("mega")
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	// The big.Int result exceeds uint64, so it should saturate at MaxUint64.
++	if w == 0 {
++		t.Fatal("weight wrapped to zero — overflow bug present")
++	}
++	// Since 10000 * MaxUint64 / 10000 = MaxUint64, the result should be MaxUint64.
++	if w != ^uint64(0) {
++		t.Errorf("want MaxUint64 (%d), got %d", ^uint64(0), w)
++	}
++}
+diff -ruN '--exclude=.git' aethernet-main/internal/crypto/signing.go aethernet-fixed/internal/crypto/signing.go
+--- aethernet-main/internal/crypto/signing.go	2026-02-26 01:15:06.000000000 +0000
++++ aethernet-fixed/internal/crypto/signing.go	2026-02-27 03:04:19.275288010 +0000
+@@ -13,18 +13,11 @@
+ // This struct must mirror the unexported eventCanonical struct in the event package
+ // exactly — same fields, same JSON tags, same declaration order — so that both
+ // operations (signing here and ID hashing in event.ComputeID) commit to an
+-// identical byte sequence for the same event. The test TestCanonicalBytes_MatchesEventComputeID
+-// verifies this invariant by checking sha256(CanonicalBytes(e)) == e.ID.
+-//
+-// Excluded fields and rationale:
+-//   - ID: computed from these fields (circular)
+-//   - Signature: the output of signing (circular; included would prevent signing)
+-//   - SettlementState: mutable OCS lifecycle metadata that evolves after creation
+-//     without invalidating the event's causal identity or its signature.
++// identical byte sequence for the same event.
+ type signable struct {
+ 	Type            event.EventType `json:"type"`
+ 	CausalRefs      []event.EventID `json:"causal_refs"`
+-	Payload         interface{}     `json:"payload"`
++	Payload         json.RawMessage `json:"payload"`
+ 	AgentID         string          `json:"agent_id"`
+ 	CausalTimestamp uint64          `json:"causal_timestamp"`
+ 	StakeAmount     uint64          `json:"stake_amount"`
+diff -ruN '--exclude=.git' aethernet-main/internal/dag/dag.go aethernet-fixed/internal/dag/dag.go
+--- aethernet-main/internal/dag/dag.go	2026-02-26 01:15:06.000000000 +0000
++++ aethernet-fixed/internal/dag/dag.go	2026-02-27 03:05:35.168260569 +0000
+@@ -52,6 +52,7 @@
+ 	"sort"
+ 	"sync"
+ 
++	"github.com/aethernet/core/internal/crypto"
+ 	"github.com/aethernet/core/internal/event"
+ )
+ 
+@@ -62,15 +63,19 @@
+ 	ErrEventNotFound = errors.New("event not found")
+ 
+ 	// ErrDuplicateEvent is returned when an event whose ID is already stored is added
+-	// again. Because EventIDs are content-addressed, a duplicate ID means the event
+-	// content is identical; the Add call is treated as a no-op from a state perspective,
+-	// but the error signals to the caller that no insertion occurred.
++	// again.
+ 	ErrDuplicateEvent = errors.New("duplicate event")
+ 
+ 	// ErrMissingCausalRef is returned when an event's CausalRefs include an EventID
+-	// not yet present in the DAG. The event cannot be inserted until all of its
+-	// causal dependencies are known to the DAG.
++	// not yet present in the DAG.
+ 	ErrMissingCausalRef = errors.New("causal reference not in DAG")
++
++	// ErrInvalidSignature is returned when an event's cryptographic signature does
++	// not verify against its canonical content and public key.
++	ErrInvalidSignature = errors.New("dag: invalid event signature")
++
++	// ErrMissingSignature is returned when a non-genesis event has no signature.
++	ErrMissingSignature = errors.New("dag: event has no signature")
+ )
+ 
+ // DAG is a concurrent, append-only causal directed acyclic graph of AetherNet events.
+@@ -127,9 +132,20 @@
+ 		return fmt.Errorf("dag: %w: %s", ErrDuplicateEvent, e.ID)
+ 	}
+ 
++	// Signature enforcement: non-genesis events must be signed and verifiable.
++	// Genesis events (empty CausalRefs) are allowed unsigned as they bootstrap
++	// the DAG and typically pre-date key distribution.
++	isGenesis := len(e.CausalRefs) == 0
++	if !isGenesis {
++		if len(e.Signature) == 0 {
++			return fmt.Errorf("%w: %s", ErrMissingSignature, e.ID)
++		}
++		if !crypto.VerifyEvent(e) {
++			return fmt.Errorf("%w: %s", ErrInvalidSignature, e.ID)
++		}
++	}
++
+ 	// Validate all causal references before mutating any state.
+-	// This makes Add atomic: either all refs exist and the event is inserted,
+-	// or the first missing ref causes a rejection and the DAG is unchanged.
+ 	for _, ref := range e.CausalRefs {
+ 		if _, ok := d.events[ref]; !ok {
+ 			return fmt.Errorf("dag: %w: %s (referenced by %s)", ErrMissingCausalRef, ref, e.ID)
+diff -ruN '--exclude=.git' aethernet-main/internal/dag/dag_test.go aethernet-fixed/internal/dag/dag_test.go
+--- aethernet-main/internal/dag/dag_test.go	2026-02-26 01:15:06.000000000 +0000
++++ aethernet-fixed/internal/dag/dag_test.go	2026-02-27 03:09:34.670173971 +0000
+@@ -7,6 +7,7 @@
+ 	"sync"
+ 	"testing"
+ 
++	"github.com/aethernet/core/internal/crypto"
+ 	"github.com/aethernet/core/internal/dag"
+ 	"github.com/aethernet/core/internal/event"
+ )
+@@ -16,6 +17,7 @@
+ // ---------------------------------------------------------------------------
+ 
+ // makeGenesis creates a genesis event (no causal references) for the given agent.
++// Genesis events are unsigned; the DAG allows this for bootstrap.
+ func makeGenesis(t *testing.T, agentID string) *event.Event {
+ 	t.Helper()
+ 	e, err := event.New(
+@@ -32,10 +34,17 @@
+ 	return e
+ }
+ 
+-// makeChild creates an event that references all provided parents.
++// makeChild creates a signed event that references all provided parents.
+ // priorTimestamps is built automatically from the parents' CausalTimestamps.
++// A fresh keypair is generated for signing since non-genesis events must be signed.
+ func makeChild(t *testing.T, agentID string, parents ...*event.Event) *event.Event {
+ 	t.Helper()
++	kp, err := crypto.GenerateKeyPair()
++	if err != nil {
++		t.Fatalf("makeChild: GenerateKeyPair: %v", err)
++	}
++	aid := string(kp.AgentID())
++
+ 	refs := make([]event.EventID, len(parents))
+ 	prior := make(map[event.EventID]uint64, len(parents))
+ 	for i, p := range parents {
+@@ -45,14 +54,17 @@
+ 	e, err := event.New(
+ 		event.EventTypeTransfer,
+ 		refs,
+-		event.TransferPayload{FromAgent: agentID, ToAgent: "sink", Amount: 1, Currency: "AET"},
+-		agentID,
++		event.TransferPayload{FromAgent: aid, ToAgent: "sink", Amount: 1, Currency: "AET"},
++		aid,
+ 		prior,
+ 		0,
+ 	)
+ 	if err != nil {
+ 		t.Fatalf("makeChild(%q): %v", agentID, err)
+ 	}
++	if err := crypto.SignEvent(e, kp); err != nil {
++		t.Fatalf("makeChild(%q) sign: %v", agentID, err)
++	}
+ 	return e
+ }
+ 
+@@ -1061,3 +1073,93 @@
+ 		t.Errorf("position 4: got agent=%s, want E", sorted[4].AgentID)
+ 	}
+ }
++
++// ---------------------------------------------------------------------------
++// Fix 4A: Signature verification in DAG.Add
++// ---------------------------------------------------------------------------
++
++func TestAdd_UnsignedNonGenesis_Rejected(t *testing.T) {
++	// A non-genesis event with no signature must be rejected.
++	d := dag.New()
++	genesis := makeGenesis(t, "root")
++	mustAdd(t, d, genesis)
++
++	// Create a child event WITHOUT signing it.
++	refs := []event.EventID{genesis.ID}
++	prior := map[event.EventID]uint64{genesis.ID: genesis.CausalTimestamp}
++	child, err := event.New(
++		event.EventTypeTransfer,
++		refs,
++		event.TransferPayload{FromAgent: "attacker", ToAgent: "sink", Amount: 1, Currency: "AET"},
++		"attacker",
++		prior,
++		0,
++	)
++	if err != nil {
++		t.Fatalf("event.New: %v", err)
++	}
++
++	err = d.Add(child)
++	if err == nil {
++		t.Fatal("Add should reject unsigned non-genesis event, got nil")
++	}
++	if !errors.Is(err, dag.ErrMissingSignature) {
++		t.Errorf("want ErrMissingSignature, got: %v", err)
++	}
++}
++
++func TestAdd_InvalidSignature_Rejected(t *testing.T) {
++	// An event with a garbage signature must be rejected.
++	d := dag.New()
++	genesis := makeGenesis(t, "root")
++	mustAdd(t, d, genesis)
++
++	kp, _ := crypto.GenerateKeyPair()
++	aid := string(kp.AgentID())
++	refs := []event.EventID{genesis.ID}
++	prior := map[event.EventID]uint64{genesis.ID: genesis.CausalTimestamp}
++	child, err := event.New(
++		event.EventTypeTransfer,
++		refs,
++		event.TransferPayload{FromAgent: aid, ToAgent: "sink", Amount: 1, Currency: "AET"},
++		aid,
++		prior,
++		0,
++	)
++	if err != nil {
++		t.Fatalf("event.New: %v", err)
++	}
++	// Set garbage signature instead of a valid one.
++	child.Signature = make([]byte, 64)
++
++	err = d.Add(child)
++	if err == nil {
++		t.Fatal("Add should reject invalid signature, got nil")
++	}
++	if !errors.Is(err, dag.ErrInvalidSignature) {
++		t.Errorf("want ErrInvalidSignature, got: %v", err)
++	}
++}
++
++func TestAdd_ValidSignature_Accepted(t *testing.T) {
++	// A properly signed non-genesis event must be accepted.
++	d := dag.New()
++	genesis := makeGenesis(t, "root")
++	mustAdd(t, d, genesis)
++
++	child := makeChild(t, "child", genesis)
++	err := d.Add(child)
++	if err != nil {
++		t.Fatalf("Add should accept validly signed event, got: %v", err)
++	}
++}
++
++func TestAdd_GenesisUnsigned_Accepted(t *testing.T) {
++	// Genesis events (no CausalRefs) are allowed unsigned for bootstrap.
++	d := dag.New()
++	g := makeGenesis(t, "bootstrap")
++	err := d.Add(g)
++	if err != nil {
++		t.Fatalf("Add should accept unsigned genesis event, got: %v", err)
++	}
++}
+diff -ruN '--exclude=.git' aethernet-main/internal/event/event.go aethernet-fixed/internal/event/event.go
+--- aethernet-main/internal/event/event.go	2026-02-26 01:15:06.000000000 +0000
++++ aethernet-fixed/internal/event/event.go	2026-02-27 03:04:06.897292485 +0000
+@@ -109,14 +109,18 @@
+ 	// and built upon that event. An empty slice marks a genesis (root) event.
+ 	CausalRefs []EventID `json:"causal_refs"`
+ 
+-	// Payload holds type-specific structured data. The concrete type depends on
+-	// the Type field:
++	// Payload holds type-specific structured data as pre-marshaled JSON bytes.
++	// The concrete type depends on the Type field — use GetPayload[T] to decode:
+ 	//   EventTypeTransfer     → TransferPayload
+ 	//   EventTypeGeneration   → GenerationPayload
+ 	//   EventTypeAttestation  → AttestationPayload
+ 	//   EventTypeVerification → VerificationPayload
+ 	//   EventTypeDelegation   → DelegationPayload
+-	Payload interface{} `json:"payload"`
++	//
++	// Storing as json.RawMessage ensures deterministic canonical bytes across
++	// network serialization/deserialization boundaries, which is critical for
++	// signature verification after round-trips.
++	Payload json.RawMessage `json:"payload"`
+ 
+ 	// AgentID is the capability fingerprint of the originating agent.
+ 	// AetherNet identity is track-record-based rather than purely key-based:
+@@ -160,12 +164,12 @@
+ //   - Signature: circular — signing happens after hashing
+ //   - SettlementState: mutable post-creation metadata, not part of causal identity
+ type eventCanonical struct {
+-	Type            EventType   `json:"type"`
+-	CausalRefs      []EventID   `json:"causal_refs"`
+-	Payload         interface{} `json:"payload"`
+-	AgentID         string      `json:"agent_id"`
+-	CausalTimestamp uint64      `json:"causal_timestamp"`
+-	StakeAmount     uint64      `json:"stake_amount"`
++	Type            EventType       `json:"type"`
++	CausalRefs      []EventID       `json:"causal_refs"`
++	Payload         json.RawMessage `json:"payload"`
++	AgentID         string          `json:"agent_id"`
++	CausalTimestamp uint64          `json:"causal_timestamp"`
++	StakeAmount     uint64          `json:"stake_amount"`
+ }
+ 
+ // ComputeID derives the content-addressed EventID from an event's canonical fields.
+@@ -226,8 +230,6 @@
+ 	}
+ 
+ 	// Normalize nil to empty slice for consistent JSON serialization and hashing.
+-	// A nil CausalRefs and an empty CausalRefs are semantically identical (both
+-	// mean "genesis event"), but JSON encodes them differently: null vs [].
+ 	if causalRefs == nil {
+ 		causalRefs = []EventID{}
+ 	}
+@@ -235,10 +237,31 @@
+ 		priorTimestamps = map[EventID]uint64{}
+ 	}
+ 
++	// Marshal the payload to json.RawMessage at creation time so that the
++	// canonical bytes are deterministic regardless of how the event is later
++	// serialized/deserialized across the network. This is the fix for the
++	// JSON non-determinism bug where interface{} payloads produced different
++	// canonical bytes after a network round-trip.
++	var rawPayload json.RawMessage
++	if payload != nil {
++		// If already json.RawMessage, use directly.
++		if rm, ok := payload.(json.RawMessage); ok {
++			rawPayload = rm
++		} else {
++			data, err := json.Marshal(payload)
++			if err != nil {
++				return nil, fmt.Errorf("event: failed to marshal payload: %w", err)
++			}
++			rawPayload = data
++		}
++	} else {
++		rawPayload = json.RawMessage("null")
++	}
++
+ 	e := &Event{
+ 		Type:            eventType,
+ 		CausalRefs:      causalRefs,
+-		Payload:         payload,
++		Payload:         rawPayload,
+ 		AgentID:         agentID,
+ 		CausalTimestamp: ComputeCausalTimestamp(causalRefs, priorTimestamps),
+ 		StakeAmount:     stakeAmount,
+@@ -280,6 +303,25 @@
+ 	return fmt.Errorf("event: cannot transition settlement state from %q to %q", e.SettlementState, target)
+ }
+ 
++// GetPayload deserializes the event's json.RawMessage Payload into the concrete
++// type T. This is the standard way to extract typed payload data from an event
++// after the Payload field was changed from interface{} to json.RawMessage for
++// deterministic canonical bytes.
++//
++// Usage:
++//
++//	tp, err := event.GetPayload[event.TransferPayload](e)
++func GetPayload[T any](e *Event) (T, error) {
++	var result T
++	if e.Payload == nil {
++		return result, fmt.Errorf("event: payload is nil")
++	}
++	if err := json.Unmarshal(e.Payload, &result); err != nil {
++		return result, fmt.Errorf("event: failed to decode payload as %T: %w", result, err)
++	}
++	return result, nil
++}
++
+ // ---------------------------------------------------------------------------
+ // Payload types
+ // ---------------------------------------------------------------------------
+diff -ruN '--exclude=.git' aethernet-main/internal/event/event_test.go aethernet-fixed/internal/event/event_test.go
+--- aethernet-main/internal/event/event_test.go	2026-02-26 01:15:06.000000000 +0000
++++ aethernet-fixed/internal/event/event_test.go	2026-02-27 03:09:55.571166413 +0000
+@@ -1,6 +1,7 @@
+ package event_test
+ 
+ import (
++	"encoding/json"
+ 	"strings"
+ 	"testing"
+ 	"time"
+@@ -64,7 +65,8 @@
+ 		t.Error("Signature should be empty until explicitly signed")
+ 	}
+ 
+-	p, ok := e.Payload.(event.TransferPayload)
++	p, err := event.GetPayload[event.TransferPayload](e)
++	ok := err == nil
+ 	if !ok {
+ 		t.Fatalf("Payload type assertion to TransferPayload failed")
+ 	}
+@@ -104,7 +106,8 @@
+ 		t.Errorf("Type = %q, want Generation", e.Type)
+ 	}
+ 
+-	p, ok := e.Payload.(event.GenerationPayload)
++	p, err := event.GetPayload[event.GenerationPayload](e)
++	ok := err == nil
+ 	if !ok {
+ 		t.Fatalf("Payload type assertion to GenerationPayload failed")
+ 	}
+@@ -148,7 +151,8 @@
+ 		t.Errorf("Type = %q, want Attestation", e.Type)
+ 	}
+ 
+-	p, ok := e.Payload.(event.AttestationPayload)
++	p, err := event.GetPayload[event.AttestationPayload](e)
++	ok := err == nil
+ 	if !ok {
+ 		t.Fatalf("Payload type assertion to AttestationPayload failed")
+ 	}
+@@ -195,7 +199,8 @@
+ 		t.Errorf("Type = %q, want Verification", e.Type)
+ 	}
+ 
+-	p, ok := e.Payload.(event.VerificationPayload)
++	p, err := event.GetPayload[event.VerificationPayload](e)
++	ok := err == nil
+ 	if !ok {
+ 		t.Fatalf("Payload type assertion to VerificationPayload failed")
+ 	}
+@@ -231,7 +236,7 @@
+ 
+ 	e := mustNew(t, event.EventTypeVerification, []event.EventID{target.ID}, payload, "honest-validator", nil, 8000)
+ 
+-	p := e.Payload.(event.VerificationPayload)
++	p, _ := event.GetPayload[event.VerificationPayload](e)
+ 	if p.Verdict {
+ 		t.Error("VerificationPayload.Verdict = true, want false for negative verdict")
+ 	}
+@@ -258,7 +263,8 @@
+ 		t.Errorf("Type = %q, want Delegation", e.Type)
+ 	}
+ 
+-	p, ok := e.Payload.(event.DelegationPayload)
++	p, err := event.GetPayload[event.DelegationPayload](e)
++	ok := err == nil
+ 	if !ok {
+ 		t.Fatalf("Payload type assertion to DelegationPayload failed")
+ 	}
+@@ -719,3 +725,78 @@
+ 		t.Errorf("merge CausalTimestamp = %d, want 3 (max(2,2)+1)", merge.CausalTimestamp)
+ 	}
+ }
++
++// ---------------------------------------------------------------------------
++// Fix 4B: json.RawMessage Payload deterministic round-trip
++// ---------------------------------------------------------------------------
++
++func TestPayload_RoundTrip_Deterministic(t *testing.T) {
++	// Marshal an event to JSON, unmarshal it back, and verify the ID is
++	// still correct. This was broken when Payload was interface{}: after
++	// a JSON round-trip, the interface{} lost its concrete type and produced
++	// different canonical bytes.
++	payload := event.TransferPayload{
++		FromAgent: "alice",
++		ToAgent:   "bob",
++		Amount:    42,
++		Currency:  "AET",
++	}
++	e := mustNew(t, event.EventTypeTransfer, nil, payload, "alice", nil, 100)
++	originalID := e.ID
++
++	data, err := json.Marshal(e)
++	if err != nil {
++		t.Fatalf("Marshal: %v", err)
++	}
++
++	var roundTripped event.Event
++	if err := json.Unmarshal(data, &roundTripped); err != nil {
++		t.Fatalf("Unmarshal: %v", err)
++	}
++
++	recomputedID, err := event.ComputeID(&roundTripped)
++	if err != nil {
++		t.Fatalf("ComputeID after round-trip: %v", err)
++	}
++	if recomputedID != originalID {
++		t.Errorf("ID changed after JSON round-trip:\n  original:    %s\n  recomputed:  %s",
++			originalID, recomputedID)
++	}
++}
++
++func TestGetPayload_Transfer(t *testing.T) {
++	payload := event.TransferPayload{
++		FromAgent: "alice",
++		ToAgent:   "bob",
++		Amount:    42,
++		Currency:  "AET",
++	}
++	e := mustNew(t, event.EventTypeTransfer, nil, payload, "alice", nil, 0)
++
++	got, err := event.GetPayload[event.TransferPayload](e)
++	if err != nil {
++		t.Fatalf("GetPayload: %v", err)
++	}
++	if got.FromAgent != "alice" || got.ToAgent != "bob" || got.Amount != 42 {
++		t.Errorf("GetPayload returned %+v, want FromAgent=alice, ToAgent=bob, Amount=42", got)
++	}
++}
++
++func TestGetPayload_Generation(t *testing.T) {
++	payload := event.GenerationPayload{
++		GeneratingAgent:  "gpu-agent",
++		BeneficiaryAgent: "client",
++		ClaimedValue:     1000,
++		EvidenceHash:     "sha256:abc",
++		TaskDescription:  "inference",
++	}
++	e := mustNew(t, event.EventTypeGeneration, nil, payload, "gpu-agent", nil, 0)
++
++	got, err := event.GetPayload[event.GenerationPayload](e)
++	if err != nil {
++		t.Fatalf("GetPayload: %v", err)
++	}
++	if got.GeneratingAgent != "gpu-agent" || got.ClaimedValue != 1000 {
++		t.Errorf("GetPayload returned %+v", got)
++	}
++}
+diff -ruN '--exclude=.git' aethernet-main/internal/ledger/generation.go aethernet-fixed/internal/ledger/generation.go
+--- aethernet-main/internal/ledger/generation.go	2026-02-26 01:15:06.000000000 +0000
++++ aethernet-fixed/internal/ledger/generation.go	2026-02-27 03:10:08.043161904 +0000
+@@ -94,17 +94,9 @@
+ 		return fmt.Errorf("%w: got %q", ErrNotGeneration, e.Type)
+ 	}
+ 
+-	var p event.GenerationPayload
+-	switch v := e.Payload.(type) {
+-	case event.GenerationPayload:
+-		p = v
+-	case *event.GenerationPayload:
+-		if v == nil {
+-			return fmt.Errorf("ledger: Generation event %s has nil payload", e.ID)
+-		}
+-		p = *v
+-	default:
+-		return fmt.Errorf("ledger: Generation event %s payload has unexpected type %T", e.ID, e.Payload)
++	p, err := event.GetPayload[event.GenerationPayload](e)
++	if err != nil {
++		return fmt.Errorf("ledger: Generation event %s: %w", e.ID, err)
+ 	}
+ 
+ 	l.mu.Lock()
+diff -ruN '--exclude=.git' aethernet-main/internal/ledger/ledger_test.go aethernet-fixed/internal/ledger/ledger_test.go
+--- aethernet-main/internal/ledger/ledger_test.go	2026-02-26 01:15:06.000000000 +0000
++++ aethernet-fixed/internal/ledger/ledger_test.go	2026-02-27 00:26:54.000000000 +0000
+@@ -88,6 +88,11 @@
+ func TestTransferLedger_RecordAndHistory(t *testing.T) {
+ 	tl := ledger.NewTransferLedger()
+ 
++	// Fund alice so the balance check passes.
++	if err := tl.FundAgent("alice", 10_000); err != nil {
++		t.Fatalf("FundAgent: %v", err)
++	}
++
+ 	e := newTransferEvent(t, "alice", "bob", 1_000, nil, nil)
+ 	if err := tl.Record(e); err != nil {
+ 		t.Fatalf("Record() error: %v", err)
+@@ -139,6 +144,11 @@
+ func TestTransferLedger_Balance_SettledIncoming(t *testing.T) {
+ 	tl := ledger.NewTransferLedger()
+ 
++	// Fund alice so she can send to bob.
++	if err := tl.FundAgent("alice", 100_000); err != nil {
++		t.Fatalf("FundAgent: %v", err)
++	}
++
+ 	e := newTransferEvent(t, "alice", "bob", 5_000, nil, nil)
+ 	if err := tl.Record(e); err != nil {
+ 		t.Fatalf("Record() error: %v", err)
+@@ -169,6 +179,11 @@
+ func TestTransferLedger_Balance_ReservesOptimisticOutgoing(t *testing.T) {
+ 	tl := ledger.NewTransferLedger()
+ 
++	// Fund carol so she can send to alice.
++	if err := tl.FundAgent("carol", 100_000); err != nil {
++		t.Fatalf("FundAgent: %v", err)
++	}
++
+ 	// carol → alice: 3000, settled immediately.
+ 	inbound := newTransferEvent(t, "carol", "alice", 3_000, nil, nil)
+ 	if err := tl.Record(inbound); err != nil {
+@@ -198,6 +213,10 @@
+ func TestTransferLedger_PendingOutgoing_OptimisticOnly(t *testing.T) {
+ 	tl := ledger.NewTransferLedger()
+ 
++	if err := tl.FundAgent("alice", 100_000); err != nil {
++		t.Fatalf("FundAgent: %v", err)
++	}
++
+ 	// e1: alice → bob 1000, stays Optimistic.
+ 	e1 := newTransferEvent(t, "alice", "bob", 1_000, nil, nil)
+ 	if err := tl.Record(e1); err != nil {
+@@ -227,6 +246,10 @@
+ func TestTransferLedger_DuplicateRecord_Error(t *testing.T) {
+ 	tl := ledger.NewTransferLedger()
+ 
++	if err := tl.FundAgent("alice", 100_000); err != nil {
++		t.Fatalf("FundAgent: %v", err)
++	}
++
+ 	e := newTransferEvent(t, "alice", "bob", 500, nil, nil)
+ 	if err := tl.Record(e); err != nil {
+ 		t.Fatalf("first Record() error: %v", err)
+@@ -250,6 +273,10 @@
+ func TestTransferLedger_Settle_AdvancesState(t *testing.T) {
+ 	tl := ledger.NewTransferLedger()
+ 
++	if err := tl.FundAgent("alice", 100_000); err != nil {
++		t.Fatalf("FundAgent: %v", err)
++	}
++
+ 	e := newTransferEvent(t, "alice", "bob", 100, nil, nil)
+ 	if err := tl.Record(e); err != nil {
+ 		t.Fatalf("Record() error: %v", err)
+@@ -278,6 +305,10 @@
+ func TestTransferLedger_Settle_InvalidTransition_Error(t *testing.T) {
+ 	tl := ledger.NewTransferLedger()
+ 
++	if err := tl.FundAgent("alice", 100_000); err != nil {
++		t.Fatalf("FundAgent: %v", err)
++	}
++
+ 	e := newTransferEvent(t, "alice", "bob", 100, nil, nil)
+ 	if err := tl.Record(e); err != nil {
+ 		t.Fatalf("Record() error: %v", err)
+@@ -312,6 +343,10 @@
+ 	const agent = "pager"
+ 	const n = 5
+ 
++	if err := tl.FundAgent(crypto.AgentID(agent), 100_000); err != nil {
++		t.Fatalf("FundAgent: %v", err)
++	}
++
+ 	// Build a causal chain so each of the 5 events gets a distinct Lamport
+ 	// timestamp (1–5), making the sort order fully deterministic.
+ 	var prev *event.Event
+@@ -392,6 +427,10 @@
+ 	tl := ledger.NewTransferLedger()
+ 	const agent = "orderer"
+ 
++	if err := tl.FundAgent(crypto.AgentID(agent), 100_000); err != nil {
++		t.Fatalf("FundAgent: %v", err)
++	}
++
+ 	// Three-event causal chain: ts=1, ts=2, ts=3.
+ 	e1 := newTransferEvent(t, agent, "dst-1", 100, nil, nil)
+ 	if err := tl.Record(e1); err != nil {
+@@ -876,6 +915,14 @@
+ 	tl := ledger.NewTransferLedger()
+ 	const goroutines = 50
+ 
++	// Fund each concurrent sender so the balance check passes.
++	for i := 0; i < goroutines; i++ {
++		from := crypto.AgentID(fmt.Sprintf("concurrent-sender-%d", i))
++		if err := tl.FundAgent(from, 100_000); err != nil {
++			t.Fatalf("FundAgent %s: %v", from, err)
++		}
++	}
++
+ 	var wg sync.WaitGroup
+ 	wg.Add(goroutines)
+ 	for i := 0; i < goroutines; i++ {
+@@ -949,3 +996,55 @@
+ 		t.Errorf("GenerationHistory(concurrent-gen-0) len = %d, want 1", len(history))
+ 	}
+ }
++
++// ---------------------------------------------------------------------------
++// Fix 3: Balance validation and FundAgent
++// ---------------------------------------------------------------------------
++
++func TestTransferLedger_Record_ZeroBalance_Rejected(t *testing.T) {
++	tl := ledger.NewTransferLedger()
++
++	// alice has no balance — the transfer must be rejected.
++	e := newTransferEvent(t, "alice", "bob", 1_000, nil, nil)
++	err := tl.Record(e)
++	if err == nil {
++		t.Fatal("Record should reject transfer from zero-balance sender")
++	}
++	if !errors.Is(err, ledger.ErrInsufficientBalance) {
++		t.Errorf("want ErrInsufficientBalance, got %v", err)
++	}
++}
++
++func TestTransferLedger_Record_Overdraft_Rejected(t *testing.T) {
++	tl := ledger.NewTransferLedger()
++
++	if err := tl.FundAgent("alice", 500); err != nil {
++		t.Fatalf("FundAgent: %v", err)
++	}
++
++	// alice has 500 but tries to send 1000.
++	e := newTransferEvent(t, "alice", "bob", 1_000, nil, nil)
++	err := tl.Record(e)
++	if err == nil {
++		t.Fatal("Record should reject overdraft transfer")
++	}
++	if !errors.Is(err, ledger.ErrInsufficientBalance) {
++		t.Errorf("want ErrInsufficientBalance, got %v", err)
++	}
++}
++
++func TestTransferLedger_FundAgent_CreatesSettledEntry(t *testing.T) {
++	tl := ledger.NewTransferLedger()
++
++	if err := tl.FundAgent("bob", 5_000); err != nil {
++		t.Fatalf("FundAgent: %v", err)
++	}
++
++	bal, err := tl.Balance(crypto.AgentID("bob"))
++	if err != nil {
++		t.Fatalf("Balance: %v", err)
++	}
++	if bal != 5_000 {
++		t.Errorf("Balance = %d, want 5000 after FundAgent", bal)
++	}
++}
+diff -ruN '--exclude=.git' aethernet-main/internal/ledger/transfer.go aethernet-fixed/internal/ledger/transfer.go
+--- aethernet-main/internal/ledger/transfer.go	2026-02-26 01:15:06.000000000 +0000
++++ aethernet-fixed/internal/ledger/transfer.go	2026-02-27 03:10:16.910158698 +0000
+@@ -37,6 +37,10 @@
+ 	// ErrInvalidTransition is returned when Settle requests a settlement state
+ 	// progression that violates the OCS lifecycle rules.
+ 	ErrInvalidTransition = errors.New("ledger: invalid settlement state transition")
++
++	// ErrInsufficientBalance is returned when a transfer's FromAgent does not
++	// have enough spendable balance to cover the transfer amount.
++	ErrInsufficientBalance = errors.New("ledger: insufficient balance")
+ )
+ 
+ // TransferEntry is a single record in the Transfer Ledger. It captures the
+@@ -100,19 +104,9 @@
+ 		return fmt.Errorf("%w: got %q", ErrNotTransfer, e.Type)
+ 	}
+ 
+-	// Accept both value and pointer forms of TransferPayload so callers are not
+-	// constrained by how they constructed the event.
+-	var p event.TransferPayload
+-	switch v := e.Payload.(type) {
+-	case event.TransferPayload:
+-		p = v
+-	case *event.TransferPayload:
+-		if v == nil {
+-			return fmt.Errorf("ledger: Transfer event %s has nil payload", e.ID)
+-		}
+-		p = *v
+-	default:
+-		return fmt.Errorf("ledger: Transfer event %s payload has unexpected type %T", e.ID, e.Payload)
++	p, err := event.GetPayload[event.TransferPayload](e)
++	if err != nil {
++		return fmt.Errorf("ledger: Transfer event %s: %w", e.ID, err)
+ 	}
+ 
+ 	l.mu.Lock()
+@@ -122,6 +116,17 @@
+ 		return fmt.Errorf("%w: %s", ErrDuplicateEntry, e.ID)
+ 	}
+ 
++	// Balance validation: the sender must have enough spendable balance to
++	// cover this transfer. Skip the check for the "system" agent which is
++	// the source of genesis credits (FundAgent).
++	if string(p.FromAgent) != "system" && p.Amount > 0 {
++		available := l.balanceLocked(crypto.AgentID(p.FromAgent))
++		if available < p.Amount {
++			return fmt.Errorf("%w: agent %s balance %d < transfer amount %d",
++				ErrInsufficientBalance, p.FromAgent, available, p.Amount)
++		}
++	}
++
+ 	l.entries[e.ID] = &TransferEntry{
+ 		EventID:    e.ID,
+ 		FromAgent:  crypto.AgentID(p.FromAgent),
+@@ -190,7 +195,13 @@
+ func (l *TransferLedger) Balance(agentID crypto.AgentID) (uint64, error) {
+ 	l.mu.RLock()
+ 	defer l.mu.RUnlock()
++	return l.balanceLocked(agentID), nil
++}
+ 
++// balanceLocked computes the spendable balance while the caller already holds
++// at least a read lock on l.mu. Extracted so Record can call it under the write
++// lock without double-locking.
++func (l *TransferLedger) balanceLocked(agentID crypto.AgentID) uint64 {
+ 	var inSettled, outReserved uint64
+ 	for _, e := range l.entries {
+ 		if e.ToAgent == agentID && e.Settlement == event.SettlementSettled {
+@@ -203,9 +214,51 @@
+ 	}
+ 
+ 	if outReserved >= inSettled {
+-		return 0, nil
++		return 0
++	}
++	return inSettled - outReserved
++}
++
++// BalanceCheck returns an error if agentID does not have enough spendable
++// balance to cover amount. It is a convenience wrapper used by the OCS engine
++// before recording a transfer.
++func (l *TransferLedger) BalanceCheck(agentID crypto.AgentID, amount uint64) error {
++	l.mu.RLock()
++	defer l.mu.RUnlock()
++	if l.balanceLocked(agentID) < amount {
++		return fmt.Errorf("%w: agent %s has insufficient funds for %d", ErrInsufficientBalance, agentID, amount)
++	}
++	return nil
++}
++
++// FundAgent creates a genesis credit entry that grants initial funds to an agent.
++// This is the only path through which new balance enters the Transfer Ledger
++// outside of normal settled transfers. Used for initial staking and test setup.
++// The entry is created in Settled state so it is immediately spendable.
++func (l *TransferLedger) FundAgent(agentID crypto.AgentID, amount uint64) error {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++
++	// Create a synthetic settled entry with a deterministic ID based on the
++	// agent and amount, using a "genesis:" prefix to avoid collisions with
++	// content-addressed event IDs.
++	eid := event.EventID(fmt.Sprintf("genesis:%s:%d:%d", agentID, amount, len(l.entries)))
++	if _, exists := l.entries[eid]; exists {
++		return fmt.Errorf("%w: %s", ErrDuplicateEntry, eid)
++	}
++
++	l.entries[eid] = &TransferEntry{
++		EventID:    eid,
++		FromAgent:  "system",
++		ToAgent:    agentID,
++		Amount:     amount,
++		Currency:   "AET",
++		Memo:       "genesis credit",
++		Timestamp:  0,
++		Settlement: event.SettlementSettled,
++		RecordedAt: time.Now(),
+ 	}
+-	return inSettled - outReserved, nil
++	return nil
+ }
+ 
+ // PendingOutgoing returns the total outgoing amount across all Optimistic
+diff -ruN '--exclude=.git' aethernet-main/internal/network/node.go aethernet-fixed/internal/network/node.go
+--- aethernet-main/internal/network/node.go	2026-02-26 01:15:06.000000000 +0000
++++ aethernet-fixed/internal/network/node.go	2026-02-27 03:08:39.214194022 +0000
+@@ -2,6 +2,7 @@
+ 
+ import (
+ 	"context"
++	"crypto/rand"
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
+@@ -39,6 +40,11 @@
+ 
+ 	// Version is the protocol version string, included in every handshake.
+ 	Version string
++
++	// KeyPair is this node's Ed25519 keypair, used for challenge-response
++	// authentication during the handshake. Both sides sign the other's challenge
++	// with their private key to prove identity.
++	KeyPair *crypto.KeyPair
+ }
+ 
+ // DefaultNodeConfig returns a NodeConfig with production-ready defaults.
+@@ -142,9 +148,8 @@
+ 	n.wg.Wait()
+ }
+ 
+-// Connect dials the node at address, performs the two-way handshake, registers
+-// the peer, and starts its read/write goroutines. Returns the connected Peer on
+-// success, or an error if the dial, handshake, or peer-limit check fails.
++// Connect dials the node at address, performs the two-way challenge-response
++// handshake, registers the peer, and starts its read/write goroutines.
+ func (n *Node) Connect(address string) (*Peer, error) {
+ 	conn, err := net.Dial("tcp", address)
+ 	if err != nil {
+@@ -153,12 +158,25 @@
+ 
+ 	peer := NewPeer("", address, conn)
+ 
+-	// Connecting side sends its handshake first.
++	// Generate a challenge for the remote side to sign.
++	myChallenge := make([]byte, 32)
++	if _, err := rand.Read(myChallenge); err != nil {
++		conn.Close()
++		return nil, fmt.Errorf("network: generate challenge: %w", err)
++	}
++
++	// Connecting side sends its handshake first (with challenge, no response yet).
+ 	tips := n.dag.Tips()
++	var pubKey []byte
++	if n.config.KeyPair != nil {
++		pubKey = n.config.KeyPair.PublicKey
++	}
+ 	hsPayload, err := json.Marshal(HandshakePayload{
+-		AgentID:  n.config.AgentID,
+-		Version:  n.config.Version,
+-		TipCount: len(tips),
++		AgentID:   n.config.AgentID,
++		Version:   n.config.Version,
++		TipCount:  len(tips),
++		Challenge: myChallenge,
++		PublicKey: pubKey,
+ 	})
+ 	if err != nil {
+ 		conn.Close()
+@@ -169,7 +187,7 @@
+ 		return nil, fmt.Errorf("network: send handshake: %w", err)
+ 	}
+ 
+-	// Then read the acceptor's handshake response.
++	// Read the acceptor's handshake response (contains their challenge + response to ours).
+ 	var reply Message
+ 	if err := peer.dec.Decode(&reply); err != nil {
+ 		conn.Close()
+@@ -185,6 +203,33 @@
+ 		return nil, fmt.Errorf("network: decode handshake response: %w", err)
+ 	}
+ 
++	// Verify the acceptor's response to our challenge.
++	if n.config.KeyPair != nil && len(theirHS.PublicKey) > 0 {
++		if !crypto.Verify(theirHS.PublicKey, myChallenge, theirHS.ChallengeResponse) {
++			conn.Close()
++			return nil, errors.New("network: peer failed challenge-response verification")
++		}
++	}
++
++	// Now send our response to their challenge.
++	if n.config.KeyPair != nil && len(theirHS.Challenge) > 0 {
++		resp, err := n.config.KeyPair.Sign(theirHS.Challenge)
++		if err != nil {
++			conn.Close()
++			return nil, fmt.Errorf("network: sign challenge: %w", err)
++		}
++		// Send a follow-up message with our challenge response.
++		crPayload, _ := json.Marshal(HandshakePayload{
++			AgentID:           n.config.AgentID,
++			ChallengeResponse: resp,
++			PublicKey:         pubKey,
++		})
++		if err := peer.enc.Encode(Message{Type: MsgHandshake, Payload: crPayload}); err != nil {
++			conn.Close()
++			return nil, fmt.Errorf("network: send challenge response: %w", err)
++		}
++	}
++
+ 	n.mu.Lock()
+ 	if len(n.peers) >= n.config.MaxPeers {
+ 		n.mu.Unlock()
+@@ -307,13 +352,12 @@
+ 	}
+ }
+ 
+-// handleIncomingConn performs the acceptor side of the handshake and, on
+-// success, registers the peer and starts its loops. The acceptor reads the
+-// connector's handshake first, then sends its own.
++// handleIncomingConn performs the acceptor side of the challenge-response
++// handshake and, on success, registers the peer and starts its loops.
+ func (n *Node) handleIncomingConn(conn net.Conn) error {
+ 	peer := NewPeer("", conn.RemoteAddr().String(), conn)
+ 
+-	// Read the connector's handshake.
++	// Read the connector's handshake (contains their challenge for us).
+ 	var msg Message
+ 	if err := peer.dec.Decode(&msg); err != nil {
+ 		return fmt.Errorf("network: read handshake: %w", err)
+@@ -334,12 +378,33 @@
+ 		return ErrMaxPeers
+ 	}
+ 
+-	// Send our handshake response.
++	// Generate our own challenge for the connector.
++	myChallenge := make([]byte, 32)
++	if _, err := rand.Read(myChallenge); err != nil {
++		return fmt.Errorf("network: generate challenge: %w", err)
++	}
++
++	// Sign the connector's challenge if we have a keypair.
++	var challengeResp []byte
++	var pubKey []byte
++	if n.config.KeyPair != nil && len(theirHS.Challenge) > 0 {
++		var err error
++		challengeResp, err = n.config.KeyPair.Sign(theirHS.Challenge)
++		if err != nil {
++			return fmt.Errorf("network: sign challenge: %w", err)
++		}
++		pubKey = n.config.KeyPair.PublicKey
++	}
++
++	// Send our handshake response (with our challenge + response to theirs).
+ 	tips := n.dag.Tips()
+ 	hsPayload, err := json.Marshal(HandshakePayload{
+-		AgentID:  n.config.AgentID,
+-		Version:  n.config.Version,
+-		TipCount: len(tips),
++		AgentID:           n.config.AgentID,
++		Version:           n.config.Version,
++		TipCount:          len(tips),
++		Challenge:         myChallenge,
++		ChallengeResponse: challengeResp,
++		PublicKey:         pubKey,
+ 	})
+ 	if err != nil {
+ 		return fmt.Errorf("network: marshal handshake: %w", err)
+@@ -348,6 +413,27 @@
+ 		return fmt.Errorf("network: send handshake: %w", err)
+ 	}
+ 
++	// Read the connector's challenge response.
++	if n.config.KeyPair != nil && len(myChallenge) > 0 {
++		var crMsg Message
++		if err := peer.dec.Decode(&crMsg); err != nil {
++			return fmt.Errorf("network: read challenge response: %w", err)
++		}
++		if crMsg.Type != MsgHandshake {
++			return errors.New("network: expected challenge response")
++		}
++		var crHS HandshakePayload
++		if err := json.Unmarshal(crMsg.Payload, &crHS); err != nil {
++			return fmt.Errorf("network: decode challenge response: %w", err)
++		}
++		// Verify the connector signed our challenge with a valid key.
++		if len(theirHS.PublicKey) > 0 {
++			if !crypto.Verify(theirHS.PublicKey, myChallenge, crHS.ChallengeResponse) {
++				return errors.New("network: peer failed challenge-response verification")
++			}
++		}
++	}
++
+ 	peer.mu.Lock()
+ 	peer.AgentID = theirHS.AgentID
+ 	peer.State = PeerConnected
+diff -ruN '--exclude=.git' aethernet-main/internal/network/peer.go aethernet-fixed/internal/network/peer.go
+--- aethernet-main/internal/network/peer.go	2026-02-26 01:15:06.000000000 +0000
++++ aethernet-fixed/internal/network/peer.go	2026-02-27 03:06:11.277247513 +0000
+@@ -72,14 +72,24 @@
+ // HandshakePayload is exchanged immediately after a TCP connection is established.
+ // Both sides send their own HandshakePayload, in sequence: the connecting side
+ // sends first, the accepting side sends second.
++//
++// Challenge-response authentication: each side includes a random Challenge for the
++// other to sign. The other side signs it and includes the signature in
++// ChallengeResponse. Both sides also include their PublicKey so the peer can
++// verify the response.
+ type HandshakePayload struct {
+ 	// AgentID identifies the local node.
+ 	AgentID crypto.AgentID `json:"agent_id"`
+ 	// Version is the protocol version string for compatibility gating.
+ 	Version string `json:"version"`
+-	// TipCount is the number of DAG tips the sender currently holds, giving
+-	// the acceptor a rough measure of how much state the peer has.
++	// TipCount is the number of DAG tips the sender currently holds.
+ 	TipCount int `json:"tip_count"`
++	// Challenge is a random 32-byte nonce the sender wants the peer to sign.
++	Challenge []byte `json:"challenge,omitempty"`
++	// ChallengeResponse is this side's signature over the peer's Challenge.
++	ChallengeResponse []byte `json:"challenge_response,omitempty"`
++	// PublicKey is the Ed25519 public key corresponding to AgentID.
++	PublicKey []byte `json:"public_key,omitempty"`
+ }
+ 
+ // SyncBatchPayload carries a set of events sent in response to MsgRequestSync.
+diff -ruN '--exclude=.git' aethernet-main/internal/ocs/engine.go aethernet-fixed/internal/ocs/engine.go
+--- aethernet-main/internal/ocs/engine.go	2026-02-26 01:15:06.000000000 +0000
++++ aethernet-fixed/internal/ocs/engine.go	2026-02-27 03:04:39.703280624 +0000
+@@ -180,8 +180,9 @@
+ 	generation *ledger.GenerationLedger
+ 	identity   *identity.Registry
+ 
+-	pending map[event.EventID]*PendingItem
+-	results chan VerificationResult
++	pending   map[event.EventID]*PendingItem
++	processed map[event.EventID]struct{} // tracks already-settled events for idempotency
++	results   chan VerificationResult
+ 
+ 	mu     sync.RWMutex
+ 	ctx    context.Context
+@@ -207,6 +208,7 @@
+ 		generation: gl,
+ 		identity:   reg,
+ 		pending:    make(map[event.EventID]*PendingItem),
++		processed:  make(map[event.EventID]struct{}),
+ 		results:    make(chan VerificationResult, resultsBufferSize),
+ 	}
+ }
+@@ -304,29 +306,26 @@
+ 
+ 	switch ev.Type {
+ 	case event.EventTypeTransfer:
++		// Balance check before recording. Extract payload to get the amount.
++		tp, err := event.GetPayload[event.TransferPayload](ev)
++		if err != nil {
++			return fmt.Errorf("ocs: decode transfer payload: %w", err)
++		}
++		if err := e.transfer.BalanceCheck(crypto.AgentID(tp.FromAgent), tp.Amount); err != nil {
++			return fmt.Errorf("ocs: %w", err)
++		}
+ 		if err := e.transfer.Record(ev); err != nil {
+ 			return fmt.Errorf("ocs: ledger record failed: %w", err)
+ 		}
+-		switch p := ev.Payload.(type) {
+-		case event.TransferPayload:
+-			amount = p.Amount
+-		case *event.TransferPayload:
+-			if p != nil {
+-				amount = p.Amount
+-			}
+-		}
++		amount = tp.Amount
+ 
+ 	case event.EventTypeGeneration:
+ 		if err := e.generation.Record(ev); err != nil {
+ 			return fmt.Errorf("ocs: ledger record failed: %w", err)
+ 		}
+-		switch p := ev.Payload.(type) {
+-		case event.GenerationPayload:
+-			amount = p.ClaimedValue
+-		case *event.GenerationPayload:
+-			if p != nil {
+-				amount = p.ClaimedValue
+-			}
++		gp, err := event.GetPayload[event.GenerationPayload](ev)
++		if err == nil {
++			amount = gp.ClaimedValue
+ 		}
+ 
+ 	default:
+@@ -387,12 +386,20 @@
+ // Returns ErrNotPending if the event is not in the pending map.
+ func (e *Engine) ProcessResult(result VerificationResult) error {
+ 	e.mu.Lock()
++	// Idempotency: if already processed, return silently. This prevents the
++	// double-settlement race where checkExpired and a real verdict both try
++	// to settle the same event.
++	if _, done := e.processed[result.EventID]; done {
++		e.mu.Unlock()
++		return nil
++	}
+ 	item, exists := e.pending[result.EventID]
+ 	if !exists {
+ 		e.mu.Unlock()
+ 		return fmt.Errorf("%w: %s", ErrNotPending, result.EventID)
+ 	}
+ 	delete(e.pending, result.EventID)
++	e.processed[result.EventID] = struct{}{}
+ 	e.mu.Unlock()
+ 
+ 	// Use the event type as the capability domain for identity updates.
+@@ -436,25 +443,25 @@
+ // passed and treats each as a failed verification. Called by the background
+ // goroutine on every expiredCheckInterval tick.
+ //
+-// Expired items are collected under a read lock, then processed individually
+-// (each ProcessResult call acquires its own write lock). If a real verdict
+-// arrives concurrently for the same event, one of the two ProcessResult calls
+-// will find ErrNotPending and return silently — this is correct: first write wins.
++// Each expired item is re-verified under the write lock before processing to
++// prevent races with concurrent real verdicts. The processed set ensures that
++// if a real verdict was applied between collection and processing, the expiry
++// is silently skipped (idempotent).
+ func (e *Engine) checkExpired() {
+ 	now := time.Now()
+ 
+-	e.mu.RLock()
+-	var expired []*PendingItem
+-	for _, item := range e.pending {
++	e.mu.Lock()
++	var expired []event.EventID
++	for id, item := range e.pending {
+ 		if now.Sub(item.OptimisticAt) > item.Deadline {
+-			expired = append(expired, item)
++			expired = append(expired, id)
+ 		}
+ 	}
+-	e.mu.RUnlock()
++	e.mu.Unlock()
+ 
+-	for _, item := range expired {
++	for _, id := range expired {
+ 		_ = e.ProcessResult(VerificationResult{
+-			EventID:   item.EventID,
++			EventID:   id,
+ 			Verdict:   false,
+ 			Reason:    "verification deadline exceeded",
+ 			Timestamp: now,
+diff -ruN '--exclude=.git' aethernet-main/internal/ocs/engine_test.go aethernet-fixed/internal/ocs/engine_test.go
+--- aethernet-main/internal/ocs/engine_test.go	2026-02-26 01:15:06.000000000 +0000
++++ aethernet-fixed/internal/ocs/engine_test.go	2026-02-27 00:26:45.000000000 +0000
+@@ -45,6 +45,14 @@
+ 	}
+ }
+ 
++// fundAgent gives agentID an initial spendable balance in the transfer ledger.
++func fundAgent(t *testing.T, h *testHarness, agentID string, amount uint64) {
++	t.Helper()
++	if err := h.tl.FundAgent(crypto.AgentID(agentID), amount); err != nil {
++		t.Fatalf("FundAgent(%s, %d): %v", agentID, amount, err)
++	}
++}
++
+ // registerAgent adds a minimal CapabilityFingerprint for agentID to the registry.
+ // The fingerprint carries a 32-byte placeholder public key so the registry
+ // accepts it without requiring a real Ed25519 key.
+@@ -204,6 +212,7 @@
+ 
+ func TestEngine_Submit_Transfer_LandsInPending(t *testing.T) {
+ 	h := newHarness(t, nil)
++	fundAgent(t, h, "alice", 100_000)
+ 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
+ 
+ 	if err := h.eng.Submit(e); err != nil {
+@@ -228,6 +237,7 @@
+ 
+ func TestEngine_Submit_InsufficientStake(t *testing.T) {
+ 	h := newHarness(t, nil) // MinStakeRequired = 1000
++	fundAgent(t, h, "alice", 100_000)
+ 	e := newTransferEvent(t, "alice", "bob", 500, 999) // stake 999 < 1000
+ 
+ 	err := h.eng.Submit(e)
+@@ -241,6 +251,7 @@
+ 
+ func TestEngine_Submit_Duplicate_Error(t *testing.T) {
+ 	h := newHarness(t, nil)
++	fundAgent(t, h, "alice", 100_000)
+ 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
+ 
+ 	if err := h.eng.Submit(e); err != nil {
+@@ -284,6 +295,7 @@
+ 
+ func TestEngine_PendingCount_Increments(t *testing.T) {
+ 	h := newHarness(t, nil)
++	fundAgent(t, h, "alice", 100_000)
+ 
+ 	if h.eng.PendingCount() != 0 {
+ 		t.Fatalf("initial PendingCount = %d, want 0", h.eng.PendingCount())
+@@ -308,6 +320,7 @@
+ 
+ func TestEngine_IsPending_TrueForSubmitted(t *testing.T) {
+ 	h := newHarness(t, nil)
++	fundAgent(t, h, "alice", 100_000)
+ 	e := newTransferEvent(t, "alice", "bob", 100, 1000)
+ 
+ 	if h.eng.IsPending(e.ID) {
+@@ -332,6 +345,7 @@
+ 	}
+ 	defer h.eng.Stop()
+ 
++	fundAgent(t, h, "alice", 100_000)
+ 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
+ 	if err := h.eng.Submit(e); err != nil {
+ 		t.Fatalf("Submit: %v", err)
+@@ -392,6 +406,7 @@
+ 	}
+ 	defer h.eng.Stop()
+ 
++	fundAgent(t, h, "alice", 100_000)
+ 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
+ 	if err := h.eng.Submit(e); err != nil {
+ 		t.Fatalf("Submit: %v", err)
+@@ -425,6 +440,7 @@
+ func TestEngine_ProcessResult_True_RecordsTaskCompletion(t *testing.T) {
+ 	h := newHarness(t, nil)
+ 	registerAgent(t, h.reg, "alice")
++	fundAgent(t, h, "alice", 100_000)
+ 
+ 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
+ 	if err := h.eng.Submit(e); err != nil {
+@@ -458,6 +474,7 @@
+ func TestEngine_ProcessResult_False_RecordsTaskFailure(t *testing.T) {
+ 	h := newHarness(t, nil)
+ 	registerAgent(t, h.reg, "alice")
++	fundAgent(t, h, "alice", 100_000)
+ 
+ 	// First record a successful task to boost OptimisticTrustLimit above the
+ 	// minimum floor (1000 micro-AET), so the subsequent 15% failure reduction
+@@ -555,6 +572,7 @@
+ 	}
+ 	h := newHarness(t, cfg)
+ 
++	fundAgent(t, h, "alice", 100_000)
+ 	e := newTransferEvent(t, "alice", "bob", 100, 1000)
+ 	if err := h.eng.Submit(e); err != nil {
+ 		t.Fatalf("Submit: %v", err)
+@@ -588,6 +606,12 @@
+ 	h := newHarness(t, nil)
+ 	const goroutines = 20
+ 
++	// Fund each concurrent sender.
++	for i := 0; i < goroutines; i++ {
++		from := fmt.Sprintf("concurrent-sender-%d", i)
++		fundAgent(t, h, from, 100_000)
++	}
++
+ 	var wg sync.WaitGroup
+ 	wg.Add(goroutines)
+ 	for i := 0; i < goroutines; i++ {
+@@ -634,6 +658,7 @@
+ 	events := make([]*event.Event, goroutines)
+ 	for i := 0; i < goroutines; i++ {
+ 		from := fmt.Sprintf("verif-sender-%d", i)
++		fundAgent(t, h, from, 100_000)
+ 		e := newTransferEvent(t, from, "verif-sink", uint64(i+1)*100, 1000)
+ 		if err := h.eng.Submit(e); err != nil {
+ 			t.Fatalf("Submit %d: %v", i, err)
+@@ -662,3 +687,69 @@
+ 		return h.eng.PendingCount() == 0
+ 	})
+ }
++
++// ---------------------------------------------------------------------------
++// Fix 2: Double settlement idempotency
++// ---------------------------------------------------------------------------
++
++func TestDoubleSettlement_IsIdempotent(t *testing.T) {
++	// Verify that when both a real positive verdict and an expiry false verdict
++	// race on the same event, the first one wins and the second is a no-op.
++	// The event must end up Settled, not Adjusted.
++	h := newHarness(t, nil)
++	fundAgent(t, h, "alice", 100_000)
++
++	e := newTransferEvent(t, "alice", "bob", 500, 1000)
++	if err := h.eng.Submit(e); err != nil {
++		t.Fatalf("Submit: %v", err)
++	}
++
++	// Process a positive verdict first.
++	if err := h.eng.ProcessResult(verdict(e.ID, true, 0)); err != nil {
++		t.Fatalf("ProcessResult (true): %v", err)
++	}
++
++	// Now simulate the expiry sweep also trying to process the same event.
++	// This must not overwrite the Settled state with Adjusted.
++	err := h.eng.ProcessResult(verdict(e.ID, false, 0))
++	// The second call must be silently idempotent (no error, no state change).
++	if err != nil {
++		t.Fatalf("second ProcessResult should be idempotent, got: %v", err)
++	}
++
++	// The entry must be Settled, not Adjusted.
++	history, err := h.tl.History(crypto.AgentID("alice"), 1, 0)
++	if err != nil || len(history) == 0 {
++		t.Fatalf("History: err=%v len=%d", err, len(history))
++	}
++	if history[0].Settlement != event.SettlementSettled {
++		t.Errorf("Settlement = %q, want Settled (first-write-wins idempotency)", history[0].Settlement)
++	}
++}
++
++// ---------------------------------------------------------------------------
++// Fix 3: Balance validation
++// ---------------------------------------------------------------------------
++
++func TestEngine_Submit_ZeroBalance_Rejected(t *testing.T) {
++	h := newHarness(t, nil)
++	// Do NOT fund alice — she has zero balance.
++	e := newTransferEvent(t, "alice", "bob", 500, 1000)
++
++	err := h.eng.Submit(e)
++	if err == nil {
++		t.Fatal("Submit should reject transfer from zero-balance agent, got nil")
++	}
++}
++
++func TestEngine_Submit_Overdraft_Rejected(t *testing.T) {
++	h := newHarness(t, nil)
++	fundAgent(t, h, "alice", 100) // only 100 micro-AET
++
++	e := newTransferEvent(t, "alice", "bob", 500, 1000) // wants to send 500
++
++	err := h.eng.Submit(e)
++	if err == nil {
++		t.Fatal("Submit should reject overdraft transfer, got nil")
++	}
++}
