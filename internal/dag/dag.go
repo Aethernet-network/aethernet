@@ -52,6 +52,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/aethernet/core/internal/crypto"
 	"github.com/aethernet/core/internal/event"
 )
 
@@ -62,15 +63,19 @@ var (
 	ErrEventNotFound = errors.New("event not found")
 
 	// ErrDuplicateEvent is returned when an event whose ID is already stored is added
-	// again. Because EventIDs are content-addressed, a duplicate ID means the event
-	// content is identical; the Add call is treated as a no-op from a state perspective,
-	// but the error signals to the caller that no insertion occurred.
+	// again.
 	ErrDuplicateEvent = errors.New("duplicate event")
 
 	// ErrMissingCausalRef is returned when an event's CausalRefs include an EventID
-	// not yet present in the DAG. The event cannot be inserted until all of its
-	// causal dependencies are known to the DAG.
+	// not yet present in the DAG.
 	ErrMissingCausalRef = errors.New("causal reference not in DAG")
+
+	// ErrInvalidSignature is returned when an event's cryptographic signature does
+	// not verify against its canonical content and public key.
+	ErrInvalidSignature = errors.New("dag: invalid event signature")
+
+	// ErrMissingSignature is returned when a non-genesis event has no signature.
+	ErrMissingSignature = errors.New("dag: event has no signature")
 )
 
 // DAG is a concurrent, append-only causal directed acyclic graph of AetherNet events.
@@ -128,11 +133,25 @@ func (d *DAG) Add(e *event.Event) error {
 	}
 
 	// Validate all causal references before mutating any state.
-	// This makes Add atomic: either all refs exist and the event is inserted,
-	// or the first missing ref causes a rejection and the DAG is unchanged.
+	// This check runs before signature verification so that events with unknown
+	// refs return ErrMissingCausalRef (the structurally prior error) rather than
+	// ErrMissingSignature when both conditions hold.
 	for _, ref := range e.CausalRefs {
 		if _, ok := d.events[ref]; !ok {
 			return fmt.Errorf("dag: %w: %s (referenced by %s)", ErrMissingCausalRef, ref, e.ID)
+		}
+	}
+
+	// Signature enforcement: non-genesis events must be signed and verifiable.
+	// Genesis events (empty CausalRefs) are allowed unsigned as they bootstrap
+	// the DAG and typically pre-date key distribution.
+	isGenesis := len(e.CausalRefs) == 0
+	if !isGenesis {
+		if len(e.Signature) == 0 {
+			return fmt.Errorf("%w: %s", ErrMissingSignature, e.ID)
+		}
+		if !crypto.VerifyEvent(e) {
+			return fmt.Errorf("%w: %s", ErrInvalidSignature, e.ID)
 		}
 	}
 

@@ -72,14 +72,24 @@ type Message struct {
 // HandshakePayload is exchanged immediately after a TCP connection is established.
 // Both sides send their own HandshakePayload, in sequence: the connecting side
 // sends first, the accepting side sends second.
+//
+// Challenge-response authentication: each side includes a random Challenge for the
+// other to sign. The other side signs it and includes the signature in
+// ChallengeResponse. Both sides also include their PublicKey so the peer can
+// verify the response.
 type HandshakePayload struct {
 	// AgentID identifies the local node.
 	AgentID crypto.AgentID `json:"agent_id"`
 	// Version is the protocol version string for compatibility gating.
 	Version string `json:"version"`
-	// TipCount is the number of DAG tips the sender currently holds, giving
-	// the acceptor a rough measure of how much state the peer has.
+	// TipCount is the number of DAG tips the sender currently holds.
 	TipCount int `json:"tip_count"`
+	// Challenge is a random 32-byte nonce the sender wants the peer to sign.
+	Challenge []byte `json:"challenge,omitempty"`
+	// ChallengeResponse is this side's signature over the peer's Challenge.
+	ChallengeResponse []byte `json:"challenge_response,omitempty"`
+	// PublicKey is the Ed25519 public key corresponding to AgentID.
+	PublicKey []byte `json:"public_key,omitempty"`
 }
 
 // SyncBatchPayload carries a set of events sent in response to MsgRequestSync.

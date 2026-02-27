@@ -88,6 +88,11 @@ func chainPrior(events ...*event.Event) ([]event.EventID, map[event.EventID]uint
 func TestTransferLedger_RecordAndHistory(t *testing.T) {
 	tl := ledger.NewTransferLedger()
 
+	// Fund alice so the balance check passes.
+	if err := tl.FundAgent("alice", 10_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
 	e := newTransferEvent(t, "alice", "bob", 1_000, nil, nil)
 	if err := tl.Record(e); err != nil {
 		t.Fatalf("Record() error: %v", err)
@@ -139,6 +144,11 @@ func TestTransferLedger_Balance_ZeroForNewAgent(t *testing.T) {
 func TestTransferLedger_Balance_SettledIncoming(t *testing.T) {
 	tl := ledger.NewTransferLedger()
 
+	// Fund alice so she can send to bob.
+	if err := tl.FundAgent("alice", 100_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
 	e := newTransferEvent(t, "alice", "bob", 5_000, nil, nil)
 	if err := tl.Record(e); err != nil {
 		t.Fatalf("Record() error: %v", err)
@@ -169,6 +179,11 @@ func TestTransferLedger_Balance_SettledIncoming(t *testing.T) {
 func TestTransferLedger_Balance_ReservesOptimisticOutgoing(t *testing.T) {
 	tl := ledger.NewTransferLedger()
 
+	// Fund carol so she can send to alice.
+	if err := tl.FundAgent("carol", 100_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
 	// carol → alice: 3000, settled immediately.
 	inbound := newTransferEvent(t, "carol", "alice", 3_000, nil, nil)
 	if err := tl.Record(inbound); err != nil {
@@ -197,6 +212,10 @@ func TestTransferLedger_Balance_ReservesOptimisticOutgoing(t *testing.T) {
 
 func TestTransferLedger_PendingOutgoing_OptimisticOnly(t *testing.T) {
 	tl := ledger.NewTransferLedger()
+
+	if err := tl.FundAgent("alice", 100_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
 
 	// e1: alice → bob 1000, stays Optimistic.
 	e1 := newTransferEvent(t, "alice", "bob", 1_000, nil, nil)
@@ -227,6 +246,10 @@ func TestTransferLedger_PendingOutgoing_OptimisticOnly(t *testing.T) {
 func TestTransferLedger_DuplicateRecord_Error(t *testing.T) {
 	tl := ledger.NewTransferLedger()
 
+	if err := tl.FundAgent("alice", 100_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
 	e := newTransferEvent(t, "alice", "bob", 500, nil, nil)
 	if err := tl.Record(e); err != nil {
 		t.Fatalf("first Record() error: %v", err)
@@ -249,6 +272,10 @@ func TestTransferLedger_DuplicateRecord_Error(t *testing.T) {
 
 func TestTransferLedger_Settle_AdvancesState(t *testing.T) {
 	tl := ledger.NewTransferLedger()
+
+	if err := tl.FundAgent("alice", 100_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
 
 	e := newTransferEvent(t, "alice", "bob", 100, nil, nil)
 	if err := tl.Record(e); err != nil {
@@ -277,6 +304,10 @@ func TestTransferLedger_Settle_AdvancesState(t *testing.T) {
 
 func TestTransferLedger_Settle_InvalidTransition_Error(t *testing.T) {
 	tl := ledger.NewTransferLedger()
+
+	if err := tl.FundAgent("alice", 100_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
 
 	e := newTransferEvent(t, "alice", "bob", 100, nil, nil)
 	if err := tl.Record(e); err != nil {
@@ -311,6 +342,10 @@ func TestTransferLedger_History_Pagination(t *testing.T) {
 	tl := ledger.NewTransferLedger()
 	const agent = "pager"
 	const n = 5
+
+	if err := tl.FundAgent(crypto.AgentID(agent), 100_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
 
 	// Build a causal chain so each of the 5 events gets a distinct Lamport
 	// timestamp (1–5), making the sort order fully deterministic.
@@ -391,6 +426,10 @@ func TestTransferLedger_History_Pagination(t *testing.T) {
 func TestTransferLedger_History_OrderedByTimestampDesc(t *testing.T) {
 	tl := ledger.NewTransferLedger()
 	const agent = "orderer"
+
+	if err := tl.FundAgent(crypto.AgentID(agent), 100_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
 
 	// Three-event causal chain: ts=1, ts=2, ts=3.
 	e1 := newTransferEvent(t, agent, "dst-1", 100, nil, nil)
@@ -876,6 +915,14 @@ func TestTransferLedger_ConcurrentRecord(t *testing.T) {
 	tl := ledger.NewTransferLedger()
 	const goroutines = 50
 
+	// Fund each concurrent sender so the balance check passes.
+	for i := 0; i < goroutines; i++ {
+		from := crypto.AgentID(fmt.Sprintf("concurrent-sender-%d", i))
+		if err := tl.FundAgent(from, 100_000); err != nil {
+			t.Fatalf("FundAgent %s: %v", from, err)
+		}
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
 	for i := 0; i < goroutines; i++ {
@@ -947,5 +994,57 @@ func TestGenerationLedger_ConcurrentRecord(t *testing.T) {
 	}
 	if len(history) != 1 {
 		t.Errorf("GenerationHistory(concurrent-gen-0) len = %d, want 1", len(history))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fix 3: Balance validation and FundAgent
+// ---------------------------------------------------------------------------
+
+func TestTransferLedger_Record_ZeroBalance_Rejected(t *testing.T) {
+	tl := ledger.NewTransferLedger()
+
+	// alice has no balance — the transfer must be rejected.
+	e := newTransferEvent(t, "alice", "bob", 1_000, nil, nil)
+	err := tl.Record(e)
+	if err == nil {
+		t.Fatal("Record should reject transfer from zero-balance sender")
+	}
+	if !errors.Is(err, ledger.ErrInsufficientBalance) {
+		t.Errorf("want ErrInsufficientBalance, got %v", err)
+	}
+}
+
+func TestTransferLedger_Record_Overdraft_Rejected(t *testing.T) {
+	tl := ledger.NewTransferLedger()
+
+	if err := tl.FundAgent("alice", 500); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
+	// alice has 500 but tries to send 1000.
+	e := newTransferEvent(t, "alice", "bob", 1_000, nil, nil)
+	err := tl.Record(e)
+	if err == nil {
+		t.Fatal("Record should reject overdraft transfer")
+	}
+	if !errors.Is(err, ledger.ErrInsufficientBalance) {
+		t.Errorf("want ErrInsufficientBalance, got %v", err)
+	}
+}
+
+func TestTransferLedger_FundAgent_CreatesSettledEntry(t *testing.T) {
+	tl := ledger.NewTransferLedger()
+
+	if err := tl.FundAgent("bob", 5_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
+	bal, err := tl.Balance(crypto.AgentID("bob"))
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if bal != 5_000 {
+		t.Errorf("Balance = %d, want 5000 after FundAgent", bal)
 	}
 }

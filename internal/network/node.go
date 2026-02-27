@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +40,11 @@ type NodeConfig struct {
 
 	// Version is the protocol version string, included in every handshake.
 	Version string
+
+	// KeyPair is this node's Ed25519 keypair, used for challenge-response
+	// authentication during the handshake. Both sides sign the other's challenge
+	// with their private key to prove identity.
+	KeyPair *crypto.KeyPair
 }
 
 // DefaultNodeConfig returns a NodeConfig with production-ready defaults.
@@ -142,9 +148,8 @@ func (n *Node) Stop() {
 	n.wg.Wait()
 }
 
-// Connect dials the node at address, performs the two-way handshake, registers
-// the peer, and starts its read/write goroutines. Returns the connected Peer on
-// success, or an error if the dial, handshake, or peer-limit check fails.
+// Connect dials the node at address, performs the two-way challenge-response
+// handshake, registers the peer, and starts its read/write goroutines.
 func (n *Node) Connect(address string) (*Peer, error) {
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
@@ -153,12 +158,25 @@ func (n *Node) Connect(address string) (*Peer, error) {
 
 	peer := NewPeer("", address, conn)
 
-	// Connecting side sends its handshake first.
+	// Generate a challenge for the remote side to sign.
+	myChallenge := make([]byte, 32)
+	if _, err := rand.Read(myChallenge); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("network: generate challenge: %w", err)
+	}
+
+	// Connecting side sends its handshake first (with challenge, no response yet).
 	tips := n.dag.Tips()
+	var pubKey []byte
+	if n.config.KeyPair != nil {
+		pubKey = n.config.KeyPair.PublicKey
+	}
 	hsPayload, err := json.Marshal(HandshakePayload{
-		AgentID:  n.config.AgentID,
-		Version:  n.config.Version,
-		TipCount: len(tips),
+		AgentID:   n.config.AgentID,
+		Version:   n.config.Version,
+		TipCount:  len(tips),
+		Challenge: myChallenge,
+		PublicKey: pubKey,
 	})
 	if err != nil {
 		conn.Close()
@@ -169,7 +187,7 @@ func (n *Node) Connect(address string) (*Peer, error) {
 		return nil, fmt.Errorf("network: send handshake: %w", err)
 	}
 
-	// Then read the acceptor's handshake response.
+	// Read the acceptor's handshake response (contains their challenge + response to ours).
 	var reply Message
 	if err := peer.dec.Decode(&reply); err != nil {
 		conn.Close()
@@ -183,6 +201,33 @@ func (n *Node) Connect(address string) (*Peer, error) {
 	if err := json.Unmarshal(reply.Payload, &theirHS); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("network: decode handshake response: %w", err)
+	}
+
+	// Verify the acceptor's response to our challenge.
+	if n.config.KeyPair != nil && len(theirHS.PublicKey) > 0 {
+		if !crypto.Verify(theirHS.PublicKey, myChallenge, theirHS.ChallengeResponse) {
+			conn.Close()
+			return nil, errors.New("network: peer failed challenge-response verification")
+		}
+	}
+
+	// Now send our response to their challenge.
+	if n.config.KeyPair != nil && len(theirHS.Challenge) > 0 {
+		resp, err := n.config.KeyPair.Sign(theirHS.Challenge)
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("network: sign challenge: %w", err)
+		}
+		// Send a follow-up message with our challenge response.
+		crPayload, _ := json.Marshal(HandshakePayload{
+			AgentID:           n.config.AgentID,
+			ChallengeResponse: resp,
+			PublicKey:         pubKey,
+		})
+		if err := peer.enc.Encode(Message{Type: MsgHandshake, Payload: crPayload}); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("network: send challenge response: %w", err)
+		}
 	}
 
 	n.mu.Lock()
@@ -307,13 +352,12 @@ func (n *Node) acceptLoop() {
 	}
 }
 
-// handleIncomingConn performs the acceptor side of the handshake and, on
-// success, registers the peer and starts its loops. The acceptor reads the
-// connector's handshake first, then sends its own.
+// handleIncomingConn performs the acceptor side of the challenge-response
+// handshake and, on success, registers the peer and starts its loops.
 func (n *Node) handleIncomingConn(conn net.Conn) error {
 	peer := NewPeer("", conn.RemoteAddr().String(), conn)
 
-	// Read the connector's handshake.
+	// Read the connector's handshake (contains their challenge for us).
 	var msg Message
 	if err := peer.dec.Decode(&msg); err != nil {
 		return fmt.Errorf("network: read handshake: %w", err)
@@ -334,18 +378,60 @@ func (n *Node) handleIncomingConn(conn net.Conn) error {
 		return ErrMaxPeers
 	}
 
-	// Send our handshake response.
+	// Generate our own challenge for the connector.
+	myChallenge := make([]byte, 32)
+	if _, err := rand.Read(myChallenge); err != nil {
+		return fmt.Errorf("network: generate challenge: %w", err)
+	}
+
+	// Sign the connector's challenge if we have a keypair.
+	var challengeResp []byte
+	var pubKey []byte
+	if n.config.KeyPair != nil && len(theirHS.Challenge) > 0 {
+		var err error
+		challengeResp, err = n.config.KeyPair.Sign(theirHS.Challenge)
+		if err != nil {
+			return fmt.Errorf("network: sign challenge: %w", err)
+		}
+		pubKey = n.config.KeyPair.PublicKey
+	}
+
+	// Send our handshake response (with our challenge + response to theirs).
 	tips := n.dag.Tips()
 	hsPayload, err := json.Marshal(HandshakePayload{
-		AgentID:  n.config.AgentID,
-		Version:  n.config.Version,
-		TipCount: len(tips),
+		AgentID:           n.config.AgentID,
+		Version:           n.config.Version,
+		TipCount:          len(tips),
+		Challenge:         myChallenge,
+		ChallengeResponse: challengeResp,
+		PublicKey:         pubKey,
 	})
 	if err != nil {
 		return fmt.Errorf("network: marshal handshake: %w", err)
 	}
 	if err := peer.enc.Encode(Message{Type: MsgHandshake, Payload: hsPayload}); err != nil {
 		return fmt.Errorf("network: send handshake: %w", err)
+	}
+
+	// Read the connector's challenge response.
+	if n.config.KeyPair != nil && len(myChallenge) > 0 {
+		var crMsg Message
+		if err := peer.dec.Decode(&crMsg); err != nil {
+			return fmt.Errorf("network: read challenge response: %w", err)
+		}
+		if crMsg.Type != MsgHandshake {
+			return errors.New("network: expected challenge response")
+		}
+		var crHS HandshakePayload
+		if err := json.Unmarshal(crMsg.Payload, &crHS); err != nil {
+			return fmt.Errorf("network: decode challenge response: %w", err)
+		}
+		// Verify the connector signed our challenge with a valid key.
+		if len(theirHS.PublicKey) > 0 {
+			if !crypto.Verify(theirHS.PublicKey, myChallenge, crHS.ChallengeResponse) {
+				return errors.New("network: peer failed challenge-response verification")
+			}
+		}
 	}
 
 	peer.mu.Lock()

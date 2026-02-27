@@ -13,18 +13,11 @@ import (
 // This struct must mirror the unexported eventCanonical struct in the event package
 // exactly — same fields, same JSON tags, same declaration order — so that both
 // operations (signing here and ID hashing in event.ComputeID) commit to an
-// identical byte sequence for the same event. The test TestCanonicalBytes_MatchesEventComputeID
-// verifies this invariant by checking sha256(CanonicalBytes(e)) == e.ID.
-//
-// Excluded fields and rationale:
-//   - ID: computed from these fields (circular)
-//   - Signature: the output of signing (circular; included would prevent signing)
-//   - SettlementState: mutable OCS lifecycle metadata that evolves after creation
-//     without invalidating the event's causal identity or its signature.
+// identical byte sequence for the same event.
 type signable struct {
 	Type            event.EventType `json:"type"`
 	CausalRefs      []event.EventID `json:"causal_refs"`
-	Payload         interface{}     `json:"payload"`
+	Payload         json.RawMessage `json:"payload"`
 	AgentID         string          `json:"agent_id"`
 	CausalTimestamp uint64          `json:"causal_timestamp"`
 	StakeAmount     uint64          `json:"stake_amount"`

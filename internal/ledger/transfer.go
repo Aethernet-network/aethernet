@@ -37,6 +37,10 @@ var (
 	// ErrInvalidTransition is returned when Settle requests a settlement state
 	// progression that violates the OCS lifecycle rules.
 	ErrInvalidTransition = errors.New("ledger: invalid settlement state transition")
+
+	// ErrInsufficientBalance is returned when a transfer's FromAgent does not
+	// have enough spendable balance to cover the transfer amount.
+	ErrInsufficientBalance = errors.New("ledger: insufficient balance")
 )
 
 // TransferEntry is a single record in the Transfer Ledger. It captures the
@@ -73,6 +77,11 @@ type TransferEntry struct {
 	// RecordedAt is the wall-clock time at which Record was called. Used only
 	// for operational observability; not used in any balance or ordering logic.
 	RecordedAt time.Time
+
+	// IsGenesis marks entries created by FundAgent. Genesis credits are
+	// internal funding mechanics and are excluded from History results so
+	// that agent-facing history reflects only real transfers.
+	IsGenesis bool
 }
 
 // TransferLedger is a concurrent, in-memory record of all Transfer events recorded
@@ -100,19 +109,9 @@ func (l *TransferLedger) Record(e *event.Event) error {
 		return fmt.Errorf("%w: got %q", ErrNotTransfer, e.Type)
 	}
 
-	// Accept both value and pointer forms of TransferPayload so callers are not
-	// constrained by how they constructed the event.
-	var p event.TransferPayload
-	switch v := e.Payload.(type) {
-	case event.TransferPayload:
-		p = v
-	case *event.TransferPayload:
-		if v == nil {
-			return fmt.Errorf("ledger: Transfer event %s has nil payload", e.ID)
-		}
-		p = *v
-	default:
-		return fmt.Errorf("ledger: Transfer event %s payload has unexpected type %T", e.ID, e.Payload)
+	p, err := event.GetPayload[event.TransferPayload](e)
+	if err != nil {
+		return fmt.Errorf("ledger: Transfer event %s: %w", e.ID, err)
 	}
 
 	l.mu.Lock()
@@ -120,6 +119,17 @@ func (l *TransferLedger) Record(e *event.Event) error {
 
 	if _, exists := l.entries[e.ID]; exists {
 		return fmt.Errorf("%w: %s", ErrDuplicateEntry, e.ID)
+	}
+
+	// Balance validation: the sender must have enough spendable balance to
+	// cover this transfer. Skip the check for the "system" agent which is
+	// the source of genesis credits (FundAgent).
+	if string(p.FromAgent) != "system" && p.Amount > 0 {
+		available := l.balanceLocked(crypto.AgentID(p.FromAgent))
+		if available < p.Amount {
+			return fmt.Errorf("%w: agent %s balance %d < transfer amount %d",
+				ErrInsufficientBalance, p.FromAgent, available, p.Amount)
+		}
 	}
 
 	l.entries[e.ID] = &TransferEntry{
@@ -190,7 +200,13 @@ func (l *TransferLedger) Settle(eventID event.EventID, state event.SettlementSta
 func (l *TransferLedger) Balance(agentID crypto.AgentID) (uint64, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
+	return l.balanceLocked(agentID), nil
+}
 
+// balanceLocked computes the spendable balance while the caller already holds
+// at least a read lock on l.mu. Extracted so Record can call it under the write
+// lock without double-locking.
+func (l *TransferLedger) balanceLocked(agentID crypto.AgentID) uint64 {
 	var inSettled, outReserved uint64
 	for _, e := range l.entries {
 		if e.ToAgent == agentID && e.Settlement == event.SettlementSettled {
@@ -203,9 +219,52 @@ func (l *TransferLedger) Balance(agentID crypto.AgentID) (uint64, error) {
 	}
 
 	if outReserved >= inSettled {
-		return 0, nil
+		return 0
 	}
-	return inSettled - outReserved, nil
+	return inSettled - outReserved
+}
+
+// BalanceCheck returns an error if agentID does not have enough spendable
+// balance to cover amount. It is a convenience wrapper used by the OCS engine
+// before recording a transfer.
+func (l *TransferLedger) BalanceCheck(agentID crypto.AgentID, amount uint64) error {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.balanceLocked(agentID) < amount {
+		return fmt.Errorf("%w: agent %s has insufficient funds for %d", ErrInsufficientBalance, agentID, amount)
+	}
+	return nil
+}
+
+// FundAgent creates a genesis credit entry that grants initial funds to an agent.
+// This is the only path through which new balance enters the Transfer Ledger
+// outside of normal settled transfers. Used for initial staking and test setup.
+// The entry is created in Settled state so it is immediately spendable.
+func (l *TransferLedger) FundAgent(agentID crypto.AgentID, amount uint64) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	// Create a synthetic settled entry with a deterministic ID based on the
+	// agent and amount, using a "genesis:" prefix to avoid collisions with
+	// content-addressed event IDs.
+	eid := event.EventID(fmt.Sprintf("genesis:%s:%d:%d", agentID, amount, len(l.entries)))
+	if _, exists := l.entries[eid]; exists {
+		return fmt.Errorf("%w: %s", ErrDuplicateEntry, eid)
+	}
+
+	l.entries[eid] = &TransferEntry{
+		EventID:    eid,
+		FromAgent:  "system",
+		ToAgent:    agentID,
+		Amount:     amount,
+		Currency:   "AET",
+		Memo:       "genesis credit",
+		Timestamp:  0,
+		Settlement: event.SettlementSettled,
+		RecordedAt: time.Now(),
+		IsGenesis:  true,
+	}
+	return nil
 }
 
 // PendingOutgoing returns the total outgoing amount across all Optimistic
@@ -241,6 +300,9 @@ func (l *TransferLedger) History(agentID crypto.AgentID, limit int, offset int) 
 
 	var matched []*TransferEntry
 	for _, e := range l.entries {
+		if e.IsGenesis {
+			continue // genesis credits are internal funding mechanics, not transfer history
+		}
 		if e.FromAgent == agentID || e.ToAgent == agentID {
 			matched = append(matched, e)
 		}

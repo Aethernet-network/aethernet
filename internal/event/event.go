@@ -109,14 +109,18 @@ type Event struct {
 	// and built upon that event. An empty slice marks a genesis (root) event.
 	CausalRefs []EventID `json:"causal_refs"`
 
-	// Payload holds type-specific structured data. The concrete type depends on
-	// the Type field:
+	// Payload holds type-specific structured data as pre-marshaled JSON bytes.
+	// The concrete type depends on the Type field — use GetPayload[T] to decode:
 	//   EventTypeTransfer     → TransferPayload
 	//   EventTypeGeneration   → GenerationPayload
 	//   EventTypeAttestation  → AttestationPayload
 	//   EventTypeVerification → VerificationPayload
 	//   EventTypeDelegation   → DelegationPayload
-	Payload interface{} `json:"payload"`
+	//
+	// Storing as json.RawMessage ensures deterministic canonical bytes across
+	// network serialization/deserialization boundaries, which is critical for
+	// signature verification after round-trips.
+	Payload json.RawMessage `json:"payload"`
 
 	// AgentID is the capability fingerprint of the originating agent.
 	// AetherNet identity is track-record-based rather than purely key-based:
@@ -160,12 +164,12 @@ type Event struct {
 //   - Signature: circular — signing happens after hashing
 //   - SettlementState: mutable post-creation metadata, not part of causal identity
 type eventCanonical struct {
-	Type            EventType   `json:"type"`
-	CausalRefs      []EventID   `json:"causal_refs"`
-	Payload         interface{} `json:"payload"`
-	AgentID         string      `json:"agent_id"`
-	CausalTimestamp uint64      `json:"causal_timestamp"`
-	StakeAmount     uint64      `json:"stake_amount"`
+	Type            EventType       `json:"type"`
+	CausalRefs      []EventID       `json:"causal_refs"`
+	Payload         json.RawMessage `json:"payload"`
+	AgentID         string          `json:"agent_id"`
+	CausalTimestamp uint64          `json:"causal_timestamp"`
+	StakeAmount     uint64          `json:"stake_amount"`
 }
 
 // ComputeID derives the content-addressed EventID from an event's canonical fields.
@@ -226,8 +230,6 @@ func New(
 	}
 
 	// Normalize nil to empty slice for consistent JSON serialization and hashing.
-	// A nil CausalRefs and an empty CausalRefs are semantically identical (both
-	// mean "genesis event"), but JSON encodes them differently: null vs [].
 	if causalRefs == nil {
 		causalRefs = []EventID{}
 	}
@@ -235,10 +237,31 @@ func New(
 		priorTimestamps = map[EventID]uint64{}
 	}
 
+	// Marshal the payload to json.RawMessage at creation time so that the
+	// canonical bytes are deterministic regardless of how the event is later
+	// serialized/deserialized across the network. This is the fix for the
+	// JSON non-determinism bug where interface{} payloads produced different
+	// canonical bytes after a network round-trip.
+	var rawPayload json.RawMessage
+	if payload != nil {
+		// If already json.RawMessage, use directly.
+		if rm, ok := payload.(json.RawMessage); ok {
+			rawPayload = rm
+		} else {
+			data, err := json.Marshal(payload)
+			if err != nil {
+				return nil, fmt.Errorf("event: failed to marshal payload: %w", err)
+			}
+			rawPayload = data
+		}
+	} else {
+		rawPayload = json.RawMessage("null")
+	}
+
 	e := &Event{
 		Type:            eventType,
 		CausalRefs:      causalRefs,
-		Payload:         payload,
+		Payload:         rawPayload,
 		AgentID:         agentID,
 		CausalTimestamp: ComputeCausalTimestamp(causalRefs, priorTimestamps),
 		StakeAmount:     stakeAmount,
@@ -278,6 +301,25 @@ func Transition(e *Event, target SettlementState) error {
 		}
 	}
 	return fmt.Errorf("event: cannot transition settlement state from %q to %q", e.SettlementState, target)
+}
+
+// GetPayload deserializes the event's json.RawMessage Payload into the concrete
+// type T. This is the standard way to extract typed payload data from an event
+// after the Payload field was changed from interface{} to json.RawMessage for
+// deterministic canonical bytes.
+//
+// Usage:
+//
+//	tp, err := event.GetPayload[event.TransferPayload](e)
+func GetPayload[T any](e *Event) (T, error) {
+	var result T
+	if e.Payload == nil {
+		return result, fmt.Errorf("event: payload is nil")
+	}
+	if err := json.Unmarshal(e.Payload, &result); err != nil {
+		return result, fmt.Errorf("event: failed to decode payload as %T: %w", result, err)
+	}
+	return result, nil
 }
 
 // ---------------------------------------------------------------------------

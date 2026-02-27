@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/aethernet/core/internal/crypto"
 	"github.com/aethernet/core/internal/dag"
 	"github.com/aethernet/core/internal/event"
 )
@@ -16,6 +17,7 @@ import (
 // ---------------------------------------------------------------------------
 
 // makeGenesis creates a genesis event (no causal references) for the given agent.
+// Genesis events are unsigned; the DAG allows this for bootstrap.
 func makeGenesis(t *testing.T, agentID string) *event.Event {
 	t.Helper()
 	e, err := event.New(
@@ -32,10 +34,17 @@ func makeGenesis(t *testing.T, agentID string) *event.Event {
 	return e
 }
 
-// makeChild creates an event that references all provided parents.
+// makeChild creates a signed event that references all provided parents.
 // priorTimestamps is built automatically from the parents' CausalTimestamps.
+// A fresh keypair is generated for signing since non-genesis events must be signed.
 func makeChild(t *testing.T, agentID string, parents ...*event.Event) *event.Event {
 	t.Helper()
+	kp, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("makeChild: GenerateKeyPair: %v", err)
+	}
+	aid := string(kp.AgentID())
+
 	refs := make([]event.EventID, len(parents))
 	prior := make(map[event.EventID]uint64, len(parents))
 	for i, p := range parents {
@@ -45,13 +54,16 @@ func makeChild(t *testing.T, agentID string, parents ...*event.Event) *event.Eve
 	e, err := event.New(
 		event.EventTypeTransfer,
 		refs,
-		event.TransferPayload{FromAgent: agentID, ToAgent: "sink", Amount: 1, Currency: "AET"},
-		agentID,
+		event.TransferPayload{FromAgent: aid, ToAgent: "sink", Amount: 1, Currency: "AET"},
+		aid,
 		prior,
 		0,
 	)
 	if err != nil {
 		t.Fatalf("makeChild(%q): %v", agentID, err)
+	}
+	if err := crypto.SignEvent(e, kp); err != nil {
+		t.Fatalf("makeChild(%q) sign: %v", agentID, err)
 	}
 	return e
 }
@@ -1059,5 +1071,95 @@ func TestForkMerge_CompleteScenario(t *testing.T) {
 	// E has ts=4 → must be last.
 	if sorted[4].ID != E.ID {
 		t.Errorf("position 4: got agent=%s, want E", sorted[4].AgentID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fix 4A: Signature verification in DAG.Add
+// ---------------------------------------------------------------------------
+
+func TestAdd_UnsignedNonGenesis_Rejected(t *testing.T) {
+	// A non-genesis event with no signature must be rejected.
+	d := dag.New()
+	genesis := makeGenesis(t, "root")
+	mustAdd(t, d, genesis)
+
+	// Create a child event WITHOUT signing it.
+	refs := []event.EventID{genesis.ID}
+	prior := map[event.EventID]uint64{genesis.ID: genesis.CausalTimestamp}
+	child, err := event.New(
+		event.EventTypeTransfer,
+		refs,
+		event.TransferPayload{FromAgent: "attacker", ToAgent: "sink", Amount: 1, Currency: "AET"},
+		"attacker",
+		prior,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("event.New: %v", err)
+	}
+
+	err = d.Add(child)
+	if err == nil {
+		t.Fatal("Add should reject unsigned non-genesis event, got nil")
+	}
+	if !errors.Is(err, dag.ErrMissingSignature) {
+		t.Errorf("want ErrMissingSignature, got: %v", err)
+	}
+}
+
+func TestAdd_InvalidSignature_Rejected(t *testing.T) {
+	// An event with a garbage signature must be rejected.
+	d := dag.New()
+	genesis := makeGenesis(t, "root")
+	mustAdd(t, d, genesis)
+
+	kp, _ := crypto.GenerateKeyPair()
+	aid := string(kp.AgentID())
+	refs := []event.EventID{genesis.ID}
+	prior := map[event.EventID]uint64{genesis.ID: genesis.CausalTimestamp}
+	child, err := event.New(
+		event.EventTypeTransfer,
+		refs,
+		event.TransferPayload{FromAgent: aid, ToAgent: "sink", Amount: 1, Currency: "AET"},
+		aid,
+		prior,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("event.New: %v", err)
+	}
+	// Set garbage signature instead of a valid one.
+	child.Signature = make([]byte, 64)
+
+	err = d.Add(child)
+	if err == nil {
+		t.Fatal("Add should reject invalid signature, got nil")
+	}
+	if !errors.Is(err, dag.ErrInvalidSignature) {
+		t.Errorf("want ErrInvalidSignature, got: %v", err)
+	}
+}
+
+func TestAdd_ValidSignature_Accepted(t *testing.T) {
+	// A properly signed non-genesis event must be accepted.
+	d := dag.New()
+	genesis := makeGenesis(t, "root")
+	mustAdd(t, d, genesis)
+
+	child := makeChild(t, "child", genesis)
+	err := d.Add(child)
+	if err != nil {
+		t.Fatalf("Add should accept validly signed event, got: %v", err)
+	}
+}
+
+func TestAdd_GenesisUnsigned_Accepted(t *testing.T) {
+	// Genesis events (no CausalRefs) are allowed unsigned for bootstrap.
+	d := dag.New()
+	g := makeGenesis(t, "bootstrap")
+	err := d.Add(g)
+	if err != nil {
+		t.Fatalf("Add should accept unsigned genesis event, got: %v", err)
 	}
 }

@@ -1,6 +1,7 @@
 package event_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -64,7 +65,8 @@ func TestNew_Transfer(t *testing.T) {
 		t.Error("Signature should be empty until explicitly signed")
 	}
 
-	p, ok := e.Payload.(event.TransferPayload)
+	p, err := event.GetPayload[event.TransferPayload](e)
+	ok := err == nil
 	if !ok {
 		t.Fatalf("Payload type assertion to TransferPayload failed")
 	}
@@ -104,7 +106,8 @@ func TestNew_Generation(t *testing.T) {
 		t.Errorf("Type = %q, want Generation", e.Type)
 	}
 
-	p, ok := e.Payload.(event.GenerationPayload)
+	p, err := event.GetPayload[event.GenerationPayload](e)
+	ok := err == nil
 	if !ok {
 		t.Fatalf("Payload type assertion to GenerationPayload failed")
 	}
@@ -148,7 +151,8 @@ func TestNew_Attestation(t *testing.T) {
 		t.Errorf("Type = %q, want Attestation", e.Type)
 	}
 
-	p, ok := e.Payload.(event.AttestationPayload)
+	p, err := event.GetPayload[event.AttestationPayload](e)
+	ok := err == nil
 	if !ok {
 		t.Fatalf("Payload type assertion to AttestationPayload failed")
 	}
@@ -195,7 +199,8 @@ func TestNew_Verification(t *testing.T) {
 		t.Errorf("Type = %q, want Verification", e.Type)
 	}
 
-	p, ok := e.Payload.(event.VerificationPayload)
+	p, err := event.GetPayload[event.VerificationPayload](e)
+	ok := err == nil
 	if !ok {
 		t.Fatalf("Payload type assertion to VerificationPayload failed")
 	}
@@ -231,7 +236,7 @@ func TestNew_Verification_NegativeVerdict(t *testing.T) {
 
 	e := mustNew(t, event.EventTypeVerification, []event.EventID{target.ID}, payload, "honest-validator", nil, 8000)
 
-	p := e.Payload.(event.VerificationPayload)
+	p, _ := event.GetPayload[event.VerificationPayload](e)
 	if p.Verdict {
 		t.Error("VerificationPayload.Verdict = true, want false for negative verdict")
 	}
@@ -258,7 +263,8 @@ func TestNew_Delegation(t *testing.T) {
 		t.Errorf("Type = %q, want Delegation", e.Type)
 	}
 
-	p, ok := e.Payload.(event.DelegationPayload)
+	p, err := event.GetPayload[event.DelegationPayload](e)
+	ok := err == nil
 	if !ok {
 		t.Fatalf("Payload type assertion to DelegationPayload failed")
 	}
@@ -717,5 +723,80 @@ func TestDAGChain_ForkThenMerge(t *testing.T) {
 
 	if merge.CausalTimestamp != 3 {
 		t.Errorf("merge CausalTimestamp = %d, want 3 (max(2,2)+1)", merge.CausalTimestamp)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fix 4B: json.RawMessage Payload deterministic round-trip
+// ---------------------------------------------------------------------------
+
+func TestPayload_RoundTrip_Deterministic(t *testing.T) {
+	// Marshal an event to JSON, unmarshal it back, and verify the ID is
+	// still correct. This was broken when Payload was interface{}: after
+	// a JSON round-trip, the interface{} lost its concrete type and produced
+	// different canonical bytes.
+	payload := event.TransferPayload{
+		FromAgent: "alice",
+		ToAgent:   "bob",
+		Amount:    42,
+		Currency:  "AET",
+	}
+	e := mustNew(t, event.EventTypeTransfer, nil, payload, "alice", nil, 100)
+	originalID := e.ID
+
+	data, err := json.Marshal(e)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var roundTripped event.Event
+	if err := json.Unmarshal(data, &roundTripped); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	recomputedID, err := event.ComputeID(&roundTripped)
+	if err != nil {
+		t.Fatalf("ComputeID after round-trip: %v", err)
+	}
+	if recomputedID != originalID {
+		t.Errorf("ID changed after JSON round-trip:\n  original:    %s\n  recomputed:  %s",
+			originalID, recomputedID)
+	}
+}
+
+func TestGetPayload_Transfer(t *testing.T) {
+	payload := event.TransferPayload{
+		FromAgent: "alice",
+		ToAgent:   "bob",
+		Amount:    42,
+		Currency:  "AET",
+	}
+	e := mustNew(t, event.EventTypeTransfer, nil, payload, "alice", nil, 0)
+
+	got, err := event.GetPayload[event.TransferPayload](e)
+	if err != nil {
+		t.Fatalf("GetPayload: %v", err)
+	}
+	if got.FromAgent != "alice" || got.ToAgent != "bob" || got.Amount != 42 {
+		t.Errorf("GetPayload returned %+v, want FromAgent=alice, ToAgent=bob, Amount=42", got)
+	}
+}
+
+func TestGetPayload_Generation(t *testing.T) {
+	payload := event.GenerationPayload{
+		GeneratingAgent:  "gpu-agent",
+		BeneficiaryAgent: "client",
+		ClaimedValue:     1000,
+		EvidenceHash:     "sha256:abc",
+		TaskDescription:  "inference",
+	}
+	e := mustNew(t, event.EventTypeGeneration, nil, payload, "gpu-agent", nil, 0)
+
+	got, err := event.GetPayload[event.GenerationPayload](e)
+	if err != nil {
+		t.Fatalf("GetPayload: %v", err)
+	}
+	if got.GeneratingAgent != "gpu-agent" || got.ClaimedValue != 1000 {
+		t.Errorf("GetPayload returned %+v", got)
 	}
 }

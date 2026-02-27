@@ -180,8 +180,9 @@ type Engine struct {
 	generation *ledger.GenerationLedger
 	identity   *identity.Registry
 
-	pending map[event.EventID]*PendingItem
-	results chan VerificationResult
+	pending   map[event.EventID]*PendingItem
+	processed map[event.EventID]struct{} // tracks already-settled events for idempotency
+	results   chan VerificationResult
 
 	mu     sync.RWMutex
 	ctx    context.Context
@@ -207,6 +208,7 @@ func NewEngine(
 		generation: gl,
 		identity:   reg,
 		pending:    make(map[event.EventID]*PendingItem),
+		processed:  make(map[event.EventID]struct{}),
 		results:    make(chan VerificationResult, resultsBufferSize),
 	}
 }
@@ -304,29 +306,26 @@ func (e *Engine) Submit(ev *event.Event) error {
 
 	switch ev.Type {
 	case event.EventTypeTransfer:
+		// Balance check before recording. Extract payload to get the amount.
+		tp, err := event.GetPayload[event.TransferPayload](ev)
+		if err != nil {
+			return fmt.Errorf("ocs: decode transfer payload: %w", err)
+		}
+		if err := e.transfer.BalanceCheck(crypto.AgentID(tp.FromAgent), tp.Amount); err != nil {
+			return fmt.Errorf("ocs: %w", err)
+		}
 		if err := e.transfer.Record(ev); err != nil {
 			return fmt.Errorf("ocs: ledger record failed: %w", err)
 		}
-		switch p := ev.Payload.(type) {
-		case event.TransferPayload:
-			amount = p.Amount
-		case *event.TransferPayload:
-			if p != nil {
-				amount = p.Amount
-			}
-		}
+		amount = tp.Amount
 
 	case event.EventTypeGeneration:
 		if err := e.generation.Record(ev); err != nil {
 			return fmt.Errorf("ocs: ledger record failed: %w", err)
 		}
-		switch p := ev.Payload.(type) {
-		case event.GenerationPayload:
-			amount = p.ClaimedValue
-		case *event.GenerationPayload:
-			if p != nil {
-				amount = p.ClaimedValue
-			}
+		gp, err := event.GetPayload[event.GenerationPayload](ev)
+		if err == nil {
+			amount = gp.ClaimedValue
 		}
 
 	default:
@@ -387,12 +386,20 @@ func (e *Engine) SubmitVerification(result VerificationResult) error {
 // Returns ErrNotPending if the event is not in the pending map.
 func (e *Engine) ProcessResult(result VerificationResult) error {
 	e.mu.Lock()
+	// Idempotency: if already processed, return silently. This prevents the
+	// double-settlement race where checkExpired and a real verdict both try
+	// to settle the same event.
+	if _, done := e.processed[result.EventID]; done {
+		e.mu.Unlock()
+		return nil
+	}
 	item, exists := e.pending[result.EventID]
 	if !exists {
 		e.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrNotPending, result.EventID)
 	}
 	delete(e.pending, result.EventID)
+	e.processed[result.EventID] = struct{}{}
 	e.mu.Unlock()
 
 	// Use the event type as the capability domain for identity updates.
@@ -436,25 +443,25 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 // passed and treats each as a failed verification. Called by the background
 // goroutine on every expiredCheckInterval tick.
 //
-// Expired items are collected under a read lock, then processed individually
-// (each ProcessResult call acquires its own write lock). If a real verdict
-// arrives concurrently for the same event, one of the two ProcessResult calls
-// will find ErrNotPending and return silently — this is correct: first write wins.
+// Each expired item is re-verified under the write lock before processing to
+// prevent races with concurrent real verdicts. The processed set ensures that
+// if a real verdict was applied between collection and processing, the expiry
+// is silently skipped (idempotent).
 func (e *Engine) checkExpired() {
 	now := time.Now()
 
-	e.mu.RLock()
-	var expired []*PendingItem
-	for _, item := range e.pending {
+	e.mu.Lock()
+	var expired []event.EventID
+	for id, item := range e.pending {
 		if now.Sub(item.OptimisticAt) > item.Deadline {
-			expired = append(expired, item)
+			expired = append(expired, id)
 		}
 	}
-	e.mu.RUnlock()
+	e.mu.Unlock()
 
-	for _, item := range expired {
+	for _, id := range expired {
 		_ = e.ProcessResult(VerificationResult{
-			EventID:   item.EventID,
+			EventID:   id,
 			Verdict:   false,
 			Reason:    "verification deadline exceeded",
 			Timestamp: now,

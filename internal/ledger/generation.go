@@ -94,17 +94,9 @@ func (l *GenerationLedger) Record(e *event.Event) error {
 		return fmt.Errorf("%w: got %q", ErrNotGeneration, e.Type)
 	}
 
-	var p event.GenerationPayload
-	switch v := e.Payload.(type) {
-	case event.GenerationPayload:
-		p = v
-	case *event.GenerationPayload:
-		if v == nil {
-			return fmt.Errorf("ledger: Generation event %s has nil payload", e.ID)
-		}
-		p = *v
-	default:
-		return fmt.Errorf("ledger: Generation event %s payload has unexpected type %T", e.ID, e.Payload)
+	p, err := event.GetPayload[event.GenerationPayload](e)
+	if err != nil {
+		return fmt.Errorf("ledger: Generation event %s: %w", e.ID, err)
 	}
 
 	l.mu.Lock()

@@ -39,6 +39,7 @@ package consensus
 import (
 	"errors"
 	"fmt"
+	"math/big"
 	"sync"
 	"time"
 
@@ -46,6 +47,10 @@ import (
 	"github.com/aethernet/core/internal/event"
 	"github.com/aethernet/core/internal/identity"
 )
+
+// bigDivisor is the constant 10000 used for weight normalization, pre-allocated
+// as a *big.Int so it is not re-created on every computeWeight call.
+var bigDivisor = big.NewInt(10000)
 
 // Sentinel errors for programmatic handling by callers.
 var (
@@ -208,10 +213,23 @@ func (vr *VotingRound) computeWeight(agentID crypto.AgentID) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("consensus: agent %s not in registry: %w", agentID, err)
 	}
-	// Integer-first arithmetic: multiply before dividing to preserve precision.
-	// If either ReputationScore or StakedAmount is zero the product is zero,
-	// giving weight zero as specified.
-	return fp.ReputationScore * fp.StakedAmount / 10000, nil
+	// Overflow-safe arithmetic using math/big: the intermediate product of
+	// ReputationScore × StakedAmount can exceed uint64 for large stakes.
+	// Using big.Int for the multiplication avoids silent wraparound.
+	// If either factor is zero, return zero immediately (short-circuit).
+	if fp.ReputationScore == 0 || fp.StakedAmount == 0 {
+		return 0, nil
+	}
+	product := new(big.Int).Mul(
+		new(big.Int).SetUint64(fp.ReputationScore),
+		new(big.Int).SetUint64(fp.StakedAmount),
+	)
+	result := new(big.Int).Div(product, bigDivisor)
+	// If the result exceeds uint64 range, saturate at MaxUint64.
+	if !result.IsUint64() {
+		return ^uint64(0), nil
+	}
+	return result.Uint64(), nil
 }
 
 // RegisterVote records a vote from voterID for the given eventID and immediately

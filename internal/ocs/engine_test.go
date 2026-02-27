@@ -45,6 +45,14 @@ func newHarness(t *testing.T, cfg *ocs.EngineConfig) *testHarness {
 	}
 }
 
+// fundAgent gives agentID an initial spendable balance in the transfer ledger.
+func fundAgent(t *testing.T, h *testHarness, agentID string, amount uint64) {
+	t.Helper()
+	if err := h.tl.FundAgent(crypto.AgentID(agentID), amount); err != nil {
+		t.Fatalf("FundAgent(%s, %d): %v", agentID, amount, err)
+	}
+}
+
 // registerAgent adds a minimal CapabilityFingerprint for agentID to the registry.
 // The fingerprint carries a 32-byte placeholder public key so the registry
 // accepts it without requiring a real Ed25519 key.
@@ -204,6 +212,7 @@ func TestEngine_SubmitVerification_BeforeStart_Error(t *testing.T) {
 
 func TestEngine_Submit_Transfer_LandsInPending(t *testing.T) {
 	h := newHarness(t, nil)
+	fundAgent(t, h, "alice", 100_000)
 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
 
 	if err := h.eng.Submit(e); err != nil {
@@ -228,6 +237,7 @@ func TestEngine_Submit_Generation_LandsInPending(t *testing.T) {
 
 func TestEngine_Submit_InsufficientStake(t *testing.T) {
 	h := newHarness(t, nil) // MinStakeRequired = 1000
+	fundAgent(t, h, "alice", 100_000)
 	e := newTransferEvent(t, "alice", "bob", 500, 999) // stake 999 < 1000
 
 	err := h.eng.Submit(e)
@@ -241,6 +251,7 @@ func TestEngine_Submit_InsufficientStake(t *testing.T) {
 
 func TestEngine_Submit_Duplicate_Error(t *testing.T) {
 	h := newHarness(t, nil)
+	fundAgent(t, h, "alice", 100_000)
 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
 
 	if err := h.eng.Submit(e); err != nil {
@@ -284,6 +295,7 @@ func TestEngine_Submit_UnsupportedEventType(t *testing.T) {
 
 func TestEngine_PendingCount_Increments(t *testing.T) {
 	h := newHarness(t, nil)
+	fundAgent(t, h, "alice", 100_000)
 
 	if h.eng.PendingCount() != 0 {
 		t.Fatalf("initial PendingCount = %d, want 0", h.eng.PendingCount())
@@ -308,6 +320,7 @@ func TestEngine_PendingCount_Increments(t *testing.T) {
 
 func TestEngine_IsPending_TrueForSubmitted(t *testing.T) {
 	h := newHarness(t, nil)
+	fundAgent(t, h, "alice", 100_000)
 	e := newTransferEvent(t, "alice", "bob", 100, 1000)
 
 	if h.eng.IsPending(e.ID) {
@@ -332,6 +345,7 @@ func TestEngine_SubmitVerification_True_TransferSettled(t *testing.T) {
 	}
 	defer h.eng.Stop()
 
+	fundAgent(t, h, "alice", 100_000)
 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit: %v", err)
@@ -392,6 +406,7 @@ func TestEngine_SubmitVerification_False_Adjusted(t *testing.T) {
 	}
 	defer h.eng.Stop()
 
+	fundAgent(t, h, "alice", 100_000)
 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit: %v", err)
@@ -425,6 +440,7 @@ func TestEngine_SubmitVerification_False_Adjusted(t *testing.T) {
 func TestEngine_ProcessResult_True_RecordsTaskCompletion(t *testing.T) {
 	h := newHarness(t, nil)
 	registerAgent(t, h.reg, "alice")
+	fundAgent(t, h, "alice", 100_000)
 
 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
 	if err := h.eng.Submit(e); err != nil {
@@ -458,6 +474,7 @@ func TestEngine_ProcessResult_True_RecordsTaskCompletion(t *testing.T) {
 func TestEngine_ProcessResult_False_RecordsTaskFailure(t *testing.T) {
 	h := newHarness(t, nil)
 	registerAgent(t, h.reg, "alice")
+	fundAgent(t, h, "alice", 100_000)
 
 	// First record a successful task to boost OptimisticTrustLimit above the
 	// minimum floor (1000 micro-AET), so the subsequent 15% failure reduction
@@ -555,6 +572,7 @@ func TestEngine_Expiry_AdjustsLedger(t *testing.T) {
 	}
 	h := newHarness(t, cfg)
 
+	fundAgent(t, h, "alice", 100_000)
 	e := newTransferEvent(t, "alice", "bob", 100, 1000)
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit: %v", err)
@@ -587,6 +605,12 @@ func TestEngine_Expiry_AdjustsLedger(t *testing.T) {
 func TestEngine_ConcurrentSubmit(t *testing.T) {
 	h := newHarness(t, nil)
 	const goroutines = 20
+
+	// Fund each concurrent sender.
+	for i := 0; i < goroutines; i++ {
+		from := fmt.Sprintf("concurrent-sender-%d", i)
+		fundAgent(t, h, from, 100_000)
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
@@ -634,6 +658,7 @@ func TestEngine_ConcurrentVerification(t *testing.T) {
 	events := make([]*event.Event, goroutines)
 	for i := 0; i < goroutines; i++ {
 		from := fmt.Sprintf("verif-sender-%d", i)
+		fundAgent(t, h, from, 100_000)
 		e := newTransferEvent(t, from, "verif-sink", uint64(i+1)*100, 1000)
 		if err := h.eng.Submit(e); err != nil {
 			t.Fatalf("Submit %d: %v", i, err)
@@ -661,4 +686,70 @@ func TestEngine_ConcurrentVerification(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool {
 		return h.eng.PendingCount() == 0
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Fix 2: Double settlement idempotency
+// ---------------------------------------------------------------------------
+
+func TestDoubleSettlement_IsIdempotent(t *testing.T) {
+	// Verify that when both a real positive verdict and an expiry false verdict
+	// race on the same event, the first one wins and the second is a no-op.
+	// The event must end up Settled, not Adjusted.
+	h := newHarness(t, nil)
+	fundAgent(t, h, "alice", 100_000)
+
+	e := newTransferEvent(t, "alice", "bob", 500, 1000)
+	if err := h.eng.Submit(e); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	// Process a positive verdict first.
+	if err := h.eng.ProcessResult(verdict(e.ID, true, 0)); err != nil {
+		t.Fatalf("ProcessResult (true): %v", err)
+	}
+
+	// Now simulate the expiry sweep also trying to process the same event.
+	// This must not overwrite the Settled state with Adjusted.
+	err := h.eng.ProcessResult(verdict(e.ID, false, 0))
+	// The second call must be silently idempotent (no error, no state change).
+	if err != nil {
+		t.Fatalf("second ProcessResult should be idempotent, got: %v", err)
+	}
+
+	// The entry must be Settled, not Adjusted.
+	history, err := h.tl.History(crypto.AgentID("alice"), 1, 0)
+	if err != nil || len(history) == 0 {
+		t.Fatalf("History: err=%v len=%d", err, len(history))
+	}
+	if history[0].Settlement != event.SettlementSettled {
+		t.Errorf("Settlement = %q, want Settled (first-write-wins idempotency)", history[0].Settlement)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fix 3: Balance validation
+// ---------------------------------------------------------------------------
+
+func TestEngine_Submit_ZeroBalance_Rejected(t *testing.T) {
+	h := newHarness(t, nil)
+	// Do NOT fund alice — she has zero balance.
+	e := newTransferEvent(t, "alice", "bob", 500, 1000)
+
+	err := h.eng.Submit(e)
+	if err == nil {
+		t.Fatal("Submit should reject transfer from zero-balance agent, got nil")
+	}
+}
+
+func TestEngine_Submit_Overdraft_Rejected(t *testing.T) {
+	h := newHarness(t, nil)
+	fundAgent(t, h, "alice", 100) // only 100 micro-AET
+
+	e := newTransferEvent(t, "alice", "bob", 500, 1000) // wants to send 500
+
+	err := h.eng.Submit(e)
+	if err == nil {
+		t.Fatal("Submit should reject overdraft transfer, got nil")
+	}
 }

@@ -402,3 +402,48 @@ func TestConcurrent_MultipleEvents(t *testing.T) {
 		t.Errorf("want %d finalized events, got %d", numGoroutines, got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Fix 1: Overflow-safe weight computation
+// ---------------------------------------------------------------------------
+
+func TestComputeWeight_NoOverflow(t *testing.T) {
+	// Use values that would overflow uint64 under naive multiplication:
+	// 10000 * 1_844_674_407_370_955_300 = 1.84e22, exceeding uint64 max (1.84e19).
+	// The math/big implementation must produce the correct result.
+	reg := identity.NewRegistry()
+	const rep = uint64(10000)                      // max reputation
+	const stake = uint64(1_844_674_407_370_955_300) // near uint64 max / 10000
+	registerAgent(t, reg, "whale", rep, stake)
+	vr := newRound(reg)
+
+	w, err := vr.ComputeWeight("whale")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Expected: 10000 * 1_844_674_407_370_955_300 / 10000 = 1_844_674_407_370_955_300
+	if w != stake {
+		t.Errorf("want weight %d, got %d (overflow detected!)", stake, w)
+	}
+}
+
+func TestComputeWeight_LargeValues_NoWrapAround(t *testing.T) {
+	// Values that definitely overflow a uint64 multiplication:
+	// 10000 * MaxUint64 = overflow. Result should saturate, not wrap.
+	reg := identity.NewRegistry()
+	registerAgent(t, reg, "mega", 10000, ^uint64(0))
+	vr := newRound(reg)
+
+	w, err := vr.ComputeWeight("mega")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The big.Int result exceeds uint64, so it should saturate at MaxUint64.
+	if w == 0 {
+		t.Fatal("weight wrapped to zero — overflow bug present")
+	}
+	// Since 10000 * MaxUint64 / 10000 = MaxUint64, the result should be MaxUint64.
+	if w != ^uint64(0) {
+		t.Errorf("want MaxUint64 (%d), got %d", ^uint64(0), w)
+	}
+}
