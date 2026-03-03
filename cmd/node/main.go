@@ -28,6 +28,7 @@ import (
 	"github.com/aethernet/core/internal/ledger"
 	"github.com/aethernet/core/internal/network"
 	"github.com/aethernet/core/internal/ocs"
+	"github.com/aethernet/core/internal/store"
 )
 
 // VERSION is the protocol and build version broadcast during handshake.
@@ -99,23 +100,69 @@ type nodeStack struct {
 	supply *ledger.SupplyManager
 	reg    *identity.Registry
 	engine *ocs.Engine
+	store  *store.Store
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
-// nodeStack. The OCS engine is constructed but not started; call engine.Start()
-// before serving traffic.
-func buildStack() *nodeStack {
-	d := dag.New()
-	tl := ledger.NewTransferLedger()
-	gl := ledger.NewGenerationLedger()
+// nodeStack. When s is non-nil, state is restored from the store and all subsequent
+// mutations write through. When s is nil, all components start fresh (in-memory only).
+// The OCS engine is constructed but not started; call engine.Start() before serving traffic.
+func buildStack(s *store.Store) *nodeStack {
+	var (
+		d   *dag.DAG
+		tl  *ledger.TransferLedger
+		gl  *ledger.GenerationLedger
+		reg *identity.Registry
+		err error
+	)
+
+	if s != nil {
+		d, err = dag.LoadFromStore(s)
+		if err != nil {
+			slog.Error("failed to load DAG from store", "err", err)
+			os.Exit(1)
+		}
+		tl, err = ledger.LoadTransferLedgerFromStore(s)
+		if err != nil {
+			slog.Error("failed to load transfer ledger", "err", err)
+			os.Exit(1)
+		}
+		gl, err = ledger.LoadGenerationLedgerFromStore(s)
+		if err != nil {
+			slog.Error("failed to load generation ledger", "err", err)
+			os.Exit(1)
+		}
+		reg, err = identity.LoadRegistryFromStore(s)
+		if err != nil {
+			slog.Error("failed to load identity registry", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("restored state from store",
+			"events", d.Size(),
+			"identities", len(reg.All(0, 0)),
+		)
+	} else {
+		d = dag.New()
+		tl = ledger.NewTransferLedger()
+		gl = ledger.NewGenerationLedger()
+		reg = identity.NewRegistry()
+	}
+
 	sm := ledger.NewSupplyManager(tl, gl)
-	reg := identity.NewRegistry()
 	eng := ocs.NewEngine(ocs.DefaultConfig(), tl, gl, reg)
+	if s != nil {
+		eng.SetStore(s)
+		if err := eng.LoadPendingFromStore(s); err != nil {
+			slog.Error("failed to load pending items", "err", err)
+			os.Exit(1)
+		}
+	}
 	return &nodeStack{
 		dag:    d,
 		supply: sm,
 		reg:    reg,
 		engine: eng,
+		store:  s,
 	}
 }
 
@@ -150,10 +197,14 @@ func startStack(stack *nodeStack, agentID crypto.AgentID) *network.Node {
 	return node
 }
 
-// stopStack tears down the network node then the OCS engine in safe order.
+// stopStack tears down the network node, OCS engine, and persistence store in
+// safe reverse-startup order.
 func stopStack(node *network.Node, stack *nodeStack) {
 	node.Stop()
 	stack.engine.Stop()
+	if stack.store != nil {
+		stack.store.Close()
+	}
 }
 
 // runLoop prints status every 10 seconds and blocks until SIGINT or SIGTERM.
@@ -230,7 +281,13 @@ func cmdStart() {
 
 	slog.Info("starting AetherNet node", "version", VERSION, "agent_id", agentID)
 
-	stack := buildStack()
+	s, err := store.NewStore("./data/aethernet.db")
+	if err != nil {
+		slog.Error("failed to open store", "err", err)
+		os.Exit(1)
+	}
+
+	stack := buildStack(s)
 	node := startStack(stack, agentID)
 
 	cfg := network.DefaultNodeConfig(agentID)
@@ -259,7 +316,13 @@ func cmdConnect() {
 
 	slog.Info("starting AetherNet node", "version", VERSION, "agent_id", agentID)
 
-	stack := buildStack()
+	s, err := store.NewStore("./data/aethernet.db")
+	if err != nil {
+		slog.Error("failed to open store", "err", err)
+		os.Exit(1)
+	}
+
+	stack := buildStack(s)
 	node := startStack(stack, agentID)
 
 	cfg := network.DefaultNodeConfig(agentID)

@@ -20,6 +20,15 @@ import (
 	"github.com/aethernet/core/internal/event"
 )
 
+// transferPersistence is the subset of store.Store used by TransferLedger.
+// Defining a local interface breaks the import cycle: store imports ledger for
+// the TransferEntry type, and ledger uses only this interface — not store directly.
+// *store.Store satisfies this interface.
+type transferPersistence interface {
+	PutTransfer(e *TransferEntry) error
+	AllTransfers() ([]*TransferEntry, error)
+}
+
 // Sentinel errors returned by TransferLedger methods.
 var (
 	// ErrNotTransfer is returned when Record receives an event whose Type is not
@@ -89,6 +98,14 @@ type TransferEntry struct {
 type TransferLedger struct {
 	mu      sync.RWMutex
 	entries map[event.EventID]*TransferEntry
+	store   transferPersistence
+}
+
+// SetStore attaches a persistence backend to the TransferLedger. After this call
+// Record and Settle write through to the store on every mutation. The argument
+// must satisfy transferPersistence; *store.Store from the store package does so.
+func (l *TransferLedger) SetStore(s transferPersistence) {
+	l.store = s
 }
 
 // NewTransferLedger returns an empty, ready-to-use TransferLedger.
@@ -143,6 +160,9 @@ func (l *TransferLedger) Record(e *event.Event) error {
 		Settlement: e.SettlementState,
 		RecordedAt: time.Now(),
 	}
+	if l.store != nil {
+		_ = l.store.PutTransfer(l.entries[e.ID])
+	}
 	return nil
 }
 
@@ -183,6 +203,9 @@ func (l *TransferLedger) Settle(eventID event.EventID, state event.SettlementSta
 	}
 
 	entry.Settlement = state
+	if l.store != nil {
+		_ = l.store.PutTransfer(entry)
+	}
 	return nil
 }
 
@@ -333,4 +356,22 @@ func (l *TransferLedger) History(agentID crypto.AgentID, limit int, offset int) 
 	}
 
 	return matched, nil
+}
+
+// LoadTransferLedgerFromStore reconstructs a TransferLedger from a persisted
+// store, bypassing event validation (all entries were already validated on
+// first Record). The returned ledger has s attached so subsequent mutations
+// continue to write through. s must satisfy transferPersistence; *store.Store
+// from the store package does so.
+func LoadTransferLedgerFromStore(s transferPersistence) (*TransferLedger, error) {
+	entries, err := s.AllTransfers()
+	if err != nil {
+		return nil, fmt.Errorf("ledger: load transfers: %w", err)
+	}
+	tl := NewTransferLedger()
+	tl.store = s
+	for _, e := range entries {
+		tl.entries[e.EventID] = e
+	}
+	return tl, nil
 }

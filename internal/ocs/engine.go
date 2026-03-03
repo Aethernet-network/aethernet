@@ -38,6 +38,14 @@ import (
 	"github.com/aethernet/core/internal/ledger"
 )
 
+// ocsPersistence is the subset of store.Store used by Engine.
+// *store.Store from the store package satisfies this interface.
+type ocsPersistence interface {
+	PutPending(item *PendingItem) error
+	DeletePending(id event.EventID) error
+	AllPending() ([]*PendingItem, error)
+}
+
 // Sentinel errors for programmatic handling by callers.
 var (
 	// ErrAlreadyRunning is returned by Start when the engine is already active.
@@ -184,10 +192,19 @@ type Engine struct {
 	processed map[event.EventID]struct{} // tracks already-settled events for idempotency
 	results   chan VerificationResult
 
+	store ocsPersistence // optional; nil means in-memory only
+
 	mu     sync.RWMutex
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{} // closed when the background goroutine exits
+}
+
+// SetStore attaches a persistence backend to the Engine. After this call Submit
+// writes new PendingItems through to the store and ProcessResult deletes them.
+// s must satisfy ocsPersistence; *store.Store from the store package does so.
+func (e *Engine) SetStore(s ocsPersistence) {
+	e.store = s
 }
 
 // NewEngine constructs an Engine backed by the provided ledgers and identity registry.
@@ -340,6 +357,9 @@ func (e *Engine) Submit(ev *event.Event) error {
 		OptimisticAt: time.Now(),
 		Deadline:     e.config.VerificationTimeout,
 	}
+	if e.store != nil {
+		_ = e.store.PutPending(e.pending[ev.ID])
+	}
 	return nil
 }
 
@@ -400,6 +420,9 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 	}
 	delete(e.pending, result.EventID)
 	e.processed[result.EventID] = struct{}{}
+	if e.store != nil {
+		_ = e.store.DeletePending(result.EventID)
+	}
 	e.mu.Unlock()
 
 	// Use the event type as the capability domain for identity updates.
@@ -483,4 +506,21 @@ func (e *Engine) IsPending(eventID event.EventID) bool {
 	defer e.mu.RUnlock()
 	_, ok := e.pending[eventID]
 	return ok
+}
+
+// LoadPendingFromStore restores in-flight PendingItems from the persistence store
+// on node restart. It also sets the store on the engine so that subsequent
+// Submit/ProcessResult calls continue to write through. Call before Start.
+// s must satisfy ocsPersistence; *store.Store from the store package does so.
+func (e *Engine) LoadPendingFromStore(s ocsPersistence) error {
+	items, err := s.AllPending()
+	if err != nil {
+		return fmt.Errorf("ocs: load pending: %w", err)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, item := range items {
+		e.pending[item.EventID] = item
+	}
+	return nil
 }

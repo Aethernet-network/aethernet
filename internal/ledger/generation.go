@@ -26,6 +26,13 @@ import (
 	"github.com/aethernet/core/internal/event"
 )
 
+// generationPersistence is the subset of store.Store used by GenerationLedger.
+// *store.Store from the store package satisfies this interface.
+type generationPersistence interface {
+	PutGeneration(e *GenerationEntry) error
+	AllGenerations() ([]*GenerationEntry, error)
+}
+
 // ErrNotGeneration is returned when Record receives an event whose Type is not
 // EventTypeGeneration.
 var ErrNotGeneration = errors.New("ledger: event is not a Generation")
@@ -74,6 +81,14 @@ type GenerationEntry struct {
 type GenerationLedger struct {
 	mu      sync.RWMutex
 	entries map[event.EventID]*GenerationEntry
+	store   generationPersistence
+}
+
+// SetStore attaches a persistence backend to the GenerationLedger. After this call
+// Record, Verify, and Reject write through to the store on every mutation.
+// s must satisfy generationPersistence; *store.Store from the store package does so.
+func (l *GenerationLedger) SetStore(s generationPersistence) {
+	l.store = s
 }
 
 // NewGenerationLedger returns an empty, ready-to-use GenerationLedger.
@@ -118,6 +133,9 @@ func (l *GenerationLedger) Record(e *event.Event) error {
 		Settlement:       event.SettlementOptimistic,
 		RecordedAt:       time.Now(),
 	}
+	if l.store != nil {
+		_ = l.store.PutGeneration(l.entries[e.ID])
+	}
 	return nil
 }
 
@@ -144,6 +162,9 @@ func (l *GenerationLedger) Verify(eventID event.EventID, verifiedValue uint64) e
 
 	entry.VerifiedValue = verifiedValue
 	entry.Settlement = event.SettlementSettled
+	if l.store != nil {
+		_ = l.store.PutGeneration(entry)
+	}
 	return nil
 }
 
@@ -168,6 +189,9 @@ func (l *GenerationLedger) Reject(eventID event.EventID) error {
 	}
 
 	entry.Settlement = event.SettlementAdjusted
+	if l.store != nil {
+		_ = l.store.PutGeneration(entry)
+	}
 	return nil
 }
 
@@ -274,4 +298,21 @@ func (l *GenerationLedger) ContributionScore(agentID crypto.AgentID) (uint64, er
 		score = 10000
 	}
 	return score, nil
+}
+
+// LoadGenerationLedgerFromStore reconstructs a GenerationLedger from a persisted
+// store, bypassing event validation (all entries were already validated on first
+// Record). The returned ledger has s attached so subsequent mutations write through.
+// s must satisfy generationPersistence; *store.Store from the store package does so.
+func LoadGenerationLedgerFromStore(s generationPersistence) (*GenerationLedger, error) {
+	entries, err := s.AllGenerations()
+	if err != nil {
+		return nil, fmt.Errorf("ledger: load generations: %w", err)
+	}
+	gl := NewGenerationLedger()
+	gl.store = s
+	for _, e := range entries {
+		gl.entries[e.EventID] = e
+	}
+	return gl, nil
 }

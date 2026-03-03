@@ -10,6 +10,13 @@ import (
 	"github.com/aethernet/core/internal/crypto"
 )
 
+// identityPersistence is the subset of store.Store used by Registry.
+// *store.Store from the store package satisfies this interface.
+type identityPersistence interface {
+	PutIdentity(fp *CapabilityFingerprint) error
+	AllIdentities() ([]*CapabilityFingerprint, error)
+}
+
 // Sentinel errors for programmatic handling by callers.
 var (
 	// ErrAgentNotFound is returned when an operation targets an AgentID that
@@ -57,6 +64,14 @@ const (
 type Registry struct {
 	mu     sync.RWMutex
 	agents map[crypto.AgentID]*CapabilityFingerprint
+	store  identityPersistence
+}
+
+// SetStore attaches a persistence backend to the Registry. After this call
+// Register, Update, RecordTaskCompletion, and RecordTaskFailure write through.
+// s must satisfy identityPersistence; *store.Store from the store package does so.
+func (r *Registry) SetStore(s identityPersistence) {
+	r.store = s
 }
 
 // NewRegistry creates an empty Registry ready to receive agent registrations.
@@ -86,6 +101,9 @@ func (r *Registry) Register(fp *CapabilityFingerprint) error {
 		return fmt.Errorf("identity: failed to compute hash during registration: %w", err)
 	}
 	r.agents[fp.AgentID] = stored
+	if r.store != nil {
+		_ = r.store.PutIdentity(stored)
+	}
 	return nil
 }
 
@@ -119,6 +137,9 @@ func (r *Registry) Update(agentID crypto.AgentID, updatedFP *CapabilityFingerpri
 		return fmt.Errorf("identity: failed to compute hash during update: %w", err)
 	}
 	r.agents[agentID] = stored
+	if r.store != nil {
+		_ = r.store.PutIdentity(stored)
+	}
 	return nil
 }
 
@@ -208,7 +229,13 @@ func (r *Registry) RecordTaskCompletion(agentID crypto.AgentID, valueGenerated u
 	}
 
 	fp.FingerprintVersion++
-	return fp.refreshHash()
+	if err := fp.refreshHash(); err != nil {
+		return err
+	}
+	if r.store != nil {
+		_ = r.store.PutIdentity(fp)
+	}
+	return nil
 }
 
 // RecordTaskFailure records a failed task for agentID in the given capability domain.
@@ -246,7 +273,13 @@ func (r *Registry) RecordTaskFailure(agentID crypto.AgentID, domain string) erro
 	}
 
 	fp.FingerprintVersion++
-	return fp.refreshHash()
+	if err := fp.refreshHash(); err != nil {
+		return err
+	}
+	if r.store != nil {
+		_ = r.store.PutIdentity(fp)
+	}
+	return nil
 }
 
 // CanTransact reports whether agentID may optimistically transact the given amount.
@@ -319,4 +352,21 @@ func (r *Registry) getRaw(agentID crypto.AgentID) (*CapabilityFingerprint, error
 		return nil, fmt.Errorf("identity: %w: %s", ErrAgentNotFound, agentID)
 	}
 	return fp, nil
+}
+
+// LoadRegistryFromStore reconstructs a Registry from a persisted store, restoring
+// all previously-registered agent fingerprints. The returned registry has s
+// attached so subsequent mutations write through. s must satisfy identityPersistence;
+// *store.Store from the store package does so.
+func LoadRegistryFromStore(s identityPersistence) (*Registry, error) {
+	fps, err := s.AllIdentities()
+	if err != nil {
+		return nil, fmt.Errorf("identity: load from store: %w", err)
+	}
+	r := NewRegistry()
+	r.store = s
+	for _, fp := range fps {
+		r.agents[fp.AgentID] = fp
+	}
+	return r, nil
 }

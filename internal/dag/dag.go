@@ -56,6 +56,15 @@ import (
 	"github.com/aethernet/core/internal/event"
 )
 
+// dagPersistence is the subset of store.Store used by DAG.
+// Defining a local interface breaks the potential import cycle: the store package
+// may import dag-adjacent packages, and using an interface here avoids any
+// circular dependency. *store.Store from the store package satisfies this interface.
+type dagPersistence interface {
+	PutEvent(e *event.Event) error
+	AllEvents() ([]*event.Event, error)
+}
+
 // Sentinel errors allow callers to use errors.Is for programmatic branching
 // rather than string-matching error messages.
 var (
@@ -97,6 +106,19 @@ type DAG struct {
 	// An event enters tips when it is added, and is removed from tips when
 	// any later event lists it in CausalRefs.
 	tips map[event.EventID]struct{}
+
+	// store is the optional persistence backend. When non-nil, every successful
+	// Add writes the event through to BadgerDB for durability. Defaults to nil
+	// (in-memory only) so existing tests require no changes.
+	store dagPersistence
+}
+
+// SetStore attaches a persistence backend to the DAG. After this call every
+// successful Add writes through to the store. Must be called before any Add
+// to ensure the full event history is durable. s must satisfy dagPersistence;
+// *store.Store from the store package does so.
+func (d *DAG) SetStore(s dagPersistence) {
+	d.store = s
 }
 
 // New creates and returns an empty DAG ready to accept events.
@@ -169,6 +191,73 @@ func (d *DAG) Add(e *event.Event) error {
 	}
 
 	// e itself has no children yet, so it enters the frontier.
+	d.tips[e.ID] = struct{}{}
+
+	// Write-through to the persistence store when one is attached.
+	if d.store != nil {
+		_ = d.store.PutEvent(e)
+	}
+
+	return nil
+}
+
+// LoadFromStore reconstructs an in-memory DAG from a previously persisted store.
+// Events are replayed in CausalTimestamp order so that every parent is inserted
+// before its children. The returned DAG has s attached as its store so subsequent
+// Add calls continue to write through. s must satisfy dagPersistence;
+// *store.Store from the store package does so.
+func LoadFromStore(s dagPersistence) (*DAG, error) {
+	events, err := s.AllEvents()
+	if err != nil {
+		return nil, fmt.Errorf("dag: load from store: %w", err)
+	}
+
+	d := New()
+	d.store = s
+
+	// Sort events by CausalTimestamp for topological ordering. This guarantees
+	// every parent event is inserted before any of its children.
+	sort.Slice(events, func(i, j int) bool {
+		return events[i].CausalTimestamp < events[j].CausalTimestamp
+	})
+
+	for _, e := range events {
+		if err := d.addFromStore(e); err != nil {
+			return nil, fmt.Errorf("dag: replay event %s: %w", e.ID, err)
+		}
+	}
+	return d, nil
+}
+
+// addFromStore inserts e into the in-memory DAG structures without signature
+// verification (events were already verified on first acceptance) and without
+// writing back to the store (we are loading FROM the store). Duplicate events
+// during replay are silently skipped — not an error.
+func (d *DAG) addFromStore(e *event.Event) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Silently skip duplicates during replay.
+	if _, exists := d.events[e.ID]; exists {
+		return nil
+	}
+
+	// Validate causal references. Because events are replayed in CausalTimestamp
+	// order, all parents should already be present.
+	for _, ref := range e.CausalRefs {
+		if _, ok := d.events[ref]; !ok {
+			return fmt.Errorf("dag: %w: %s (referenced by %s)", ErrMissingCausalRef, ref, e.ID)
+		}
+	}
+
+	// Insert into in-memory structures (mirrors the commit phase of Add).
+	d.events[e.ID] = e
+	d.children[e.ID] = make(map[event.EventID]struct{})
+
+	for _, ref := range e.CausalRefs {
+		d.children[ref][e.ID] = struct{}{}
+		delete(d.tips, ref)
+	}
 	d.tips[e.ID] = struct{}{}
 
 	return nil
