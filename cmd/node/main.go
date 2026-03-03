@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aethernet/core/internal/api"
 	"github.com/aethernet/core/internal/crypto"
 	"github.com/aethernet/core/internal/dag"
 	"github.com/aethernet/core/internal/identity"
@@ -33,6 +34,9 @@ import (
 
 // VERSION is the protocol and build version broadcast during handshake.
 const VERSION = "0.1.0-testnet"
+
+// apiAddr is the TCP address the HTTP REST API listens on.
+const apiAddr = ":8338"
 
 // keyPath is the default location of the encrypted Ed25519 identity file.
 const keyPath = "./node_keys/identity.json"
@@ -93,21 +97,25 @@ func loadKeyPair() *crypto.KeyPair {
 // ---------------------------------------------------------------------------
 
 // nodeStack bundles the runtime components so they can be passed around and
-// shut down together. The transfer and generation ledgers are retained by the
-// engine and supply manager; callers access them only through these fields.
+// shut down together.
 type nodeStack struct {
-	dag    *dag.DAG
-	supply *ledger.SupplyManager
-	reg    *identity.Registry
-	engine *ocs.Engine
-	store  *store.Store
+	dag        *dag.DAG
+	transfer   *ledger.TransferLedger
+	generation *ledger.GenerationLedger
+	supply     *ledger.SupplyManager
+	reg        *identity.Registry
+	engine     *ocs.Engine
+	store      *store.Store
+	kp         *crypto.KeyPair
+	apiSrv     *api.Server
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
-// nodeStack. When s is non-nil, state is restored from the store and all subsequent
-// mutations write through. When s is nil, all components start fresh (in-memory only).
-// The OCS engine is constructed but not started; call engine.Start() before serving traffic.
-func buildStack(s *store.Store) *nodeStack {
+// nodeStack. When s is non-nil, state is restored from the store and all
+// subsequent mutations write through. When s is nil, all components start fresh
+// (in-memory only). The OCS engine is constructed but not started; call
+// engine.Start() before serving traffic.
+func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 	var (
 		d   *dag.DAG
 		tl  *ledger.TransferLedger
@@ -158,11 +166,14 @@ func buildStack(s *store.Store) *nodeStack {
 		}
 	}
 	return &nodeStack{
-		dag:    d,
-		supply: sm,
-		reg:    reg,
-		engine: eng,
-		store:  s,
+		dag:        d,
+		transfer:   tl,
+		generation: gl,
+		supply:     sm,
+		reg:        reg,
+		engine:     eng,
+		store:      s,
+		kp:         kp,
 	}
 }
 
@@ -179,8 +190,8 @@ func printStatus(agentID crypto.AgentID, d *dag.DAG, n *network.Node, eng *ocs.E
 		id, n.PeerCount(), d.Size(), eng.PendingCount(), ratio)
 }
 
-// startStack starts the OCS engine and network node, returning the node.
-// On any error it stops whatever has started and exits.
+// startStack starts the OCS engine, network node, and HTTP API server.
+// Returns the network node. On any error it stops whatever has started and exits.
 func startStack(stack *nodeStack, agentID crypto.AgentID) *network.Node {
 	if err := stack.engine.Start(); err != nil {
 		slog.Error("failed to start OCS engine", "err", err)
@@ -194,12 +205,29 @@ func startStack(stack *nodeStack, agentID crypto.AgentID) *network.Node {
 		stack.engine.Stop()
 		os.Exit(1)
 	}
+
+	apiSrv := api.NewServer(
+		apiAddr,
+		stack.dag, stack.transfer, stack.generation,
+		stack.reg, stack.engine, stack.supply,
+		node, stack.kp,
+	)
+	if err := apiSrv.Start(); err != nil {
+		slog.Error("failed to start API server", "addr", apiAddr, "err", err)
+		node.Stop()
+		stack.engine.Stop()
+		os.Exit(1)
+	}
+	stack.apiSrv = apiSrv
 	return node
 }
 
-// stopStack tears down the network node, OCS engine, and persistence store in
-// safe reverse-startup order.
+// stopStack tears down the API server, network node, OCS engine, and persistence
+// store in safe reverse-startup order.
 func stopStack(node *network.Node, stack *nodeStack) {
+	if stack.apiSrv != nil {
+		stack.apiSrv.Stop()
+	}
 	node.Stop()
 	stack.engine.Stop()
 	if stack.store != nil {
@@ -273,8 +301,8 @@ func cmdInit() {
 	slog.Info("node identity initialised", "agent_id", agentID)
 }
 
-// cmdStart loads the keypair, starts the OCS engine and network listener, then
-// enters the status loop until the process receives SIGINT or SIGTERM.
+// cmdStart loads the keypair, starts the OCS engine, network listener, and API
+// server, then enters the status loop until the process receives SIGINT or SIGTERM.
 func cmdStart() {
 	kp := loadKeyPair()
 	agentID := kp.AgentID()
@@ -287,12 +315,12 @@ func cmdStart() {
 		os.Exit(1)
 	}
 
-	stack := buildStack(s)
+	stack := buildStack(s, kp)
 	node := startStack(stack, agentID)
 
 	cfg := network.DefaultNodeConfig(agentID)
-	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\n\n",
-		VERSION, agentID, cfg.ListenAddr)
+	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\nAPI      : http://localhost%s\n\n",
+		VERSION, agentID, cfg.ListenAddr, apiAddr)
 
 	runLoop(agentID, stack.dag, node, stack.engine, stack.supply)
 	stopStack(node, stack)
@@ -322,12 +350,12 @@ func cmdConnect() {
 		os.Exit(1)
 	}
 
-	stack := buildStack(s)
+	stack := buildStack(s, kp)
 	node := startStack(stack, agentID)
 
 	cfg := network.DefaultNodeConfig(agentID)
-	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\n\n",
-		VERSION, agentID, cfg.ListenAddr)
+	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\nAPI      : http://localhost%s\n\n",
+		VERSION, agentID, cfg.ListenAddr, apiAddr)
 
 	fmt.Printf("Connecting to %s...\n", *peerAddr)
 	peer, err := node.Connect(*peerAddr)

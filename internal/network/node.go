@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -496,16 +497,10 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		_ = n.dag.Add(&e)
 
 	case MsgRequestSync:
-		// Respond with a batch containing all current tip events.
-		// In a full implementation this would be replaced by a bloom-filter
-		// based reconciliation protocol; tips are a minimal first approximation.
-		tips := n.dag.Tips()
-		events := make([]*event.Event, 0, len(tips))
-		for _, id := range tips {
-			if e, err := n.dag.Get(id); err == nil {
-				events = append(events, e)
-			}
-		}
+		// Respond with ALL known events so peers can fully catch up.
+		// Sending the complete set is safe because events are append-only and
+		// the receiver deduplicates via ErrDuplicateEvent in dag.Add.
+		events := n.dag.All()
 		payload, err := json.Marshal(SyncBatchPayload{Events: events})
 		if err != nil {
 			return
@@ -513,12 +508,16 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		_ = peer.Send(Message{Type: MsgSyncBatch, Payload: payload})
 
 	case MsgSyncBatch:
-		// Add each event in the batch to the local DAG. Events whose causal
-		// refs are not yet known are silently skipped (ErrMissingCausalRef).
+		// Sort by CausalTimestamp before inserting so parents always arrive
+		// before their children, satisfying dag.Add's causal-ref precondition.
+		// Events already present are silently skipped (ErrDuplicateEvent).
 		var batch SyncBatchPayload
 		if err := json.Unmarshal(msg.Payload, &batch); err != nil {
 			return
 		}
+		sort.Slice(batch.Events, func(i, j int) bool {
+			return batch.Events[i].CausalTimestamp < batch.Events[j].CausalTimestamp
+		})
 		for _, e := range batch.Events {
 			_ = n.dag.Add(e)
 		}

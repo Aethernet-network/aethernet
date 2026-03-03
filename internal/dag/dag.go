@@ -305,6 +305,19 @@ func (d *DAG) Size() int {
 	return len(d.events)
 }
 
+// All returns a snapshot of every event currently stored in the DAG.
+// The slice is unordered — for a causally-ordered listing use TopologicalSort.
+// Returned pointers alias the DAG's internal storage; treat events as read-only.
+func (d *DAG) All() []*event.Event {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	result := make([]*event.Event, 0, len(d.events))
+	for _, e := range d.events {
+		result = append(result, e)
+	}
+	return result
+}
+
 // Ancestors returns the set of all events that causally precede id —
 // the transitive closure of id's CausalRefs, traversed breadth-first.
 //
