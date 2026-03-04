@@ -280,6 +280,19 @@ func (n *Node) PeerCount() int {
 	return len(n.peers)
 }
 
+// ListenAddr returns the TCP address the node is bound to.
+// When the node was started with ":0" or "127.0.0.1:0", the OS assigns a
+// random port; this method returns the actual assigned address so that
+// other nodes can dial it. Returns config.ListenAddr if the node is not started.
+func (n *Node) ListenAddr() string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	if n.listener != nil {
+		return n.listener.Addr().String()
+	}
+	return n.config.ListenAddr
+}
+
 // startPeerLoops launches three goroutines for peer:
 //
 //  1. writeLoop — drains peer.send and writes to the TCP connection.
@@ -330,8 +343,13 @@ func (n *Node) startPeerLoops(peer *Peer) {
 // is closed (triggered by Stop).
 func (n *Node) acceptLoop() {
 	defer n.wg.Done()
+	// Capture the listener once under the read lock so that the loop body
+	// never races with Stop's nil-assignment of n.listener.
+	n.mu.RLock()
+	ln := n.listener
+	n.mu.RUnlock()
 	for {
-		conn, err := n.listener.Accept()
+		conn, err := ln.Accept()
 		if err != nil {
 			select {
 			case <-n.ctx.Done():

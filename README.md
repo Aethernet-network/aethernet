@@ -2,7 +2,7 @@
 
 **The value layer for AI agents**
 
-![Go](https://img.shields.io/badge/go-1.22%2B-00ADD8?style=flat-square&logo=go) ![Tests](https://img.shields.io/badge/tests-224%20passing-4caf50?style=flat-square) ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square) ![Status](https://img.shields.io/badge/status-testnet%20development-orange?style=flat-square)
+![Go](https://img.shields.io/badge/go-1.22%2B-00ADD8?style=flat-square&logo=go) ![Tests](https://img.shields.io/badge/tests-276%20passing-4caf50?style=flat-square) ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square) ![Status](https://img.shields.io/badge/status-testnet%20development-orange?style=flat-square)
 
 AetherNet is a distributed ledger protocol built from first principles for autonomous AI agents. Unlike general-purpose blockchains inherited from the Bitcoin and Ethereum lineage, AetherNet's architecture treats AI compute as the primary economic primitive: the money supply expands in direct proportion to verified AI work, settlement is optimistic rather than synchronous, and identity is a track record rather than an address. The protocol runs at machine speed, not human speed, with causal event ordering via a DAG instead of serialized blocks, and reputation-weighted virtual voting instead of proof-of-work or delegated stake.
 
@@ -123,43 +123,175 @@ An Ed25519 keypair is generated, encrypted with scrypt + AES-256-GCM, and saved 
 AetherNet 0.1.0-testnet
 AgentID  : a3f9d2e1b7c4...8f0e5d6c3a2b
 Listening: 0.0.0.0:8337
+API      : 0.0.0.0:8338
 
 [a3f9d2e1b7c4...]  peers=0    dag=0       ocs_pending=0     supply=1.0000x
 ```
 
-Status is printed every 10 seconds. `Ctrl-C` triggers a clean shutdown.
+### Interact with the node (curl)
 
-### Connect to a peer
-
-```bash
-./bin/aethernet connect --peer 192.168.1.42:8337
-```
-
-```
-AetherNet 0.1.0-testnet
-AgentID  : a3f9d2e1b7c4...8f0e5d6c3a2b
-Listening: 0.0.0.0:8337
-
-Connecting to 192.168.1.42:8337...
-Connected  : b9e1f3a2c6d7...4e0c9f8a1b2d  (192.168.1.42:8337)
-
-[a3f9d2e1b7c4...]  peers=1    dag=14      ocs_pending=0     supply=1.0000x
-```
-
-### Check identity without starting the network
+**Register this node's agent:**
 
 ```bash
-./bin/aethernet status
+curl -s -X POST http://localhost:8338/v1/agents \
+  -H 'Content-Type: application/json' \
+  -d '{"capabilities": [{"type": "inference", "model": "gpt-4o"}]}' | jq .
 ```
 
+**Submit AI compute work (Generation event):**
+
+```bash
+curl -s -X POST http://localhost:8338/v1/generation \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "claimed_value": 10000,
+    "evidence_hash": "sha256:abc123",
+    "task_description": "GPT-4o inference run: 1000 tokens",
+    "stake_amount": 1000
+  }' | jq .
 ```
-AetherNet 0.1.0-testnet
-AgentID    : a3f9d2e1b7c4...8f0e5d6c3a2b
-Listen addr: 0.0.0.0:8337
-Max peers  : 50
-Sync every : 10s
-Key file   : ./node_keys/identity.json
+
+**Transfer to another agent:**
+
+```bash
+curl -s -X POST http://localhost:8338/v1/transfer \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "to_agent": "BOB_AGENT_ID",
+    "amount": 500,
+    "currency": "AET",
+    "stake_amount": 1000
+  }' | jq .
 ```
+
+**Check balance:**
+
+```bash
+curl -s http://localhost:8338/v1/agents/YOUR_AGENT_ID/balance | jq .
+```
+
+**Get node status:**
+
+```bash
+curl -s http://localhost:8338/v1/status | jq .
+```
+
+### Multi-node setup
+
+Start a second node on a different machine (or a second terminal with a different data directory):
+
+```bash
+# Terminal 1 — Node A
+./bin/aethernet start
+
+# Terminal 2 — Node B
+mkdir nodeB && cd nodeB
+../bin/aethernet init
+../bin/aethernet start --listen 0.0.0.0:9337 --api 0.0.0.0:9338
+```
+
+Connect Node B to Node A:
+
+```bash
+../bin/aethernet connect --peer 127.0.0.1:8337
+```
+
+Events submitted to either node propagate to the other within milliseconds via the broadcast path. Both DAGs converge to the same state.
+
+---
+
+## Python SDK
+
+The Python SDK in `sdk/python/` provides an HTTP client for any Python agent to interact with a running AetherNet node.
+
+```bash
+pip install -e sdk/python/
+```
+
+```python
+from aethernet import AetherNetClient
+
+client = AetherNetClient("http://localhost:8338", agent_id="my-agent")
+client.register(capabilities=[{"type": "inference", "model": "gpt-4o"}])
+
+event_id = client.generate(
+    claimed_value=10_000,
+    evidence_hash="sha256:abc123",
+    task_description="inference run",
+    stake_amount=1_000,
+)
+result = client.verify(event_id=event_id, verdict=True, verified_value=10_000)
+print(result["status"])  # "settled"
+
+bal = client.balance()
+print(f"{bal['balance']} {bal['currency']}")
+```
+
+Run the two-agent demo:
+
+```bash
+python sdk/python/examples/agent_demo.py --node http://localhost:8338
+```
+
+### Agent framework integrations
+
+```bash
+pip install aethernet[langchain]   # LangChain
+pip install aethernet[crewai]      # CrewAI
+pip install aethernet[openai]      # OpenAI Agents SDK
+```
+
+```python
+# LangChain
+from aethernet.langchain_tools import get_aethernet_tools
+tools = get_aethernet_tools(node_url="http://localhost:8338", agent_id="my-agent")
+
+# CrewAI
+from aethernet.crewai_tools import get_aethernet_crewai_tools
+tools = get_aethernet_crewai_tools(node_url="http://localhost:8338", agent_id="my-agent")
+
+# OpenAI Agents SDK
+from aethernet.openai_tools import get_aethernet_openai_tools
+tools = get_aethernet_openai_tools(node_url="http://localhost:8338", agent_id="my-agent")
+```
+
+---
+
+## Go SDK
+
+A typed Go client is available in `pkg/sdk/`:
+
+```go
+import "github.com/aethernet/core/pkg/sdk"
+
+c := sdk.NewClient("http://localhost:8338")
+eventID, err := c.Transfer(ctx, sdk.TransferRequest{
+    ToAgent:     "bob-agent-id",
+    Amount:      500,
+    Currency:    "AET",
+    StakeAmount: 1000,
+})
+```
+
+---
+
+## REST API Reference
+
+All endpoints are under `http://HOST:8338/v1`. Request and response bodies are JSON.
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/agents` | Register the node's agent; returns `{agent_id, fingerprint_hash}` |
+| `GET` | `/v1/agents` | List all registered agents |
+| `GET` | `/v1/agents/{agent_id}` | Get capability fingerprint for an agent |
+| `GET` | `/v1/agents/{agent_id}/balance` | Get spendable balance; returns `{agent_id, balance, currency}` |
+| `POST` | `/v1/transfer` | Submit Transfer event; returns `{event_id}` |
+| `POST` | `/v1/generation` | Submit Generation event; returns `{event_id}` |
+| `POST` | `/v1/verify` | Submit OCS verdict; returns `{event_id, verdict, status}` |
+| `GET` | `/v1/pending` | List events awaiting OCS verification |
+| `GET` | `/v1/events/{event_id}` | Fetch a DAG event by ID |
+| `GET` | `/v1/dag/tips` | Current DAG frontier event IDs |
+| `GET` | `/v1/status` | Node health snapshot |
 
 ---
 
@@ -171,6 +303,9 @@ aethernet/
 │   └── node/
 │       └── main.go          # Node binary: init, start, connect, status
 ├── internal/
+│   ├── api/
+│   │   ├── server.go        # HTTP REST API server
+│   │   └── server_test.go
 │   ├── event/
 │   │   ├── event.go         # Event types, payloads, settlement FSM
 │   │   └── event_test.go
@@ -196,15 +331,65 @@ aethernet/
 │   ├── consensus/
 │   │   ├── voting.go        # Reputation-weighted virtual voting
 │   │   └── voting_test.go
-│   └── network/
-│       ├── peer.go          # Peer connection, send/read loops
-│       └── node.go          # Node: listener, handshake, DAG sync, broadcast
+│   ├── network/
+│   │   ├── peer.go          # Peer connection, send/read loops
+│   │   └── node.go          # Node: listener, handshake, DAG sync, broadcast
+│   └── integration/
+│       └── two_node_test.go # End-to-end two-node sync tests
+├── pkg/
+│   └── sdk/
+│       └── client.go        # Typed Go client for the REST API
+├── sdk/
+│   └── python/
+│       ├── aethernet/       # Python package
+│       └── examples/        # Runnable demo scripts
 ├── bin/                     # Compiled binaries (git-ignored)
 ├── go.mod
 ├── go.sum
 ├── LICENSE
 └── README.md
 ```
+
+---
+
+## Development
+
+### Run all tests
+
+```bash
+go test -p 1 ./... -race -count=1
+```
+
+Expected: 276 tests passing, zero data races.
+
+### Run a specific package
+
+```bash
+go test ./internal/dag/... -v -race
+go test ./internal/consensus/... -v -race
+go test ./internal/integration/... -v -race
+```
+
+### Build the binary
+
+```bash
+go build -o bin/aethernet ./cmd/node/
+```
+
+### Test count by package
+
+| Package | Tests |
+|---|---|
+| `internal/event` | 31 |
+| `internal/dag` | 41 |
+| `internal/crypto` | 37 |
+| `internal/identity` | 37 |
+| `internal/ledger` | 26 |
+| `internal/ocs` | 22 |
+| `internal/consensus` | 16 |
+| `internal/api` | 13 |
+| `internal/integration` | 3 |
+| **Total** | **276** |
 
 ---
 
@@ -232,145 +417,6 @@ Conflict resolution uses virtual voting: no explicit vote messages are broadcast
 
 ---
 
-## Python SDK
-
-The Python SDK in `sdk/python/` provides a standard-library-only HTTP client for any Python agent to interact with a running AetherNet node.
-
-```bash
-pip install -e sdk/python/
-```
-
-```python
-from aethernet import AetherNetClient
-
-client = AetherNetClient("http://localhost:8338", agent_id="my-agent")
-agent_id = client.register()
-event_id = client.generate(
-    claimed_value=5000,
-    evidence_hash="sha256:...",
-    task_description="inference run",
-    stake_amount=1000,
-)
-result = client.verify(event_id=event_id, verdict=True, verified_value=5000)
-print(result["status"])  # "settled"
-```
-
----
-
-## Agent Framework Integrations
-
-AetherNet provides native tool integrations for the three largest agent frameworks.
-
-### LangChain
-
-```bash
-pip install aethernet[langchain]
-```
-
-```python
-from aethernet.langchain_tools import get_aethernet_tools
-
-tools = get_aethernet_tools(node_url="http://localhost:8338", agent_id="my-agent")
-# Pass to any LangChain agent
-from langchain.agents import create_tool_calling_agent
-agent = create_tool_calling_agent(llm, tools, prompt)
-```
-
-### CrewAI
-
-```bash
-pip install aethernet[crewai]
-```
-
-```python
-from aethernet.crewai_tools import get_aethernet_crewai_tools
-
-tools = get_aethernet_crewai_tools(node_url="http://localhost:8338", agent_id="my-agent")
-# Pass to any CrewAI agent
-from crewai import Agent
-agent = Agent(role="trader", tools=tools, ...)
-```
-
-### OpenAI Agents SDK
-
-```bash
-pip install aethernet[openai]
-```
-
-```python
-from aethernet.openai_tools import get_aethernet_openai_tools
-from agents import Agent
-
-tools = get_aethernet_openai_tools(node_url="http://localhost:8338", agent_id="my-agent")
-agent = Agent(name="trader", tools=tools)
-```
-
-### Raw OpenAI Function Calling
-
-Works with the standard `openai` library, no Agents SDK needed:
-
-```python
-import json
-import openai
-from aethernet import AetherNetClient
-from aethernet.openai_tools import get_aethernet_function_definitions, handle_function_call
-
-client = AetherNetClient("http://localhost:8338", agent_id="my-agent")
-
-# Get function schemas for chat completions
-tools = [{"type": "function", "function": f} for f in get_aethernet_function_definitions()]
-response = openai.chat.completions.create(model="gpt-4o", messages=messages, tools=tools)
-
-# Handle tool calls returned by the model
-tool_call = response.choices[0].message.tool_calls[0]
-result = handle_function_call(
-    client,
-    tool_call.function.name,
-    json.loads(tool_call.function.arguments),
-)
-```
-
----
-
-## Development
-
-### Run all tests
-
-```bash
-go test ./... -race
-```
-
-Expected: 224 tests passing, zero data races.
-
-### Run a specific package
-
-```bash
-go test ./internal/dag/... -v -race
-go test ./internal/consensus/... -v -race
-go test ./internal/ocs/... -v -race
-```
-
-### Build the binary
-
-```bash
-go build -o bin/aethernet ./cmd/node/
-```
-
-### Test count by package
-
-| Package | Tests |
-|---|---|
-| `internal/event` | 31 |
-| `internal/dag` | 41 |
-| `internal/crypto` | 37 |
-| `internal/identity` | 37 |
-| `internal/ledger` | 26 |
-| `internal/ocs` | 22 |
-| `internal/consensus` | 16 |
-| **Total** | **224** |
-
----
-
 ## Whitepaper
 
 The full architectural specification — including the reasoning behind every design decision, the formal properties of the causal DAG, the proof that virtual voting is Byzantine fault tolerant under the 2/3 honest-weight assumption, and the derivation of the compute-backed supply function — is documented in the AetherNet whitepaper. Every component in this codebase traces directly to a first-principles requirement documented there.
@@ -383,7 +429,7 @@ The full architectural specification — including the reasoning behind every de
 
 | Phase | Status | Description |
 |---|---|---|
-| Phase 1: Core Protocol | In Progress | Event DAG, dual ledger, OCS engine, virtual voting consensus, TCP networking, node binary |
+| Phase 1: Core Protocol | In Progress | Event DAG, dual ledger, OCS engine, virtual voting consensus, TCP networking, node binary, REST API, Python SDK |
 | Phase 2: Testnet | Upcoming | Multi-node testnet deployment, security audit, bridge to existing payment rails, validator tooling |
 | Phase 3: Mainnet | Planned | Validator onboarding, exchange listings, developer SDK, ecosystem growth |
 
@@ -391,7 +437,7 @@ The full architectural specification — including the reasoning behind every de
 
 ## Contributing
 
-AetherNet is in early development. The codebase is intentionally minimal — no external dependencies beyond `golang.org/x/crypto`, no frameworks, no generated code. Every line traces to a specific architectural requirement.
+AetherNet is in early development. The codebase is intentionally minimal — no external dependencies beyond `golang.org/x/crypto` and `requests` (Python SDK), no frameworks, no generated code. Every line traces to a specific architectural requirement.
 
 We are looking for distributed systems engineers who have built consensus protocols or p2p networks, AI infrastructure developers who understand the operational realities of running models at scale, and cryptographers who can stress-test the virtual voting and OCS settlement models. Open an issue to start a conversation before submitting a pull request.
 
