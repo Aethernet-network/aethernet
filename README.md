@@ -232,6 +232,106 @@ Conflict resolution uses virtual voting: no explicit vote messages are broadcast
 
 ---
 
+## Python SDK
+
+The Python SDK in `sdk/python/` provides a standard-library-only HTTP client for any Python agent to interact with a running AetherNet node.
+
+```bash
+pip install -e sdk/python/
+```
+
+```python
+from aethernet import AetherNetClient
+
+client = AetherNetClient("http://localhost:8338", agent_id="my-agent")
+agent_id = client.register()
+event_id = client.generate(
+    claimed_value=5000,
+    evidence_hash="sha256:...",
+    task_description="inference run",
+    stake_amount=1000,
+)
+result = client.verify(event_id=event_id, verdict=True, verified_value=5000)
+print(result["status"])  # "settled"
+```
+
+---
+
+## Agent Framework Integrations
+
+AetherNet provides native tool integrations for the three largest agent frameworks.
+
+### LangChain
+
+```bash
+pip install aethernet[langchain]
+```
+
+```python
+from aethernet.langchain_tools import get_aethernet_tools
+
+tools = get_aethernet_tools(node_url="http://localhost:8338", agent_id="my-agent")
+# Pass to any LangChain agent
+from langchain.agents import create_tool_calling_agent
+agent = create_tool_calling_agent(llm, tools, prompt)
+```
+
+### CrewAI
+
+```bash
+pip install aethernet[crewai]
+```
+
+```python
+from aethernet.crewai_tools import get_aethernet_crewai_tools
+
+tools = get_aethernet_crewai_tools(node_url="http://localhost:8338", agent_id="my-agent")
+# Pass to any CrewAI agent
+from crewai import Agent
+agent = Agent(role="trader", tools=tools, ...)
+```
+
+### OpenAI Agents SDK
+
+```bash
+pip install aethernet[openai]
+```
+
+```python
+from aethernet.openai_tools import get_aethernet_openai_tools
+from agents import Agent
+
+tools = get_aethernet_openai_tools(node_url="http://localhost:8338", agent_id="my-agent")
+agent = Agent(name="trader", tools=tools)
+```
+
+### Raw OpenAI Function Calling
+
+Works with the standard `openai` library, no Agents SDK needed:
+
+```python
+import json
+import openai
+from aethernet import AetherNetClient
+from aethernet.openai_tools import get_aethernet_function_definitions, handle_function_call
+
+client = AetherNetClient("http://localhost:8338", agent_id="my-agent")
+
+# Get function schemas for chat completions
+tools = [{"type": "function", "function": f} for f in get_aethernet_function_definitions()]
+response = openai.chat.completions.create(model="gpt-4o", messages=messages, tools=tools)
+
+# Handle tool calls returned by the model
+tool_call = response.choices[0].message.tool_calls[0]
+result = handle_function_call(
+    client,
+    tool_call.function.name,
+    json.loads(tool_call.function.arguments),
+)
+```
+
+---
+
 ## Development
 
 ### Run all tests

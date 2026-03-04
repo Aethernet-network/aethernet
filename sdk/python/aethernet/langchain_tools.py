@@ -21,6 +21,8 @@ Usage::
     agent = create_tool_calling_agent(llm, tools, prompt)
 """
 
+from .client import AetherNetClient
+
 try:
     from langchain_core.tools import BaseTool
     from pydantic import BaseModel, Field
@@ -187,11 +189,27 @@ if HAS_LANGCHAIN:
             )
 
 
-def get_aethernet_tools(client) -> list:
-    """Create all AetherNet LangChain tools bound to *client*.
+def get_aethernet_tools(
+    client=None,
+    *,
+    node_url: str = "http://localhost:8338",
+    agent_id: str = "",
+) -> list:
+    """Create all AetherNet LangChain tools.
+
+    Can be called two ways::
+
+        # Recommended — by node URL:
+        tools = get_aethernet_tools(node_url="http://localhost:8338", agent_id="my-agent")
+
+        # Or pass an existing client directly:
+        tools = get_aethernet_tools(client)
 
     Args:
-        client: An :class:`~aethernet.AetherNetClient` instance.
+        client: An existing :class:`~aethernet.AetherNetClient`. Created from
+            *node_url* / *agent_id* when omitted.
+        node_url: Node base URL; used only when *client* is None.
+        agent_id: Agent ID to bind to the client; used only when *client* is None.
 
     Returns:
         A list of five :class:`langchain_core.tools.BaseTool` instances
@@ -201,6 +219,8 @@ def get_aethernet_tools(client) -> list:
         ImportError: If ``langchain-core`` is not installed.
     """
     _require_langchain()
+    if client is None:
+        client = AetherNetClient(node_url, agent_id=agent_id)
     return [
         AetherNetTransferTool(client=client),
         AetherNetGenerateValueTool(client=client),

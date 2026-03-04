@@ -39,8 +39,10 @@ class AetherNetClient:
             No trailing slash required.
     """
 
-    def __init__(self, base_url: str = "http://localhost:8338"):
+    def __init__(self, base_url: str = "http://localhost:8338", agent_id: str = ""):
         self.base_url = base_url.rstrip("/")
+        self.node_url = self.base_url  # alias used by framework tool integrations
+        self.agent_id = agent_id
 
     # ------------------------------------------------------------------
     # Internal transport
@@ -76,22 +78,32 @@ class AetherNetClient:
         result = self._request("POST", "/v1/agents", {"capabilities": capabilities or []})
         return result["agent_id"]
 
-    def balance(self, agent_id: str) -> dict:
+    def balance(self, agent_id: str = "") -> dict:
         """Return the spendable balance for agent_id.
+
+        If agent_id is omitted the client's own agent_id (set in constructor) is used.
 
         Returns:
             Dict with keys: agent_id, balance (int micro-AET), currency.
         """
-        return self._request("GET", f"/v1/agents/{agent_id}/balance")
+        aid = agent_id or self.agent_id
+        if not aid:
+            raise ValueError("agent_id required: pass to AetherNetClient() or balance()")
+        return self._request("GET", f"/v1/agents/{aid}/balance")
 
-    def profile(self, agent_id: str) -> dict:
+    def profile(self, agent_id: str = "") -> dict:
         """Return the capability fingerprint for agent_id.
+
+        If agent_id is omitted the client's own agent_id (set in constructor) is used.
 
         Returns:
             Dict with keys: agent_id, capabilities, reputation_score,
             optimistic_trust_limit, total_value_generated, etc.
         """
-        return self._request("GET", f"/v1/agents/{agent_id}")
+        aid = agent_id or self.agent_id
+        if not aid:
+            raise ValueError("agent_id required: pass to AetherNetClient() or profile()")
+        return self._request("GET", f"/v1/agents/{aid}")
 
     def agents(self) -> list:
         """Return list of all registered agent fingerprints."""
@@ -104,6 +116,7 @@ class AetherNetClient:
         task_description: str = "",
         stake_amount: int = 1000,
         beneficiary_agent: str = "",
+        beneficiary: str = "",  # alias for beneficiary_agent (used by framework tools)
         causal_refs=None,
     ) -> str:
         """Submit a Generation event to claim value for completed AI work.
@@ -119,6 +132,7 @@ class AetherNetClient:
         Returns:
             The event_id string for the submitted Generation event.
         """
+        beneficiary_agent = beneficiary_agent or beneficiary
         body: dict = {
             "claimed_value": claimed_value,
             "evidence_hash": evidence_hash,
