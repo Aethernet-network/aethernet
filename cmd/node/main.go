@@ -5,9 +5,16 @@
 // Subcommands:
 //
 //	aethernet init                      generate a new node identity
-//	aethernet start                     start the node
+//	aethernet start [flags]             start the node
 //	aethernet connect --peer <address>  start and dial a specific peer
 //	aethernet status                    print identity and config, no networking
+//
+// Environment variables (all optional):
+//
+//	AETHERNET_DATA    base directory for key file and BadgerDB store (default: ".")
+//	AETHERNET_LISTEN  p2p TCP listen address  (default: "0.0.0.0:8337")
+//	AETHERNET_API     REST API listen address (default: ":8338")
+//	AETHERNET_PEER    peer to auto-connect on startup (default: "")
 package main
 
 import (
@@ -18,6 +25,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -35,11 +43,31 @@ import (
 // VERSION is the protocol and build version broadcast during handshake.
 const VERSION = "0.1.0-testnet"
 
-// apiAddr is the TCP address the HTTP REST API listens on.
-const apiAddr = ":8338"
+// envOr returns the value of the named environment variable, or defaultVal when
+// the variable is unset or empty.
+func envOr(key, defaultVal string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultVal
+}
 
-// keyPath is the default location of the encrypted Ed25519 identity file.
-const keyPath = "./node_keys/identity.json"
+// dataDir returns the base directory for all node data files.
+// When AETHERNET_DATA is set (e.g. in Docker), files are stored there.
+// Otherwise "." (the current working directory) is used for backward compatibility.
+func dataDir() string {
+	return envOr("AETHERNET_DATA", ".")
+}
+
+// keyFilePath returns the path to the encrypted Ed25519 identity file.
+func keyFilePath() string {
+	return filepath.Join(dataDir(), "node_keys", "identity.json")
+}
+
+// storePath returns the path to the BadgerDB data store.
+func storePath() string {
+	return filepath.Join(dataDir(), "data", "aethernet.db")
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -65,14 +93,20 @@ func main() {
 
 func printUsage() {
 	fmt.Fprintf(os.Stderr, "AetherNet node %s\n\nUsage:\n", VERSION)
-	fmt.Fprintf(os.Stderr, "  aethernet init                      generate a new node identity\n")
-	fmt.Fprintf(os.Stderr, "  aethernet start                     start the node\n")
-	fmt.Fprintf(os.Stderr, "  aethernet connect --peer <address>  start and connect to a peer\n")
-	fmt.Fprintf(os.Stderr, "  aethernet status                    print node identity and config\n")
+	fmt.Fprintf(os.Stderr, "  aethernet init                            generate a new node identity\n")
+	fmt.Fprintf(os.Stderr, "  aethernet start [--listen addr] [--api addr] [--peer addr]\n")
+	fmt.Fprintf(os.Stderr, "                                            start the node\n")
+	fmt.Fprintf(os.Stderr, "  aethernet connect --peer <address>        start and connect to a peer\n")
+	fmt.Fprintf(os.Stderr, "  aethernet status                          print node identity and config\n")
+	fmt.Fprintf(os.Stderr, "\nEnvironment variables:\n")
+	fmt.Fprintf(os.Stderr, "  AETHERNET_DATA    data directory (default: current directory)\n")
+	fmt.Fprintf(os.Stderr, "  AETHERNET_LISTEN  p2p listen address (default: 0.0.0.0:8337)\n")
+	fmt.Fprintf(os.Stderr, "  AETHERNET_API     API listen address (default: :8338)\n")
+	fmt.Fprintf(os.Stderr, "  AETHERNET_PEER    peer to connect on startup\n")
 }
 
 // readPassphrase prints prompt and reads one line from stdin, stripping the
-// trailing newline. Uses bufio.NewReader so it works on any platform.
+// trailing newline.
 func readPassphrase(prompt string) string {
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Print(prompt)
@@ -80,15 +114,62 @@ func readPassphrase(prompt string) string {
 	return strings.TrimRight(line, "\r\n")
 }
 
-// loadKeyPair prompts for a passphrase and loads the keypair from keyPath.
-// Exits with a structured log message on any error.
+// loadKeyPair loads the node keypair, choosing the right strategy based on context:
+//   - Docker / non-interactive (AETHERNET_DATA is set): if no key file exists yet,
+//     auto-generate one with an empty passphrase. If it exists, load with empty
+//     passphrase (Docker-generated keys always use an empty passphrase).
+//   - Interactive (AETHERNET_DATA not set): prompt for a passphrase as before.
 func loadKeyPair() *crypto.KeyPair {
-	passphrase := readPassphrase("Passphrase: ")
-	kp, err := crypto.LoadKeyPair(keyPath, passphrase)
+	path := keyFilePath()
+
+	if os.Getenv("AETHERNET_DATA") == "" {
+		// Interactive mode — original passphrase-prompt flow.
+		return loadKeyPairInteractive(path)
+	}
+
+	// Docker / non-interactive mode.
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return autoInitKeyPair(path)
+	}
+	kp, err := crypto.LoadKeyPair(path, "")
 	if err != nil {
-		slog.Error("failed to load keypair", "path", keyPath, "err", err)
+		// Key file exists but empty passphrase doesn't work (manually copied key?).
+		slog.Warn("empty passphrase failed, falling back to interactive prompt", "path", path)
+		return loadKeyPairInteractive(path)
+	}
+	return kp
+}
+
+// loadKeyPairInteractive prompts for a passphrase and loads the keypair from path.
+func loadKeyPairInteractive(path string) *crypto.KeyPair {
+	passphrase := readPassphrase("Passphrase: ")
+	kp, err := crypto.LoadKeyPair(path, passphrase)
+	if err != nil {
+		slog.Error("failed to load keypair", "path", path, "err", err)
 		os.Exit(1)
 	}
+	return kp
+}
+
+// autoInitKeyPair generates a new Ed25519 keypair, saves it with an empty
+// passphrase (suitable for non-interactive Docker startup), and returns it.
+func autoInitKeyPair(path string) *crypto.KeyPair {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		slog.Error("failed to create key directory", "err", err)
+		os.Exit(1)
+	}
+	kp, err := crypto.GenerateKeyPair()
+	if err != nil {
+		slog.Error("failed to generate keypair", "err", err)
+		os.Exit(1)
+	}
+	if err := kp.Save(path, ""); err != nil {
+		slog.Error("failed to save keypair", "path", path, "err", err)
+		os.Exit(1)
+	}
+	agentID := kp.AgentID()
+	fmt.Printf("Auto-generated identity.\nAgentID : %s\nKey file: %s\n", agentID, path)
+	slog.Info("auto-generated node identity", "agent_id", agentID)
 	return kp
 }
 
@@ -111,10 +192,7 @@ type nodeStack struct {
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
-// nodeStack. When s is non-nil, state is restored from the store and all
-// subsequent mutations write through. When s is nil, all components start fresh
-// (in-memory only). The OCS engine is constructed but not started; call
-// engine.Start() before serving traffic.
+// nodeStack. When s is non-nil, state is restored from the store.
 func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 	var (
 		d   *dag.DAG
@@ -178,10 +256,8 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 }
 
 // printStatus writes a single-line status summary every tick.
-// Uses fmt.Printf as specified — not slog — so it is easy to read at a glance.
 func printStatus(agentID crypto.AgentID, d *dag.DAG, n *network.Node, eng *ocs.Engine, sm *ledger.SupplyManager) {
 	ratio, _ := sm.SupplyRatio()
-	// Abbreviate the 64-char AgentID for readability in the terminal.
 	id := string(agentID)
 	if len(id) > 16 {
 		id = id[:16] + "..."
@@ -191,29 +267,31 @@ func printStatus(agentID crypto.AgentID, d *dag.DAG, n *network.Node, eng *ocs.E
 }
 
 // startStack starts the OCS engine, network node, and HTTP API server.
-// Returns the network node. On any error it stops whatever has started and exits.
-func startStack(stack *nodeStack, agentID crypto.AgentID) *network.Node {
+// p2pAddr and apiListenAddr override the defaults and may come from flags or
+// environment variables.
+func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr string) *network.Node {
 	if err := stack.engine.Start(); err != nil {
 		slog.Error("failed to start OCS engine", "err", err)
 		os.Exit(1)
 	}
 
 	cfg := network.DefaultNodeConfig(agentID)
+	cfg.ListenAddr = p2pAddr
 	node := network.NewNode(cfg, stack.dag)
 	if err := node.Start(); err != nil {
-		slog.Error("failed to start network listener", "addr", cfg.ListenAddr, "err", err)
+		slog.Error("failed to start network listener", "addr", p2pAddr, "err", err)
 		stack.engine.Stop()
 		os.Exit(1)
 	}
 
 	apiSrv := api.NewServer(
-		apiAddr,
+		apiListenAddr,
 		stack.dag, stack.transfer, stack.generation,
 		stack.reg, stack.engine, stack.supply,
 		node, stack.kp,
 	)
 	if err := apiSrv.Start(); err != nil {
-		slog.Error("failed to start API server", "addr", apiAddr, "err", err)
+		slog.Error("failed to start API server", "addr", apiListenAddr, "err", err)
 		node.Stop()
 		stack.engine.Stop()
 		os.Exit(1)
@@ -243,7 +321,6 @@ func runLoop(agentID crypto.AgentID, d *dag.DAG, node *network.Node, eng *ocs.En
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
-	// Print once immediately so the operator sees current state on startup.
 	printStatus(agentID, d, node, eng, sm)
 
 	for {
@@ -262,21 +339,21 @@ func runLoop(agentID crypto.AgentID, d *dag.DAG, node *network.Node, eng *ocs.En
 // Subcommand implementations
 // ---------------------------------------------------------------------------
 
-// cmdInit generates a new Ed25519 keypair, saves it encrypted to keyPath,
-// and prints the resulting AgentID.
+// cmdInit generates a new Ed25519 keypair, saves it encrypted to the key file
+// path, and prints the resulting AgentID.
 func cmdInit() {
-	if err := os.MkdirAll("./node_keys", 0o700); err != nil {
+	kfPath := keyFilePath()
+	if err := os.MkdirAll(filepath.Dir(kfPath), 0o700); err != nil {
 		slog.Error("failed to create key directory", "err", err)
 		os.Exit(1)
 	}
-	if err := os.MkdirAll("./data", 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(dataDir(), "data"), 0o700); err != nil {
 		slog.Error("failed to create data directory", "err", err)
 		os.Exit(1)
 	}
 
-	// Guard against accidental overwrite of an existing identity.
-	if _, err := os.Stat(keyPath); err == nil {
-		fmt.Fprintf(os.Stderr, "identity already exists at %s\nRemove it to reinitialise.\n", keyPath)
+	if _, err := os.Stat(kfPath); err == nil {
+		fmt.Fprintf(os.Stderr, "identity already exists at %s\nRemove it to reinitialise.\n", kfPath)
 		os.Exit(1)
 	}
 
@@ -291,47 +368,71 @@ func cmdInit() {
 		slog.Error("failed to generate keypair", "err", err)
 		os.Exit(1)
 	}
-	if err := kp.Save(keyPath, passphrase); err != nil {
-		slog.Error("failed to save keypair", "path", keyPath, "err", err)
+	if err := kp.Save(kfPath, passphrase); err != nil {
+		slog.Error("failed to save keypair", "path", kfPath, "err", err)
 		os.Exit(1)
 	}
 
 	agentID := kp.AgentID()
-	fmt.Printf("Identity created.\nAgentID : %s\nKey file: %s\n", agentID, keyPath)
+	fmt.Printf("Identity created.\nAgentID : %s\nKey file: %s\n", agentID, kfPath)
 	slog.Info("node identity initialised", "agent_id", agentID)
 }
 
-// cmdStart loads the keypair, starts the OCS engine, network listener, and API
-// server, then enters the status loop until the process receives SIGINT or SIGTERM.
+// cmdStart loads (or auto-generates) the keypair, then starts the full node
+// stack and enters the status loop until SIGINT or SIGTERM.
 func cmdStart() {
+	fs := flag.NewFlagSet("start", flag.ExitOnError)
+	p2pAddr := fs.String("listen", envOr("AETHERNET_LISTEN", "0.0.0.0:8337"), "TCP address for p2p connections")
+	apiListenAddr := fs.String("api", envOr("AETHERNET_API", ":8338"), "TCP address for the REST API")
+	peerAddr := fs.String("peer", envOr("AETHERNET_PEER", ""), "peer to auto-connect on startup (host:port)")
+	_ = fs.Parse(os.Args[2:])
+
 	kp := loadKeyPair()
 	agentID := kp.AgentID()
 
 	slog.Info("starting AetherNet node", "version", VERSION, "agent_id", agentID)
 
-	s, err := store.NewStore("./data/aethernet.db")
+	if err := os.MkdirAll(filepath.Dir(storePath()), 0o700); err != nil {
+		slog.Error("failed to create data directory", "err", err)
+		os.Exit(1)
+	}
+	s, err := store.NewStore(storePath())
 	if err != nil {
 		slog.Error("failed to open store", "err", err)
 		os.Exit(1)
 	}
 
 	stack := buildStack(s, kp)
-	node := startStack(stack, agentID)
+	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr)
 
-	cfg := network.DefaultNodeConfig(agentID)
-	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\nAPI      : http://localhost%s\n\n",
-		VERSION, agentID, cfg.ListenAddr, apiAddr)
+	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\nAPI      : %s\n\n",
+		VERSION, agentID, node.ListenAddr(), *apiListenAddr)
+
+	if *peerAddr != "" {
+		fmt.Printf("Connecting to %s...\n", *peerAddr)
+		peer, err := node.Connect(*peerAddr)
+		if err != nil {
+			// Non-fatal: log and continue. In Docker, the peer container may not
+			// be ready yet; the operator can retry or rely on sync interval.
+			slog.Warn("failed to auto-connect to peer", "addr", *peerAddr, "err", err)
+			fmt.Printf("Warning: could not connect to %s: %v\n\n", *peerAddr, err)
+		} else {
+			fmt.Printf("Connected  : %s  (%s)\n\n", peer.AgentID, *peerAddr)
+		}
+	}
 
 	runLoop(agentID, stack.dag, node, stack.engine, stack.supply)
 	stopStack(node, stack)
 	slog.Info("node stopped cleanly")
 }
 
-// cmdConnect loads the keypair, starts the node, dials the given peer address,
-// then enters the status loop until the process is interrupted.
+// cmdConnect is the legacy subcommand that requires --peer. It is equivalent to
+// `aethernet start --peer <address>` and is kept for backward compatibility.
 func cmdConnect() {
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
 	peerAddr := fs.String("peer", "", "address of the peer to connect to (host:port)")
+	p2pAddr := fs.String("listen", envOr("AETHERNET_LISTEN", "0.0.0.0:8337"), "TCP address for p2p connections")
+	apiListenAddr := fs.String("api", envOr("AETHERNET_API", ":8338"), "TCP address for the REST API")
 	_ = fs.Parse(os.Args[2:])
 
 	if *peerAddr == "" {
@@ -344,18 +445,21 @@ func cmdConnect() {
 
 	slog.Info("starting AetherNet node", "version", VERSION, "agent_id", agentID)
 
-	s, err := store.NewStore("./data/aethernet.db")
+	if err := os.MkdirAll(filepath.Dir(storePath()), 0o700); err != nil {
+		slog.Error("failed to create data directory", "err", err)
+		os.Exit(1)
+	}
+	s, err := store.NewStore(storePath())
 	if err != nil {
 		slog.Error("failed to open store", "err", err)
 		os.Exit(1)
 	}
 
 	stack := buildStack(s, kp)
-	node := startStack(stack, agentID)
+	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr)
 
-	cfg := network.DefaultNodeConfig(agentID)
-	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\nAPI      : http://localhost%s\n\n",
-		VERSION, agentID, cfg.ListenAddr, apiAddr)
+	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\nAPI      : %s\n\n",
+		VERSION, agentID, node.ListenAddr(), *apiListenAddr)
 
 	fmt.Printf("Connecting to %s...\n", *peerAddr)
 	peer, err := node.Connect(*peerAddr)
@@ -376,12 +480,15 @@ func cmdConnect() {
 func cmdStatus() {
 	kp := loadKeyPair()
 	agentID := kp.AgentID()
+	p2pAddr := envOr("AETHERNET_LISTEN", "0.0.0.0:8337")
+	apiListenAddr := envOr("AETHERNET_API", ":8338")
 	cfg := network.DefaultNodeConfig(agentID)
 
 	fmt.Printf("AetherNet %s\n", VERSION)
 	fmt.Printf("AgentID    : %s\n", agentID)
-	fmt.Printf("Listen addr: %s\n", cfg.ListenAddr)
+	fmt.Printf("Listen addr: %s\n", p2pAddr)
+	fmt.Printf("API addr   : %s\n", apiListenAddr)
 	fmt.Printf("Max peers  : %d\n", cfg.MaxPeers)
 	fmt.Printf("Sync every : %s\n", cfg.SyncInterval)
-	fmt.Printf("Key file   : %s\n", keyPath)
+	fmt.Printf("Key file   : %s\n", keyFilePath())
 }

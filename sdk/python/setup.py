@@ -1,16 +1,18 @@
 from setuptools import setup, find_packages
 
+with open("README.md", "r", encoding="utf-8") as f:
+    long_description = f.read()
+
 setup(
     name="aethernet",
     version="0.1.0",
-    description="Python SDK for the AetherNet AI-agent financial protocol",
-    long_description=(
-        "AetherNet is a causal-DAG protocol for AI agent value exchange. "
-        "This SDK provides an HTTP client (requests) plus optional tool "
-        "integrations for LangChain, CrewAI, and the OpenAI Agents SDK."
-    ),
+    author="AetherNet",
+    description="Python SDK for AetherNet — financial infrastructure for AI agents",
+    long_description=long_description,
+    long_description_content_type="text/markdown",
+    url="https://github.com/mschreiber89/aethernet",
     packages=find_packages(),
-    python_requires=">=3.9",
+    python_requires=">=3.8",
     install_requires=["requests>=2.20.0"],
     extras_require={
         "langchain": ["langchain-core>=0.1.0"],
@@ -18,4 +20,17 @@ setup(
         "openai": ["openai-agents>=0.1.0"],
         "all": ["langchain-core>=0.1.0", "crewai>=0.1.0", "openai-agents>=0.1.0"],
     },
+    classifiers=[
+        "Development Status :: 3 - Alpha",
+        "Intended Audience :: Developers",
+        "License :: OSI Approved :: MIT License",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Topic :: Software Development :: Libraries",
+    ],
+    keywords="ai agents payments settlement blockchain",
 )

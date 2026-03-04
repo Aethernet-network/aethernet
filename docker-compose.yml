@@ -1,0 +1,52 @@
+version: "3.8"
+
+services:
+  node1:
+    build: .
+    container_name: aethernet-node1
+    ports:
+      - "8337:8337"
+      - "8338:8338"
+    volumes:
+      - node1-data:/data
+    environment:
+      - AETHERNET_DATA=/data
+      - AETHERNET_LISTEN=0.0.0.0:8337
+      - AETHERNET_API=0.0.0.0:8338
+
+  node2:
+    build: .
+    container_name: aethernet-node2
+    ports:
+      - "8339:8337"
+      - "8340:8338"
+    volumes:
+      - node2-data:/data
+    environment:
+      - AETHERNET_DATA=/data
+      - AETHERNET_LISTEN=0.0.0.0:8337
+      - AETHERNET_API=0.0.0.0:8338
+      - AETHERNET_PEER=node1:8337
+    depends_on:
+      - node1
+
+  node3:
+    build: .
+    container_name: aethernet-node3
+    ports:
+      - "8341:8337"
+      - "8342:8338"
+    volumes:
+      - node3-data:/data
+    environment:
+      - AETHERNET_DATA=/data
+      - AETHERNET_LISTEN=0.0.0.0:8337
+      - AETHERNET_API=0.0.0.0:8338
+      - AETHERNET_PEER=node1:8337
+    depends_on:
+      - node1
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:

@@ -88,6 +88,35 @@ Three properties distinguish AetherNet from existing approaches:
 
 ## Quick Start
 
+### Docker (fastest)
+
+```bash
+# Single node — one command, no setup
+docker build -t aethernet .
+docker run -p 8337:8337 -p 8338:8338 aethernet
+
+# Three-node testnet
+docker compose up -d
+
+# Verify the node is running
+curl http://localhost:8338/v1/status
+```
+
+### Docker + Python agent demo
+
+```bash
+# Terminal 1: start node
+docker compose up -d
+
+# Terminal 2: run the two-agent payment demo
+pip install aethernet
+python sdk/python/examples/real_agent_demo.py
+```
+
+---
+
+### Build from source
+
 **Prerequisites:** Go 1.22 or later, Git
 
 ### Clone and build
@@ -204,6 +233,18 @@ Events submitted to either node propagate to the other within milliseconds via t
 
 The Python SDK in `sdk/python/` provides an HTTP client for any Python agent to interact with a running AetherNet node.
 
+### Install from PyPI
+
+```bash
+pip install aethernet                    # base SDK (requests)
+pip install aethernet[langchain]         # + LangChain tools
+pip install aethernet[crewai]            # + CrewAI tools
+pip install aethernet[openai]            # + OpenAI Agents SDK tools
+pip install aethernet[all]               # everything
+```
+
+Or directly from the repo:
+
 ```bash
 pip install -e sdk/python/
 ```
@@ -227,10 +268,10 @@ bal = client.balance()
 print(f"{bal['balance']} {bal['currency']}")
 ```
 
-Run the two-agent demo:
+Run the two-agent payment demo:
 
 ```bash
-python sdk/python/examples/agent_demo.py --node http://localhost:8338
+python sdk/python/examples/real_agent_demo.py
 ```
 
 ### Agent framework integrations
