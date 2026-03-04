@@ -5,6 +5,7 @@
 // Subcommands:
 //
 //	aethernet init                      generate a new node identity
+//	aethernet genesis                   seed initial token supply into the store
 //	aethernet start [flags]             start the node
 //	aethernet connect --peer <address>  start and dial a specific peer
 //	aethernet status                    print identity and config, no networking
@@ -33,6 +34,7 @@ import (
 	"github.com/aethernet/core/internal/api"
 	"github.com/aethernet/core/internal/crypto"
 	"github.com/aethernet/core/internal/dag"
+	"github.com/aethernet/core/internal/genesis"
 	"github.com/aethernet/core/internal/identity"
 	"github.com/aethernet/core/internal/ledger"
 	"github.com/aethernet/core/internal/network"
@@ -78,6 +80,8 @@ func main() {
 	switch os.Args[1] {
 	case "init":
 		cmdInit()
+	case "genesis":
+		cmdGenesis()
 	case "start":
 		cmdStart()
 	case "connect":
@@ -94,6 +98,7 @@ func main() {
 func printUsage() {
 	fmt.Fprintf(os.Stderr, "AetherNet node %s\n\nUsage:\n", VERSION)
 	fmt.Fprintf(os.Stderr, "  aethernet init                            generate a new node identity\n")
+	fmt.Fprintf(os.Stderr, "  aethernet genesis                         seed genesis token supply into the store\n")
 	fmt.Fprintf(os.Stderr, "  aethernet start [--listen addr] [--api addr] [--peer addr]\n")
 	fmt.Fprintf(os.Stderr, "                                            start the node\n")
 	fmt.Fprintf(os.Stderr, "  aethernet connect --peer <address>        start and connect to a peer\n")
@@ -473,6 +478,63 @@ func cmdConnect() {
 	runLoop(agentID, stack.dag, node, stack.engine, stack.supply)
 	stopStack(node, stack)
 	slog.Info("node stopped cleanly")
+}
+
+// cmdGenesis seeds the initial token supply into the BadgerDB store by funding
+// the six protocol-controlled allocation buckets. It is idempotent: running it
+// again after the store already has balances will add the allocations again, so
+// operators should call it exactly once on a fresh store.
+//
+// Genesis allocations (micro-AET):
+//
+//	founders  : 150,000,000,000
+//	investors : 150,000,000,000
+//	ecosystem : 300,000,000,000
+//	rewards   : 200,000,000,000
+//	treasury  : 100,000,000,000
+//	public    : 100,000,000,000
+func cmdGenesis() {
+	if err := os.MkdirAll(filepath.Dir(storePath()), 0o700); err != nil {
+		slog.Error("failed to create data directory", "err", err)
+		os.Exit(1)
+	}
+	s, err := store.NewStore(storePath())
+	if err != nil {
+		slog.Error("failed to open store", "err", err)
+		os.Exit(1)
+	}
+	defer s.Close()
+
+	tl, err := ledger.LoadTransferLedgerFromStore(s)
+	if err != nil {
+		slog.Error("failed to load transfer ledger", "err", err)
+		os.Exit(1)
+	}
+
+	buckets := []struct {
+		name   string
+		amount uint64
+	}{
+		{genesis.BucketFounders, genesis.FoundersAllocation},
+		{genesis.BucketInvestors, genesis.InvestorsAllocation},
+		{genesis.BucketEcosystem, genesis.EcosystemAllocation},
+		{genesis.BucketRewards, genesis.NetworkRewards},
+		{genesis.BucketTreasury, genesis.TreasuryAllocation},
+		{genesis.BucketPublic, genesis.PublicAllocation},
+	}
+
+	fmt.Printf("AetherNet Genesis Allocation\nStore: %s\n\n", storePath())
+	var total uint64
+	for _, b := range buckets {
+		if err := tl.FundAgent(crypto.AgentID(b.name), b.amount); err != nil {
+			slog.Error("failed to fund genesis bucket", "bucket", b.name, "err", err)
+			os.Exit(1)
+		}
+		fmt.Printf("  %-30s %15d micro-AET\n", b.name, b.amount)
+		total += b.amount
+	}
+	fmt.Printf("\n  %-30s %15d micro-AET\n", "TOTAL", total)
+	fmt.Println("\nGenesis complete.")
 }
 
 // cmdStatus loads the keypair and prints node identity and configuration.

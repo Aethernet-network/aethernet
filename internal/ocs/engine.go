@@ -34,8 +34,10 @@ import (
 
 	"github.com/aethernet/core/internal/crypto"
 	"github.com/aethernet/core/internal/event"
+	"github.com/aethernet/core/internal/fees"
 	"github.com/aethernet/core/internal/identity"
 	"github.com/aethernet/core/internal/ledger"
+	"github.com/aethernet/core/internal/staking"
 )
 
 // ocsPersistence is the subset of store.Store used by Engine.
@@ -188,6 +190,12 @@ type Engine struct {
 	generation *ledger.GenerationLedger
 	identity   *identity.Registry
 
+	// Economics — all optional. When nil the settlement path is unchanged and
+	// all existing behaviour is preserved (backward compatible).
+	feeCollector *fees.Collector
+	stakeManager *staking.StakeManager
+	treasuryID   crypto.AgentID
+
 	pending   map[event.EventID]*PendingItem
 	processed map[event.EventID]struct{} // tracks already-settled events for idempotency
 	results   chan VerificationResult
@@ -198,6 +206,15 @@ type Engine struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{} // closed when the background goroutine exits
+}
+
+// SetEconomics attaches optional fee collection and staking mechanics to the
+// engine. Call before Start. All three values may be nil individually; the engine
+// skips whichever components are absent so existing tests remain unaffected.
+func (e *Engine) SetEconomics(fc *fees.Collector, sm *staking.StakeManager, treasuryID crypto.AgentID) {
+	e.feeCollector = fc
+	e.stakeManager = sm
+	e.treasuryID = treasuryID
 }
 
 // SetStore attaches a persistence backend to the Engine. After this call Submit
@@ -441,6 +458,10 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 				return fmt.Errorf("ocs: verify generation %s: %w", result.EventID, err)
 			}
 		}
+		// Collect settlement fee when economics are wired in.
+		if e.feeCollector != nil && item.Amount > 0 {
+			e.feeCollector.CollectFee(item.Amount, result.VerifierID, e.treasuryID)
+		}
 		// Best-effort: agent may not be registered on this node.
 		_ = e.identity.RecordTaskCompletion(item.AgentID, result.VerifiedValue, domain)
 	} else {
@@ -454,8 +475,14 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 				return fmt.Errorf("ocs: reject generation %s: %w", result.EventID, err)
 			}
 		}
+		// Slash 10% of the offending agent's stake; credit slashed amount to treasury.
+		if e.stakeManager != nil {
+			slashed := e.stakeManager.Slash(item.AgentID, 10)
+			if slashed > 0 && e.treasuryID != "" {
+				_ = e.transfer.FundAgent(e.treasuryID, slashed)
+			}
+		}
 		// RecordTaskFailure applies the 15% OptimisticTrustLimit reduction.
-		// AdjustmentPenalty (config) is available for stake-slashing extensions.
 		_ = e.identity.RecordTaskFailure(item.AgentID, domain)
 	}
 

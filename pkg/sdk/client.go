@@ -147,6 +147,32 @@ type PendingItem struct {
 	Deadline     int64     `json:"Deadline"` // nanoseconds
 }
 
+// StakeRequest is the input to Client.Stake and Client.Unstake.
+type StakeRequest struct {
+	AgentID string `json:"agent_id"`
+	Amount  uint64 `json:"amount"`
+}
+
+// StakeInfoResponse is the staking state for a single agent.
+type StakeInfoResponse struct {
+	AgentID         string `json:"agent_id"`
+	StakedAmount    uint64 `json:"staked_amount"`
+	TrustMultiplier uint64 `json:"trust_multiplier"`
+	TrustLimit      uint64 `json:"trust_limit"`
+}
+
+// EconomicsResponse is a snapshot of the network's token economics.
+type EconomicsResponse struct {
+	TotalSupply         uint64 `json:"total_supply"`
+	OnboardingPoolTotal uint64 `json:"onboarding_pool_total"`
+	OnboardingMaxAgents uint64 `json:"onboarding_max_agents"`
+	OnboardingAllocated uint64 `json:"onboarding_allocated"`
+	TotalCollected      uint64 `json:"total_collected"`
+	TotalBurned         uint64 `json:"total_burned"`
+	TreasuryAccrued     uint64 `json:"treasury_accrued"`
+	FeeBasisPoints      uint64 `json:"fee_basis_points"`
+}
+
 // ---------------------------------------------------------------------------
 // Internal transport helpers
 // ---------------------------------------------------------------------------
@@ -375,4 +401,62 @@ func (c *Client) Pending() ([]PendingItem, error) {
 		return nil, err
 	}
 	return result, nil
+}
+
+// Stake stakes tokens for the given agent. Returns the updated staking state.
+func (c *Client) Stake(req StakeRequest) (*StakeInfoResponse, error) {
+	resp, err := c.do(http.MethodPost, "/v1/stake", req)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := checkAndDecode[StakeInfoResponse](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// Unstake removes staked tokens for the given agent.
+// Returns an error (wrapping the API error message) if the agent has
+// insufficient staked balance.
+func (c *Client) Unstake(req StakeRequest) (*StakeInfoResponse, error) {
+	resp, err := c.do(http.MethodPost, "/v1/unstake", req)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := checkAndDecode[StakeInfoResponse](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// StakeInfo returns the staking state for agentID.
+func (c *Client) StakeInfo(agentID string) (*StakeInfoResponse, error) {
+	resp, err := c.do(http.MethodGet, "/v1/agents/"+agentID+"/stake", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := checkAndDecode[StakeInfoResponse](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// Economics returns a snapshot of the network's token economics.
+func (c *Client) Economics() (*EconomicsResponse, error) {
+	resp, err := c.do(http.MethodGet, "/v1/economics", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := checkAndDecode[EconomicsResponse](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
 }

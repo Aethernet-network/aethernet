@@ -164,6 +164,53 @@ class AetherNetClient:
         return self._get("/v1/pending")
 
     # ------------------------------------------------------------------
+    # Economics / staking endpoints
+    # ------------------------------------------------------------------
+
+    def stake(self, agent_id: str, amount: int) -> Dict[str, Any]:
+        """Stake *amount* micro-AET tokens for *agent_id*.
+
+        Returns a dict with ``agent_id``, ``staked_amount``, and ``trust_limit``.
+
+        Raises:
+            AetherNetError: If staking is not enabled on the node (HTTP 501).
+        """
+        return self._post("/v1/stake", {"agent_id": agent_id, "amount": amount})
+
+    def unstake(self, agent_id: str, amount: int) -> Dict[str, Any]:
+        """Unstake *amount* micro-AET tokens for *agent_id*.
+
+        Returns a dict with ``agent_id``, ``staked_amount``, and ``trust_limit``.
+
+        Raises:
+            AetherNetError: If the agent has insufficient staked balance (HTTP 400)
+                or staking is not enabled (HTTP 501).
+        """
+        return self._post("/v1/unstake", {"agent_id": agent_id, "amount": amount})
+
+    def stake_info(self, agent_id: str = "") -> Dict[str, Any]:
+        """Return the staking state for *agent_id*.
+
+        Uses ``self.agent_id`` when *agent_id* is omitted.
+
+        Returns a dict with ``agent_id``, ``staked_amount``, ``trust_multiplier``,
+        and ``trust_limit``.
+        """
+        aid = agent_id or self.agent_id
+        if not aid:
+            raise ValueError("agent_id required: pass to AetherNetClient() or stake_info()")
+        return self._get(f"/v1/agents/{aid}/stake")
+
+    def economics(self) -> Dict[str, Any]:
+        """Return a snapshot of the network's token economics.
+
+        Returns a dict with ``total_supply``, ``onboarding_pool_total``,
+        ``onboarding_max_agents``, ``onboarding_allocated``, ``total_collected``,
+        ``total_burned``, ``treasury_accrued``, and ``fee_basis_points``.
+        """
+        return self._get("/v1/economics")
+
+    # ------------------------------------------------------------------
     # Transport helpers
     # ------------------------------------------------------------------
 
