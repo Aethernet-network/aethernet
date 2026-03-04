@@ -122,6 +122,31 @@ type GenerationRequest struct {
 	CausalRefs       []string `json:"causal_refs,omitempty"`
 }
 
+// VerifyRequest is the input to Client.Verify.
+type VerifyRequest struct {
+	EventID       string `json:"event_id"`
+	Verdict       bool   `json:"verdict"`
+	VerifiedValue uint64 `json:"verified_value,omitempty"`
+}
+
+// VerifyResponse is the result returned by Client.Verify.
+type VerifyResponse struct {
+	EventID string `json:"event_id"`
+	Verdict bool   `json:"verdict"`
+	Status  string `json:"status"` // "settled" or "adjusted"
+}
+
+// PendingItem is an event awaiting OCS verification, as returned by Client.Pending.
+// JSON field names match the Go default (capitalized) used by ocs.PendingItem.
+type PendingItem struct {
+	EventID      string    `json:"EventID"`
+	EventType    string    `json:"EventType"`
+	AgentID      string    `json:"AgentID"`
+	Amount       uint64    `json:"Amount"`
+	OptimisticAt time.Time `json:"OptimisticAt"`
+	Deadline     int64     `json:"Deadline"` // nanoseconds
+}
+
 // ---------------------------------------------------------------------------
 // Internal transport helpers
 // ---------------------------------------------------------------------------
@@ -317,6 +342,35 @@ func (c *Client) Agents() ([]AgentProfile, error) {
 	}
 
 	result, err := checkAndDecode[[]AgentProfile](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// Verify submits a verification verdict for a pending OCS event.
+// Returns an error (wrapping the API error message) if the event is not pending.
+func (c *Client) Verify(req VerifyRequest) (*VerifyResponse, error) {
+	resp, err := c.do(http.MethodPost, "/v1/verify", req)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := checkAndDecode[VerifyResponse](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// Pending returns all events currently awaiting OCS verification.
+func (c *Client) Pending() ([]PendingItem, error) {
+	resp, err := c.do(http.MethodGet, "/v1/pending", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := checkAndDecode[[]PendingItem](resp, http.StatusOK)
 	if err != nil {
 		return nil, err
 	}

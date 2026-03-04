@@ -17,6 +17,8 @@
 //	GET  /v1/agents/{agent_id}/balance get an agent's spendable balance
 //	POST /v1/transfer                 submit a Transfer event
 //	POST /v1/generation               submit a Generation event
+//	POST /v1/verify                   submit a verification verdict for a pending event
+//	GET  /v1/pending                  list all pending OCS items
 //	GET  /v1/events/{event_id}        get a DAG event by ID
 //	GET  /v1/dag/tips                 list current DAG tip event IDs
 //	GET  /v1/status                   node health snapshot
@@ -97,6 +99,8 @@ func NewServer(
 	mux.HandleFunc("GET /v1/agents/{agent_id}", s.handleGetAgent)
 	mux.HandleFunc("POST /v1/transfer", s.handleTransfer)
 	mux.HandleFunc("POST /v1/generation", s.handleGeneration)
+	mux.HandleFunc("POST /v1/verify", s.handleVerify)
+	mux.HandleFunc("GET /v1/pending", s.handlePending)
 	mux.HandleFunc("GET /v1/events/{event_id}", s.handleGetEvent)
 	mux.HandleFunc("GET /v1/dag/tips", s.handleDAGTips)
 	mux.HandleFunc("GET /v1/status", s.handleStatus)
@@ -186,6 +190,18 @@ type statusResponse struct {
 
 type tipsResponse struct {
 	Tips []event.EventID `json:"tips"`
+}
+
+type verifyRequest struct {
+	EventID       event.EventID `json:"event_id"`
+	Verdict       bool          `json:"verdict"`
+	VerifiedValue uint64        `json:"verified_value,omitempty"`
+}
+
+type verifyResponse struct {
+	EventID string `json:"event_id"`
+	Verdict bool   `json:"verdict"`
+	Status  string `json:"status"` // "settled" or "adjusted"
 }
 
 // ---------------------------------------------------------------------------
@@ -427,4 +443,50 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		OCSPending:  s.engine.PendingCount(),
 		SupplyRatio: ratio,
 	})
+}
+
+// handleVerify submits a VerificationResult to the OCS engine.
+// Returns 400 when the event is not in the pending map.
+func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
+	var req verifyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if req.EventID == "" {
+		writeError(w, http.StatusBadRequest, "event_id is required")
+		return
+	}
+
+	result := ocs.VerificationResult{
+		EventID:       req.EventID,
+		Verdict:       req.Verdict,
+		VerifiedValue: req.VerifiedValue,
+		VerifierID:    s.agentID,
+		Timestamp:     time.Now(),
+	}
+	if err := s.engine.ProcessResult(result); err != nil {
+		if errors.Is(err, ocs.ErrNotPending) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	status := "settled"
+	if !req.Verdict {
+		status = "adjusted"
+	}
+	writeJSON(w, http.StatusOK, verifyResponse{
+		EventID: string(req.EventID),
+		Verdict: req.Verdict,
+		Status:  status,
+	})
+}
+
+// handlePending returns all events currently awaiting OCS verification.
+func (s *Server) handlePending(w http.ResponseWriter, r *http.Request) {
+	items := s.engine.Pending()
+	writeJSON(w, http.StatusOK, items)
 }

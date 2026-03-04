@@ -508,6 +508,18 @@ func (e *Engine) IsPending(eventID event.EventID) bool {
 	return ok
 }
 
+// Pending returns a snapshot of all events currently awaiting verification.
+// The caller receives a new slice; mutations do not affect the engine state.
+func (e *Engine) Pending() []*PendingItem {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	items := make([]*PendingItem, 0, len(e.pending))
+	for _, item := range e.pending {
+		items = append(items, item)
+	}
+	return items
+}
+
 // LoadPendingFromStore restores in-flight PendingItems from the persistence store
 // on node restart. It also sets the store on the engine so that subsequent
 // Submit/ProcessResult calls continue to write through. Call before Start.

@@ -346,3 +346,95 @@ func TestHandleListAgents(t *testing.T) {
 		t.Errorf("agent_id mismatch")
 	}
 }
+
+func TestPostVerify_Success(t *testing.T) {
+	setup := newTestSetup(t)
+
+	// Submit a generation event so there is something pending.
+	genResp := post(t, setup.ts, "/v1/generation", map[string]any{
+		"claimed_value": 5000,
+		"evidence_hash": "sha256:verify-test",
+		"stake_amount":  1000,
+	})
+	if genResp.StatusCode != http.StatusCreated {
+		t.Fatalf("generation: want 201, got %d", genResp.StatusCode)
+	}
+	var genResult struct {
+		EventID string `json:"event_id"`
+	}
+	decodeJSON(t, genResp, &genResult)
+
+	// Verify the event with a positive verdict.
+	resp := post(t, setup.ts, "/v1/verify", map[string]any{
+		"event_id":       genResult.EventID,
+		"verdict":        true,
+		"verified_value": 5000,
+	})
+	if resp.StatusCode != http.StatusOK {
+		var e map[string]string
+		decodeJSON(t, resp, &e)
+		t.Fatalf("verify: want 200, got %d: %v", resp.StatusCode, e)
+	}
+
+	var result struct {
+		EventID string `json:"event_id"`
+		Verdict bool   `json:"verdict"`
+		Status  string `json:"status"`
+	}
+	decodeJSON(t, resp, &result)
+	if result.Status != "settled" {
+		t.Errorf("want status=settled, got %q", result.Status)
+	}
+	if !result.Verdict {
+		t.Error("want verdict=true")
+	}
+}
+
+func TestPostVerify_NotPending(t *testing.T) {
+	setup := newTestSetup(t)
+
+	resp := post(t, setup.ts, "/v1/verify", map[string]any{
+		"event_id": "0000000000000000000000000000000000000000000000000000000000000000",
+		"verdict":  true,
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("want 400 for unknown event, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestGetPending(t *testing.T) {
+	setup := newTestSetup(t)
+
+	// No pending items on a fresh node.
+	resp := get(t, setup.ts, "/v1/pending")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+	var items []map[string]any
+	decodeJSON(t, resp, &items)
+	if len(items) != 0 {
+		t.Errorf("want 0 pending items on fresh node, got %d", len(items))
+	}
+
+	// Submit a generation event — it should appear as pending.
+	genResp := post(t, setup.ts, "/v1/generation", map[string]any{
+		"claimed_value": 3000,
+		"evidence_hash": "sha256:pending-test",
+		"stake_amount":  1000,
+	})
+	if genResp.StatusCode != http.StatusCreated {
+		t.Fatalf("generation: want 201, got %d", genResp.StatusCode)
+	}
+	genResp.Body.Close()
+
+	resp2 := get(t, setup.ts, "/v1/pending")
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp2.StatusCode)
+	}
+	var items2 []map[string]any
+	decodeJSON(t, resp2, &items2)
+	if len(items2) != 1 {
+		t.Errorf("want 1 pending item after generation, got %d", len(items2))
+	}
+}
