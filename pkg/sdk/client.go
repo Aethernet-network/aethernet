@@ -157,13 +157,19 @@ type StakeRequest struct {
 type StakeInfoResponse struct {
 	AgentID         string `json:"agent_id"`
 	StakedAmount    uint64 `json:"staked_amount"`
+	StakedSince     int64  `json:"staked_since"`
 	TrustMultiplier uint64 `json:"trust_multiplier"`
 	TrustLimit      uint64 `json:"trust_limit"`
+	TasksCompleted  uint64 `json:"tasks_completed"`
+	EffectiveTasks  uint64 `json:"effective_tasks"`
+	LastActivity    int64  `json:"last_activity"`
+	DaysStaked      uint64 `json:"days_staked"`
 }
 
 // EconomicsResponse is a snapshot of the network's token economics.
 type EconomicsResponse struct {
 	TotalSupply         uint64 `json:"total_supply"`
+	CirculatingSupply   uint64 `json:"circulating_supply"`
 	OnboardingPoolTotal uint64 `json:"onboarding_pool_total"`
 	OnboardingMaxAgents uint64 `json:"onboarding_max_agents"`
 	OnboardingAllocated uint64 `json:"onboarding_allocated"`

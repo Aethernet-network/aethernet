@@ -38,6 +38,7 @@ import (
 	"github.com/aethernet/core/internal/identity"
 	"github.com/aethernet/core/internal/ledger"
 	"github.com/aethernet/core/internal/staking"
+	"github.com/aethernet/core/internal/validation"
 )
 
 // ocsPersistence is the subset of store.Store used by Engine.
@@ -76,6 +77,10 @@ var (
 	// ErrNotPending is returned by ProcessResult when the event ID is not in
 	// the pending map — either already settled, expired, or unknown.
 	ErrNotPending = errors.New("ocs: event not in pending")
+
+	// ErrSelfDealing is returned by ProcessResult when the verifier is a party
+	// to the transaction being verified (sender or recipient).
+	ErrSelfDealing = errors.New("ocs: validator cannot verify transactions they are party to")
 )
 
 // resultsBufferSize is the capacity of the internal verification results channel.
@@ -128,6 +133,11 @@ type PendingItem struct {
 	// Amount is the economic value at stake: Transfer amount or Generation
 	// ClaimedValue, in micro-AET. Used for analytics and future slashing logic.
 	Amount uint64
+
+	// RecipientID is the other party to the transaction (ToAgent for transfers,
+	// BeneficiaryAgent for generation). Used for anti-self-dealing checks.
+	// Empty for events with no distinct recipient.
+	RecipientID crypto.AgentID
 
 	// OptimisticAt is the wall-clock time the event was accepted as Optimistic.
 	// Combined with Deadline it determines whether the item has expired.
@@ -338,6 +348,8 @@ func (e *Engine) Submit(ev *event.Event) error {
 
 	var amount uint64
 
+	var recipientID crypto.AgentID
+
 	switch ev.Type {
 	case event.EventTypeTransfer:
 		// Balance check before recording. Extract payload to get the amount.
@@ -352,6 +364,7 @@ func (e *Engine) Submit(ev *event.Event) error {
 			return fmt.Errorf("ocs: ledger record failed: %w", err)
 		}
 		amount = tp.Amount
+		recipientID = crypto.AgentID(tp.ToAgent)
 
 	case event.EventTypeGeneration:
 		if err := e.generation.Record(ev); err != nil {
@@ -360,6 +373,7 @@ func (e *Engine) Submit(ev *event.Event) error {
 		gp, err := event.GetPayload[event.GenerationPayload](ev)
 		if err == nil {
 			amount = gp.ClaimedValue
+			recipientID = crypto.AgentID(gp.BeneficiaryAgent)
 		}
 
 	default:
@@ -371,6 +385,7 @@ func (e *Engine) Submit(ev *event.Event) error {
 		EventType:    ev.Type,
 		AgentID:      crypto.AgentID(ev.AgentID),
 		Amount:       amount,
+		RecipientID:  recipientID,
 		OptimisticAt: time.Now(),
 		Deadline:     e.config.VerificationTimeout,
 	}
@@ -435,6 +450,15 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 		e.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrNotPending, result.EventID)
 	}
+
+	// Anti-self-dealing: reject verifiers who are party to the transaction.
+	// Skip when VerifierID is empty (expiry sweep path).
+	if result.VerifierID != "" && !validation.CanValidate(result.VerifierID, item.AgentID, item.RecipientID) {
+		e.mu.Unlock()
+		return fmt.Errorf("%w: verifier=%s sender=%s recipient=%s",
+			ErrSelfDealing, result.VerifierID, item.AgentID, item.RecipientID)
+	}
+
 	delete(e.pending, result.EventID)
 	e.processed[result.EventID] = struct{}{}
 	if e.store != nil {
@@ -462,6 +486,10 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 		if e.feeCollector != nil && item.Amount > 0 {
 			e.feeCollector.CollectFee(item.Amount, result.VerifierID, e.treasuryID)
 		}
+		// Record activity for decay tracking.
+		if e.stakeManager != nil {
+			e.stakeManager.RecordActivity(item.AgentID)
+		}
 		// Best-effort: agent may not be registered on this node.
 		_ = e.identity.RecordTaskCompletion(item.AgentID, result.VerifiedValue, domain)
 	} else {
@@ -475,9 +503,16 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 				return fmt.Errorf("ocs: reject generation %s: %w", result.EventID, err)
 			}
 		}
-		// Slash 10% of the offending agent's stake; credit slashed amount to treasury.
+		// Slash the offending agent's stake and credit the amount to treasury.
+		// Transfer defaults (sender exploited trust) → full slash + reset timestamp.
+		// Other failures (bad generation claim) → 10% slash.
 		if e.stakeManager != nil {
-			slashed := e.stakeManager.Slash(item.AgentID, 10)
+			var slashed uint64
+			if item.EventType == event.EventTypeTransfer {
+				slashed = e.stakeManager.SlashDefault(item.AgentID)
+			} else {
+				slashed = e.stakeManager.Slash(item.AgentID, 10)
+			}
 			if slashed > 0 && e.treasuryID != "" {
 				_ = e.transfer.FundAgent(e.treasuryID, slashed)
 			}

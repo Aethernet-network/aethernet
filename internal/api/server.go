@@ -250,12 +250,18 @@ type agentAddressResponse struct {
 type stakeInfoResponse struct {
 	AgentID         string `json:"agent_id"`
 	StakedAmount    uint64 `json:"staked_amount"`
+	StakedSince     int64  `json:"staked_since"`
 	TrustMultiplier uint64 `json:"trust_multiplier"`
 	TrustLimit      uint64 `json:"trust_limit"`
+	TasksCompleted  uint64 `json:"tasks_completed"`
+	EffectiveTasks  uint64 `json:"effective_tasks"`
+	LastActivity    int64  `json:"last_activity"`
+	DaysStaked      uint64 `json:"days_staked"`
 }
 
 type economicsResponse struct {
 	TotalSupply         uint64 `json:"total_supply"`
+	CirculatingSupply   uint64 `json:"circulating_supply"`
 	OnboardingPoolTotal uint64 `json:"onboarding_pool_total"`
 	OnboardingMaxAgents uint64 `json:"onboarding_max_agents"`
 	OnboardingAllocated uint64 `json:"onboarding_allocated"`
@@ -406,7 +412,8 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 
 		if s.stakeManager != nil {
 			s.stakeManager.Stake(s.agentID, allocation)
-			resp.TrustLimit = staking.TrustLimit(allocation, 0)
+			since := s.stakeManager.StakedSince(s.agentID)
+			resp.TrustLimit = staking.TrustLimit(allocation, 0, since, time.Now().Unix())
 		}
 	} else {
 		s.onboardingMu.Unlock()
@@ -449,6 +456,8 @@ func (s *Server) handleGetBalance(w http.ResponseWriter, r *http.Request) {
 
 // handleTransfer constructs, signs, and submits a Transfer event.
 // The from_agent is always the node's own keypair identity.
+// When staking is wired in, the transfer amount must not exceed the sender's
+// computed trust limit; excess is rejected with HTTP 403.
 func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
 	var req transferRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -461,6 +470,22 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Currency == "" {
 		req.Currency = "AET"
+	}
+
+	// Trust limit enforcement: amount must not exceed the sender's trust limit.
+	if s.stakeManager != nil {
+		var tasksCompleted uint64
+		if fp, err := s.registry.Get(s.agentID); err == nil {
+			tasksCompleted = fp.TasksCompleted
+		}
+		staked := s.stakeManager.StakedAmount(s.agentID)
+		since := s.stakeManager.StakedSince(s.agentID)
+		lastAct := s.stakeManager.LastActivity(s.agentID)
+		trustLimit := staking.TrustLimitFull(staked, tasksCompleted, since, lastAct, time.Now().Unix())
+		if req.Amount > trustLimit {
+			writeError(w, http.StatusForbidden, "amount exceeds trust limit")
+			return
+		}
 	}
 
 	payload := event.TransferPayload{
@@ -570,6 +595,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleVerify submits a VerificationResult to the OCS engine.
 // Returns 400 when the event is not in the pending map.
+// Returns 403 when the validator is a party to the transaction (self-dealing).
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	var req verifyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -591,6 +617,10 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	if err := s.engine.ProcessResult(result); err != nil {
 		if errors.Is(err, ocs.ErrNotPending) {
 			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if errors.Is(err, ocs.ErrSelfDealing) {
+			writeError(w, http.StatusForbidden, err.Error())
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -633,7 +663,8 @@ func (s *Server) handleGetAgentAddress(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleGetStake returns the staking info for agent_id.
+// handleGetStake returns the full staking info for agent_id, including effective
+// tasks (after decay), days staked, and the computed trust limit.
 // Returns 501 when the staking component is not wired in.
 func (s *Server) handleGetStake(w http.ResponseWriter, r *http.Request) {
 	if s.stakeManager == nil {
@@ -642,21 +673,35 @@ func (s *Server) handleGetStake(w http.ResponseWriter, r *http.Request) {
 	}
 	agentID := crypto.AgentID(r.PathValue("agent_id"))
 
-	// Get tasks completed from identity registry (0 if agent not registered).
 	var tasksCompleted uint64
 	if fp, err := s.registry.Get(agentID); err == nil {
 		tasksCompleted = fp.TasksCompleted
 	}
 
+	now := time.Now().Unix()
 	staked := s.stakeManager.StakedAmount(agentID)
-	multiplier := staking.TrustMultiplier(tasksCompleted)
-	limit := staking.TrustLimit(staked, tasksCompleted)
+	since := s.stakeManager.StakedSince(agentID)
+	lastAct := s.stakeManager.LastActivity(agentID)
+
+	var daysStaked uint64
+	if since > 0 && now > since {
+		daysStaked = uint64((now - since) / 86400)
+	}
+
+	effective := staking.EffectiveTasks(tasksCompleted, lastAct, now)
+	multiplier := staking.TrustMultiplier(effective, since, now)
+	limit := staking.TrustLimitFull(staked, tasksCompleted, since, lastAct, now)
 
 	writeJSON(w, http.StatusOK, stakeInfoResponse{
 		AgentID:         string(agentID),
 		StakedAmount:    staked,
+		StakedSince:     since,
 		TrustMultiplier: multiplier,
 		TrustLimit:      limit,
+		TasksCompleted:  tasksCompleted,
+		EffectiveTasks:  effective,
+		LastActivity:    lastAct,
+		DaysStaked:      daysStaked,
 	})
 }
 
@@ -671,8 +716,14 @@ func (s *Server) handleEconomics(w http.ResponseWriter, r *http.Request) {
 		collected, burned, treasury = s.feeCollector.Stats()
 	}
 
+	var circulating uint64
+	if genesis.TotalSupply >= burned {
+		circulating = genesis.TotalSupply - burned
+	}
+
 	writeJSON(w, http.StatusOK, economicsResponse{
 		TotalSupply:         genesis.TotalSupply,
+		CirculatingSupply:   circulating,
 		OnboardingPoolTotal: genesis.OnboardingPoolTotal,
 		OnboardingMaxAgents: genesis.OnboardingMaxAgents,
 		OnboardingAllocated: allocated,
@@ -730,12 +781,15 @@ func (s *Server) handleStake(w http.ResponseWriter, r *http.Request) {
 	if fp, err := s.registry.Get(agentID); err == nil {
 		tasksCompleted = fp.TasksCompleted
 	}
+	now := time.Now().Unix()
 	staked := s.stakeManager.StakedAmount(agentID)
+	since := s.stakeManager.StakedSince(agentID)
+	lastAct := s.stakeManager.LastActivity(agentID)
 
 	writeJSON(w, http.StatusOK, stakeOpResponse{
 		AgentID:      req.AgentID,
 		StakedAmount: staked,
-		TrustLimit:   staking.TrustLimit(staked, tasksCompleted),
+		TrustLimit:   staking.TrustLimitFull(staked, tasksCompleted, since, lastAct, now),
 	})
 }
 
@@ -772,12 +826,15 @@ func (s *Server) handleUnstake(w http.ResponseWriter, r *http.Request) {
 	if fp, err := s.registry.Get(agentID); err == nil {
 		tasksCompleted = fp.TasksCompleted
 	}
+	now := time.Now().Unix()
 	staked := s.stakeManager.StakedAmount(agentID)
+	since := s.stakeManager.StakedSince(agentID)
+	lastAct := s.stakeManager.LastActivity(agentID)
 
 	writeJSON(w, http.StatusOK, unstakeOpResponse{
 		AgentID:      req.AgentID,
 		StakedAmount: staked,
-		TrustLimit:   staking.TrustLimit(staked, tasksCompleted),
+		TrustLimit:   staking.TrustLimitFull(staked, tasksCompleted, since, lastAct, now),
 		Success:      true,
 	})
 }

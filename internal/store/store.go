@@ -11,6 +11,7 @@
 package store
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -30,6 +31,7 @@ const (
 	prefixGeneration = "gen:"
 	prefixPending    = "ocs:"
 	prefixIdentity   = "idn:"
+	prefixStakeMeta  = "stk:"
 )
 
 // Store is the durable persistence layer for a single AetherNet node.
@@ -358,4 +360,80 @@ func (s *Store) AllIdentities() ([]*identity.CapabilityFingerprint, error) {
 		return nil
 	})
 	return fps, err
+}
+
+// ---------------------------------------------------------------------------
+// Stake metadata (stakedSince, lastActivity timestamps)
+// ---------------------------------------------------------------------------
+
+// stakeMetaValue encodes two int64 timestamps as a 16-byte big-endian blob.
+// Index 0–7 = stakedSince, index 8–15 = lastActivity.
+func stakeMetaValue(stakedSince, lastActivity int64) []byte {
+	buf := make([]byte, 16)
+	binary.BigEndian.PutUint64(buf[0:8], uint64(stakedSince))
+	binary.BigEndian.PutUint64(buf[8:16], uint64(lastActivity))
+	return buf
+}
+
+func parseStakeMetaValue(val []byte) (stakedSince, lastActivity int64) {
+	if len(val) < 16 {
+		return 0, 0
+	}
+	stakedSince = int64(binary.BigEndian.Uint64(val[0:8]))
+	lastActivity = int64(binary.BigEndian.Uint64(val[8:16]))
+	return
+}
+
+// PutStakeMeta stores stakedSince and lastActivity timestamps for agentID
+// under the key "stk:<agentID>".
+func (s *Store) PutStakeMeta(agentID crypto.AgentID, stakedSince int64, lastActivity int64) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(prefixStakeMeta+string(agentID)), stakeMetaValue(stakedSince, lastActivity))
+	})
+}
+
+// GetStakeMeta retrieves the stakedSince and lastActivity timestamps for agentID.
+// Returns (0, 0, nil) if the key does not exist.
+func (s *Store) GetStakeMeta(agentID crypto.AgentID) (stakedSince int64, lastActivity int64, err error) {
+	err = s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(prefixStakeMeta + string(agentID)))
+		if err != nil {
+			if err == badger.ErrKeyNotFound {
+				return nil // not an error — agent simply has no stored meta
+			}
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			stakedSince, lastActivity = parseStakeMetaValue(val)
+			return nil
+		})
+	})
+	return
+}
+
+// AllStakeMeta returns all stored stake metadata as a map from AgentID to a
+// [2]int64 array where index 0 = stakedSince and index 1 = lastActivity.
+func (s *Store) AllStakeMeta() (map[crypto.AgentID][2]int64, error) {
+	result := make(map[crypto.AgentID][2]int64)
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(prefixStakeMeta)
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		prefixLen := len(prefixStakeMeta)
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := string(item.Key()[prefixLen:]) // strip prefix
+			if err := item.Value(func(val []byte) error {
+				ss, la := parseStakeMetaValue(val)
+				result[crypto.AgentID(key)] = [2]int64{ss, la}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return result, err
 }

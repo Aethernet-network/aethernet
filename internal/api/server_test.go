@@ -18,6 +18,7 @@ import (
 // testSetup holds the components for a test API server.
 type testSetup struct {
 	kp       *crypto.KeyPair
+	d        *dag.DAG
 	tl       *ledger.TransferLedger
 	gl       *ledger.GenerationLedger
 	reg      *identity.Registry
@@ -50,7 +51,23 @@ func newTestSetup(t *testing.T) *testSetup {
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
-	return &testSetup{kp: kp, tl: tl, gl: gl, reg: reg, eng: eng, srv: srv, ts: ts}
+	return &testSetup{kp: kp, d: d, tl: tl, gl: gl, reg: reg, eng: eng, srv: srv, ts: ts}
+}
+
+// newVerifierServer creates a second API server sharing the same internal
+// components (dag, ledgers, registry, engine) as setup but with a fresh keypair.
+// This simulates an independent validator node on the same network.
+func newVerifierServer(t *testing.T, setup *testSetup) *httptest.Server {
+	t.Helper()
+	kp2, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("generate verifier keypair: %v", err)
+	}
+	sm2 := ledger.NewSupplyManager(setup.tl, setup.gl)
+	srv2 := api.NewServer("", setup.d, setup.tl, setup.gl, setup.reg, setup.eng, sm2, nil, kp2)
+	ts2 := httptest.NewServer(srv2)
+	t.Cleanup(ts2.Close)
+	return ts2
 }
 
 // post is a convenience helper for JSON POST requests.
@@ -364,8 +381,10 @@ func TestPostVerify_Success(t *testing.T) {
 	}
 	decodeJSON(t, genResp, &genResult)
 
-	// Verify the event with a positive verdict.
-	resp := post(t, setup.ts, "/v1/verify", map[string]any{
+	// Verify using an independent validator node (different keypair, shared engine).
+	// The submitter cannot verify their own event (anti-self-dealing rule).
+	verifier := newVerifierServer(t, setup)
+	resp := post(t, verifier, "/v1/verify", map[string]any{
 		"event_id":       genResult.EventID,
 		"verdict":        true,
 		"verified_value": 5000,
