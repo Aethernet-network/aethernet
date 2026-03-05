@@ -57,6 +57,7 @@ import (
 	"github.com/aethernet/core/internal/ledger"
 	"github.com/aethernet/core/internal/network"
 	"github.com/aethernet/core/internal/ocs"
+	svcregistry "github.com/aethernet/core/internal/registry"
 	"github.com/aethernet/core/internal/staking"
 	"github.com/aethernet/core/internal/wallet"
 )
@@ -81,6 +82,9 @@ type Server struct {
 	walletMgr    *wallet.Wallet
 	stakeManager *staking.StakeManager
 	feeCollector *fees.Collector
+
+	// Service registry — optional; set via SetServiceRegistry after construction.
+	svcRegistry *svcregistry.Registry
 
 	// Onboarding tracking. Protected by onboardingMu.
 	onboardingMu        sync.Mutex
@@ -140,6 +144,11 @@ func NewServer(
 	mux.HandleFunc("POST /v1/stake", s.handleStake)
 	mux.HandleFunc("POST /v1/unstake", s.handleUnstake)
 	mux.HandleFunc("GET /v1/network/activity", s.handleNetworkActivity)
+	mux.HandleFunc("POST /v1/registry", s.handlePostRegistry)
+	mux.HandleFunc("GET /v1/registry/search", s.handleSearchRegistry)
+	mux.HandleFunc("GET /v1/registry/categories", s.handleRegistryCategories)
+	mux.HandleFunc("DELETE /v1/registry/{agent_id}", s.handleDeleteRegistry)
+	mux.HandleFunc("GET /v1/registry/{agent_id}", s.handleGetRegistryListing)
 
 	// Serve the web explorer from ./explorer (dev) or the Docker install path.
 	explorerDir := explorerPath()
@@ -160,6 +169,12 @@ func (s *Server) SetEconomics(w *wallet.Wallet, sm *staking.StakeManager, fc *fe
 	s.walletMgr = w
 	s.stakeManager = sm
 	s.feeCollector = fc
+}
+
+// SetServiceRegistry wires the agent service discovery registry into the server.
+// Call before Start. When nil, the /v1/registry endpoints return 501.
+func (s *Server) SetServiceRegistry(r *svcregistry.Registry) {
+	s.svcRegistry = r
 }
 
 // ServeHTTP implements http.Handler. This allows the Server to be mounted
@@ -328,6 +343,22 @@ type activityBucket struct {
 type networkActivityResponse struct {
 	Hours   int              `json:"hours"`
 	Buckets []activityBucket `json:"buckets"`
+}
+
+type registryListingRequest struct {
+	AgentID     string   `json:"agent_id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Category    string   `json:"category"`
+	PriceAET    uint64   `json:"price_aet"`
+	Endpoint    string   `json:"endpoint,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Active      bool     `json:"active"`
+}
+
+type deactivateResponse struct {
+	AgentID string `json:"agent_id"`
+	Active  bool   `json:"active"`
 }
 
 type stakeRequest struct {
@@ -1047,6 +1078,118 @@ func (s *Server) handleNetworkActivity(w http.ResponseWriter, r *http.Request) {
 		Hours:   hours,
 		Buckets: result,
 	})
+}
+
+// handlePostRegistry creates or updates a service listing for the requesting
+// agent. Returns 501 when the service registry is not wired in.
+func (s *Server) handlePostRegistry(w http.ResponseWriter, r *http.Request) {
+	if s.svcRegistry == nil {
+		writeError(w, http.StatusNotImplemented, "service registry not enabled")
+		return
+	}
+	var req registryListingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if req.Category == "" {
+		writeError(w, http.StatusBadRequest, "category is required")
+		return
+	}
+
+	// Accept any agent_id from the body; fall back to the node's own identity.
+	agentID := crypto.AgentID(req.AgentID)
+	if agentID == "" {
+		agentID = s.agentID
+	}
+
+	listing := &svcregistry.ServiceListing{
+		AgentID:     agentID,
+		Name:        req.Name,
+		Description: req.Description,
+		Category:    req.Category,
+		PriceAET:    req.PriceAET,
+		Endpoint:    req.Endpoint,
+		Tags:        req.Tags,
+		Active:      req.Active,
+	}
+	s.svcRegistry.Register(listing)
+	got, _ := s.svcRegistry.Get(agentID)
+	writeJSON(w, http.StatusCreated, got)
+}
+
+// handleSearchRegistry searches for active service listings.
+// Query params: q (search term), category, limit (default 20).
+func (s *Server) handleSearchRegistry(w http.ResponseWriter, r *http.Request) {
+	if s.svcRegistry == nil {
+		writeError(w, http.StatusNotImplemented, "service registry not enabled")
+		return
+	}
+	q := r.URL.Query().Get("q")
+	category := r.URL.Query().Get("category")
+	limit := 20
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	results := s.svcRegistry.Search(q, category, limit)
+	if results == nil {
+		results = []*svcregistry.ServiceListing{}
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+
+// handleGetRegistryListing returns the service listing for a single agent.
+func (s *Server) handleGetRegistryListing(w http.ResponseWriter, r *http.Request) {
+	if s.svcRegistry == nil {
+		writeError(w, http.StatusNotImplemented, "service registry not enabled")
+		return
+	}
+	agentID := crypto.AgentID(r.PathValue("agent_id"))
+	listing, ok := s.svcRegistry.Get(agentID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "listing not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, listing)
+}
+
+// handleRegistryCategories returns all categories with active listing counts.
+func (s *Server) handleRegistryCategories(w http.ResponseWriter, r *http.Request) {
+	if s.svcRegistry == nil {
+		writeError(w, http.StatusNotImplemented, "service registry not enabled")
+		return
+	}
+	cats := s.svcRegistry.Categories()
+	if cats == nil {
+		cats = map[string]int{}
+	}
+	writeJSON(w, http.StatusOK, cats)
+}
+
+// handleDeleteRegistry deactivates the listing owned by the node. Returns 403
+// when the requested agent_id does not match the node's own identity, and 404
+// when the listing does not exist.
+func (s *Server) handleDeleteRegistry(w http.ResponseWriter, r *http.Request) {
+	if s.svcRegistry == nil {
+		writeError(w, http.StatusNotImplemented, "service registry not enabled")
+		return
+	}
+	agentID := crypto.AgentID(r.PathValue("agent_id"))
+	if agentID != s.agentID {
+		writeError(w, http.StatusForbidden, "can only deactivate your own listing")
+		return
+	}
+	if !s.svcRegistry.Deactivate(agentID) {
+		writeError(w, http.StatusNotFound, "listing not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, deactivateResponse{AgentID: string(agentID), Active: false})
 }
 
 // handleUnstake unstakes tokens for the given agent.

@@ -153,6 +153,20 @@ type StakeRequest struct {
 	Amount  uint64 `json:"amount"`
 }
 
+// ServiceListing describes a service an agent advertises via the registry.
+type ServiceListing struct {
+	AgentID     string   `json:"agent_id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Category    string   `json:"category"`
+	PriceAET    uint64   `json:"price_aet"`
+	Endpoint    string   `json:"endpoint,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	CreatedAt   int64    `json:"created_at"`
+	UpdatedAt   int64    `json:"updated_at"`
+	Active      bool     `json:"active"`
+}
+
 // StakeInfoResponse is the staking state for a single agent.
 type StakeInfoResponse struct {
 	AgentID         string `json:"agent_id"`
@@ -465,4 +479,95 @@ func (c *Client) Economics() (*EconomicsResponse, error) {
 		return nil, err
 	}
 	return &result, nil
+}
+
+// RegisterService publishes or updates a service listing for the node's agent.
+// The node API populates agent_id automatically from its own identity.
+func (c *Client) RegisterService(listing ServiceListing) error {
+	resp, err := c.do(http.MethodPost, "/v1/registry", listing)
+	if err != nil {
+		return err
+	}
+	_, err = checkAndDecode[ServiceListing](resp, http.StatusCreated)
+	return err
+}
+
+// SearchServices finds active service listings matching query and/or category.
+// Pass empty strings to list all; limit=0 uses the server default (20).
+func (c *Client) SearchServices(query string, category string, limit int) ([]ServiceListing, error) {
+	path := "/v1/registry/search"
+	sep := "?"
+	if query != "" {
+		path += sep + "q=" + query
+		sep = "&"
+	}
+	if category != "" {
+		path += sep + "category=" + category
+		sep = "&"
+	}
+	if limit > 0 {
+		path += sep + "limit=" + fmt.Sprintf("%d", limit)
+	}
+
+	resp, err := c.do(http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	result, err := checkAndDecode[[]ServiceListing](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// GetService returns the service listing for the given agentID.
+func (c *Client) GetService(agentID string) (*ServiceListing, error) {
+	resp, err := c.do(http.MethodGet, "/v1/registry/"+agentID, nil)
+	if err != nil {
+		return nil, err
+	}
+	result, err := checkAndDecode[ServiceListing](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// ListCategories returns a map of category name to active listing count.
+func (c *Client) ListCategories() (map[string]int, error) {
+	resp, err := c.do(http.MethodGet, "/v1/registry/categories", nil)
+	if err != nil {
+		return nil, err
+	}
+	result, err := checkAndDecode[map[string]int](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// DeactivateService marks the node's own service listing as inactive.
+// It first calls Status() to resolve the node's agentID, then issues DELETE.
+func (c *Client) DeactivateService() error {
+	status, err := c.Status()
+	if err != nil {
+		return fmt.Errorf("sdk: resolve agent id: %w", err)
+	}
+	resp, err := c.do(http.MethodDelete, "/v1/registry/"+status.AgentID, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var apiErr struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&apiErr)
+		msg := apiErr.Error
+		if msg == "" {
+			msg = fmt.Sprintf("status %d", resp.StatusCode)
+		}
+		return fmt.Errorf("sdk: api error %d: %s", resp.StatusCode, msg)
+	}
+	return nil
 }

@@ -211,6 +211,87 @@ class AetherNetClient:
         return self._get("/v1/economics")
 
     # ------------------------------------------------------------------
+    # Service registry endpoints
+    # ------------------------------------------------------------------
+
+    def register_service(
+        self,
+        name: str,
+        description: str = "",
+        category: str = "",
+        price_aet: int = 0,
+        endpoint: str = "",
+        tags: Optional[List[str]] = None,
+        active: bool = True,
+    ) -> Dict[str, Any]:
+        """Publish or update a service listing for this node's agent.
+
+        Returns the stored listing dict (includes ``created_at``, ``updated_at``).
+        """
+        body: Dict[str, Any] = {
+            "name": name,
+            "description": description,
+            "category": category,
+            "price_aet": price_aet,
+            "active": active,
+        }
+        if endpoint:
+            body["endpoint"] = endpoint
+        if tags:
+            body["tags"] = tags
+        return self._post("/v1/registry", body)
+
+    def search_services(
+        self,
+        query: str = "",
+        category: str = "",
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Search for active service listings.
+
+        Args:
+            query:    Keyword matched against name, description, and tags.
+            category: Filter by exact category (case-insensitive).
+            limit:    Maximum number of results to return.
+
+        Returns a list of listing dicts.
+        """
+        params: Dict[str, Any] = {"limit": limit}
+        if query:
+            params["q"] = query
+        if category:
+            params["category"] = category
+        resp = self.session.get(self.node_url + "/v1/registry/search", params=params)
+        resp.raise_for_status()
+        result = resp.json()
+        return result if isinstance(result, list) else []
+
+    def get_service(self, agent_id: str) -> Dict[str, Any]:
+        """Return the service listing for *agent_id*.
+
+        Raises:
+            AetherNetError: If no listing exists for the agent (HTTP 404).
+        """
+        return self._get(f"/v1/registry/{agent_id}")
+
+    def list_categories(self) -> Dict[str, int]:
+        """Return a mapping of category name to active listing count."""
+        return self._get("/v1/registry/categories")
+
+    def deactivate_service(self) -> Dict[str, Any]:
+        """Deactivate this node's own service listing.
+
+        Raises:
+            AetherNetError: If no listing exists (HTTP 404) or the node's
+                agentID could not be resolved (HTTP error on /v1/status).
+        """
+        st = self.status()
+        agent_id = st.get("agent_id", "")
+        if not agent_id:
+            raise AetherNetError(0, "could not resolve node agent_id from /v1/status")
+        return self._delete(f"/v1/registry/{agent_id}")
+
+    # ------------------------------------------------------------------
     # Transport helpers
     # ------------------------------------------------------------------
 
@@ -221,6 +302,16 @@ class AetherNetClient:
 
     def _post(self, path: str, body: Dict) -> Any:
         resp = self.session.post(self.node_url + path, json=body)
+        if resp.status_code >= 400:
+            try:
+                err = resp.json().get("error", resp.text)
+            except Exception:
+                err = resp.text
+            raise AetherNetError(resp.status_code, err)
+        return resp.json()
+
+    def _delete(self, path: str) -> Any:
+        resp = self.session.delete(self.node_url + path)
         if resp.status_code >= 400:
             try:
                 err = resp.json().get("error", resp.text)

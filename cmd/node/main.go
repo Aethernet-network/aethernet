@@ -39,6 +39,7 @@ import (
 	"github.com/aethernet/core/internal/ledger"
 	"github.com/aethernet/core/internal/network"
 	"github.com/aethernet/core/internal/ocs"
+	"github.com/aethernet/core/internal/registry"
 	"github.com/aethernet/core/internal/store"
 )
 
@@ -185,15 +186,16 @@ func autoInitKeyPair(path string) *crypto.KeyPair {
 // nodeStack bundles the runtime components so they can be passed around and
 // shut down together.
 type nodeStack struct {
-	dag        *dag.DAG
-	transfer   *ledger.TransferLedger
-	generation *ledger.GenerationLedger
-	supply     *ledger.SupplyManager
-	reg        *identity.Registry
-	engine     *ocs.Engine
-	store      *store.Store
-	kp         *crypto.KeyPair
-	apiSrv     *api.Server
+	dag         *dag.DAG
+	transfer    *ledger.TransferLedger
+	generation  *ledger.GenerationLedger
+	supply      *ledger.SupplyManager
+	reg         *identity.Registry
+	engine      *ocs.Engine
+	store       *store.Store
+	kp          *crypto.KeyPair
+	apiSrv      *api.Server
+	svcRegistry *registry.Registry
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
@@ -248,15 +250,25 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 			os.Exit(1)
 		}
 	}
+	svcReg := registry.New()
+	if s != nil {
+		svcReg.SetStore(s)
+		if err := svcReg.LoadFromStore(); err != nil {
+			slog.Error("failed to load service registry", "err", err)
+			os.Exit(1)
+		}
+	}
+
 	return &nodeStack{
-		dag:        d,
-		transfer:   tl,
-		generation: gl,
-		supply:     sm,
-		reg:        reg,
-		engine:     eng,
-		store:      s,
-		kp:         kp,
+		dag:         d,
+		transfer:    tl,
+		generation:  gl,
+		supply:      sm,
+		reg:         reg,
+		engine:      eng,
+		store:       s,
+		kp:          kp,
+		svcRegistry: svcReg,
 	}
 }
 
@@ -295,6 +307,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		stack.reg, stack.engine, stack.supply,
 		node, stack.kp,
 	)
+	if stack.svcRegistry != nil {
+		apiSrv.SetServiceRegistry(stack.svcRegistry)
+	}
 	if err := apiSrv.Start(); err != nil {
 		slog.Error("failed to start API server", "addr", apiListenAddr, "err", err)
 		node.Stop()

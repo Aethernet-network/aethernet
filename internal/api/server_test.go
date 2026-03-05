@@ -13,6 +13,7 @@ import (
 	"github.com/aethernet/core/internal/identity"
 	"github.com/aethernet/core/internal/ledger"
 	"github.com/aethernet/core/internal/ocs"
+	"github.com/aethernet/core/internal/registry"
 )
 
 // testSetup holds the components for a test API server.
@@ -48,6 +49,7 @@ func newTestSetup(t *testing.T) *testSetup {
 	sm := ledger.NewSupplyManager(tl, gl)
 
 	srv := api.NewServer("", d, tl, gl, reg, eng, sm, nil, kp)
+	srv.SetServiceRegistry(registry.New())
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
@@ -591,5 +593,196 @@ func TestGetNetworkActivity(t *testing.T) {
 	}
 	if len(buckets) != 24 {
 		t.Errorf("want 24 buckets, got %d", len(buckets))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Registry endpoint tests
+// ---------------------------------------------------------------------------
+
+func TestPostRegistry(t *testing.T) {
+	setup := newTestSetup(t)
+
+	resp := post(t, setup.ts, "/v1/registry", map[string]any{
+		"agent_id":    string(setup.kp.AgentID()),
+		"name":        "Document Summarizer",
+		"description": "Summarizes documents up to 50 pages",
+		"category":    "research",
+		"price_aet":   5000,
+		"tags":        []string{"summarization", "research"},
+		"active":      true,
+	})
+	if resp.StatusCode != http.StatusCreated {
+		var e map[string]string
+		decodeJSON(t, resp, &e)
+		t.Fatalf("want 201, got %d: %v", resp.StatusCode, e)
+	}
+
+	var result map[string]any
+	decodeJSON(t, resp, &result)
+	if result["name"] != "Document Summarizer" {
+		t.Errorf("name mismatch: got %v", result["name"])
+	}
+	if result["category"] != "research" {
+		t.Errorf("category mismatch: got %v", result["category"])
+	}
+}
+
+func TestGetRegistrySearch(t *testing.T) {
+	setup := newTestSetup(t)
+
+	// Register a listing.
+	r := post(t, setup.ts, "/v1/registry", map[string]any{
+		"name":     "Code Reviewer",
+		"category": "code-review",
+		"active":   true,
+	})
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("register: want 201, got %d", r.StatusCode)
+	}
+	r.Body.Close()
+
+	resp := get(t, setup.ts, "/v1/registry/search?q=code")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+	var results []map[string]any
+	decodeJSON(t, resp, &results)
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0]["name"] != "Code Reviewer" {
+		t.Errorf("wrong result name: %v", results[0]["name"])
+	}
+}
+
+func TestGetRegistrySearch_Category(t *testing.T) {
+	setup := newTestSetup(t)
+
+	r := post(t, setup.ts, "/v1/registry", map[string]any{
+		"name":     "Research Assistant",
+		"category": "research",
+		"active":   true,
+	})
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("register: want 201, got %d", r.StatusCode)
+	}
+	r.Body.Close()
+
+	resp := get(t, setup.ts, "/v1/registry/search?category=research")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+	var results []map[string]any
+	decodeJSON(t, resp, &results)
+	if len(results) != 1 {
+		t.Fatalf("want 1 result for category=research, got %d", len(results))
+	}
+}
+
+func TestGetRegistryListing(t *testing.T) {
+	setup := newTestSetup(t)
+
+	r := post(t, setup.ts, "/v1/registry", map[string]any{
+		"name":     "ML Classifier",
+		"category": "research",
+		"active":   true,
+	})
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("register: want 201, got %d", r.StatusCode)
+	}
+	r.Body.Close()
+
+	agentID := string(setup.kp.AgentID())
+	resp := get(t, setup.ts, "/v1/registry/"+agentID)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+
+	var listing map[string]any
+	decodeJSON(t, resp, &listing)
+	if listing["name"] != "ML Classifier" {
+		t.Errorf("name: got %v", listing["name"])
+	}
+	if listing["agent_id"] == nil {
+		t.Error("agent_id must be present")
+	}
+}
+
+func TestGetCategories(t *testing.T) {
+	setup := newTestSetup(t)
+
+	r := post(t, setup.ts, "/v1/registry", map[string]any{
+		"name":     "Writer",
+		"category": "writing",
+		"active":   true,
+	})
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("register: want 201, got %d", r.StatusCode)
+	}
+	r.Body.Close()
+
+	resp := get(t, setup.ts, "/v1/registry/categories")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+	var cats map[string]any
+	decodeJSON(t, resp, &cats)
+	if cats["writing"] == nil {
+		t.Error("categories must include 'writing'")
+	}
+	if int(cats["writing"].(float64)) != 1 {
+		t.Errorf("writing count: want 1, got %v", cats["writing"])
+	}
+}
+
+func TestDeleteRegistry(t *testing.T) {
+	setup := newTestSetup(t)
+
+	// Register a listing under the node's own agentID.
+	r := post(t, setup.ts, "/v1/registry", map[string]any{
+		"agent_id": string(setup.kp.AgentID()),
+		"name":     "To Be Deleted",
+		"category": "writing",
+		"active":   true,
+	})
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("register: want 201, got %d", r.StatusCode)
+	}
+	r.Body.Close()
+
+	// DELETE the listing.
+	agentID := string(setup.kp.AgentID())
+	req, err := http.NewRequest(http.MethodDelete, setup.ts.URL+"/v1/registry/"+agentID, nil)
+	if err != nil {
+		t.Fatalf("build DELETE request: %v", err)
+	}
+	delResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE request: %v", err)
+	}
+	if delResp.StatusCode != http.StatusOK {
+		var e map[string]string
+		decodeJSON(t, delResp, &e)
+		t.Fatalf("want 200, got %d: %v", delResp.StatusCode, e)
+	}
+
+	var result map[string]any
+	decodeJSON(t, delResp, &result)
+	if result["active"] != false {
+		t.Errorf("want active=false, got %v", result["active"])
+	}
+
+	// Search should no longer return the listing.
+	resp := get(t, setup.ts, "/v1/registry/search?category=writing")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("search: want 200, got %d", resp.StatusCode)
+	}
+	var results []map[string]any
+	decodeJSON(t, resp, &results)
+	for _, l := range results {
+		if l["name"] == "To Be Deleted" {
+			t.Error("deactivated listing still appears in search")
+		}
 	}
 }

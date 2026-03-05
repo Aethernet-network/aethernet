@@ -32,6 +32,7 @@ const (
 	prefixPending    = "ocs:"
 	prefixIdentity   = "idn:"
 	prefixStakeMeta  = "stk:"
+	prefixRegistry   = "reg:"
 )
 
 // Store is the durable persistence layer for a single AetherNet node.
@@ -428,6 +429,65 @@ func (s *Store) AllStakeMeta() (map[crypto.AgentID][2]int64, error) {
 			if err := item.Value(func(val []byte) error {
 				ss, la := parseStakeMetaValue(val)
 				result[crypto.AgentID(key)] = [2]int64{ss, la}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return result, err
+}
+
+// ---------------------------------------------------------------------------
+// Service registry listings (raw JSON blobs)
+// ---------------------------------------------------------------------------
+
+// PutListing stores a raw JSON-encoded ServiceListing under "reg:<agentID>".
+func (s *Store) PutListing(agentID string, data []byte) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(prefixRegistry+agentID), data)
+	})
+}
+
+// GetListing retrieves the raw JSON blob for the listing identified by agentID.
+// Returns an error wrapping badger.ErrKeyNotFound when absent.
+func (s *Store) GetListing(agentID string) ([]byte, error) {
+	var data []byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(prefixRegistry + agentID))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			data = make([]byte, len(val))
+			copy(data, val)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: get listing %s: %w", agentID, err)
+	}
+	return data, nil
+}
+
+// AllListings returns all stored listing blobs as a map from agentID to raw JSON.
+func (s *Store) AllListings() (map[string][]byte, error) {
+	result := make(map[string][]byte)
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(prefixRegistry)
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		prefixLen := len(prefixRegistry)
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := string(item.Key()[prefixLen:])
+			if err := item.Value(func(val []byte) error {
+				blob := make([]byte, len(val))
+				copy(blob, val)
+				result[key] = blob
 				return nil
 			}); err != nil {
 				return err
