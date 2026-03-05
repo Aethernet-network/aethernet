@@ -51,6 +51,7 @@ import (
 	"github.com/aethernet/core/internal/crypto"
 	"github.com/aethernet/core/internal/dag"
 	"github.com/aethernet/core/internal/event"
+	"github.com/aethernet/core/internal/eventbus"
 	"github.com/aethernet/core/internal/fees"
 	"github.com/aethernet/core/internal/genesis"
 	"github.com/aethernet/core/internal/identity"
@@ -85,6 +86,10 @@ type Server struct {
 
 	// Service registry — optional; set via SetServiceRegistry after construction.
 	svcRegistry *svcregistry.Registry
+
+	// Event bus — optional; set via SetEventBus after construction.
+	// When non-nil, handlers publish events for real-time WebSocket streaming.
+	eventBus *eventbus.Bus
 
 	// Onboarding tracking. Protected by onboardingMu.
 	onboardingMu        sync.Mutex
@@ -150,6 +155,9 @@ func NewServer(
 	mux.HandleFunc("DELETE /v1/registry/{agent_id}", s.handleDeleteRegistry)
 	mux.HandleFunc("GET /v1/registry/{agent_id}", s.handleGetRegistryListing)
 
+	// WebSocket endpoint for real-time event streaming.
+	mux.Handle("GET /v1/ws", s.wsHandler())
+
 	// Serve the web explorer from ./explorer (dev) or the Docker install path.
 	explorerDir := explorerPath()
 	if explorerDir != "" {
@@ -175,6 +183,13 @@ func (s *Server) SetEconomics(w *wallet.Wallet, sm *staking.StakeManager, fc *fe
 // Call before Start. When nil, the /v1/registry endpoints return 501.
 func (s *Server) SetServiceRegistry(r *svcregistry.Registry) {
 	s.svcRegistry = r
+}
+
+// SetEventBus wires the event bus into the server. Call before Start.
+// When non-nil, handlers publish typed events for real-time WebSocket streaming
+// at GET /v1/ws. When nil, the WebSocket endpoint closes immediately.
+func (s *Server) SetEventBus(b *eventbus.Bus) {
+	s.eventBus = b
 }
 
 // ServeHTTP implements http.Handler. This allows the Server to be mounted
@@ -518,6 +533,14 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, resp)
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(eventbus.Event{
+			Type:      eventbus.EventTypeNewAgent,
+			Timestamp: time.Now(),
+			Data:      map[string]any{"agent_id": string(fp.AgentID)},
+		})
+	}
 }
 
 // handleListAgents returns all registered agent fingerprints.
@@ -889,6 +912,14 @@ func (s *Server) handleStake(w http.ResponseWriter, r *http.Request) {
 		StakedAmount: staked,
 		TrustLimit:   staking.TrustLimitFull(staked, tasksCompleted, since, lastAct, now),
 	})
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(eventbus.Event{
+			Type:      eventbus.EventTypeStake,
+			Timestamp: time.Now(),
+			Data:      map[string]any{"agent_id": req.AgentID, "amount": req.Amount},
+		})
+	}
 }
 
 // handleRecentEvents returns the most recent N events from the DAG ordered by
@@ -1120,6 +1151,14 @@ func (s *Server) handlePostRegistry(w http.ResponseWriter, r *http.Request) {
 	s.svcRegistry.Register(listing)
 	got, _ := s.svcRegistry.Get(agentID)
 	writeJSON(w, http.StatusCreated, got)
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(eventbus.Event{
+			Type:      eventbus.EventTypeRegistration,
+			Timestamp: time.Now(),
+			Data:      map[string]any{"agent_id": string(agentID), "name": req.Name},
+		})
+	}
 }
 
 // handleSearchRegistry searches for active service listings.
@@ -1236,4 +1275,12 @@ func (s *Server) handleUnstake(w http.ResponseWriter, r *http.Request) {
 		TrustLimit:   staking.TrustLimitFull(staked, tasksCompleted, since, lastAct, now),
 		Success:      true,
 	})
+
+	if s.eventBus != nil {
+		s.eventBus.Publish(eventbus.Event{
+			Type:      eventbus.EventTypeUnstake,
+			Timestamp: time.Now(),
+			Data:      map[string]any{"agent_id": req.AgentID, "amount": req.Amount},
+		})
+	}
 }

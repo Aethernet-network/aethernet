@@ -34,6 +34,7 @@ import (
 	"github.com/aethernet/core/internal/api"
 	"github.com/aethernet/core/internal/crypto"
 	"github.com/aethernet/core/internal/dag"
+	"github.com/aethernet/core/internal/eventbus"
 	"github.com/aethernet/core/internal/genesis"
 	"github.com/aethernet/core/internal/identity"
 	"github.com/aethernet/core/internal/ledger"
@@ -196,6 +197,7 @@ type nodeStack struct {
 	kp          *crypto.KeyPair
 	apiSrv      *api.Server
 	svcRegistry *registry.Registry
+	bus         *eventbus.Bus
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
@@ -273,20 +275,29 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 }
 
 // printStatus writes a single-line status summary every tick.
-func printStatus(agentID crypto.AgentID, d *dag.DAG, n *network.Node, eng *ocs.Engine, sm *ledger.SupplyManager) {
+func printStatus(agentID crypto.AgentID, d *dag.DAG, n *network.Node, eng *ocs.Engine, sm *ledger.SupplyManager, bus *eventbus.Bus) {
 	ratio, _ := sm.SupplyRatio()
 	id := string(agentID)
 	if len(id) > 16 {
 		id = id[:16] + "..."
 	}
-	fmt.Printf("[%s]  peers=%-3d  dag=%-6d  ocs_pending=%-4d  supply=%.4fx\n",
-		id, n.PeerCount(), d.Size(), eng.PendingCount(), ratio)
+	wsSubs := 0
+	if bus != nil {
+		wsSubs = bus.SubscriberCount()
+	}
+	fmt.Printf("[%s]  peers=%-3d  dag=%-6d  ocs_pending=%-4d  supply=%.4fx  ws_subs=%-2d\n",
+		id, n.PeerCount(), d.Size(), eng.PendingCount(), ratio, wsSubs)
 }
 
 // startStack starts the OCS engine, network node, and HTTP API server.
 // p2pAddr and apiListenAddr override the defaults and may come from flags or
 // environment variables.
 func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr string) *network.Node {
+	// Create the event bus and wire it to the OCS engine before starting.
+	bus := eventbus.New()
+	stack.engine.SetEventBus(bus)
+	stack.bus = bus
+
 	if err := stack.engine.Start(); err != nil {
 		slog.Error("failed to start OCS engine", "err", err)
 		os.Exit(1)
@@ -310,6 +321,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	if stack.svcRegistry != nil {
 		apiSrv.SetServiceRegistry(stack.svcRegistry)
 	}
+	apiSrv.SetEventBus(bus)
 	if err := apiSrv.Start(); err != nil {
 		slog.Error("failed to start API server", "addr", apiListenAddr, "err", err)
 		node.Stop()
@@ -334,14 +346,14 @@ func stopStack(node *network.Node, stack *nodeStack) {
 }
 
 // runLoop prints status every 10 seconds and blocks until SIGINT or SIGTERM.
-func runLoop(agentID crypto.AgentID, d *dag.DAG, node *network.Node, eng *ocs.Engine, sm *ledger.SupplyManager) {
+func runLoop(agentID crypto.AgentID, d *dag.DAG, node *network.Node, eng *ocs.Engine, sm *ledger.SupplyManager, bus *eventbus.Bus) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
-	printStatus(agentID, d, node, eng, sm)
+	printStatus(agentID, d, node, eng, sm, bus)
 
 	for {
 		select {
@@ -350,7 +362,7 @@ func runLoop(agentID crypto.AgentID, d *dag.DAG, node *network.Node, eng *ocs.En
 			slog.Info("shutdown signal received")
 			return
 		case <-ticker.C:
-			printStatus(agentID, d, node, eng, sm)
+			printStatus(agentID, d, node, eng, sm, bus)
 		}
 	}
 }
@@ -441,7 +453,7 @@ func cmdStart() {
 		}
 	}
 
-	runLoop(agentID, stack.dag, node, stack.engine, stack.supply)
+	runLoop(agentID, stack.dag, node, stack.engine, stack.supply, stack.bus)
 	stopStack(node, stack)
 	slog.Info("node stopped cleanly")
 }
@@ -490,7 +502,7 @@ func cmdConnect() {
 	}
 	fmt.Printf("Connected  : %s  (%s)\n\n", peer.AgentID, *peerAddr)
 
-	runLoop(agentID, stack.dag, node, stack.engine, stack.supply)
+	runLoop(agentID, stack.dag, node, stack.engine, stack.supply, stack.bus)
 	stopStack(node, stack)
 	slog.Info("node stopped cleanly")
 }

@@ -34,6 +34,7 @@ import (
 
 	"github.com/aethernet/core/internal/crypto"
 	"github.com/aethernet/core/internal/event"
+	"github.com/aethernet/core/internal/eventbus"
 	"github.com/aethernet/core/internal/fees"
 	"github.com/aethernet/core/internal/identity"
 	"github.com/aethernet/core/internal/ledger"
@@ -206,6 +207,10 @@ type Engine struct {
 	stakeManager *staking.StakeManager
 	treasuryID   crypto.AgentID
 
+	// eventBus — optional. When non-nil, settlement events are published for
+	// real-time streaming. Nil-safe throughout ProcessResult.
+	eventBus *eventbus.Bus
+
 	pending   map[event.EventID]*PendingItem
 	processed map[event.EventID]struct{} // tracks already-settled events for idempotency
 	results   chan VerificationResult
@@ -232,6 +237,13 @@ func (e *Engine) SetEconomics(fc *fees.Collector, sm *staking.StakeManager, trea
 // s must satisfy ocsPersistence; *store.Store from the store package does so.
 func (e *Engine) SetStore(s ocsPersistence) {
 	e.store = s
+}
+
+// SetEventBus wires an event bus into the Engine. Call before Start.
+// When non-nil, ProcessResult publishes settlement, verification, and slash
+// events for real-time streaming. Nil-safe: all existing tests are unaffected.
+func (e *Engine) SetEventBus(b *eventbus.Bus) {
+	e.eventBus = b
 }
 
 // NewEngine constructs an Engine backed by the provided ledgers and identity registry.
@@ -477,9 +489,23 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 			if err := e.transfer.Settle(result.EventID, event.SettlementSettled); err != nil {
 				return fmt.Errorf("ocs: settle transfer %s: %w", result.EventID, err)
 			}
+			if e.eventBus != nil {
+				e.eventBus.Publish(eventbus.Event{
+					Type:      eventbus.EventTypeTransfer,
+					Timestamp: time.Now(),
+					Data:      map[string]any{"event_id": string(result.EventID), "agent_id": string(item.AgentID), "amount": item.Amount},
+				})
+			}
 		case event.EventTypeGeneration:
 			if err := e.generation.Verify(result.EventID, result.VerifiedValue); err != nil {
 				return fmt.Errorf("ocs: verify generation %s: %w", result.EventID, err)
+			}
+			if e.eventBus != nil {
+				e.eventBus.Publish(eventbus.Event{
+					Type:      eventbus.EventTypeGeneration,
+					Timestamp: time.Now(),
+					Data:      map[string]any{"event_id": string(result.EventID), "agent_id": string(item.AgentID), "amount": item.Amount, "verified_value": result.VerifiedValue},
+				})
 			}
 		}
 		// Collect settlement fee when economics are wired in.
@@ -516,9 +542,30 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 			if slashed > 0 && e.treasuryID != "" {
 				_ = e.transfer.FundAgent(e.treasuryID, slashed)
 			}
+			if slashed > 0 && e.eventBus != nil {
+				e.eventBus.Publish(eventbus.Event{
+					Type:      eventbus.EventTypeSlash,
+					Timestamp: time.Now(),
+					Data:      map[string]any{"agent_id": string(item.AgentID), "amount": slashed},
+				})
+			}
 		}
 		// RecordTaskFailure applies the 15% OptimisticTrustLimit reduction.
 		_ = e.identity.RecordTaskFailure(item.AgentID, domain)
+	}
+
+	// Publish a verification event for every settled verdict (positive or negative).
+	if e.eventBus != nil {
+		e.eventBus.Publish(eventbus.Event{
+			Type:      eventbus.EventTypeVerification,
+			Timestamp: time.Now(),
+			Data: map[string]any{
+				"event_id": string(result.EventID),
+				"agent_id": string(item.AgentID),
+				"amount":   item.Amount,
+				"verdict":  result.Verdict,
+			},
+		})
 	}
 
 	return nil
