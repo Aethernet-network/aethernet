@@ -457,3 +457,139 @@ func TestGetPending(t *testing.T) {
 		t.Errorf("want 1 pending item after generation, got %d", len(items2))
 	}
 }
+
+func TestGetRecentEvents(t *testing.T) {
+	setup := newTestSetup(t)
+
+	// Empty DAG — should return an empty array.
+	resp := get(t, setup.ts, "/v1/events/recent")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+	var items []map[string]any
+	decodeJSON(t, resp, &items)
+	if len(items) != 0 {
+		t.Errorf("want 0 events on empty DAG, got %d", len(items))
+	}
+
+	// Submit two generation events.
+	for i := 0; i < 2; i++ {
+		r := post(t, setup.ts, "/v1/generation", map[string]any{
+			"claimed_value": 1000,
+			"evidence_hash": "sha256:recent-test",
+			"stake_amount":  1000,
+		})
+		if r.StatusCode != http.StatusCreated {
+			t.Fatalf("generation %d: want 201, got %d", i, r.StatusCode)
+		}
+		r.Body.Close()
+	}
+
+	resp2 := get(t, setup.ts, "/v1/events/recent?limit=10")
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp2.StatusCode)
+	}
+	var items2 []map[string]any
+	decodeJSON(t, resp2, &items2)
+	if len(items2) != 2 {
+		t.Errorf("want 2 recent events, got %d", len(items2))
+	}
+	// Verify required fields are present.
+	for _, item := range items2 {
+		if item["id"] == nil {
+			t.Error("event missing id field")
+		}
+		if item["type"] == nil {
+			t.Error("event missing type field")
+		}
+	}
+}
+
+func TestGetLeaderboard(t *testing.T) {
+	setup := newTestSetup(t)
+
+	// Register the node's agent.
+	r := post(t, setup.ts, "/v1/agents", map[string]any{})
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("register: want 201, got %d", r.StatusCode)
+	}
+	r.Body.Close()
+
+	resp := get(t, setup.ts, "/v1/agents/leaderboard?sort=reputation&limit=10")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+	var entries []map[string]any
+	decodeJSON(t, resp, &entries)
+	if len(entries) != 1 {
+		t.Fatalf("want 1 leaderboard entry, got %d", len(entries))
+	}
+	if entries[0]["agent_id"] == nil {
+		t.Error("leaderboard entry missing agent_id")
+	}
+	if entries[0]["rank"] == nil {
+		t.Error("leaderboard entry missing rank")
+	}
+}
+
+func TestGetDagStats(t *testing.T) {
+	setup := newTestSetup(t)
+
+	resp := get(t, setup.ts, "/v1/dag/stats")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+	var stats map[string]any
+	decodeJSON(t, resp, &stats)
+	if stats["total_events"] == nil {
+		t.Error("dag stats missing total_events")
+	}
+	if stats["tips_count"] == nil {
+		t.Error("dag stats missing tips_count")
+	}
+
+	// Submit an event and verify the counts increase.
+	genResp := post(t, setup.ts, "/v1/generation", map[string]any{
+		"claimed_value": 1000,
+		"evidence_hash": "sha256:stats-test",
+		"stake_amount":  1000,
+	})
+	if genResp.StatusCode != http.StatusCreated {
+		t.Fatalf("generation: want 201, got %d", genResp.StatusCode)
+	}
+	genResp.Body.Close()
+
+	resp2 := get(t, setup.ts, "/v1/dag/stats")
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("want 200 after event, got %d", resp2.StatusCode)
+	}
+	var stats2 map[string]any
+	decodeJSON(t, resp2, &stats2)
+	if int(stats2["total_events"].(float64)) != 1 {
+		t.Errorf("want total_events=1, got %v", stats2["total_events"])
+	}
+}
+
+func TestGetNetworkActivity(t *testing.T) {
+	setup := newTestSetup(t)
+
+	resp := get(t, setup.ts, "/v1/network/activity?hours=24")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+	var result map[string]any
+	decodeJSON(t, resp, &result)
+	if result["hours"] == nil {
+		t.Error("network activity missing hours field")
+	}
+	if result["buckets"] == nil {
+		t.Error("network activity missing buckets field")
+	}
+	buckets, ok := result["buckets"].([]any)
+	if !ok {
+		t.Fatal("buckets is not an array")
+	}
+	if len(buckets) != 24 {
+		t.Errorf("want 24 buckets, got %d", len(buckets))
+	}
+}

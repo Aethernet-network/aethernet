@@ -11,6 +11,7 @@ RUN CGO_ENABLED=0 go build -o /aethernet ./cmd/node
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /aethernet /usr/local/bin/aethernet
+COPY explorer/ /usr/local/share/aethernet/explorer/
 EXPOSE 8337 8338
 VOLUME /data
 ENV AETHERNET_DATA=/data

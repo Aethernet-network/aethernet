@@ -11,23 +11,27 @@
 //
 // Endpoints:
 //
-//	POST /v1/agents                   register the node's own agent
-//	GET  /v1/agents                   list all known agents
-//	GET  /v1/agents/{agent_id}         get an agent's capability fingerprint
-//	GET  /v1/agents/{agent_id}/balance  get an agent's spendable balance
-//	GET  /v1/agents/{agent_id}/address  get an agent's deposit address
-//	GET  /v1/agents/{agent_id}/stake    get an agent's staking info
-//	POST /v1/transfer                  submit a Transfer event
-//	POST /v1/generation                submit a Generation event
-//	POST /v1/verify                    submit a verification verdict for a pending event
-//	GET  /v1/pending                   list all pending OCS items
-//	GET  /v1/events/{event_id}         get a DAG event by ID
-//	GET  /v1/dag/tips                  list current DAG tip event IDs
-//	GET  /v1/status                    node health snapshot
-//	GET  /v1/economics                 network economics overview
-//	GET  /v1/address/{address}         resolve a deposit address to an agent ID
-//	POST /v1/stake                     stake tokens for an agent
-//	POST /v1/unstake                   unstake tokens for an agent
+//	POST /v1/agents                      register the node's own agent
+//	GET  /v1/agents                      list all known agents
+//	GET  /v1/agents/{agent_id}            get an agent's capability fingerprint
+//	GET  /v1/agents/{agent_id}/balance    get an agent's spendable balance
+//	GET  /v1/agents/{agent_id}/address    get an agent's deposit address
+//	GET  /v1/agents/{agent_id}/stake      get an agent's staking info
+//	POST /v1/transfer                     submit a Transfer event
+//	POST /v1/generation                   submit a Generation event
+//	POST /v1/verify                       submit a verification verdict for a pending event
+//	GET  /v1/pending                      list all pending OCS items
+//	GET  /v1/events/{event_id}            get a DAG event by ID
+//	GET  /v1/events/recent?limit=N        most recent N events ordered by timestamp desc
+//	GET  /v1/dag/tips                     list current DAG tip event IDs
+//	GET  /v1/dag/stats                    DAG statistics for visualization
+//	GET  /v1/status                       node health snapshot
+//	GET  /v1/economics                    network economics overview
+//	GET  /v1/address/{address}            resolve a deposit address to an agent ID
+//	POST /v1/stake                        stake tokens for an agent
+//	POST /v1/unstake                      unstake tokens for an agent
+//	GET  /v1/agents/leaderboard?sort=S    top agents sorted by reputation/balance/tasks
+//	GET  /v1/network/activity?hours=N     hourly transaction volume for last N hours
 package api
 
 import (
@@ -38,7 +42,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -114,6 +120,7 @@ func NewServer(
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/agents", s.handleRegisterAgent)
+	mux.HandleFunc("GET /v1/agents/leaderboard", s.handleLeaderboard)
 	mux.HandleFunc("GET /v1/agents", s.handleListAgents)
 	mux.HandleFunc("GET /v1/agents/{agent_id}/balance", s.handleGetBalance)
 	mux.HandleFunc("GET /v1/agents/{agent_id}/address", s.handleGetAgentAddress)
@@ -123,13 +130,23 @@ func NewServer(
 	mux.HandleFunc("POST /v1/generation", s.handleGeneration)
 	mux.HandleFunc("POST /v1/verify", s.handleVerify)
 	mux.HandleFunc("GET /v1/pending", s.handlePending)
+	mux.HandleFunc("GET /v1/events/recent", s.handleRecentEvents)
 	mux.HandleFunc("GET /v1/events/{event_id}", s.handleGetEvent)
 	mux.HandleFunc("GET /v1/dag/tips", s.handleDAGTips)
+	mux.HandleFunc("GET /v1/dag/stats", s.handleDAGStats)
 	mux.HandleFunc("GET /v1/status", s.handleStatus)
 	mux.HandleFunc("GET /v1/economics", s.handleEconomics)
 	mux.HandleFunc("GET /v1/address/{address}", s.handleResolveAddress)
 	mux.HandleFunc("POST /v1/stake", s.handleStake)
 	mux.HandleFunc("POST /v1/unstake", s.handleUnstake)
+	mux.HandleFunc("GET /v1/network/activity", s.handleNetworkActivity)
+
+	// Serve the web explorer from ./explorer (dev) or the Docker install path.
+	explorerDir := explorerPath()
+	if explorerDir != "" {
+		mux.Handle("GET /explorer/", http.StripPrefix("/explorer/", http.FileServer(http.Dir(explorerDir))))
+	}
+
 	s.mux = mux
 	s.srv = &http.Server{Addr: listenAddr, Handler: mux}
 
@@ -276,6 +293,43 @@ type resolveAddressResponse struct {
 	AgentID string `json:"agent_id"`
 }
 
+type recentEventItem struct {
+	ID              string `json:"id"`
+	Type            string `json:"type"`
+	AgentID         string `json:"agent_id"`
+	CausalTimestamp uint64 `json:"causal_timestamp"`
+	StakeAmount     uint64 `json:"stake_amount"`
+	SettlementState string `json:"settlement_state"`
+}
+
+type dagStatsResponse struct {
+	TotalEvents  int            `json:"total_events"`
+	EventsByType map[string]int `json:"events_by_type"`
+	TipsCount    int            `json:"tips_count"`
+	MaxDepth     uint64         `json:"max_depth"`
+}
+
+type leaderboardEntry struct {
+	Rank            int    `json:"rank"`
+	AgentID         string `json:"agent_id"`
+	ReputationScore uint64 `json:"reputation_score"`
+	TasksCompleted  uint64 `json:"tasks_completed"`
+	Balance         uint64 `json:"balance"`
+	TrustLimit      uint64 `json:"trust_limit"`
+	StakedAmount    uint64 `json:"staked_amount"`
+}
+
+type activityBucket struct {
+	Hour   string `json:"hour"`
+	Volume uint64 `json:"volume"`
+	Count  int    `json:"count"`
+}
+
+type networkActivityResponse struct {
+	Hours   int              `json:"hours"`
+	Buckets []activityBucket `json:"buckets"`
+}
+
 type stakeRequest struct {
 	AgentID string `json:"agent_id"`
 	Amount  uint64 `json:"amount"`
@@ -297,6 +351,19 @@ type unstakeOpResponse struct {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// explorerPath returns the directory to serve the web explorer from, or ""
+// if no explorer directory is found. It checks two locations in order:
+//  1. ./explorer  — the development / source-tree path
+//  2. /usr/local/share/aethernet/explorer — the Docker install path
+func explorerPath() string {
+	for _, p := range []string{"./explorer", "/usr/local/share/aethernet/explorer"} {
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -790,6 +857,195 @@ func (s *Server) handleStake(w http.ResponseWriter, r *http.Request) {
 		AgentID:      req.AgentID,
 		StakedAmount: staked,
 		TrustLimit:   staking.TrustLimitFull(staked, tasksCompleted, since, lastAct, now),
+	})
+}
+
+// handleRecentEvents returns the most recent N events from the DAG ordered by
+// CausalTimestamp descending. The limit query parameter controls how many are
+// returned (default 50, max 200).
+func (s *Server) handleRecentEvents(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	all := s.dag.All()
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].CausalTimestamp != all[j].CausalTimestamp {
+			return all[i].CausalTimestamp > all[j].CausalTimestamp
+		}
+		return all[i].ID > all[j].ID
+	})
+	if len(all) > limit {
+		all = all[:limit]
+	}
+
+	items := make([]recentEventItem, len(all))
+	for i, e := range all {
+		items[i] = recentEventItem{
+			ID:              string(e.ID),
+			Type:            string(e.Type),
+			AgentID:         e.AgentID,
+			CausalTimestamp: e.CausalTimestamp,
+			StakeAmount:     e.StakeAmount,
+			SettlementState: string(e.SettlementState),
+		}
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+// handleDAGStats returns aggregate statistics about the local DAG useful for
+// the explorer visualization.
+func (s *Server) handleDAGStats(w http.ResponseWriter, r *http.Request) {
+	all := s.dag.All()
+	byType := make(map[string]int)
+	var maxDepth uint64
+	for _, e := range all {
+		byType[string(e.Type)]++
+		if e.CausalTimestamp > maxDepth {
+			maxDepth = e.CausalTimestamp
+		}
+	}
+	writeJSON(w, http.StatusOK, dagStatsResponse{
+		TotalEvents:  len(all),
+		EventsByType: byType,
+		TipsCount:    len(s.dag.Tips()),
+		MaxDepth:     maxDepth,
+	})
+}
+
+// handleLeaderboard returns the top N agents sorted by a given field.
+// The sort query parameter accepts "reputation" (default), "balance", or "tasks".
+// The limit query parameter controls how many agents are returned (default 20, max 100).
+func (s *Server) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
+	sortBy := r.URL.Query().Get("sort")
+	if sortBy == "" {
+		sortBy = "reputation"
+	}
+	limit := 20
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	agents := s.registry.All(0, 0)
+
+	// Fetch balances and stake info for each agent.
+	entries := make([]leaderboardEntry, 0, len(agents))
+	now := time.Now().Unix()
+	for _, fp := range agents {
+		bal, _ := s.transfer.Balance(fp.AgentID)
+		var staked uint64
+		var trustLimit uint64
+		if s.stakeManager != nil {
+			staked = s.stakeManager.StakedAmount(fp.AgentID)
+			since := s.stakeManager.StakedSince(fp.AgentID)
+			lastAct := s.stakeManager.LastActivity(fp.AgentID)
+			trustLimit = staking.TrustLimitFull(staked, fp.TasksCompleted, since, lastAct, now)
+		}
+		entries = append(entries, leaderboardEntry{
+			AgentID:         string(fp.AgentID),
+			ReputationScore: fp.ReputationScore,
+			TasksCompleted:  fp.TasksCompleted,
+			Balance:         bal,
+			TrustLimit:      trustLimit,
+			StakedAmount:    staked,
+		})
+	}
+
+	switch sortBy {
+	case "balance":
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Balance > entries[j].Balance })
+	case "tasks":
+		sort.Slice(entries, func(i, j int) bool { return entries[i].TasksCompleted > entries[j].TasksCompleted })
+	default: // "reputation"
+		sort.Slice(entries, func(i, j int) bool { return entries[i].ReputationScore > entries[j].ReputationScore })
+	}
+
+	if len(entries) > limit {
+		entries = entries[:limit]
+	}
+	for i := range entries {
+		entries[i].Rank = i + 1
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+// handleNetworkActivity returns hourly transaction volume buckets for the last
+// N hours. The hours query parameter controls the window (default 24, max 168).
+// Since events carry Lamport timestamps rather than wall-clock times, we bucket
+// by event submission epoch: events are partitioned into equal Lamport-clock
+// ranges mapped to wall-clock hours relative to now.
+func (s *Server) handleNetworkActivity(w http.ResponseWriter, r *http.Request) {
+	hours := 24
+	if v := r.URL.Query().Get("hours"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			hours = n
+		}
+	}
+	if hours > 168 {
+		hours = 168
+	}
+
+	// Build buckets keyed by hour offset from now (0 = current hour).
+	type bucket struct {
+		volume uint64
+		count  int
+	}
+	buckets := make([]bucket, hours)
+
+	all := s.dag.All()
+	if len(all) > 0 {
+		// Find the max Lamport timestamp — maps to the current hour (offset 0).
+		var maxTS uint64
+		for _, e := range all {
+			if e.CausalTimestamp > maxTS {
+				maxTS = e.CausalTimestamp
+			}
+		}
+
+		// Each Lamport unit maps to an approximate wall-clock slot.
+		// Treat each bucket as covering maxTS/hours Lamport ticks.
+		ticksPerHour := maxTS / uint64(hours)
+		if ticksPerHour == 0 {
+			ticksPerHour = 1
+		}
+
+		for _, e := range all {
+			// Offset from the newest event (higher Lamport = more recent).
+			age := maxTS - e.CausalTimestamp
+			idx := int(age / ticksPerHour)
+			if idx >= hours {
+				idx = hours - 1
+			}
+			buckets[idx].count++
+			// Add stake as a proxy for economic volume.
+			buckets[idx].volume += e.StakeAmount
+		}
+	}
+
+	now := time.Now().UTC().Truncate(time.Hour)
+	result := make([]activityBucket, hours)
+	for i := range result {
+		t := now.Add(-time.Duration(i) * time.Hour)
+		result[i] = activityBucket{
+			Hour:   t.Format(time.RFC3339),
+			Volume: buckets[i].volume,
+			Count:  buckets[i].count,
+		}
+	}
+	writeJSON(w, http.StatusOK, networkActivityResponse{
+		Hours:   hours,
+		Buckets: result,
 	})
 }
 
