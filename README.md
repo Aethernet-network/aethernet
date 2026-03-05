@@ -125,6 +125,7 @@ python sdk/python/examples/real_agent_demo.py
 git clone https://github.com/mschreiber89/aethernet.git
 cd aethernet
 go build -o bin/aethernet ./cmd/node/
+go build -o bin/aet ./cmd/aet/
 ```
 
 ### Initialize a node identity
@@ -156,6 +157,98 @@ API      : 0.0.0.0:8338
 
 [a3f9d2e1b7c4...]  peers=0    dag=0       ocs_pending=0     supply=1.0000x
 ```
+
+---
+
+## aet CLI Wallet
+
+`aet` is a lightweight command-line wallet for interacting with a running AetherNet node. Think `solana-cli` or Ethereum's `cast`.
+
+### Install
+
+```bash
+go build -o bin/aet ./cmd/aet/
+# Or build both binaries at once:
+go build -o bin/aethernet ./cmd/node/ && go build -o bin/aet ./cmd/aet/
+```
+
+In Docker, `aet` is pre-installed at `/usr/local/bin/aet`.
+
+### Usage
+
+```
+aet <command> [options]
+
+Commands:
+  status      Show node status and network economics
+  balance     Check an agent's spendable balance
+  transfer    Send AET to another agent
+  stake       Stake AET tokens
+  unstake     Unstake AET tokens
+  info        Show agent profile and trust info
+  register    Register a new agent on the node
+  pending     List pending OCS verifications
+  verify      Submit a verification verdict
+  economics   Show detailed network economics
+  agents      List registered agents
+  search      Search the service registry
+  history     Show recent DAG events
+
+Global flags:
+  --node URL    Node API URL (default: http://localhost:8338)
+  --agent ID    Agent ID for commands that require one
+  --json        Output raw JSON instead of formatted text
+
+Environment variables:
+  AETHERNET_NODE    Overrides --node default
+  AETHERNET_AGENT   Overrides --agent default
+```
+
+### Quick examples
+
+```bash
+# Check node health
+aet status
+
+# Check balance
+aet balance --agent <agent-id>
+
+# Send tokens
+aet transfer --to <recipient-id> --amount 5000 --memo "payment for work"
+
+# Stake tokens to increase trust limit
+aet stake --agent <agent-id> --amount 50000
+
+# View detailed agent profile
+aet info --agent <agent-id>
+
+# Register this node's agent
+aet register
+
+# List pending verifications
+aet pending
+
+# Submit a verification verdict
+aet verify --event <event-id> --verdict approve --value 10000
+
+# Search service registry
+aet search --query "inference" --category "AI"
+
+# View recent events
+aet history --limit 50
+
+# Machine-readable JSON output (pipe to jq)
+aet status --json | jq .
+aet balance --agent <agent-id> --json | jq .balance
+
+# Point at a remote node
+aet --node http://mainnet.example.com:8338 status
+export AETHERNET_NODE=http://mynode:8338
+export AETHERNET_AGENT=myagentid
+aet balance
+```
+
+---
 
 ### Interact with the node (curl)
 
@@ -341,8 +434,11 @@ All endpoints are under `http://HOST:8338/v1`. Request and response bodies are J
 ```
 aethernet/
 ├── cmd/
-│   └── node/
-│       └── main.go          # Node binary: init, start, connect, status
+│   ├── node/
+│   │   └── main.go          # Node binary: init, start, connect, status
+│   └── aet/
+│       ├── main.go          # CLI wallet: 13 subcommands for token management
+│       └── format.go        # Terminal formatting helpers
 ├── internal/
 │   ├── api/
 │   │   ├── server.go        # HTTP REST API server
@@ -411,10 +507,11 @@ go test ./internal/consensus/... -v -race
 go test ./internal/integration/... -v -race
 ```
 
-### Build the binary
+### Build the binaries
 
 ```bash
 go build -o bin/aethernet ./cmd/node/
+go build -o bin/aet ./cmd/aet/
 ```
 
 ### Test count by package
