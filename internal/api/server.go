@@ -58,6 +58,7 @@ import (
 	"github.com/aethernet/core/internal/ledger"
 	"github.com/aethernet/core/internal/network"
 	"github.com/aethernet/core/internal/ocs"
+	"github.com/aethernet/core/internal/ratelimit"
 	svcregistry "github.com/aethernet/core/internal/registry"
 	"github.com/aethernet/core/internal/staking"
 	"github.com/aethernet/core/internal/wallet"
@@ -90,6 +91,11 @@ type Server struct {
 	// Event bus — optional; set via SetEventBus after construction.
 	// When non-nil, handlers publish events for real-time WebSocket streaming.
 	eventBus *eventbus.Bus
+
+	// Rate limiters — optional; set via SetRateLimiters after construction.
+	// When nil, no rate limiting is applied (safe for tests).
+	writeLimiter *ratelimit.Limiter // POST/DELETE/PUT/PATCH endpoints
+	readLimiter  *ratelimit.Limiter // GET endpoints
 
 	// Onboarding tracking. Protected by onboardingMu.
 	onboardingMu        sync.Mutex
@@ -165,7 +171,7 @@ func NewServer(
 	}
 
 	s.mux = mux
-	s.srv = &http.Server{Addr: listenAddr, Handler: mux}
+	s.srv = &http.Server{Addr: listenAddr, Handler: s}
 
 	return s
 }
@@ -192,9 +198,38 @@ func (s *Server) SetEventBus(b *eventbus.Bus) {
 	s.eventBus = b
 }
 
-// ServeHTTP implements http.Handler. This allows the Server to be mounted
-// directly in httptest.NewServer for tests without binding a real TCP port.
+// SetRateLimiters wires per-IP rate limiters into the server. Call before Start.
+// writeLimiter is applied to POST/DELETE/PUT/PATCH requests; readLimiter to GET
+// requests. Either may be nil to disable rate limiting for that class. When not
+// called (e.g. in tests), both limiters are nil and no rate limiting is applied.
+func (s *Server) SetRateLimiters(writeLimiter, readLimiter *ratelimit.Limiter) {
+	s.writeLimiter = writeLimiter
+	s.readLimiter = readLimiter
+}
+
+// ServeHTTP implements http.Handler. Applies per-IP rate limiting (when
+// configured) before dispatching to the route mux. Tests that construct the
+// Server via httptest.NewServer(s) pass through here without rate limiting
+// because SetRateLimiters is not called in tests.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost, http.MethodDelete, http.MethodPut, http.MethodPatch:
+		if s.writeLimiter != nil && !s.writeLimiter.Allow(ratelimit.ExtractIP(r)) {
+			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate limit exceeded"}`))
+			return
+		}
+	default:
+		if s.readLimiter != nil && !s.readLimiter.Allow(ratelimit.ExtractIP(r)) {
+			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate limit exceeded"}`))
+			return
+		}
+	}
 	s.mux.ServeHTTP(w, r)
 }
 
@@ -468,8 +503,14 @@ func (s *Server) submitAndAdd(e *event.Event) error {
 //   - Grants an onboarding allocation from the ecosystem pool (declining curve)
 //   - Auto-stakes the onboarding allocation
 func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req registerAgentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
@@ -580,8 +621,14 @@ func (s *Server) handleGetBalance(w http.ResponseWriter, r *http.Request) {
 // When staking is wired in, the transfer amount must not exceed the sender's
 // computed trust limit; excess is rejected with HTTP 403.
 func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req transferRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
@@ -639,8 +686,14 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
 // handleGeneration constructs, signs, and submits a Generation event.
 // The generating_agent is always the node's own keypair identity.
 func (s *Server) handleGeneration(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req generationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
@@ -718,8 +771,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // Returns 400 when the event is not in the pending map.
 // Returns 403 when the validator is a party to the transaction (self-dealing).
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req verifyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
@@ -881,8 +940,14 @@ func (s *Server) handleStake(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "staking not enabled")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req stakeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
@@ -1118,8 +1183,14 @@ func (s *Server) handlePostRegistry(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "service registry not enabled")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req registryListingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
@@ -1239,8 +1310,14 @@ func (s *Server) handleUnstake(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "staking not enabled")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req stakeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}

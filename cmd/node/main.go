@@ -40,6 +40,7 @@ import (
 	"github.com/aethernet/core/internal/ledger"
 	"github.com/aethernet/core/internal/network"
 	"github.com/aethernet/core/internal/ocs"
+	"github.com/aethernet/core/internal/ratelimit"
 	"github.com/aethernet/core/internal/registry"
 	"github.com/aethernet/core/internal/store"
 )
@@ -322,6 +323,10 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		apiSrv.SetServiceRegistry(stack.svcRegistry)
 	}
 	apiSrv.SetEventBus(bus)
+	apiSrv.SetRateLimiters(
+		ratelimit.New(ratelimit.DefaultConfig()),
+		ratelimit.New(ratelimit.ReadOnlyConfig()),
+	)
 	if err := apiSrv.Start(); err != nil {
 		slog.Error("failed to start API server", "addr", apiListenAddr, "err", err)
 		node.Stop()
