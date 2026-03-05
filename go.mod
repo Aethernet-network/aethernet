@@ -1,4 +1,4 @@
-module github.com/aethernet/core
+module github.com/Aethernet-network/aethernet
 
 go 1.25.0
 

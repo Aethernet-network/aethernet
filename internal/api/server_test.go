@@ -7,13 +7,13 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/aethernet/core/internal/api"
-	"github.com/aethernet/core/internal/crypto"
-	"github.com/aethernet/core/internal/dag"
-	"github.com/aethernet/core/internal/identity"
-	"github.com/aethernet/core/internal/ledger"
-	"github.com/aethernet/core/internal/ocs"
-	"github.com/aethernet/core/internal/registry"
+	"github.com/Aethernet-network/aethernet/internal/api"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/dag"
+	"github.com/Aethernet-network/aethernet/internal/identity"
+	"github.com/Aethernet-network/aethernet/internal/ledger"
+	"github.com/Aethernet-network/aethernet/internal/ocs"
+	"github.com/Aethernet-network/aethernet/internal/registry"
 )
 
 // testSetup holds the components for a test API server.

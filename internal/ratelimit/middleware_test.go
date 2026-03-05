@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aethernet/core/internal/ratelimit"
+	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 )
 
 // okHandler is a trivial handler that always returns 200 OK.

@@ -3,7 +3,7 @@ package genesis_test
 import (
 	"testing"
 
-	"github.com/aethernet/core/internal/genesis"
+	"github.com/Aethernet-network/aethernet/internal/genesis"
 )
 
 // TestAllocationsSum verifies that all genesis bucket allocations sum to TotalSupply.

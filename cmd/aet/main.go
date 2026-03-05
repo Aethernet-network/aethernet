@@ -42,7 +42,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aethernet/core/pkg/sdk"
+	"github.com/Aethernet-network/aethernet/pkg/sdk"
 )
 
 const cliVersion = "0.1.0-testnet"

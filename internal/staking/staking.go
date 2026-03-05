@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aethernet/core/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
 )
 
 // Decay constants.

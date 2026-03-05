@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aethernet/core/internal/crypto"
-	"github.com/aethernet/core/internal/event"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/event"
 )
 
 // transferPersistence is the subset of store.Store used by TransferLedger.

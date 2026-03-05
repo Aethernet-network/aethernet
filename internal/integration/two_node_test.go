@@ -15,14 +15,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aethernet/core/internal/api"
-	"github.com/aethernet/core/internal/crypto"
-	"github.com/aethernet/core/internal/dag"
-	"github.com/aethernet/core/internal/event"
-	"github.com/aethernet/core/internal/identity"
-	"github.com/aethernet/core/internal/ledger"
-	"github.com/aethernet/core/internal/network"
-	"github.com/aethernet/core/internal/ocs"
+	"github.com/Aethernet-network/aethernet/internal/api"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/dag"
+	"github.com/Aethernet-network/aethernet/internal/event"
+	"github.com/Aethernet-network/aethernet/internal/identity"
+	"github.com/Aethernet-network/aethernet/internal/ledger"
+	"github.com/Aethernet-network/aethernet/internal/network"
+	"github.com/Aethernet-network/aethernet/internal/ocs"
 )
 
 // nodeStack bundles a complete in-memory node for use in integration tests.

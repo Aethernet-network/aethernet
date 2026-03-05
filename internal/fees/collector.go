@@ -12,8 +12,8 @@ package fees
 import (
 	"sync"
 
-	"github.com/aethernet/core/internal/crypto"
-	"github.com/aethernet/core/internal/ledger"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/ledger"
 )
 
 const (

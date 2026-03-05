@@ -22,8 +22,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aethernet/core/internal/crypto"
-	"github.com/aethernet/core/internal/event"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/event"
 )
 
 // sendBufSize is the capacity of each Peer's outbound message channel.

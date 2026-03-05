@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aethernet/core/internal/crypto"
-	"github.com/aethernet/core/internal/dag"
-	"github.com/aethernet/core/internal/event"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/dag"
+	"github.com/Aethernet-network/aethernet/internal/event"
 )
 
 // Sentinel errors for programmatic handling by callers.

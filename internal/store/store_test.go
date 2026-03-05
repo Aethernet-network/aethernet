@@ -5,12 +5,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aethernet/core/internal/crypto"
-	"github.com/aethernet/core/internal/event"
-	"github.com/aethernet/core/internal/identity"
-	"github.com/aethernet/core/internal/ledger"
-	"github.com/aethernet/core/internal/ocs"
-	"github.com/aethernet/core/internal/store"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/event"
+	"github.com/Aethernet-network/aethernet/internal/identity"
+	"github.com/Aethernet-network/aethernet/internal/ledger"
+	"github.com/Aethernet-network/aethernet/internal/ocs"
+	"github.com/Aethernet-network/aethernet/internal/store"
 )
 
 // openStore creates a Store backed by a fresh temp directory and registers

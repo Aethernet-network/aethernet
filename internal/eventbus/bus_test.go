@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aethernet/core/internal/eventbus"
+	"github.com/Aethernet-network/aethernet/internal/eventbus"
 )
 
 func TestPublishSubscribe(t *testing.T) {

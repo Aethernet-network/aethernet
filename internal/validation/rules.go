@@ -10,7 +10,7 @@
 // attacks proportionally more expensive.
 package validation
 
-import "github.com/aethernet/core/internal/crypto"
+import "github.com/Aethernet-network/aethernet/internal/crypto"
 
 // MinValidators is the minimum number of independent validators required to
 // settle a transaction. Testnet value; increase to 3 for mainnet.

@@ -3,8 +3,8 @@ package registry_test
 import (
 	"testing"
 
-	"github.com/aethernet/core/internal/crypto"
-	"github.com/aethernet/core/internal/registry"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/registry"
 )
 
 // makeID generates a fresh AgentID backed by a real Ed25519 keypair.

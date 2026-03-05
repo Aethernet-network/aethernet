@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/aethernet/core/internal/event"
+	"github.com/Aethernet-network/aethernet/internal/event"
 )
 
 // signable defines the fields of an event that are covered by the signature.

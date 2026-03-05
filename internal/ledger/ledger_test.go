@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aethernet/core/internal/crypto"
-	"github.com/aethernet/core/internal/event"
-	"github.com/aethernet/core/internal/ledger"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/event"
+	"github.com/Aethernet-network/aethernet/internal/ledger"
 )
 
 // ---------------------------------------------------------------------------

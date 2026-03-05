@@ -11,7 +11,7 @@ import (
 	"encoding/hex"
 	"sync"
 
-	"github.com/aethernet/core/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
 )
 
 // Address is a human-readable deposit address for an AetherNet agent.

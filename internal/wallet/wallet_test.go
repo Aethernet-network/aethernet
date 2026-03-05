@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aethernet/core/internal/crypto"
-	"github.com/aethernet/core/internal/wallet"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/wallet"
 )
 
 // TestDeriveAddress_Deterministic verifies that the same public key always

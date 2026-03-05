@@ -13,13 +13,13 @@ import (
 	"log"
 	"net/http/httptest"
 
-	"github.com/aethernet/core/internal/api"
-	"github.com/aethernet/core/internal/crypto"
-	"github.com/aethernet/core/internal/dag"
-	"github.com/aethernet/core/internal/identity"
-	"github.com/aethernet/core/internal/ledger"
-	"github.com/aethernet/core/internal/ocs"
-	"github.com/aethernet/core/pkg/sdk"
+	"github.com/Aethernet-network/aethernet/internal/api"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/dag"
+	"github.com/Aethernet-network/aethernet/internal/identity"
+	"github.com/Aethernet-network/aethernet/internal/ledger"
+	"github.com/Aethernet-network/aethernet/internal/ocs"
+	"github.com/Aethernet-network/aethernet/pkg/sdk"
 )
 
 func main() {

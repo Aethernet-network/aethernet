@@ -3,9 +3,9 @@ package fees_test
 import (
 	"testing"
 
-	"github.com/aethernet/core/internal/crypto"
-	"github.com/aethernet/core/internal/fees"
-	"github.com/aethernet/core/internal/ledger"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/fees"
+	"github.com/Aethernet-network/aethernet/internal/ledger"
 )
 
 // TestCalculateFee verifies the 10 bps fee calculation at representative amounts.

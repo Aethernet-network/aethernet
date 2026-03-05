@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aethernet/core/internal/ratelimit"
+	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 )
 
 // TestAllow_UnderLimit verifies that requests within the burst limit are all

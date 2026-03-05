@@ -3,8 +3,8 @@ package validation_test
 import (
 	"testing"
 
-	"github.com/aethernet/core/internal/crypto"
-	"github.com/aethernet/core/internal/validation"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/validation"
 )
 
 // ---------------------------------------------------------------------------

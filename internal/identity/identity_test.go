@@ -7,8 +7,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/aethernet/core/internal/crypto"
-	"github.com/aethernet/core/internal/identity"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/identity"
 )
 
 // ---------------------------------------------------------------------------

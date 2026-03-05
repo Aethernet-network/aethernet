@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aethernet/core/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
 )
 
 // registryStore is the subset of store.Store used for persistence.

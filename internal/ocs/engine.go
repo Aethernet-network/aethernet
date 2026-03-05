@@ -32,15 +32,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aethernet/core/internal/crypto"
-	"github.com/aethernet/core/internal/event"
-	"github.com/aethernet/core/internal/eventbus"
-	"github.com/aethernet/core/internal/fees"
-	"github.com/aethernet/core/internal/identity"
-	"github.com/aethernet/core/internal/ledger"
-	"github.com/aethernet/core/internal/metrics"
-	"github.com/aethernet/core/internal/staking"
-	"github.com/aethernet/core/internal/validation"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/event"
+	"github.com/Aethernet-network/aethernet/internal/eventbus"
+	"github.com/Aethernet-network/aethernet/internal/fees"
+	"github.com/Aethernet-network/aethernet/internal/identity"
+	"github.com/Aethernet-network/aethernet/internal/ledger"
+	"github.com/Aethernet-network/aethernet/internal/metrics"
+	"github.com/Aethernet-network/aethernet/internal/staking"
+	"github.com/Aethernet-network/aethernet/internal/validation"
 )
 
 // ocsPersistence is the subset of store.Store used by Engine.

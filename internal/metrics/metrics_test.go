@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aethernet/core/internal/metrics"
+	"github.com/Aethernet-network/aethernet/internal/metrics"
 )
 
 // TestCounter_IncAndAdd verifies that Inc and Add both accumulate correctly.

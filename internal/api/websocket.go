@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/aethernet/core/internal/eventbus"
+	"github.com/Aethernet-network/aethernet/internal/eventbus"
 	"golang.org/x/net/websocket"
 )
 

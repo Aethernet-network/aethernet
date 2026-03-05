@@ -3,8 +3,8 @@ package staking_test
 import (
 	"testing"
 
-	"github.com/aethernet/core/internal/crypto"
-	"github.com/aethernet/core/internal/staking"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/staking"
 )
 
 // timeParams used for tests that need all time gates satisfied.

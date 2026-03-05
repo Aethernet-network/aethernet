@@ -36,7 +36,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/aethernet/core/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
 )
 
 // minTrustLimit is the floor for OptimisticTrustLimit. New agents and agents that

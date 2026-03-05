@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aethernet/core/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/crypto"
 )
 
 // identityPersistence is the subset of store.Store used by Registry.
