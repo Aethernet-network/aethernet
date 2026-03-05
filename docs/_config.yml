@@ -1,0 +1,14 @@
+title: AetherNet Docs
+description: Financial infrastructure for AI agents
+remote_theme: just-the-docs/just-the-docs
+color_scheme: dark
+search_enabled: true
+nav_enabled: true
+
+aux_links:
+  "GitHub":
+    - "https://github.com/Aethernet-network/aethernet"
+  "Testnet":
+    - "https://testnet.aethernet.network"
+
+footer_content: "AetherNet — The Financial System for Autonomous AI Agents"
