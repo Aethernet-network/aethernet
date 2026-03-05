@@ -38,6 +38,7 @@ import (
 	"github.com/aethernet/core/internal/genesis"
 	"github.com/aethernet/core/internal/identity"
 	"github.com/aethernet/core/internal/ledger"
+	"github.com/aethernet/core/internal/metrics"
 	"github.com/aethernet/core/internal/network"
 	"github.com/aethernet/core/internal/ocs"
 	"github.com/aethernet/core/internal/ratelimit"
@@ -199,6 +200,9 @@ type nodeStack struct {
 	apiSrv      *api.Server
 	svcRegistry *registry.Registry
 	bus         *eventbus.Bus
+	metricsReg  *metrics.Registry
+	nodeMetrics *metrics.AetherNetMetrics
+	metricsStop chan struct{} // closed to terminate the gauge-update goroutine
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
@@ -294,6 +298,13 @@ func printStatus(agentID crypto.AgentID, d *dag.DAG, n *network.Node, eng *ocs.E
 // p2pAddr and apiListenAddr override the defaults and may come from flags or
 // environment variables.
 func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr string) *network.Node {
+	// Create the metrics registry and wire it to the OCS engine.
+	metricsReg := metrics.NewRegistry()
+	nodeMetrics := metrics.NewAetherNetMetrics(metricsReg)
+	stack.metricsReg = metricsReg
+	stack.nodeMetrics = nodeMetrics
+	stack.engine.SetMetrics(nodeMetrics)
+
 	// Create the event bus and wire it to the OCS engine before starting.
 	bus := eventbus.New()
 	stack.engine.SetEventBus(bus)
@@ -327,6 +338,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		ratelimit.New(ratelimit.DefaultConfig()),
 		ratelimit.New(ratelimit.ReadOnlyConfig()),
 	)
+	apiSrv.SetMetrics(metricsReg, nodeMetrics)
 	if err := apiSrv.Start(); err != nil {
 		slog.Error("failed to start API server", "addr", apiListenAddr, "err", err)
 		node.Stop()
@@ -334,12 +346,37 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		os.Exit(1)
 	}
 	stack.apiSrv = apiSrv
+
+	// Periodic gauge updater — refreshes DAG size, tip count, peer count, and
+	// uptime every 10 seconds. Stops when metricsStop is closed.
+	stop := make(chan struct{})
+	stack.metricsStop = stop
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		nodeStart := time.Now()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				nodeMetrics.DAGSize.Set(int64(stack.dag.Size()))
+				nodeMetrics.DAGTips.Set(int64(len(stack.dag.Tips())))
+				nodeMetrics.PeerCount.Set(int64(node.PeerCount()))
+				nodeMetrics.UptimeSeconds.Set(int64(time.Since(nodeStart).Seconds()))
+			}
+		}
+	}()
+
 	return node
 }
 
 // stopStack tears down the API server, network node, OCS engine, and persistence
 // store in safe reverse-startup order.
 func stopStack(node *network.Node, stack *nodeStack) {
+	if stack.metricsStop != nil {
+		close(stack.metricsStop)
+	}
 	if stack.apiSrv != nil {
 		stack.apiSrv.Stop()
 	}

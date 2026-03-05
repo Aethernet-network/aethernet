@@ -56,6 +56,7 @@ import (
 	"github.com/aethernet/core/internal/genesis"
 	"github.com/aethernet/core/internal/identity"
 	"github.com/aethernet/core/internal/ledger"
+	"github.com/aethernet/core/internal/metrics"
 	"github.com/aethernet/core/internal/network"
 	"github.com/aethernet/core/internal/ocs"
 	"github.com/aethernet/core/internal/ratelimit"
@@ -97,6 +98,13 @@ type Server struct {
 	writeLimiter *ratelimit.Limiter // POST/DELETE/PUT/PATCH endpoints
 	readLimiter  *ratelimit.Limiter // GET endpoints
 
+	// Metrics — optional; set via SetMetrics after construction.
+	// When nil, no metrics are recorded (safe for tests).
+	metricsReg  *metrics.Registry
+	nodeMetrics *metrics.AetherNetMetrics
+
+	startTime time.Time // used by /health for uptime reporting
+
 	// Onboarding tracking. Protected by onboardingMu.
 	onboardingMu        sync.Mutex
 	onboardingAllocated uint64
@@ -131,6 +139,7 @@ func NewServer(
 		kp:         kp,
 		agentID:    kp.AgentID(),
 		listenAddr: listenAddr,
+		startTime:  time.Now(),
 	}
 
 	mux := http.NewServeMux()
@@ -163,6 +172,10 @@ func NewServer(
 
 	// WebSocket endpoint for real-time event streaming.
 	mux.Handle("GET /v1/ws", s.wsHandler())
+
+	// Monitoring endpoints (no /v1 prefix — standard convention).
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
+	mux.HandleFunc("GET /health", s.handleHealth)
 
 	// Serve the web explorer from ./explorer (dev) or the Docker install path.
 	explorerDir := explorerPath()
@@ -207,6 +220,15 @@ func (s *Server) SetRateLimiters(writeLimiter, readLimiter *ratelimit.Limiter) {
 	s.readLimiter = readLimiter
 }
 
+// SetMetrics wires a metrics registry and metric set into the server.
+// Call before Start. When not called (e.g. in tests), metrics are nil and no
+// instrumentation is applied. The /metrics endpoint returns an empty response
+// when metricsReg is nil.
+func (s *Server) SetMetrics(reg *metrics.Registry, m *metrics.AetherNetMetrics) {
+	s.metricsReg = reg
+	s.nodeMetrics = m
+}
+
 // ServeHTTP implements http.Handler. Applies per-IP rate limiting (when
 // configured) before dispatching to the route mux. Tests that construct the
 // Server via httptest.NewServer(s) pass through here without rate limiting
@@ -215,6 +237,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost, http.MethodDelete, http.MethodPut, http.MethodPatch:
 		if s.writeLimiter != nil && !s.writeLimiter.Allow(ratelimit.ExtractIP(r)) {
+			if s.nodeMetrics != nil {
+				s.nodeMetrics.RateLimitRejects.Inc()
+			}
 			w.Header().Set("Retry-After", "1")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusTooManyRequests)
@@ -223,6 +248,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	default:
 		if s.readLimiter != nil && !s.readLimiter.Allow(ratelimit.ExtractIP(r)) {
+			if s.nodeMetrics != nil {
+				s.nodeMetrics.RateLimitRejects.Inc()
+			}
 			w.Header().Set("Retry-After", "1")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusTooManyRequests)
@@ -230,7 +258,32 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// Metrics middleware — wraps dispatch to capture latency and error counts.
+	if s.nodeMetrics != nil {
+		s.nodeMetrics.APIRequests.Inc()
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		start := time.Now()
+		s.mux.ServeHTTP(sw, r)
+		s.nodeMetrics.APILatency.Observe(float64(time.Since(start).Milliseconds()))
+		if sw.status >= 400 {
+			s.nodeMetrics.APIErrors.Inc()
+		}
+		return
+	}
 	s.mux.ServeHTTP(w, r)
+}
+
+// statusWriter wraps http.ResponseWriter to capture the HTTP status code written
+// by handlers, enabling post-request error counting in the metrics middleware.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	sw.status = code
+	sw.ResponseWriter.WriteHeader(code)
 }
 
 // Start binds the TCP listener and serves requests in a background goroutine.
@@ -437,6 +490,40 @@ type unstakeOpResponse struct {
 // if no explorer directory is found. It checks two locations in order:
 //  1. ./explorer  — the development / source-tree path
 //  2. /usr/local/share/aethernet/explorer — the Docker install path
+// handleMetrics serves Prometheus text exposition format on GET /metrics.
+// Returns an empty 200 response when no registry has been wired in (tests).
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	if s.metricsReg != nil {
+		_, _ = w.Write([]byte(s.metricsReg.Render()))
+	}
+}
+
+// handleHealth serves a simple health-check on GET /health.
+// Returns HTTP 200 with status "healthy" when the node is operational.
+// Returns HTTP 503 with status "degraded" when the node is wired to the
+// network but reports zero connected peers.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	peers := 0
+	if s.node != nil {
+		peers = s.node.PeerCount()
+	}
+
+	status := "healthy"
+	code := http.StatusOK
+	if s.node != nil && peers == 0 {
+		status = "degraded"
+		code = http.StatusServiceUnavailable
+	}
+
+	writeJSON(w, code, map[string]any{
+		"status":         status,
+		"uptime_seconds": int64(time.Since(s.startTime).Seconds()),
+		"dag_size":       s.dag.Size(),
+		"peers":          peers,
+	})
+}
+
 func explorerPath() string {
 	for _, p := range []string{"./explorer", "/usr/local/share/aethernet/explorer"} {
 		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
@@ -575,6 +662,9 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusCreated, resp)
 
+	if s.nodeMetrics != nil {
+		s.nodeMetrics.AgentsRegistered.Inc()
+	}
 	if s.eventBus != nil {
 		s.eventBus.Publish(eventbus.Event{
 			Type:      eventbus.EventTypeNewAgent,

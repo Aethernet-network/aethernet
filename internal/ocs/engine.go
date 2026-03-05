@@ -38,6 +38,7 @@ import (
 	"github.com/aethernet/core/internal/fees"
 	"github.com/aethernet/core/internal/identity"
 	"github.com/aethernet/core/internal/ledger"
+	"github.com/aethernet/core/internal/metrics"
 	"github.com/aethernet/core/internal/staking"
 	"github.com/aethernet/core/internal/validation"
 )
@@ -211,6 +212,10 @@ type Engine struct {
 	// real-time streaming. Nil-safe throughout ProcessResult.
 	eventBus *eventbus.Bus
 
+	// metrics — optional. When non-nil, settlement outcomes are counted.
+	// Nil-safe throughout Submit and ProcessResult.
+	nodeMetrics *metrics.AetherNetMetrics
+
 	pending   map[event.EventID]*PendingItem
 	processed map[event.EventID]struct{} // tracks already-settled events for idempotency
 	results   chan VerificationResult
@@ -244,6 +249,13 @@ func (e *Engine) SetStore(s ocsPersistence) {
 // events for real-time streaming. Nil-safe: all existing tests are unaffected.
 func (e *Engine) SetEventBus(b *eventbus.Bus) {
 	e.eventBus = b
+}
+
+// SetMetrics wires a metrics struct into the Engine. Call before Start.
+// When non-nil, Submit and ProcessResult update transaction counters.
+// Nil-safe: all existing tests are unaffected.
+func (e *Engine) SetMetrics(m *metrics.AetherNetMetrics) {
+	e.nodeMetrics = m
 }
 
 // NewEngine constructs an Engine backed by the provided ledgers and identity registry.
@@ -404,6 +416,9 @@ func (e *Engine) Submit(ev *event.Event) error {
 	if e.store != nil {
 		_ = e.store.PutPending(e.pending[ev.ID])
 	}
+	if e.nodeMetrics != nil {
+		e.nodeMetrics.TransactionsTotal.Inc()
+	}
 	return nil
 }
 
@@ -508,9 +523,18 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 				})
 			}
 		}
+		if e.nodeMetrics != nil {
+			e.nodeMetrics.TransactionsSettled.Inc()
+			e.nodeMetrics.TransactionVolume.Add(item.Amount)
+		}
 		// Collect settlement fee when economics are wired in.
 		if e.feeCollector != nil && item.Amount > 0 {
-			e.feeCollector.CollectFee(item.Amount, result.VerifierID, e.treasuryID)
+			fee, burned := e.feeCollector.CollectFee(item.Amount, result.VerifierID, e.treasuryID)
+			if e.nodeMetrics != nil && fee > 0 {
+				e.nodeMetrics.FeesCollected.Add(fee)
+				e.nodeMetrics.FeesBurned.Add(burned)
+				e.nodeMetrics.FeesToTreasury.Add(fee * fees.TreasuryShare / 100)
+			}
 		}
 		// Record activity for decay tracking.
 		if e.stakeManager != nil {
@@ -519,6 +543,9 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 		// Best-effort: agent may not be registered on this node.
 		_ = e.identity.RecordTaskCompletion(item.AgentID, result.VerifiedValue, domain)
 	} else {
+		if e.nodeMetrics != nil {
+			e.nodeMetrics.TransactionsReversed.Inc()
+		}
 		switch item.EventType {
 		case event.EventTypeTransfer:
 			if err := e.transfer.Settle(result.EventID, event.SettlementAdjusted); err != nil {
@@ -542,12 +569,17 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 			if slashed > 0 && e.treasuryID != "" {
 				_ = e.transfer.FundAgent(e.treasuryID, slashed)
 			}
-			if slashed > 0 && e.eventBus != nil {
-				e.eventBus.Publish(eventbus.Event{
-					Type:      eventbus.EventTypeSlash,
-					Timestamp: time.Now(),
-					Data:      map[string]any{"agent_id": string(item.AgentID), "amount": slashed},
-				})
+			if slashed > 0 {
+				if e.nodeMetrics != nil {
+					e.nodeMetrics.SlashEvents.Inc()
+				}
+				if e.eventBus != nil {
+					e.eventBus.Publish(eventbus.Event{
+						Type:      eventbus.EventTypeSlash,
+						Timestamp: time.Now(),
+						Data:      map[string]any{"agent_id": string(item.AgentID), "amount": slashed},
+					})
+				}
 			}
 		}
 		// RecordTaskFailure applies the 15% OptimisticTrustLimit reduction.
