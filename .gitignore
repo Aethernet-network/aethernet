@@ -1,5 +1,9 @@
 # Binaries
 bin/
+/node
+/aethernet
+/aet
+/marketplace
 *.exe
 *.exe~
 *.dll

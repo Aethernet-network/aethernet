@@ -1,0 +1,30 @@
+# Dockerfile.node — Pure protocol node image.
+#
+# Builds only the protocol binary (identity, credit, settlement, verification,
+# reputation, economics). No marketplace code is included. Third-party
+# application builders who want to deploy AetherNet as pure infrastructure
+# should use this image.
+#
+# For the combined single-binary deployment (protocol + marketplace), see
+# the root Dockerfile instead.
+
+# Build stage
+FROM golang:1.25-alpine AS builder
+RUN apk add --no-cache git
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /aethernet ./cmd/node
+RUN CGO_ENABLED=0 go build -o /aet ./cmd/aet
+
+# Run stage
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /aethernet /usr/local/bin/aethernet
+COPY --from=builder /aet /usr/local/bin/aet
+EXPOSE 8337 8338
+VOLUME /data
+ENV AETHERNET_DATA=/data
+ENTRYPOINT ["aethernet"]
+CMD ["start"]

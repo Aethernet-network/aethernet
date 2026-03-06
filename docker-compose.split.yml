@@ -1,0 +1,58 @@
+# docker-compose.split.yml — Two-service AetherNet deployment.
+#
+# Runs the protocol node and the marketplace as separate services:
+#
+#   protocol   — pure protocol API on :8338, P2P on :8337
+#   marketplace — task marketplace + explorer on :8340
+#
+# The marketplace connects to the protocol node via HTTP API.
+# This is the recommended architecture for production deployments
+# and for builders who want to use AetherNet as a foundation for
+# their own application (replace the marketplace service with yours).
+#
+# Usage:
+#   docker-compose -f docker-compose.split.yml up
+#
+# Protocol API:   http://localhost:8338
+# Marketplace:    http://localhost:8340
+# Explorer:       http://localhost:8340/explorer/
+
+version: "3.8"
+services:
+  protocol:
+    build:
+      context: .
+      dockerfile: Dockerfile.node
+    container_name: aethernet-protocol
+    ports:
+      - "8337:8337"  # P2P
+      - "8338:8338"  # Protocol API
+    volumes:
+      - protocol-data:/data
+    environment:
+      - AETHERNET_DATA=/data
+      - AETHERNET_LISTEN=0.0.0.0:8337
+      - AETHERNET_API=0.0.0.0:8338
+    restart: unless-stopped
+
+  marketplace:
+    build:
+      context: .
+      dockerfile: Dockerfile.marketplace
+    container_name: aethernet-marketplace
+    ports:
+      - "8340:8340"  # Marketplace API + Explorer
+    environment:
+      - AETHERNET_TESTNET=true
+    depends_on:
+      - protocol
+    command:
+      - "-node"
+      - "http://protocol:8338"
+      - "-listen"
+      - ":8340"
+      - "-testnet"
+    restart: unless-stopped
+
+volumes:
+  protocol-data:

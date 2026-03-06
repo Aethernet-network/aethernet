@@ -1,0 +1,33 @@
+# Dockerfile.marketplace — Standalone marketplace image.
+#
+# Builds the marketplace binary which connects to a separately deployed
+# protocol node via its HTTP API. This image contains the task marketplace,
+# escrow tracking, autonomous routing, service registry, discovery engine,
+# and the web explorer.
+#
+# The marketplace is designed as a reference application built on AetherNet.
+# Third-party developers can replace this with their own application that
+# uses the same public SDK and protocol API.
+#
+# Usage in docker-compose (see docker-compose.yml service "marketplace"):
+#
+#   marketplace -node http://protocol:8338 -listen :8340
+
+# Build stage
+FROM golang:1.25-alpine AS builder
+RUN apk add --no-cache git
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /marketplace ./cmd/marketplace
+
+# Run stage
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /marketplace /usr/local/bin/marketplace
+COPY explorer/ /usr/local/share/aethernet/explorer/
+EXPOSE 8340
+ENV AETHERNET_TESTNET=true
+ENTRYPOINT ["marketplace"]
+CMD ["-node", "http://localhost:8338", "-listen", ":8340"]

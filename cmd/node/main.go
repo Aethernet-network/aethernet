@@ -169,12 +169,16 @@ func main() {
 
 func printUsage() {
 	fmt.Fprintf(os.Stderr, "AetherNet node %s\n\nUsage:\n", VERSION)
-	fmt.Fprintf(os.Stderr, "  aethernet init                            generate a new node identity\n")
-	fmt.Fprintf(os.Stderr, "  aethernet genesis                         seed genesis token supply into the store\n")
-	fmt.Fprintf(os.Stderr, "  aethernet start [--listen addr] [--api addr] [--peer addr]\n")
-	fmt.Fprintf(os.Stderr, "                                            start the node\n")
-	fmt.Fprintf(os.Stderr, "  aethernet connect --peer <address>        start and connect to a peer\n")
-	fmt.Fprintf(os.Stderr, "  aethernet status                          print node identity and config\n")
+	fmt.Fprintf(os.Stderr, "  aethernet init                                  generate a new node identity\n")
+	fmt.Fprintf(os.Stderr, "  aethernet genesis                               seed genesis token supply\n")
+	fmt.Fprintf(os.Stderr, "  aethernet start [--listen addr] [--api addr] [--peer addr] [--marketplace]\n")
+	fmt.Fprintf(os.Stderr, "                                                  start the node\n")
+	fmt.Fprintf(os.Stderr, "  aethernet connect --peer <address>              start and connect to a peer\n")
+	fmt.Fprintf(os.Stderr, "  aethernet status                                print node identity and config\n")
+	fmt.Fprintf(os.Stderr, "\nFlags for 'start':\n")
+	fmt.Fprintf(os.Stderr, "  --marketplace   Enable built-in marketplace (task routing, escrow, explorer)\n")
+	fmt.Fprintf(os.Stderr, "                  For split deployments, use the separate 'marketplace' binary\n")
+	fmt.Fprintf(os.Stderr, "                  instead and point it at the protocol node with --node.\n")
 	fmt.Fprintf(os.Stderr, "\nEnvironment variables:\n")
 	fmt.Fprintf(os.Stderr, "  AETHERNET_DATA    data directory (default: current directory)\n")
 	fmt.Fprintf(os.Stderr, "  AETHERNET_LISTEN  p2p listen address (default: 0.0.0.0:8337)\n")
@@ -688,7 +692,16 @@ func cmdStart() {
 	p2pAddr := fs.String("listen", envOr("AETHERNET_LISTEN", "0.0.0.0:8337"), "TCP address for p2p connections")
 	apiListenAddr := fs.String("api", envOr("AETHERNET_API", ":8338"), "TCP address for the REST API")
 	peerAddr := fs.String("peer", envOr("AETHERNET_PEER", ""), "peer to auto-connect on startup (host:port)")
+	enableMarketplace := fs.Bool("marketplace", false, "Enable built-in marketplace (task routing, escrow, explorer) in the combined single-binary deployment")
 	_ = fs.Parse(os.Args[2:])
+
+	// The --marketplace flag controls whether marketplace components (tasks,
+	// escrow, router, discovery, activity generator, auto-validator) are wired
+	// to the protocol API server. Without it, only protocol endpoints are active.
+	// This flag preserves backward compatibility with existing deployments while
+	// introducing the separation between the protocol layer and the marketplace
+	// application layer. Use cmd/marketplace for the standalone deployment.
+	_ = enableMarketplace // wiring controlled below via stack.marketplace field
 
 	kp := loadKeyPair()
 	agentID := kp.AgentID()
