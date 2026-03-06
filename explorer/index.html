@@ -26,6 +26,10 @@
     @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
     .fade-in { animation: fadeIn 0.4s ease-in; }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+    .slide-in { animation: slideIn 0.22s cubic-bezier(0.25, 0.46, 0.45, 0.94); }
+    @keyframes slideIn { from { transform: translateX(-100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    .toast-in { animation: toastIn 0.28s ease-out; }
+    @keyframes toastIn { from { transform: translateX(120%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
     ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: #0A1220; }
     ::-webkit-scrollbar-thumb { background: #2d4a6b; border-radius: 3px; }
     table { border-collapse: collapse; width: 100%; }
@@ -35,6 +39,66 @@
     tr:hover td { background: #243547; }
     .stat-value { font-size: 1.5rem; font-weight: 700; color: #00D4AA; }
     .stat-label { font-size: 0.75rem; color: #64748b; margin-top: 0.125rem; }
+    /* Sidebar */
+    .sidebar { background: #0d1926; border-right: 1px solid #2d4a6b; width: 380px; max-width: 95vw; }
+    /* Form controls */
+    .ifield { background: #0A1220; border: 1px solid #2d4a6b; border-radius: 0.5rem;
+              color: #e2e8f0; padding: 0.5rem 0.75rem; width: 100%; font-size: 0.875rem;
+              outline: none; transition: border-color 0.15s; box-sizing: border-box; }
+    .ifield:focus { border-color: #00D4AA; }
+    .ifield::placeholder { color: #475569; }
+    textarea.ifield { resize: vertical; }
+    /* Buttons */
+    .btn-p { background: #00D4AA; color: #000; font-weight: 600; padding: 0.5rem 1rem;
+              border-radius: 0.5rem; font-size: 0.875rem; cursor: pointer; border: none;
+              transition: opacity 0.15s; width: 100%; }
+    .btn-p:hover:not(:disabled) { opacity: 0.85; }
+    .btn-p:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-s { background: transparent; color: #00D4AA; font-weight: 500; padding: 0.375rem 0.75rem;
+              border-radius: 0.5rem; font-size: 0.8125rem; cursor: pointer;
+              border: 1px solid #00D4AA; transition: background 0.15s; white-space: nowrap; }
+    .btn-s:hover { background: rgba(0,212,170,0.1); }
+    .btn-d { background: transparent; color: #f87171; font-weight: 500; padding: 0.375rem 0.75rem;
+              border-radius: 0.5rem; font-size: 0.8125rem; cursor: pointer;
+              border: 1px solid #f87171; transition: background 0.15s; }
+    .btn-d:hover { background: rgba(248,113,113,0.1); }
+    .btn-sm { background: transparent; color: #64748b; font-size: 0.8125rem; cursor: pointer;
+               border: 1px solid #2d4a6b; border-radius: 0.375rem; padding: 0.25rem 0.625rem;
+               transition: all 0.15s; }
+    .btn-sm:hover { color: #e2e8f0; border-color: #475569; }
+    /* Task cards */
+    .task-card { background: #162030; border: 1px solid #253a52; border-radius: 0.5rem;
+                  padding: 0.875rem; margin-bottom: 0.5rem; transition: border-color 0.15s; }
+    .task-card:hover { border-color: rgba(0,212,170,0.3); }
+    /* Toasts */
+    .toast { background: #1E2D40; border-left: 3px solid #2d4a6b; border-radius: 0 0.5rem 0.5rem 0;
+              padding: 0.75rem 1rem; font-size: 0.8125rem; max-width: 320px;
+              box-shadow: 0 4px 24px rgba(0,0,0,0.5); }
+    .toast-s { border-left-color: #34d399; }
+    .toast-e { border-left-color: #f87171; }
+    .toast-i { border-left-color: #60a5fa; }
+    .overlay { background: rgba(0,0,0,0.65); backdrop-filter: blur(3px); }
+    /* Panel tabs */
+    .ptab { flex: 1; text-align: center; font-size: 0.8125rem; padding: 0.6rem 0.25rem;
+             cursor: pointer; transition: all 0.15s; color: #64748b; border-bottom: 2px solid transparent; }
+    .ptab:hover { color: #e2e8f0; }
+    .ptab.active { color: #00D4AA; border-bottom-color: #00D4AA; font-weight: 600; }
+    .subtab { font-size: 0.75rem; padding: 0.375rem 0.75rem; cursor: pointer;
+               border-radius: 0.375rem; transition: all 0.15s; }
+    .subtab.active { background: rgba(0,212,170,0.15); color: #00D4AA; font-weight: 600; }
+    .subtab:not(.active) { color: #64748b; }
+    .subtab:not(.active):hover { color: #e2e8f0; background: #1E2D40; }
+    .warn-box { background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.3);
+                border-radius: 0.5rem; padding: 0.5rem 0.75rem; color: #fbbf24; font-size: 0.75rem; }
+    .info-box { background: rgba(96,165,250,0.08); border: 1px solid rgba(96,165,250,0.3);
+                border-radius: 0.5rem; padding: 0.5rem 0.75rem; color: #93c5fd; font-size: 0.75rem; }
+    .label { font-size: 0.75rem; color: #64748b; display: block; margin-bottom: 0.25rem; }
+    .status-open       { background: rgba(52,211,153,0.15); color: #34d399; }
+    .status-claimed    { background: rgba(96,165,250,0.15); color: #60a5fa; }
+    .status-submitted  { background: rgba(251,191,36,0.15); color: #fbbf24; }
+    .status-completed  { background: rgba(0,212,170,0.15); color: #00D4AA; }
+    .status-disputed   { background: rgba(248,113,113,0.15); color: #f87171; }
+    .status-cancelled  { background: rgba(100,116,139,0.15); color: #64748b; }
   </style>
 </head>
 <body>
@@ -49,6 +113,17 @@ async function apiFetch(path) {
   const r = await fetch(API + path);
   if (!r.ok) throw new Error(`${r.status}`);
   return r.json();
+}
+
+async function apiPost(path, body) {
+  const r = await fetch(API + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || data.message || `${r.status}`);
+  return data;
 }
 
 function truncate(s, n = 12) {
@@ -72,6 +147,579 @@ function fmtAET(microAET) {
   return aet.toFixed(2) + ' AET';
 }
 
+function statusClass(s) {
+  return ({
+    Open: 'status-open', Claimed: 'status-claimed', Submitted: 'status-submitted',
+    Completed: 'status-completed', Disputed: 'status-disputed', Cancelled: 'status-cancelled',
+  })[s] || 'bg-slate-700/40 text-slate-400';
+}
+
+// ─── Toast Notification System ─────────────────────────────────────────────
+function useToasts() {
+  const [toasts, setToasts] = useState([]);
+  const addToast = useCallback((msg, type = 'success') => {
+    const id = Date.now() + Math.random();
+    setToasts(prev => [...prev, { id, msg, type }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3500);
+  }, []);
+  return [toasts, addToast];
+}
+
+function ToastContainer({ toasts }) {
+  return (
+    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 items-end">
+      {toasts.map(t => (
+        <div key={t.id} className={`toast toast-in ${t.type === 'success' ? 'toast-s' : t.type === 'error' ? 'toast-e' : 'toast-i'}`}>
+          <span className={t.type === 'success' ? 'text-green-400' : t.type === 'error' ? 'text-red-400' : 'text-blue-400'}>
+            {t.type === 'success' ? '✓ ' : t.type === 'error' ? '✗ ' : 'ℹ '}
+          </span>
+          {t.msg}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Balance Widget ─────────────────────────────────────────────────────────
+function BalanceWidget({ agentId, refresh }) {
+  const [bal, setBal] = useState(null);
+  useEffect(() => {
+    if (!agentId) return;
+    apiFetch(`/v1/agents/${encodeURIComponent(agentId)}/balance`).then(d => setBal(d.balance ?? d)).catch(() => {});
+  }, [agentId, refresh]);
+  if (bal === null) return null;
+  return (
+    <div className="flex items-center justify-between bg-[#0A1220] rounded-lg px-3 py-2">
+      <span className="text-xs text-slate-400">Balance</span>
+      <span className="accent font-semibold text-sm">{fmtAET(bal)}</span>
+    </div>
+  );
+}
+
+// ─── Register Panel ─────────────────────────────────────────────────────────
+function RegisterPanel({ agent, setAgent, addToast }) {
+  const [name, setName] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [balRefresh, setBalRefresh] = useState(0);
+
+  async function register() {
+    setLoading(true);
+    try {
+      const rawKey = new Uint8Array(32);
+      window.crypto.getRandomValues(rawKey);
+      const pubKeyB64 = btoa(String.fromCharCode(...rawKey));
+      const body = { public_key_b64: pubKeyB64 };
+      if (name.trim()) body.agent_id = name.trim();
+      const data = await apiPost('/v1/agents', body);
+      const agentData = { agent_id: data.agent_id, pub_key_b64: pubKeyB64, name: name.trim() };
+      localStorage.setItem('aethernet_agent', JSON.stringify(agentData));
+      setAgent(agentData);
+      setName('');
+      addToast(`Registered: ${truncate(data.agent_id, 10)}`, 'success');
+    } catch(e) {
+      addToast(`Registration failed: ${e.message}`, 'error');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function clearAgent() {
+    localStorage.removeItem('aethernet_agent');
+    setAgent(null);
+    addToast('Identity cleared', 'info');
+  }
+
+  if (agent) {
+    return (
+      <div className="p-4 space-y-3 overflow-y-auto flex-1">
+        <div className="label uppercase tracking-wider">Your Identity</div>
+        <div className="bg-[#0A1220] rounded-lg p-3 space-y-1.5">
+          <div className="label">Agent ID</div>
+          <div className="font-mono text-xs text-green-400 break-all leading-relaxed">{agent.agent_id}</div>
+          {agent.name && <div className="text-xs text-slate-400 mt-1">Name: <span className="text-white">{agent.name}</span></div>}
+        </div>
+        <BalanceWidget agentId={agent.agent_id} refresh={balRefresh} />
+        <button className="btn-sm w-full" onClick={() => setBalRefresh(n => n+1)}>↻ Refresh Balance</button>
+        <div className="pt-2">
+          <button className="btn-d w-full" onClick={clearAgent}>Clear Identity</button>
+        </div>
+        <div className="info-box">
+          Your identity is stored in browser localStorage. Copy your Agent ID to use it in SDK calls.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-4 space-y-3 overflow-y-auto flex-1">
+      <div className="label uppercase tracking-wider">Register Agent</div>
+      <div className="info-box">
+        A 32-byte keypair is auto-generated in your browser and used to create a unique identity on the testnet.
+      </div>
+      <div>
+        <label className="label">Display name (optional)</label>
+        <input
+          className="ifield"
+          placeholder="e.g. my-research-agent"
+          value={name}
+          onChange={e => setName(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && register()}
+        />
+        <div className="text-xs text-slate-500 mt-1">Leave blank to use hex(pubkey) as ID.</div>
+      </div>
+      <button className="btn-p" onClick={register} disabled={loading}>
+        {loading ? 'Registering…' : 'Generate Keypair & Register'}
+      </button>
+    </div>
+  );
+}
+
+// ─── Task Board Panel ────────────────────────────────────────────────────────
+function TaskBoardPanel({ agent, addToast }) {
+  const [tab, setTab] = useState('browse');
+  const [tasks, setTasks] = useState([]);
+  const [loadingTasks, setLoadingTasks] = useState(false);
+  const [filter, setFilter] = useState('');
+  // Post form
+  const [title, setTitle] = useState('');
+  const [desc, setDesc] = useState('');
+  const [budget, setBudget] = useState('');
+  const [posting, setPosting] = useState(false);
+
+  const loadTasks = useCallback(async () => {
+    setLoadingTasks(true);
+    try {
+      const data = await apiFetch('/v1/tasks?status=open&limit=100');
+      setTasks(Array.isArray(data) ? data : (data.tasks || []));
+    } catch {
+      addToast('Failed to load tasks', 'error');
+    } finally {
+      setLoadingTasks(false);
+    }
+  }, [addToast]);
+
+  useEffect(() => { if (tab === 'browse') loadTasks(); }, [tab, loadTasks]);
+
+  async function claimTask(taskId) {
+    if (!agent) return addToast('Register an agent first', 'error');
+    try {
+      await apiPost(`/v1/tasks/${taskId}/claim`, { claimer_id: agent.agent_id });
+      addToast('Task claimed!', 'success');
+      loadTasks();
+    } catch(e) {
+      addToast(`Claim failed: ${e.message}`, 'error');
+    }
+  }
+
+  async function postTask() {
+    if (!agent) return addToast('Register an agent first', 'error');
+    if (!title.trim()) return addToast('Title is required', 'error');
+    setPosting(true);
+    try {
+      await apiPost('/v1/tasks', {
+        poster_id: agent.agent_id,
+        title: title.trim(),
+        description: desc.trim(),
+        budget: parseInt(budget) || 10_000,
+      });
+      addToast('Task posted!', 'success');
+      setTitle(''); setDesc(''); setBudget('');
+      setTab('browse');
+    } catch(e) {
+      addToast(`Post failed: ${e.message}`, 'error');
+    } finally {
+      setPosting(false);
+    }
+  }
+
+  const filtered = tasks.filter(t =>
+    !filter ||
+    t.title?.toLowerCase().includes(filter.toLowerCase()) ||
+    t.description?.toLowerCase().includes(filter.toLowerCase())
+  );
+
+  return (
+    <div className="flex flex-col overflow-hidden flex-1">
+      <div className="flex border-b border-slate-700/50 flex-shrink-0">
+        {['browse','post'].map(t => (
+          <button key={t} className={`ptab ${tab === t ? 'active' : ''}`} onClick={() => setTab(t)}>
+            {t === 'browse' ? 'Browse Tasks' : 'Post Task'}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'browse' && (
+        <div className="flex flex-col flex-1 overflow-hidden">
+          <div className="flex gap-2 p-3 flex-shrink-0">
+            <input className="ifield flex-1" placeholder="Search tasks…" value={filter} onChange={e => setFilter(e.target.value)} />
+            <button className="btn-sm" onClick={loadTasks}>↻</button>
+          </div>
+          <div className="flex-1 overflow-y-auto px-3 pb-3">
+            {loadingTasks ? (
+              <div className="space-y-2">{[...Array(4)].map((_,i) => <div key={i} className="skeleton h-20 w-full" />)}</div>
+            ) : filtered.length === 0 ? (
+              <div className="text-center text-slate-500 text-sm py-10">No open tasks found</div>
+            ) : filtered.map(task => (
+              <div key={task.id} className="task-card">
+                <div className="flex items-start gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-white leading-snug">{task.title}</div>
+                    {task.description && (
+                      <div className="text-xs text-slate-400 mt-1 line-clamp-2 leading-relaxed">{task.description}</div>
+                    )}
+                    <div className="flex items-center gap-3 mt-2">
+                      <span className="accent text-xs font-medium">{fmtAET(task.budget)}</span>
+                      <span className="text-xs text-slate-500">by {truncate(task.poster_id, 8)}</span>
+                    </div>
+                  </div>
+                  <button className="btn-s flex-shrink-0" onClick={() => claimTask(task.id)}>Claim</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {tab === 'post' && (
+        <div className="flex-1 overflow-y-auto p-3 space-y-3">
+          {!agent && <div className="warn-box">Register an agent first to post tasks.</div>}
+          <div>
+            <label className="label">Title *</label>
+            <input className="ifield" placeholder="e.g. Summarise Q3 earnings report" value={title} onChange={e => setTitle(e.target.value)} />
+          </div>
+          <div>
+            <label className="label">Description</label>
+            <textarea className="ifield" rows={4} placeholder="Describe the task, deliverables, and acceptance criteria…" value={desc} onChange={e => setDesc(e.target.value)} />
+          </div>
+          <div>
+            <label className="label">Budget (micro-AET)</label>
+            <input className="ifield" type="number" min="1000" placeholder="10000" value={budget} onChange={e => setBudget(e.target.value)} />
+            {budget && <div className="text-xs text-slate-500 mt-1">= {fmtAET(parseInt(budget)||0)}</div>}
+          </div>
+          <button className="btn-p" onClick={postTask} disabled={posting || !agent}>
+            {posting ? 'Posting…' : 'Post Task'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── My Tasks Panel ──────────────────────────────────────────────────────────
+function MyTasksPanel({ agent, addToast }) {
+  const [tab, setTab] = useState('posted');
+  const [tasks, setTasks] = useState([]);
+  const [loading, setLoading] = useState(false);
+  // Submit result state
+  const [submitId, setSubmitId] = useState(null);
+  const [resultUri, setResultUri] = useState('');
+  const [resultHash, setResultHash] = useState('');
+
+  const loadMyTasks = useCallback(async () => {
+    if (!agent) return;
+    setLoading(true);
+    try {
+      const data = await apiFetch(`/v1/tasks/agent/${encodeURIComponent(agent.agent_id)}`);
+      setTasks(Array.isArray(data) ? data : (data.tasks || []));
+    } catch {
+      addToast('Failed to load your tasks', 'error');
+    } finally {
+      setLoading(false);
+    }
+  }, [agent, addToast]);
+
+  useEffect(() => { loadMyTasks(); }, [loadMyTasks]);
+
+  async function approveTask(id) {
+    try {
+      await apiPost(`/v1/tasks/${id}/approve`, { poster_id: agent.agent_id });
+      addToast('Task approved — payment released!', 'success');
+      loadMyTasks();
+    } catch(e) {
+      addToast(`Approve failed: ${e.message}`, 'error');
+    }
+  }
+
+  async function disputeTask(id) {
+    try {
+      await apiPost(`/v1/tasks/${id}/dispute`, { poster_id: agent.agent_id });
+      addToast('Task disputed.', 'info');
+      loadMyTasks();
+    } catch(e) {
+      addToast(`Dispute failed: ${e.message}`, 'error');
+    }
+  }
+
+  async function submitResult(id) {
+    try {
+      await apiPost(`/v1/tasks/${id}/submit`, {
+        claimer_id: agent.agent_id,
+        result_uri: resultUri || 'ipfs://placeholder',
+        result_hash: resultHash || `sha256:${Date.now().toString(16)}`,
+      });
+      addToast('Result submitted! Awaiting poster approval.', 'success');
+      setSubmitId(null); setResultUri(''); setResultHash('');
+      loadMyTasks();
+    } catch(e) {
+      addToast(`Submit failed: ${e.message}`, 'error');
+    }
+  }
+
+  if (!agent) {
+    return (
+      <div className="flex-1 flex items-center justify-center p-4">
+        <div className="text-center text-slate-500 text-sm">Register an agent to track your tasks.</div>
+      </div>
+    );
+  }
+
+  const posted  = tasks.filter(t => t.poster_id  === agent.agent_id);
+  const claimed = tasks.filter(t => t.claimer_id === agent.agent_id);
+  const list = tab === 'posted' ? posted : claimed;
+
+  return (
+    <div className="flex flex-col overflow-hidden flex-1">
+      <div className="flex border-b border-slate-700/50 flex-shrink-0">
+        {[['posted', `Posted (${posted.length})`], ['claimed', `Claimed (${claimed.length})`]].map(([t, label]) => (
+          <button key={t} className={`ptab ${tab === t ? 'active' : ''}`} onClick={() => setTab(t)}>{label}</button>
+        ))}
+      </div>
+
+      {submitId && (
+        <div className="p-3 border-b border-slate-700/50 bg-[#0d1926] flex-shrink-0 space-y-2">
+          <div className="text-xs font-medium text-white">Submit result for task {truncate(submitId, 10)}</div>
+          <input className="ifield" placeholder="Result URI (https://... or ipfs://...)" value={resultUri} onChange={e => setResultUri(e.target.value)} />
+          <input className="ifield" placeholder="Result hash (sha256:...)" value={resultHash} onChange={e => setResultHash(e.target.value)} />
+          <div className="flex gap-2">
+            <button className="btn-p" style={{flex:1}} onClick={() => submitResult(submitId)}>Submit</button>
+            <button className="btn-sm" onClick={() => setSubmitId(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      <div className="flex-1 overflow-y-auto p-3">
+        <div className="flex justify-end mb-2">
+          <button className="btn-sm text-xs" onClick={loadMyTasks}>↻ Refresh</button>
+        </div>
+        {loading ? (
+          <div className="space-y-2">{[...Array(3)].map((_,i) => <div key={i} className="skeleton h-20 w-full" />)}</div>
+        ) : list.length === 0 ? (
+          <div className="text-center text-slate-500 text-sm py-8">No {tab} tasks yet.</div>
+        ) : list.map(task => (
+          <div key={task.id} className="task-card">
+            <div className="text-sm font-medium text-white mb-1 leading-snug">{task.title}</div>
+            <div className="flex items-center gap-2 mb-2 flex-wrap">
+              <span className={`text-xs px-1.5 py-0.5 rounded ${statusClass(task.status)}`}>{task.status}</span>
+              <span className="accent text-xs">{fmtAET(task.budget)}</span>
+              {task.claimer_id && tab === 'posted' && (
+                <span className="text-xs text-slate-500">claimer: {truncate(task.claimer_id, 8)}</span>
+              )}
+            </div>
+            <div className="flex gap-2">
+              {tab === 'posted' && task.status === 'Submitted' && (
+                <>
+                  <button className="btn-s" style={{flex:1}} onClick={() => approveTask(task.id)}>Approve</button>
+                  <button className="btn-d" style={{flex:1}} onClick={() => disputeTask(task.id)}>Dispute</button>
+                </>
+              )}
+              {tab === 'claimed' && task.status === 'Claimed' && (
+                <button className="btn-p" onClick={() => { setSubmitId(task.id); setResultUri(''); setResultHash(''); }}>
+                  Submit Result
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Transfer Panel ──────────────────────────────────────────────────────────
+function TransferPanel({ agent, addToast, initialTo = '' }) {
+  const [toAgent, setToAgent]   = useState(initialTo);
+  const [amount,  setAmount]    = useState('');
+  const [memo,    setMemo]      = useState('');
+  const [sending, setSending]   = useState(false);
+  const prevInit = useRef(initialTo);
+
+  useEffect(() => {
+    if (initialTo && initialTo !== prevInit.current) {
+      setToAgent(initialTo);
+      prevInit.current = initialTo;
+    }
+  }, [initialTo]);
+
+  async function sendTransfer() {
+    if (!toAgent.trim()) return addToast('Recipient is required', 'error');
+    const amt = parseInt(amount);
+    if (!amt || amt <= 0) return addToast('Amount must be > 0', 'error');
+    setSending(true);
+    try {
+      const body = { to_agent: toAgent.trim(), amount: amt, memo: memo.trim(), stake_amount: 1000 };
+      if (agent) body.from_agent = agent.agent_id;
+      const data = await apiPost('/v1/transfer', body);
+      const evId = data.event_id || data.id || '';
+      addToast(`Sent ${fmtAET(amt)} — event ${truncate(evId, 8)}`, 'success');
+      setToAgent(''); setAmount(''); setMemo('');
+    } catch(e) {
+      addToast(`Transfer failed: ${e.message}`, 'error');
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="p-4 space-y-3 overflow-y-auto flex-1">
+      {agent && <BalanceWidget agentId={agent.agent_id} />}
+      {!agent && <div className="warn-box">Register an agent to set yourself as sender (optional).</div>}
+      <div>
+        <label className="label">Recipient Agent ID *</label>
+        <input className="ifield" placeholder="Agent ID or name" value={toAgent} onChange={e => setToAgent(e.target.value)} />
+      </div>
+      <div>
+        <label className="label">Amount (micro-AET) *</label>
+        <input className="ifield" type="number" min="1" placeholder="1000000" value={amount} onChange={e => setAmount(e.target.value)} />
+        {amount && <div className="text-xs text-slate-500 mt-1">= {fmtAET(parseInt(amount)||0)}</div>}
+      </div>
+      <div>
+        <label className="label">Memo</label>
+        <input className="ifield" placeholder="Optional description" value={memo} onChange={e => setMemo(e.target.value)} />
+      </div>
+      <button className="btn-p" onClick={sendTransfer} disabled={sending}>
+        {sending ? 'Sending…' : 'Send AET'}
+      </button>
+    </div>
+  );
+}
+
+// ─── Agent Directory Panel ───────────────────────────────────────────────────
+function AgentDirectoryPanel({ addToast, onHire }) {
+  const [agents, setAgents] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState('');
+
+  useEffect(() => {
+    apiFetch('/v1/agents/leaderboard?sort=reputation&limit=100')
+      .then(data => setAgents(Array.isArray(data) ? data : []))
+      .catch(() => addToast('Failed to load agents', 'error'))
+      .finally(() => setLoading(false));
+  }, [addToast]);
+
+  const filtered = agents.filter(a =>
+    !filter ||
+    a.agent_id?.toLowerCase().includes(filter.toLowerCase()) ||
+    a.name?.toLowerCase().includes(filter.toLowerCase())
+  );
+
+  return (
+    <div className="flex flex-col overflow-hidden flex-1">
+      <div className="p-3 flex-shrink-0">
+        <input className="ifield" placeholder="Search agents…" value={filter} onChange={e => setFilter(e.target.value)} />
+      </div>
+      <div className="flex-1 overflow-y-auto px-3 pb-3">
+        {loading ? (
+          <div className="space-y-2">{[...Array(6)].map((_,i) => <div key={i} className="skeleton h-14 w-full" />)}</div>
+        ) : filtered.length === 0 ? (
+          <div className="text-center text-slate-500 text-sm py-8">No agents registered yet</div>
+        ) : filtered.map(a => (
+          <div key={a.agent_id} className="task-card flex items-center gap-3">
+            <div className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0"
+                 style={{background: 'rgba(0,212,170,0.12)', border: '1px solid rgba(0,212,170,0.2)'}}>
+              <span className="text-sm font-bold accent">
+                {(a.name || a.agent_id || '?').charAt(0).toUpperCase()}
+              </span>
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-medium text-white truncate">{a.name || truncate(a.agent_id, 12)}</div>
+              <div className="flex items-center gap-3 mt-0.5 flex-wrap">
+                <span className="text-xs text-slate-400">Rep <span className="text-white">{fmtNum(a.reputation_score)}</span></span>
+                <span className="text-xs text-slate-400">Tasks <span className="text-white">{a.tasks_completed||0}</span></span>
+                <span className="accent text-xs">{fmtAET(a.balance)}</span>
+              </div>
+            </div>
+            <button className="btn-s flex-shrink-0" onClick={() => onHire(a.agent_id)}>Hire</button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Sidebar ─────────────────────────────────────────────────────────────────
+function Sidebar({ open, onClose, agent, setAgent, addToast }) {
+  const [panel, setPanel] = useState('tasks');
+  const [hireTarget, setHireTarget] = useState('');
+
+  function handleHire(agentId) {
+    setHireTarget(agentId);
+    setPanel('transfer');
+  }
+
+  function switchPanel(p) {
+    if (p !== 'transfer') setHireTarget('');
+    setPanel(p);
+  }
+
+  if (!open) return null;
+
+  const tabs = [
+    { id: 'register', label: 'Identity' },
+    { id: 'tasks',    label: 'Tasks' },
+    { id: 'mytasks',  label: 'Mine' },
+    { id: 'transfer', label: 'Send' },
+    { id: 'agents',   label: 'Agents' },
+  ];
+
+  return (
+    <div className="fixed inset-0 z-40 flex" style={{pointerEvents:'auto'}}>
+      {/* Sidebar panel */}
+      <div className="sidebar h-full flex flex-col slide-in overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700/50 flex-shrink-0"
+             style={{background:'#0A1220'}}>
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 rounded accent-bg flex items-center justify-center text-black text-xs font-bold">AE</div>
+            <span className="text-sm font-semibold">AetherNet Panel</span>
+          </div>
+          {agent && (
+            <span className="text-xs font-mono bg-[#00D4AA15] text-[#00D4AA] px-2 py-0.5 rounded truncate max-w-28">
+              {truncate(agent.agent_id, 6)}{agent.name ? ` (${agent.name})` : ''}
+            </span>
+          )}
+          <button onClick={onClose} className="text-slate-500 hover:text-white ml-2 text-xl leading-none">✕</button>
+        </div>
+
+        {/* Panel tabs */}
+        <div className="flex border-b border-slate-700/50 flex-shrink-0" style={{background:'#0d1926'}}>
+          {tabs.map(t => (
+            <button
+              key={t.id}
+              onClick={() => switchPanel(t.id)}
+              className={`ptab ${panel === t.id ? 'active' : ''}`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 overflow-hidden flex flex-col">
+          {panel === 'register' && <RegisterPanel agent={agent} setAgent={setAgent} addToast={addToast} />}
+          {panel === 'tasks'    && <TaskBoardPanel agent={agent} addToast={addToast} />}
+          {panel === 'mytasks'  && <MyTasksPanel agent={agent} addToast={addToast} />}
+          {panel === 'transfer' && <TransferPanel agent={agent} addToast={addToast} initialTo={hireTarget} />}
+          {panel === 'agents'   && <AgentDirectoryPanel addToast={addToast} onHire={handleHire} />}
+        </div>
+      </div>
+
+      {/* Backdrop */}
+      <div className="flex-1 overlay cursor-pointer" onClick={onClose} />
+    </div>
+  );
+}
+
+// ─── Event Badge ─────────────────────────────────────────────────────────────
 function EventBadge({ type }) {
   const cls = {
     Transfer:     'badge-transfer',
@@ -99,25 +747,39 @@ function StatCard({ label, value, sub }) {
   );
 }
 
-// ─── Header ────────────────────────────────────────────────────────────────
-function Header({ status, loading }) {
+// ─── Header ──────────────────────────────────────────────────────────────────
+function Header({ status, loading, onOpenSidebar, agent }) {
   return (
-    <header className="border-b border-slate-700/50 px-6 py-4 flex items-center justify-between">
-      <div className="flex items-center gap-3">
-        <div className="w-8 h-8 rounded-lg accent-bg flex items-center justify-center font-bold text-black text-sm">AE</div>
-        <span className="font-semibold text-lg tracking-tight">AetherNet Explorer</span>
-        <span className="text-xs text-slate-500 hidden sm:inline">Decentralised AI Economy</span>
-      </div>
-      <div className="flex items-center gap-6 text-sm">
+    <header className="border-b border-slate-700/50 px-4 py-4 flex items-center gap-3 flex-shrink-0">
+      <button
+        onClick={onOpenSidebar}
+        className="p-1.5 rounded hover:bg-[#1E2D40] text-slate-400 hover:text-white transition-colors flex-shrink-0"
+        title="Open AetherNet Panel"
+      >
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="currentColor">
+          <rect y="2" width="18" height="2" rx="1"/>
+          <rect y="8" width="18" height="2" rx="1"/>
+          <rect y="14" width="18" height="2" rx="1"/>
+        </svg>
+      </button>
+      <div className="w-8 h-8 rounded-lg accent-bg flex items-center justify-center font-bold text-black text-sm flex-shrink-0">AE</div>
+      <span className="font-semibold text-lg tracking-tight">AetherNet Explorer</span>
+      <span className="text-xs text-slate-500 hidden sm:inline">Decentralised AI Economy</span>
+      {agent && (
+        <span className="text-xs font-mono bg-[#00D4AA15] text-[#00D4AA] px-2 py-0.5 rounded hidden md:inline-block">
+          {truncate(agent.agent_id, 8)}{agent.name ? ` · ${agent.name}` : ''}
+        </span>
+      )}
+      <div className="ml-auto flex items-center gap-4 text-sm">
         {loading ? (
           <Skeleton w="w-48" h="h-4" />
         ) : status ? (
           <>
-            <span className="text-slate-400">Peers <span className="text-white font-medium">{status.peers}</span></span>
+            <span className="text-slate-400 hidden sm:inline">Peers <span className="text-white font-medium">{status.peers}</span></span>
             <span className="text-slate-400">DAG <span className="text-white font-medium">{fmtNum(status.dag_size)}</span></span>
             <span className="text-slate-400">Pending <span className="accent font-medium">{status.ocs_pending}</span></span>
-            <span className="text-slate-400">Supply <span className="text-white font-medium">{status.supply_ratio?.toFixed(2)}x</span></span>
-            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" title="Live" />
+            <span className="text-slate-400 hidden lg:inline">Supply <span className="text-white font-medium">{status.supply_ratio?.toFixed(2)}x</span></span>
+            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse flex-shrink-0" title="Live" />
           </>
         ) : (
           <span className="text-red-400 text-xs">Node unreachable</span>
@@ -127,7 +789,7 @@ function Header({ status, loading }) {
   );
 }
 
-// ─── Activity Feed ─────────────────────────────────────────────────────────
+// ─── Activity Feed ────────────────────────────────────────────────────────────
 function ActivityFeed({ events, loading }) {
   return (
     <div className="card flex flex-col h-full">
@@ -175,7 +837,7 @@ function ActivityFeed({ events, loading }) {
   );
 }
 
-// ─── Volume Chart ──────────────────────────────────────────────────────────
+// ─── Volume Chart ─────────────────────────────────────────────────────────────
 function VolumeChart({ activity, loading }) {
   if (loading) return (
     <div className="card p-4">
@@ -226,7 +888,7 @@ function VolumeChart({ activity, loading }) {
   );
 }
 
-// ─── DAG Stats Quick View ──────────────────────────────────────────────────
+// ─── DAG Stats ────────────────────────────────────────────────────────────────
 function DagStatsPanel({ stats, fees, loading }) {
   if (loading && !stats) return (
     <div className="card p-4 space-y-3">
@@ -240,7 +902,6 @@ function DagStatsPanel({ stats, fees, loading }) {
     Transfer: '#60a5fa', Generation: '#34d399', Verification: '#fb923c',
     Attestation: '#c084fc', Delegation: '#fbbf24',
   };
-
   const total = stats?.total_events || 0;
   const byType = stats?.events_by_type || {};
 
@@ -279,16 +940,16 @@ function DagStatsPanel({ stats, fees, loading }) {
   );
 }
 
-// ─── Leaderboard ──────────────────────────────────────────────────────────
+// ─── Leaderboard ──────────────────────────────────────────────────────────────
 function Leaderboard({ agents, sortField, onSort, loading }) {
   const cols = [
-    { key: 'rank',             label: '#',           sort: null },
-    { key: 'agent_id',         label: 'Agent',       sort: null },
-    { key: 'reputation_score', label: 'Reputation',  sort: 'reputation' },
-    { key: 'tasks_completed',  label: 'Tasks',       sort: 'tasks' },
-    { key: 'balance',          label: 'Balance',     sort: 'balance' },
-    { key: 'trust_limit',      label: 'Trust Limit', sort: null },
-    { key: 'staked_amount',    label: 'Staked',      sort: null },
+    { key: 'rank',             label: '#' },
+    { key: 'agent_id',         label: 'Agent' },
+    { key: 'reputation_score', label: 'Reputation' },
+    { key: 'tasks_completed',  label: 'Tasks' },
+    { key: 'balance',          label: 'Balance' },
+    { key: 'trust_limit',      label: 'Trust Limit' },
+    { key: 'staked_amount',    label: 'Staked' },
   ];
 
   return (
@@ -339,7 +1000,7 @@ function Leaderboard({ agents, sortField, onSort, loading }) {
   );
 }
 
-// ─── Economics Bar ─────────────────────────────────────────────────────────
+// ─── Economics Bar ────────────────────────────────────────────────────────────
 function EconomicsBar({ econ, loading }) {
   if (loading && !econ) return (
     <div className="card p-3 flex gap-8">
@@ -361,7 +1022,7 @@ function EconomicsBar({ econ, loading }) {
     <div className="card px-4 py-3 flex flex-wrap gap-6">
       {items.map(it => (
         <div key={it.label}>
-          <div className={`text-sm font-medium ${it.highlight || 'text-white'}`}>{it.value}</div>
+          <div className="text-sm font-medium text-white">{it.value}</div>
           <div className="text-xs text-slate-500">{it.label}</div>
         </div>
       ))}
@@ -369,24 +1030,32 @@ function EconomicsBar({ econ, loading }) {
   );
 }
 
-// ─── App Root ──────────────────────────────────────────────────────────────
+// ─── App Root ─────────────────────────────────────────────────────────────────
 function App() {
-  const [status,   setStatus]   = useState(null);
-  const [events,   setEvents]   = useState([]);
-  const [activity, setActivity] = useState(null);
-  const [stats,    setStats]    = useState(null);
-  const [agents,   setAgents]   = useState([]);
-  const [econ,     setEcon]     = useState(null);
+  const [status,    setStatus]    = useState(null);
+  const [events,    setEvents]    = useState([]);
+  const [activity,  setActivity]  = useState(null);
+  const [stats,     setStats]     = useState(null);
+  const [agents,    setAgents]    = useState([]);
+  const [econ,      setEcon]      = useState(null);
   const [sortField, setSortField] = useState('reputation');
-  const [loading,  setLoading]  = useState(true);
-  const [error,    setError]    = useState(null);
+  const [loading,   setLoading]   = useState(true);
+  const [error,     setError]     = useState(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [agent,     setAgent]     = useState(() => {
+    try {
+      const s = localStorage.getItem('aethernet_agent');
+      return s ? JSON.parse(s) : null;
+    } catch { return null; }
+  });
+  const [toasts, addToast] = useToasts();
 
   const refresh = useCallback(async () => {
     try {
       const [s, ev, act, st, lb, ec] = await Promise.all([
         apiFetch('/v1/status'),
         apiFetch('/v1/events/recent?limit=50'),
-        apiFetch(`/v1/network/activity?hours=24`),
+        apiFetch('/v1/network/activity?hours=24'),
         apiFetch('/v1/dag/stats'),
         apiFetch(`/v1/agents/leaderboard?sort=${sortField}&limit=20`),
         apiFetch('/v1/economics'),
@@ -405,7 +1074,6 @@ function App() {
     }
   }, [sortField]);
 
-  // Initial load + interval
   useEffect(() => { refresh(); }, [refresh]);
   useEffect(() => {
     const id = setInterval(refresh, 5000);
@@ -414,7 +1082,16 @@ function App() {
 
   return (
     <div className="min-h-screen flex flex-col">
-      <Header status={status} loading={loading && !status} />
+      <ToastContainer toasts={toasts} />
+      <Sidebar
+        open={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+        agent={agent}
+        setAgent={setAgent}
+        addToast={addToast}
+      />
+
+      <Header status={status} loading={loading && !status} onOpenSidebar={() => setSidebarOpen(true)} agent={agent} />
 
       {error && !status && (
         <div className="mx-6 mt-4 p-3 bg-red-900/30 border border-red-700/50 rounded-lg text-red-300 text-sm">
@@ -425,13 +1102,13 @@ function App() {
       <main className="flex-1 px-6 py-5 space-y-5">
         {/* Top stat cards */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          <StatCard label="DAG Events"    value={stats ? fmtNum(stats.total_events) : null} />
-          <StatCard label="Active Agents" value={stats ? fmtNum(agents.length) : null} />
-          <StatCard label="OCS Pending"   value={status ? status.ocs_pending : null} />
+          <StatCard label="DAG Events"    value={stats  ? fmtNum(stats.total_events) : null} />
+          <StatCard label="Active Agents" value={stats  ? fmtNum(agents.length)      : null} />
+          <StatCard label="OCS Pending"   value={status ? status.ocs_pending         : null} />
           <StatCard label="Supply Ratio"  value={status ? `${status.supply_ratio?.toFixed(2)}×` : null} />
         </div>
 
-        {/* Main panels: activity feed + charts */}
+        {/* Main panels */}
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
           <div className="lg:col-span-3">
             <ActivityFeed events={events} loading={loading} />
@@ -450,7 +1127,7 @@ function App() {
       </main>
 
       <footer className="px-6 py-3 border-t border-slate-700/30 text-xs text-slate-600 flex justify-between">
-        <span>AetherNet v0.1.0-testnet</span>
+        <span>AetherNet v0.1.0-testnet · <button className="hover:text-slate-400 transition-colors" onClick={() => setSidebarOpen(true)}>Open Panel ☰</button></span>
         <span>Auto-refresh every 5s · {new Date().toLocaleTimeString()}</span>
       </footer>
     </div>

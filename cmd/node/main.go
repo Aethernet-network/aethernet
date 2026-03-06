@@ -374,6 +374,12 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	av.Start()
 	stack.autoVal = av
 
+	// Seed the task marketplace on first run. Only runs when the marketplace
+	// is empty (TotalTasks == 0) to avoid duplicating tasks across restarts.
+	if stack.taskMgr.Stats().TotalTasks == 0 {
+		seedMarketplace(stack.transfer, stack.reg, stack.taskMgr, stack.escrowMgr)
+	}
+
 	cfg := network.DefaultNodeConfig(agentID)
 	cfg.ListenAddr = p2pAddr
 	node := network.NewNode(cfg, stack.dag)
@@ -625,6 +631,108 @@ func cmdConnect() {
 	runLoop(agentID, stack.dag, node, stack.engine, stack.supply, stack.bus)
 	stopStack(node, stack)
 	slog.Info("node stopped cleanly")
+}
+
+// seedMarketplace pre-populates the task marketplace with realistic starter
+// tasks on the very first node run (when TotalTasks == 0). It registers four
+// poster agent identities, funds each from the ecosystem allocation bucket, and
+// creates six tasks with escrow already held. This gives the explorer a live,
+// interactive economy from the moment the node starts.
+//
+// This is intentionally testnet-only: on mainnet, real agents post real tasks.
+func seedMarketplace(tl *ledger.TransferLedger, reg *identity.Registry, taskMgr *tasks.TaskManager, escrowMgr *escrow.Escrow) {
+	type poster struct {
+		id    string
+		funds uint64
+	}
+	posters := []poster{
+		{"alpha-researcher", 500_000},
+		{"data-scientist", 800_000},
+		{"code-auditor", 1_000_000},
+		{"doc-writer", 400_000},
+	}
+
+	// Register each poster agent in the identity registry so it shows up in
+	// the explorer leaderboard. Use a deterministic zero-filled public key for
+	// simplicity — testnet only.
+	for _, p := range posters {
+		fp, err := identity.NewFingerprint(crypto.AgentID(p.id), make([]byte, 32), nil)
+		if err == nil {
+			_ = reg.Register(fp)
+		}
+		if err := tl.FundAgent(crypto.AgentID(p.id), p.funds); err != nil {
+			slog.Warn("seedMarketplace: failed to fund poster", "id", p.id, "err", err)
+		}
+	}
+
+	type task struct {
+		posterID    string
+		title       string
+		description string
+		budget      uint64
+	}
+	seedTasks := []task{
+		{
+			posterID: "alpha-researcher",
+			title:    "Summarise top 10 AI research papers from arXiv this week",
+			description: "Retrieve and summarise the top 10 most-cited AI/ML papers published on " +
+				"arXiv in the last 7 days. Provide a 2-paragraph summary per paper, key findings, " +
+				"and a relevance score (1–10) for applied NLP work.",
+			budget: 50_000,
+		},
+		{
+			posterID: "data-scientist",
+			title:    "Classify 5 000-row customer review dataset",
+			description: "Apply multi-label sentiment classification (positive / neutral / negative + " +
+				"topic tags) to a CSV of 5 000 customer support messages. Return the augmented CSV " +
+				"with added columns: sentiment, confidence, primary_topic.",
+			budget: 75_000,
+		},
+		{
+			posterID: "code-auditor",
+			title:    "Audit Solidity escrow contract for reentrancy vulnerabilities",
+			description: "Review the provided Solidity escrow contract (≤300 lines). Identify reentrancy " +
+				"risks, integer overflow/underflow, and access-control issues. Deliver a structured report " +
+				"with severity ratings and suggested mitigations.",
+			budget: 100_000,
+		},
+		{
+			posterID: "doc-writer",
+			title:    "Write OpenAPI documentation for AetherNet task endpoints",
+			description: "Produce OpenAPI 3.0-compatible YAML for the 10 /v1/tasks/* endpoints. " +
+				"Include request/response schemas, example payloads, error codes, and a 1-page " +
+				"quick-start guide.",
+			budget: 30_000,
+		},
+		{
+			posterID: "alpha-researcher",
+			title:    "Translate ML paper abstract from French to English",
+			description: "Translate a 500-word French-language abstract of a machine-learning paper " +
+				"into professional academic English. Preserve technical terminology and ensure fluency " +
+				"for a native-English audience.",
+			budget: 15_000,
+		},
+		{
+			posterID: "data-scientist",
+			title:    "Generate analytics SQL queries for a SaaS dashboard",
+			description: "Write 10 optimised PostgreSQL queries for a SaaS product-analytics dashboard: " +
+				"DAU/MAU, retention cohorts, funnel drop-off, feature adoption, and revenue metrics. " +
+				"Include comments explaining each query.",
+			budget: 25_000,
+		},
+	}
+
+	for _, t := range seedTasks {
+		task, err := taskMgr.PostTask(t.posterID, t.title, t.description, "", t.budget)
+		if err != nil {
+			slog.Warn("seedMarketplace: failed to post task", "title", t.title, "err", err)
+			continue
+		}
+		if err := escrowMgr.Hold(task.ID, crypto.AgentID(t.posterID), t.budget); err != nil {
+			slog.Warn("seedMarketplace: failed to hold escrow", "task_id", task.ID, "err", err)
+		}
+	}
+	slog.Info("seedMarketplace: seeded task marketplace", "tasks", len(seedTasks))
 }
 
 // seedGenesis funds the six genesis allocation buckets using the provided

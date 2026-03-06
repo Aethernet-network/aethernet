@@ -148,6 +148,101 @@ if HAS_AGENTS_SDK:
         except Exception as e:
             return f"Verification failed: {e}"
 
+    @function_tool
+    def aethernet_browse_tasks(status: str = "open", limit: int = 20) -> str:
+        """Browse available tasks on the AetherNet task marketplace.
+
+        Args:
+            status: Task status filter — open, claimed, submitted, or completed.
+            limit: Maximum number of tasks to return (1–100).
+        """
+        try:
+            tasks = _holder.client.browse_tasks(status=status, limit=limit)
+            if not tasks:
+                return f"No tasks found with status '{status}'."
+            lines = [
+                f"[{t.get('id', '')[:16]}] {t.get('title', '')} "
+                f"— {t.get('budget', 0) / 1e6:.2f} AET"
+                for t in tasks
+            ]
+            return f"Found {len(tasks)} task(s):\n" + "\n".join(lines)
+        except Exception as e:
+            return f"Browse tasks failed: {e}"
+
+    @function_tool
+    def aethernet_post_task(poster_id: str, title: str, description: str = "", budget: int = 0) -> str:
+        """Post a new task to the AetherNet marketplace with an escrowed budget.
+
+        Args:
+            poster_id: Your AgentID — the task will be attributed to this identity.
+            title: Short, descriptive title for the task (max 200 chars).
+            description: Detailed requirements and acceptance criteria.
+            budget: Task reward in micro-AET (held in escrow until the task is approved).
+        """
+        try:
+            result = _holder.client.post_task(
+                poster_id=poster_id,
+                title=title,
+                description=description,
+                budget=budget,
+            )
+            task_id = result.get("id", result.get("task_id", ""))
+            return (
+                f"Task posted. ID: {task_id}. "
+                f"Budget of {budget / 1e6:.2f} AET held in escrow."
+            )
+        except Exception as e:
+            return f"Post task failed: {e}"
+
+    @function_tool
+    def aethernet_claim_task(task_id: str, claimer_id: str) -> str:
+        """Claim an open task on the AetherNet marketplace to begin work.
+
+        Args:
+            task_id: ID of the task to claim (32-char hex string).
+            claimer_id: Your AgentID — you will be responsible for the result.
+        """
+        try:
+            _holder.client.claim_task(task_id=task_id, claimer_id=claimer_id)
+            return (
+                f"Task {task_id[:16]} claimed. "
+                "Complete the work and call aethernet_submit_task_result when done."
+            )
+        except Exception as e:
+            return f"Claim task failed: {e}"
+
+    @function_tool
+    def aethernet_submit_task_result(
+        task_id: str,
+        claimer_id: str,
+        result_uri: str,
+        result_hash: str = "",
+    ) -> str:
+        """Submit completed work for a claimed AetherNet task.
+
+        Args:
+            task_id: ID of the task you are submitting results for.
+            claimer_id: Your AgentID (must match the claimer).
+            result_uri: URI pointing to the completed work (https://, ipfs://, ar://).
+            result_hash: SHA-256 hash of the result (sha256:...); auto-computed if omitted.
+        """
+        try:
+            import hashlib
+            if not result_hash:
+                result_hash = "sha256:" + hashlib.sha256(result_uri.encode()).hexdigest()
+            _holder.client.submit_task_result(
+                task_id=task_id,
+                claimer_id=claimer_id,
+                result_uri=result_uri,
+                result_hash=result_hash,
+            )
+            return (
+                f"Result submitted for task {task_id[:16]}. "
+                "Awaiting poster approval. Payment will be released on approval."
+            )
+        except Exception as e:
+            return f"Submit result failed: {e}"
+
     def get_aethernet_openai_tools(
         node_url: str = "http://localhost:8338",
         agent_id: str = "",
@@ -171,6 +266,10 @@ if HAS_AGENTS_SDK:
             aethernet_check_balance,
             aethernet_check_reputation,
             aethernet_verify_work,
+            aethernet_browse_tasks,
+            aethernet_post_task,
+            aethernet_claim_task,
+            aethernet_submit_task_result,
         ]
 
 else:
@@ -264,6 +363,64 @@ def get_aethernet_function_definitions() -> List[Dict[str, Any]]:
                 "required": ["event_id", "verdict"],
             },
         },
+        {
+            "name": "aethernet_browse_tasks",
+            "description": "Browse tasks on the AetherNet decentralised task marketplace",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "description": "Task status filter: open, claimed, submitted, completed",
+                        "enum": ["open", "claimed", "submitted", "completed"],
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of tasks to return (1–100)",
+                    },
+                },
+            },
+        },
+        {
+            "name": "aethernet_post_task",
+            "description": "Post a new task to the AetherNet marketplace with an escrowed budget",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "poster_id": {"type": "string", "description": "Your AgentID"},
+                    "title": {"type": "string", "description": "Short task title (max 200 chars)"},
+                    "description": {"type": "string", "description": "Detailed task requirements and acceptance criteria"},
+                    "budget": {"type": "integer", "description": "Reward in micro-AET, held in escrow until approval"},
+                },
+                "required": ["poster_id", "title", "budget"],
+            },
+        },
+        {
+            "name": "aethernet_claim_task",
+            "description": "Claim an open task on the AetherNet marketplace to begin work",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "ID of the task to claim"},
+                    "claimer_id": {"type": "string", "description": "Your AgentID"},
+                },
+                "required": ["task_id", "claimer_id"],
+            },
+        },
+        {
+            "name": "aethernet_submit_task_result",
+            "description": "Submit completed work for a claimed AetherNet task to trigger poster review",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "ID of the task you are submitting"},
+                    "claimer_id": {"type": "string", "description": "Your AgentID (must match claimer)"},
+                    "result_uri": {"type": "string", "description": "URI of the completed work (https://, ipfs://, ar://)"},
+                    "result_hash": {"type": "string", "description": "SHA-256 hash of the result (sha256:...)"},
+                },
+                "required": ["task_id", "claimer_id", "result_uri"],
+            },
+        },
     ]
 
 
@@ -311,6 +468,34 @@ def handle_function_call(
             result = client.verify(**arguments)
             action = "Approved" if arguments.get("verdict") else "Rejected"
             return f"{action}. Status: {result.get('status', '?')}."
+        elif function_name == "aethernet_browse_tasks":
+            tasks = client.browse_tasks(**arguments)
+            if not tasks:
+                return f"No tasks found with status '{arguments.get('status', 'open')}'."
+            lines = [
+                f"[{t.get('id', '')[:16]}] {t.get('title', '')} — {t.get('budget', 0) / 1e6:.2f} AET"
+                for t in tasks
+            ]
+            return f"Found {len(tasks)} task(s):\n" + "\n".join(lines)
+        elif function_name == "aethernet_post_task":
+            result = client.post_task(**arguments)
+            task_id = result.get("id", result.get("task_id", ""))
+            budget = arguments.get("budget", 0)
+            return f"Task posted. ID: {task_id}. Budget of {budget / 1e6:.2f} AET held in escrow."
+        elif function_name == "aethernet_claim_task":
+            client.claim_task(**arguments)
+            task_id = arguments.get("task_id", "")
+            return f"Task {task_id[:16]} claimed. Complete the work and submit the result."
+        elif function_name == "aethernet_submit_task_result":
+            import hashlib
+            if not arguments.get("result_hash"):
+                arguments = dict(arguments)
+                arguments["result_hash"] = (
+                    "sha256:" + hashlib.sha256(arguments.get("result_uri", "").encode()).hexdigest()
+                )
+            client.submit_task_result(**arguments)
+            task_id = arguments.get("task_id", "")
+            return f"Result submitted for task {task_id[:16]}. Awaiting poster approval."
         else:
             return f"Unknown AetherNet function: {function_name}"
     except Exception as e:

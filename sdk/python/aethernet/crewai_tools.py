@@ -186,6 +186,143 @@ if HAS_CREWAI:
             except Exception as e:
                 return f"Verification failed: {e}"
 
+    # ── Task Marketplace Tools ──────────────────────────────────────────────
+
+    class _BrowseTasksInput(BaseModel):
+        status: str = Field(default="open", description="Task status filter: open, claimed, submitted, completed")
+        limit: int = Field(default=20, description="Maximum number of tasks to return (1–100)")
+
+    class AetherNetBrowseTasksTool(BaseTool):
+        """Browse tasks listed on the AetherNet task marketplace."""
+
+        name: str = "AetherNet Browse Tasks"
+        description: str = (
+            "Browse available tasks on the AetherNet decentralised task marketplace. "
+            "Returns task IDs, titles, descriptions, budgets, and status. "
+            "Use this to discover paid work opportunities."
+        )
+        args_schema: Type[BaseModel] = _BrowseTasksInput
+        client: Optional[AetherNetClient] = None
+
+        class Config:
+            arbitrary_types_allowed = True
+
+        def _run(self, status: str = "open", limit: int = 20) -> str:
+            try:
+                tasks = self.client.browse_tasks(status=status, limit=limit)
+                if not tasks:
+                    return f"No tasks found with status '{status}'."
+                lines = [
+                    f"[{t.get('id', '')[:16]}] {t.get('title', '')} "
+                    f"— {t.get('budget', 0) / 1e6:.2f} AET — {t.get('status', '')}"
+                    for t in tasks[:limit]
+                ]
+                return f"Found {len(tasks)} task(s):\n" + "\n".join(lines)
+            except Exception as e:
+                return f"Browse tasks failed: {e}"
+
+    class _PostTaskInput(BaseModel):
+        poster_id: str = Field(description="AgentID of the task poster")
+        title: str = Field(description="Short title for the task (max 200 chars)")
+        description: str = Field(default="", description="Detailed task description, requirements, and acceptance criteria")
+        budget: int = Field(description="Task reward in micro-AET (budget held in escrow until approval)")
+
+    class AetherNetPostTaskTool(BaseTool):
+        """Post a new task to the AetherNet marketplace with an escrowed budget."""
+
+        name: str = "AetherNet Post Task"
+        description: str = (
+            "Post a new task to the AetherNet decentralised marketplace. "
+            "The budget is held in escrow and released to the claimer on approval."
+        )
+        args_schema: Type[BaseModel] = _PostTaskInput
+        client: Optional[AetherNetClient] = None
+
+        class Config:
+            arbitrary_types_allowed = True
+
+        def _run(self, poster_id: str, title: str, description: str = "", budget: int = 0) -> str:
+            try:
+                result = self.client.post_task(
+                    poster_id=poster_id,
+                    title=title,
+                    description=description,
+                    budget=budget,
+                )
+                task_id = result.get("id", result.get("task_id", ""))
+                return (
+                    f"Task posted. ID: {task_id}. "
+                    f"Budget of {budget / 1e6:.2f} AET held in escrow."
+                )
+            except Exception as e:
+                return f"Post task failed: {e}"
+
+    class _ClaimTaskInput(BaseModel):
+        task_id: str = Field(description="ID of the open task to claim")
+        claimer_id: str = Field(description="Your AgentID — you will be responsible for delivering the result")
+
+    class AetherNetClaimTaskTool(BaseTool):
+        """Claim an open task on the AetherNet marketplace to begin work."""
+
+        name: str = "AetherNet Claim Task"
+        description: str = (
+            "Claim an open task on the AetherNet marketplace. "
+            "Once claimed, complete the work and submit the result to earn the budget."
+        )
+        args_schema: Type[BaseModel] = _ClaimTaskInput
+        client: Optional[AetherNetClient] = None
+
+        class Config:
+            arbitrary_types_allowed = True
+
+        def _run(self, task_id: str, claimer_id: str) -> str:
+            try:
+                self.client.claim_task(task_id=task_id, claimer_id=claimer_id)
+                return (
+                    f"Task {task_id[:16]} claimed. "
+                    "Complete the work then call AetherNet Submit Result."
+                )
+            except Exception as e:
+                return f"Claim task failed: {e}"
+
+    class _SubmitResultInput(BaseModel):
+        task_id: str = Field(description="ID of the task you are submitting results for")
+        claimer_id: str = Field(description="Your AgentID (must match the claimer)")
+        result_uri: str = Field(description="URI pointing to the completed work (https://, ipfs://, ar://)")
+        result_hash: str = Field(default="", description="SHA-256 hash of the result (sha256:...); auto-computed if omitted")
+
+    class AetherNetSubmitResultTool(BaseTool):
+        """Submit completed work for a claimed AetherNet task."""
+
+        name: str = "AetherNet Submit Result"
+        description: str = (
+            "Submit completed work for a claimed AetherNet task. "
+            "Moves the task to 'Submitted' state; the poster approves to release escrow payment."
+        )
+        args_schema: Type[BaseModel] = _SubmitResultInput
+        client: Optional[AetherNetClient] = None
+
+        class Config:
+            arbitrary_types_allowed = True
+
+        def _run(self, task_id: str, claimer_id: str, result_uri: str, result_hash: str = "") -> str:
+            try:
+                import hashlib
+                if not result_hash:
+                    result_hash = "sha256:" + hashlib.sha256(result_uri.encode()).hexdigest()
+                self.client.submit_task_result(
+                    task_id=task_id,
+                    claimer_id=claimer_id,
+                    result_uri=result_uri,
+                    result_hash=result_hash,
+                )
+                return (
+                    f"Result submitted for task {task_id[:16]}. "
+                    "Awaiting poster approval."
+                )
+            except Exception as e:
+                return f"Submit result failed: {e}"
+
     def get_aethernet_crewai_tools(
         node_url: str = "http://localhost:8338",
         agent_id: str = "",
@@ -206,6 +343,10 @@ if HAS_CREWAI:
             AetherNetCheckBalanceTool(client=client),
             AetherNetCheckReputationTool(client=client),
             AetherNetVerifyWorkTool(client=client),
+            AetherNetBrowseTasksTool(client=client),
+            AetherNetPostTaskTool(client=client),
+            AetherNetClaimTaskTool(client=client),
+            AetherNetSubmitResultTool(client=client),
         ]
 
 else:

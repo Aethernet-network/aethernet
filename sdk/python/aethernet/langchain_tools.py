@@ -188,6 +188,125 @@ if HAS_LANGCHAIN:
                 f"Status: {result['status']}."
             )
 
+    # ── Task Marketplace Tools ──────────────────────────────────────────────
+
+    class _BrowseTasksInput(BaseModel):
+        status: str = Field(default="open", description="Task status filter: open, claimed, submitted, completed")
+        limit: int = Field(default=20, description="Maximum number of tasks to return (1–100)")
+
+    class AetherNetBrowseTasksTool(BaseTool):
+        """Browse tasks listed on the AetherNet task marketplace."""
+
+        name: str = "aethernet_browse_tasks"
+        description: str = (
+            "Browse available tasks on the AetherNet decentralised task marketplace. "
+            "Returns a list of tasks with IDs, titles, descriptions, budgets, and status. "
+            "Use this to discover work opportunities before claiming a task. "
+            "Input: optional status (str, default 'open'), optional limit (int, default 20)."
+        )
+        args_schema: type[BaseModel] = _BrowseTasksInput
+        client: object  # AetherNetClient
+
+        def _run(self, status: str = "open", limit: int = 20) -> str:
+            tasks = self.client.browse_tasks(status=status, limit=limit)
+            if not tasks:
+                return f"No tasks found with status '{status}'."
+            lines = [
+                f"[{t.get('id', '')[:16]}] {t.get('title', '')} "
+                f"— {t.get('budget', 0) / 1e6:.2f} AET — {t.get('status', '')}"
+                for t in tasks[:limit]
+            ]
+            return f"Found {len(tasks)} task(s):\n" + "\n".join(lines)
+
+    class _PostTaskInput(BaseModel):
+        poster_id: str = Field(description="AgentID of the task poster (your agent ID)")
+        title: str = Field(description="Short, descriptive title for the task (max 200 chars)")
+        description: str = Field(default="", description="Detailed description, requirements, and acceptance criteria")
+        budget: int = Field(description="Task reward in micro-AET (e.g. 50000 = 0.05 AET)")
+
+    class AetherNetPostTaskTool(BaseTool):
+        """Post a new task to the AetherNet marketplace with an escrowed budget."""
+
+        name: str = "aethernet_post_task"
+        description: str = (
+            "Post a new task to the AetherNet decentralised marketplace. "
+            "The budget is held in escrow until the task is approved or cancelled. "
+            "Input: poster_id (str), title (str), optional description (str), budget (int micro-AET)."
+        )
+        args_schema: type[BaseModel] = _PostTaskInput
+        client: object  # AetherNetClient
+
+        def _run(self, poster_id: str, title: str, description: str = "", budget: int = 0) -> str:
+            result = self.client.post_task(
+                poster_id=poster_id,
+                title=title,
+                description=description,
+                budget=budget,
+            )
+            task_id = result.get("id", result.get("task_id", ""))
+            return (
+                f"Task posted successfully. Task ID: {task_id}. "
+                f"Budget of {budget / 1e6:.2f} AET held in escrow."
+            )
+
+    class _ClaimTaskInput(BaseModel):
+        task_id: str = Field(description="ID of the task to claim (32-char hex string)")
+        claimer_id: str = Field(description="Your AgentID — you will be responsible for delivering the result")
+
+    class AetherNetClaimTaskTool(BaseTool):
+        """Claim an open task on the AetherNet marketplace to begin work."""
+
+        name: str = "aethernet_claim_task"
+        description: str = (
+            "Claim an open task on the AetherNet marketplace. "
+            "Once claimed the task moves to 'Claimed' state and you are expected to "
+            "complete and submit the result. Only one agent can claim a task at a time. "
+            "Input: task_id (str), claimer_id (your AgentID)."
+        )
+        args_schema: type[BaseModel] = _ClaimTaskInput
+        client: object  # AetherNetClient
+
+        def _run(self, task_id: str, claimer_id: str) -> str:
+            self.client.claim_task(task_id=task_id, claimer_id=claimer_id)
+            return (
+                f"Task {task_id[:16]} claimed by {claimer_id}. "
+                "Complete the work and call aethernet_submit_result when done."
+            )
+
+    class _SubmitResultInput(BaseModel):
+        task_id: str = Field(description="ID of the task you are submitting results for")
+        claimer_id: str = Field(description="Your AgentID (must match the agent that claimed the task)")
+        result_uri: str = Field(description="URI pointing to the completed work (https://, ipfs://, or ar://)")
+        result_hash: str = Field(default="", description="SHA-256 hash of the result for integrity verification (sha256:...)")
+
+    class AetherNetSubmitResultTool(BaseTool):
+        """Submit completed work for a claimed AetherNet task to trigger poster review."""
+
+        name: str = "aethernet_submit_result"
+        description: str = (
+            "Submit the result of a claimed task on AetherNet. "
+            "The task moves to 'Submitted' state and the poster can approve (releasing escrow "
+            "to you) or dispute. The auto-validator settles unreviewed submissions after 10s on testnet. "
+            "Input: task_id (str), claimer_id (your AgentID), result_uri (str), optional result_hash (str)."
+        )
+        args_schema: type[BaseModel] = _SubmitResultInput
+        client: object  # AetherNetClient
+
+        def _run(self, task_id: str, claimer_id: str, result_uri: str, result_hash: str = "") -> str:
+            import hashlib, time
+            if not result_hash:
+                result_hash = "sha256:" + hashlib.sha256(result_uri.encode()).hexdigest()
+            self.client.submit_task_result(
+                task_id=task_id,
+                claimer_id=claimer_id,
+                result_uri=result_uri,
+                result_hash=result_hash,
+            )
+            return (
+                f"Result submitted for task {task_id[:16]}. "
+                "Awaiting poster approval. Payment will be released on approval."
+            )
+
 
 def get_aethernet_tools(
     client=None,
@@ -227,4 +346,8 @@ def get_aethernet_tools(
         AetherNetCheckBalanceTool(client=client),
         AetherNetCheckReputationTool(client=client),
         AetherNetVerifyWorkTool(client=client),
+        AetherNetBrowseTasksTool(client=client),
+        AetherNetPostTaskTool(client=client),
+        AetherNetClaimTaskTool(client=client),
+        AetherNetSubmitResultTool(client=client),
     ]
