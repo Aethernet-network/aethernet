@@ -51,6 +51,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 	"github.com/Aethernet-network/aethernet/internal/registry"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
+	"github.com/Aethernet-network/aethernet/internal/router"
 	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/store"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
@@ -281,6 +282,7 @@ type nodeStack struct {
 	discoveryEngine *discovery.Engine
 	activityGen     *demo.ActivityGenerator
 	platformKeys    *platformpkg.KeyManager
+	taskRouter      *router.Router
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
@@ -388,6 +390,22 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 	// Developer platform API key manager — tracks third-party apps building on AetherNet.
 	platformKeys := platformpkg.NewKeyManager()
 
+	// Autonomous task router — matches open tasks to the best registered agent.
+	// The claimFunc and reputationFunc closures bridge the router to the live
+	// task and reputation managers without creating an import cycle.
+	claimFn := func(taskID string, agentID crypto.AgentID) error {
+		return taskMgr.ClaimTask(taskID, agentID)
+	}
+	repFn := func(agentID crypto.AgentID, category string) (uint64, float64, float64, float64) {
+		rep := reputationMgr.GetReputation(agentID)
+		cat, ok := rep.Categories[category]
+		if !ok || cat == nil {
+			return 0, 0, 0, 0
+		}
+		return cat.TasksCompleted, cat.AvgScore, cat.AvgDeliveryTime, cat.CompletionRate()
+	}
+	taskRouter := router.New(taskMgr, claimFn, repFn, 5*time.Second)
+
 	return &nodeStack{
 		dag:          d,
 		transfer:     tl,
@@ -406,6 +424,7 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 		reputationMgr:   reputationMgr,
 		discoveryEngine: discoveryEng,
 		platformKeys:    platformKeys,
+		taskRouter:      taskRouter,
 	}
 }
 
@@ -494,6 +513,13 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	if stack.platformKeys != nil {
 		apiSrv.SetPlatformKeys(stack.platformKeys)
 	}
+	if stack.taskRouter != nil {
+		// Register seed agent capabilities so the testnet router has agents to
+		// assign tasks to from the moment it starts.
+		seedRouterCapabilities(stack.taskRouter)
+		stack.taskRouter.Start()
+		apiSrv.SetTaskRouter(stack.taskRouter)
+	}
 	apiSrv.SetRateLimiters(
 		ratelimit.New(ratelimit.DefaultConfig()),
 		ratelimit.New(ratelimit.ReadOnlyConfig()),
@@ -568,6 +594,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 // stopStack tears down the API server, network node, OCS engine, and persistence
 // store in safe reverse-startup order.
 func stopStack(node *network.Node, stack *nodeStack) {
+	if stack.taskRouter != nil {
+		stack.taskRouter.Stop()
+	}
 	if stack.activityGen != nil {
 		stack.activityGen.Stop()
 	}
@@ -745,6 +774,66 @@ func cmdConnect() {
 	runLoop(agentID, stack.dag, node, stack.engine, stack.supply, stack.bus)
 	stopStack(node, stack)
 	slog.Info("node stopped cleanly")
+}
+
+// seedRouterCapabilities registers the four testnet seed agents in the
+// autonomous task router so they can receive auto-routed tasks from the moment
+// the node starts.
+func seedRouterCapabilities(r *router.Router) {
+	type seedAgent struct {
+		id           string
+		categories   []string
+		tags         []string
+		description  string
+		pricePerTask uint64 // micro-AET
+		maxConcurrent int
+	}
+	seeds := []seedAgent{
+		{
+			id:            "alpha-researcher",
+			categories:    []string{"research", "writing"},
+			tags:          []string{"papers", "nlp", "summarisation", "translation"},
+			description:   "Research and writing specialist — arxiv papers, summaries, translations",
+			pricePerTask:  20_000,
+			maxConcurrent: 3,
+		},
+		{
+			id:            "data-scientist",
+			categories:    []string{"data", "ml"},
+			tags:          []string{"csv", "classification", "sql", "analytics", "sentiment"},
+			description:   "Data science and ML workloads — classification, analytics, SQL generation",
+			pricePerTask:  30_000,
+			maxConcurrent: 2,
+		},
+		{
+			id:            "code-auditor",
+			categories:    []string{"code", "security"},
+			tags:          []string{"solidity", "audit", "reentrancy", "smart-contracts"},
+			description:   "Code review and security auditing — Solidity, reentrancy, access control",
+			pricePerTask:  50_000,
+			maxConcurrent: 2,
+		},
+		{
+			id:            "doc-writer",
+			categories:    []string{"writing", "documentation"},
+			tags:          []string{"openapi", "yaml", "docs", "technical-writing"},
+			description:   "Technical documentation — OpenAPI specs, quickstarts, API docs",
+			pricePerTask:  15_000,
+			maxConcurrent: 4,
+		},
+	}
+	for _, s := range seeds {
+		r.RegisterCapability(router.AgentCapability{
+			AgentID:       crypto.AgentID(s.id),
+			Categories:    s.categories,
+			Tags:          s.tags,
+			Description:   s.description,
+			PricePerTask:  s.pricePerTask,
+			MaxConcurrent: s.maxConcurrent,
+			Available:     true,
+		})
+	}
+	slog.Info("seedRouterCapabilities: registered seed agents", "count", len(seeds))
 }
 
 // seedMarketplace pre-populates the task marketplace with realistic starter

@@ -68,10 +68,22 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 	svcregistry "github.com/Aethernet-network/aethernet/internal/registry"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
+	"github.com/Aethernet-network/aethernet/internal/router"
 	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/wallet"
 )
+
+// taskRouterInterface is the subset of *router.Router used by the API server.
+// Using a local interface keeps the server testable without a real router.
+type taskRouterInterface interface {
+	RegisterCapability(cap router.AgentCapability)
+	UnregisterCapability(agentID crypto.AgentID)
+	SetAvailability(agentID crypto.AgentID, available bool) bool
+	RegisteredAgents() []*router.AgentCapability
+	RecentRoutes(limit int) []*router.RouteResult
+	Stats() router.RouterStats
+}
 
 // Server is the HTTP REST API for an AetherNet node.
 //
@@ -109,6 +121,10 @@ type Server struct {
 	// Discovery engine — optional; set via SetDiscoveryEngine after construction.
 	// When nil, GET /v1/discover returns 501.
 	discoveryEngine *discovery.Engine
+
+	// Autonomous task router — optional; set via SetTaskRouter after construction.
+	// When nil, /v1/router/* endpoints return 501.
+	taskRouter taskRouterInterface
 
 	// Event bus — optional; set via SetEventBus after construction.
 	// When non-nil, handlers publish events for real-time WebSocket streaming.
@@ -229,6 +245,14 @@ func NewServer(
 	mux.HandleFunc("DELETE /v1/platform/keys/{key}", s.handleRevokeKey)
 	mux.HandleFunc("GET /v1/platform/stats", s.handlePlatformStats)
 
+	// Autonomous task router endpoints.
+	mux.HandleFunc("POST /v1/router/register", s.handleRouterRegister)
+	mux.HandleFunc("DELETE /v1/router/register/{agent_id}", s.handleRouterUnregister)
+	mux.HandleFunc("PUT /v1/router/availability/{agent_id}", s.handleRouterAvailability)
+	mux.HandleFunc("GET /v1/router/agents", s.handleRouterAgents)
+	mux.HandleFunc("GET /v1/router/routes", s.handleRouterRoutes)
+	mux.HandleFunc("GET /v1/router/stats", s.handleRouterStats)
+
 	// WebSocket endpoint for real-time event streaming.
 	mux.Handle("GET /v1/ws", s.wsHandler())
 
@@ -281,6 +305,12 @@ func (s *Server) SetReputationManager(rm *reputation.ReputationManager) {
 // server. Call before Start. When nil, GET /v1/discover returns 501.
 func (s *Server) SetDiscoveryEngine(e *discovery.Engine) {
 	s.discoveryEngine = e
+}
+
+// SetTaskRouter wires the autonomous task routing engine into the server.
+// Call before Start. When nil, the /v1/router/* endpoints return 501.
+func (s *Server) SetTaskRouter(r taskRouterInterface) {
+	s.taskRouter = r
 }
 
 // SetEventBus wires the event bus into the server. Call before Start.
@@ -2303,4 +2333,145 @@ func (s *Server) handlePlatformStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.platformKeys.Stats())
+}
+
+// ---------------------------------------------------------------------------
+// Autonomous task router handlers
+// ---------------------------------------------------------------------------
+
+// handleRouterRegister handles POST /v1/router/register.
+// Registers an agent's capability profile for autonomous task routing.
+func (s *Server) handleRouterRegister(w http.ResponseWriter, r *http.Request) {
+	if s.taskRouter == nil {
+		writeError(w, http.StatusNotImplemented, "task router not enabled")
+		return
+	}
+	var req struct {
+		AgentID       string               `json:"agent_id"`
+		Categories    []string             `json:"categories"`
+		Tags          []string             `json:"tags"`
+		Description   string               `json:"description"`
+		PricePerTask  uint64               `json:"price_per_task"`
+		MaxConcurrent int                  `json:"max_concurrent"`
+		WebhookURL    string               `json:"webhook_url"`
+		WebhookSecret string               `json:"webhook_secret"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.AgentID == "" {
+		writeError(w, http.StatusBadRequest, "agent_id required")
+		return
+	}
+	if len(req.Categories) == 0 {
+		writeError(w, http.StatusBadRequest, "categories required")
+		return
+	}
+
+	cap := router.AgentCapability{
+		AgentID:       crypto.AgentID(req.AgentID),
+		Categories:    req.Categories,
+		Tags:          req.Tags,
+		Description:   req.Description,
+		PricePerTask:  req.PricePerTask,
+		MaxConcurrent: req.MaxConcurrent,
+		Available:     true,
+	}
+	if req.WebhookURL != "" {
+		cap.Webhook = &router.WebhookConfig{URL: req.WebhookURL, Secret: req.WebhookSecret}
+	}
+
+	s.taskRouter.RegisterCapability(cap)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"agent_id":   req.AgentID,
+		"categories": req.Categories,
+		"status":     "registered",
+	})
+}
+
+// handleRouterUnregister handles DELETE /v1/router/register/{agent_id}.
+// Removes an agent from the routing pool.
+func (s *Server) handleRouterUnregister(w http.ResponseWriter, r *http.Request) {
+	if s.taskRouter == nil {
+		writeError(w, http.StatusNotImplemented, "task router not enabled")
+		return
+	}
+	agentID := r.PathValue("agent_id")
+	if agentID == "" {
+		writeError(w, http.StatusBadRequest, "agent_id required")
+		return
+	}
+	s.taskRouter.UnregisterCapability(crypto.AgentID(agentID))
+	writeJSON(w, http.StatusOK, map[string]string{"agent_id": agentID, "status": "unregistered"})
+}
+
+// handleRouterAvailability handles PUT /v1/router/availability/{agent_id}.
+// Toggles whether the router will assign tasks to the agent.
+func (s *Server) handleRouterAvailability(w http.ResponseWriter, r *http.Request) {
+	if s.taskRouter == nil {
+		writeError(w, http.StatusNotImplemented, "task router not enabled")
+		return
+	}
+	agentID := r.PathValue("agent_id")
+	if agentID == "" {
+		writeError(w, http.StatusBadRequest, "agent_id required")
+		return
+	}
+	var req struct {
+		Available bool `json:"available"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if !s.taskRouter.SetAvailability(crypto.AgentID(agentID), req.Available) {
+		writeError(w, http.StatusNotFound, "agent not registered for routing")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agent_id": agentID, "available": req.Available})
+}
+
+// handleRouterAgents handles GET /v1/router/agents.
+// Returns all agents currently registered for autonomous routing.
+func (s *Server) handleRouterAgents(w http.ResponseWriter, r *http.Request) {
+	if s.taskRouter == nil {
+		writeError(w, http.StatusNotImplemented, "task router not enabled")
+		return
+	}
+	agents := s.taskRouter.RegisteredAgents()
+	if agents == nil {
+		agents = []*router.AgentCapability{}
+	}
+	writeJSON(w, http.StatusOK, agents)
+}
+
+// handleRouterRoutes handles GET /v1/router/routes?limit=N.
+// Returns recent routing decisions.
+func (s *Server) handleRouterRoutes(w http.ResponseWriter, r *http.Request) {
+	if s.taskRouter == nil {
+		writeError(w, http.StatusNotImplemented, "task router not enabled")
+		return
+	}
+	limit := 20
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	routes := s.taskRouter.RecentRoutes(limit)
+	if routes == nil {
+		routes = []*router.RouteResult{}
+	}
+	writeJSON(w, http.StatusOK, routes)
+}
+
+// handleRouterStats handles GET /v1/router/stats.
+// Returns aggregate routing engine statistics.
+func (s *Server) handleRouterStats(w http.ResponseWriter, r *http.Request) {
+	if s.taskRouter == nil {
+		writeError(w, http.StatusNotImplemented, "task router not enabled")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.taskRouter.Stats())
 }

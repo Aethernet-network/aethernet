@@ -714,6 +714,90 @@ class AetherNetClient:
         """
         return self._get(f"/v1/tasks/subtasks/{task_id}")
 
+    # ------------------------------------------------------------------
+    # Autonomous routing endpoints
+    # ------------------------------------------------------------------
+
+    def register_for_routing(
+        self,
+        categories: List[str],
+        tags: Optional[List[str]] = None,
+        description: str = "",
+        price_per_task: int = 0,
+        max_concurrent: int = 1,
+        webhook_url: str = "",
+        webhook_secret: str = "",
+    ) -> Dict[str, Any]:
+        """Register this agent for autonomous task routing.
+
+        Once registered, the router will automatically push open tasks that
+        match the agent's categories to it, calling the agent's webhook
+        (if configured) when a match is made.
+
+        Args:
+            categories:     List of task categories this agent handles.
+            tags:           Optional keyword tags for finer-grained matching.
+            description:    Human-readable description of agent capabilities.
+            price_per_task: Maximum price per task in micro-AET (0 = any budget).
+            max_concurrent: Maximum tasks to handle simultaneously.
+            webhook_url:    URL the router should POST task-assignment notices to.
+            webhook_secret: HMAC-SHA256 secret used to sign webhook payloads.
+
+        Returns the registration confirmation dict.
+        """
+        if not self.agent_id:
+            raise ValueError("agent_id required — set via AetherNetClient(agent_id=...)")
+        body: Dict[str, Any] = {
+            "agent_id": self.agent_id,
+            "categories": categories,
+            "price_per_task": price_per_task,
+            "max_concurrent": max_concurrent,
+        }
+        if tags:
+            body["tags"] = tags
+        if description:
+            body["description"] = description
+        if webhook_url:
+            body["webhook_url"] = webhook_url
+        if webhook_secret:
+            body["webhook_secret"] = webhook_secret
+        return self._post("/v1/router/register", body)
+
+    def unregister_from_routing(self, agent_id: str = "") -> Dict[str, Any]:
+        """Remove this agent from the autonomous routing pool.
+
+        Args:
+            agent_id: Agent to unregister; defaults to ``self.agent_id``.
+
+        Returns the confirmation dict.
+        """
+        aid = agent_id or self.agent_id
+        if not aid:
+            raise ValueError("agent_id required")
+        return self._delete(f"/v1/router/register/{aid}")
+
+    def set_availability(self, available: bool = True, agent_id: str = "") -> Dict[str, Any]:
+        """Toggle whether the router will assign tasks to this agent.
+
+        Args:
+            available: True to accept routed tasks, False to pause routing.
+            agent_id:  Agent to update; defaults to ``self.agent_id``.
+
+        Returns the updated availability dict.
+        """
+        aid = agent_id or self.agent_id
+        if not aid:
+            raise ValueError("agent_id required")
+        return self._put(f"/v1/router/availability/{aid}", {"available": available})
+
+    def get_routing_stats(self) -> Dict[str, Any]:
+        """Return aggregate statistics from the autonomous routing engine.
+
+        Returns a dict with ``registered_agents``, ``available_agents``,
+        ``total_routed``, and ``pending_tasks``.
+        """
+        return self._get("/v1/router/stats")
+
     def get_category_rankings(self, category: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Return agents ranked by performance in *category*.
 
@@ -746,6 +830,16 @@ class AetherNetClient:
 
     def _post(self, path: str, body: Dict) -> Any:
         resp = self.session.post(self.node_url + path, json=body)
+        if resp.status_code >= 400:
+            try:
+                err = resp.json().get("error", resp.text)
+            except Exception:
+                err = resp.text
+            raise AetherNetError(resp.status_code, err)
+        return resp.json()
+
+    def _put(self, path: str, body: Dict) -> Any:
+        resp = self.session.put(self.node_url + path, json=body)
         if resp.status_code >= 400:
             try:
                 err = resp.json().get("error", resp.text)

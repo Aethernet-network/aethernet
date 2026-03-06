@@ -83,6 +83,11 @@ class AgentWorker:
     def start(self, blocking: bool = True):
         """Start the worker loop.
 
+        Registers the agent in the identity registry (idempotent), then
+        also registers it for autonomous task routing so the protocol can
+        push matching tasks without the agent having to poll. Pull-based
+        polling continues as a belt-and-suspenders fallback.
+
         Args:
             blocking: If True, blocks forever. If False, runs in a background
                 daemon thread and returns the thread object.
@@ -92,6 +97,20 @@ class AgentWorker:
             logger.info(f"Agent {self.agent_id} registered and ready")
         except Exception as e:
             logger.info(f"Agent {self.agent_id} already registered or error: {e}")
+
+        # Register for autonomous routing (push-based). If the node doesn't
+        # have the router enabled this fails silently — polling still works.
+        try:
+            self.client.register_for_routing(
+                categories=self.categories,
+                description=f"Worker agent: {self.agent_id}",
+                max_concurrent=self.max_concurrent,
+            )
+            logger.info(
+                f"Registered for autonomous routing: categories={self.categories}"
+            )
+        except Exception as e:
+            logger.warning(f"Could not register for routing (non-fatal): {e}")
 
         logger.info(
             f"Worker started: categories={self.categories}, "
