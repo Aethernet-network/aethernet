@@ -1104,11 +1104,15 @@ func TestHandleRegisterAgent_HumanReadableIDs(t *testing.T) {
 		t.Fatalf("researcher registration: want 201, got %d", r1.StatusCode)
 	}
 	var resp1 struct {
-		AgentID string `json:"agent_id"`
+		AgentID              string `json:"agent_id"`
+		OnboardingAllocation uint64 `json:"onboarding_allocation"`
 	}
 	decodeJSON(t, r1, &resp1)
 	if resp1.AgentID != "researcher-agent" {
 		t.Errorf("want agent_id %q, got %q", "researcher-agent", resp1.AgentID)
+	}
+	if resp1.OnboardingAllocation == 0 {
+		t.Error("researcher-agent: onboarding_allocation must be non-zero")
 	}
 
 	// Register "writer-agent" with kp2's public key.
@@ -1120,11 +1124,15 @@ func TestHandleRegisterAgent_HumanReadableIDs(t *testing.T) {
 		t.Fatalf("writer registration: want 201, got %d", r2.StatusCode)
 	}
 	var resp2 struct {
-		AgentID string `json:"agent_id"`
+		AgentID              string `json:"agent_id"`
+		OnboardingAllocation uint64 `json:"onboarding_allocation"`
 	}
 	decodeJSON(t, r2, &resp2)
 	if resp2.AgentID != "writer-agent" {
 		t.Errorf("want agent_id %q, got %q", "writer-agent", resp2.AgentID)
+	}
+	if resp2.OnboardingAllocation == 0 {
+		t.Error("writer-agent: onboarding_allocation must be non-zero")
 	}
 
 	// List all agents and confirm both appear with the correct IDs.
