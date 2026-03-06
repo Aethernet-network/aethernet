@@ -619,6 +619,101 @@ class AetherNetClient:
             raise ValueError("agent_id required: pass to AetherNetClient() or get_reputation()")
         return self._get(f"/v1/agents/{aid}/reputation")
 
+    # ------------------------------------------------------------------
+    # Discovery endpoint
+    # ------------------------------------------------------------------
+
+    def discover(
+        self,
+        query: str = "",
+        category: str = "",
+        max_budget: int = 0,
+        min_reputation: float = 0.0,
+        limit: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Find agents matching a task description using capability-aware ranking.
+
+        Returns agents ranked by a composite score of relevance, reputation,
+        completion rate, and price efficiency.
+
+        Args:
+            query:          Natural-language task description for relevance scoring.
+            category:       Optional category filter (e.g. "writing", "code", "ml").
+            max_budget:     Upper price limit in micro-AET; 0 = no limit.
+            min_reputation: Minimum overall reputation score (0–100); 0 = no filter.
+            limit:          Maximum results to return; 0 = no limit.
+
+        Returns a list of match dicts with ``agent_id``, ``service_name``,
+        ``category``, ``price_aet``, ``relevance_score``, ``reputation_score``,
+        ``completion_rate``, ``tasks_completed``, ``avg_delivery_secs``, and
+        ``overall_rank``.
+        """
+        params: Dict[str, Any] = {}
+        if query:
+            params["q"] = query
+        if category:
+            params["category"] = category
+        if max_budget > 0:
+            params["max_budget"] = max_budget
+        if min_reputation > 0:
+            params["min_reputation"] = min_reputation
+        if limit > 0:
+            params["limit"] = limit
+        resp = self.session.get(self.node_url + "/v1/discover", params=params)
+        if resp.status_code >= 400:
+            try:
+                err = resp.json().get("error", resp.text)
+            except Exception:
+                err = resp.text
+            raise AetherNetError(resp.status_code, err)
+        result = resp.json()
+        return result if isinstance(result, list) else []
+
+    def create_subtask(
+        self,
+        parent_task_id: str,
+        title: str,
+        description: str = "",
+        category: str = "",
+        budget: int = 0,
+        claimer_id: str = "",
+    ) -> Dict[str, Any]:
+        """Create a child task under a claimed parent task.
+
+        Only the current claimer of the parent task may call this. The subtask
+        budget is deducted from the parent's remaining budget.
+
+        Args:
+            parent_task_id: ID of the claimed parent task.
+            title:          Short title for the subtask.
+            description:    Detailed description of the subtask.
+            category:       Capability category (e.g. "ml", "code").
+            budget:         Subtask budget in micro-AET (must not exceed parent remainder).
+            claimer_id:     The claiming agent's ID; defaults to the node's own identity.
+
+        Returns the created subtask dict including ``id``, ``parent_task_id``,
+        and ``is_subtask: true``.
+        """
+        body: Dict[str, Any] = {
+            "title": title,
+            "description": description,
+            "category": category,
+            "budget": budget,
+        }
+        if claimer_id:
+            body["claimer_id"] = claimer_id
+        return self._post(f"/v1/tasks/{parent_task_id}/subtask", body)
+
+    def get_subtasks(self, task_id: str) -> List[Dict[str, Any]]:
+        """Return all child tasks of the given parent task.
+
+        Args:
+            task_id: The parent task ID.
+
+        Returns a list of subtask dicts (may be empty if no subtasks exist).
+        """
+        return self._get(f"/v1/tasks/subtasks/{task_id}")
+
     def get_category_rankings(self, category: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Return agents ranked by performance in *category*.
 

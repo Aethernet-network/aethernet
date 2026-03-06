@@ -52,6 +52,7 @@ import (
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
+	"github.com/Aethernet-network/aethernet/internal/discovery"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/eventbus"
@@ -103,6 +104,10 @@ type Server struct {
 	// Reputation tracking — optional; set via SetReputationManager after construction.
 	// When nil, reputation endpoints return 501 and completion recording is skipped.
 	reputationMgr *reputation.ReputationManager
+
+	// Discovery engine — optional; set via SetDiscoveryEngine after construction.
+	// When nil, GET /v1/discover returns 501.
+	discoveryEngine *discovery.Engine
 
 	// Event bus — optional; set via SetEventBus after construction.
 	// When non-nil, handlers publish events for real-time WebSocket streaming.
@@ -200,6 +205,13 @@ func NewServer(
 	mux.HandleFunc("POST /v1/tasks/{id}/approve", s.handleApproveTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/dispute", s.handleDisputeTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/cancel", s.handleCancelTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/subtask", s.handleCreateSubtask)
+	// GET /v1/tasks/subtasks/{id} avoids a routing conflict with
+	// GET /v1/tasks/agent/{agent_id} that would arise from {id}/subtasks.
+	mux.HandleFunc("GET /v1/tasks/subtasks/{id}", s.handleGetSubtasks)
+
+	// Discovery endpoint — capability-aware agent matching.
+	mux.HandleFunc("GET /v1/discover", s.handleDiscover)
 
 	// Reputation endpoints.
 	mux.HandleFunc("GET /v1/agents/{id}/reputation", s.handleGetReputation)
@@ -251,6 +263,12 @@ func (s *Server) SetTaskManager(tm *tasks.TaskManager, e *escrow.Escrow) {
 // return 501, and task approval/dispute does not record reputation events.
 func (s *Server) SetReputationManager(rm *reputation.ReputationManager) {
 	s.reputationMgr = rm
+}
+
+// SetDiscoveryEngine wires the capability-aware discovery engine into the
+// server. Call before Start. When nil, GET /v1/discover returns 501.
+func (s *Server) SetDiscoveryEngine(e *discovery.Engine) {
+	s.discoveryEngine = e
 }
 
 // SetEventBus wires the event bus into the server. Call before Start.
@@ -898,6 +916,99 @@ func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 
 	task, _ := s.taskMgr.Get(taskID)
 	writeJSON(w, http.StatusOK, task)
+}
+
+// ---------------------------------------------------------------------------
+// Task chain and discovery handlers
+// ---------------------------------------------------------------------------
+
+type createSubtaskRequest struct {
+	ClaimerID   string `json:"claimer_id,omitempty"`
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+	Category    string `json:"category,omitempty"`
+	Budget      uint64 `json:"budget"`
+}
+
+// handleCreateSubtask handles POST /v1/tasks/{id}/subtask. The claimer of the
+// parent task partitions part of its budget into a new child task. Returns 201
+// on success with the created subtask.
+func (s *Server) handleCreateSubtask(w http.ResponseWriter, r *http.Request) {
+	if s.taskMgr == nil {
+		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
+		return
+	}
+
+	var req createSubtaskRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	claimerID := req.ClaimerID
+	if claimerID == "" {
+		claimerID = string(s.agentID)
+	}
+
+	parentID := r.PathValue("id")
+	subtask, err := s.taskMgr.CreateSubtask(parentID, crypto.AgentID(claimerID), req.Title, req.Description, req.Category, req.Budget)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, subtask)
+}
+
+// handleGetSubtasks handles GET /v1/tasks/{id}/subtasks. Returns all child
+// tasks of the given parent task, ordered by PostedAt ascending.
+func (s *Server) handleGetSubtasks(w http.ResponseWriter, r *http.Request) {
+	if s.taskMgr == nil {
+		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
+		return
+	}
+
+	taskID := r.PathValue("id")
+	parent, err := s.taskMgr.Get(taskID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	var subtasks []*tasks.Task
+	for _, subID := range parent.SubtaskIDs {
+		sub, err := s.taskMgr.Get(subID)
+		if err == nil {
+			subtasks = append(subtasks, sub)
+		}
+	}
+	if subtasks == nil {
+		subtasks = []*tasks.Task{}
+	}
+	writeJSON(w, http.StatusOK, subtasks)
+}
+
+// handleDiscover handles GET /v1/discover. Query params:
+//   - q           — natural-language task description
+//   - category    — optional category filter (e.g. "writing", "code")
+//   - max_budget  — optional upper price limit in micro-AET
+//   - min_reputation — optional minimum overall reputation score (0–100)
+//   - limit       — maximum results to return (0 = no limit)
+func (s *Server) handleDiscover(w http.ResponseWriter, r *http.Request) {
+	if s.discoveryEngine == nil {
+		writeError(w, http.StatusNotImplemented, "discovery not enabled")
+		return
+	}
+
+	q := r.URL.Query().Get("q")
+	category := r.URL.Query().Get("category")
+	maxBudget, _ := strconv.ParseUint(r.URL.Query().Get("max_budget"), 10, 64)
+	minReputation, _ := strconv.ParseFloat(r.URL.Query().Get("min_reputation"), 64)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+
+	matches := s.discoveryEngine.FindAgents(q, category, maxBudget, minReputation, limit)
+	if matches == nil {
+		matches = []*discovery.Match{}
+	}
+	writeJSON(w, http.StatusOK, matches)
 }
 
 // ---------------------------------------------------------------------------

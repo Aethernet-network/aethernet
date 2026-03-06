@@ -34,6 +34,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/api"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
+	"github.com/Aethernet-network/aethernet/internal/discovery"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/eventbus"
 	"github.com/Aethernet-network/aethernet/internal/fees"
@@ -213,10 +214,11 @@ type nodeStack struct {
 	metricsReg   *metrics.Registry
 	nodeMetrics  *metrics.AetherNetMetrics
 	metricsStop  chan struct{} // closed to terminate the gauge-update goroutine
-	autoVal       *validator.AutoValidator
-	taskMgr       *tasks.TaskManager
-	escrowMgr     *escrow.Escrow
-	reputationMgr *reputation.ReputationManager
+	autoVal         *validator.AutoValidator
+	taskMgr         *tasks.TaskManager
+	escrowMgr       *escrow.Escrow
+	reputationMgr   *reputation.ReputationManager
+	discoveryEngine *discovery.Engine
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
@@ -317,6 +319,10 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 		}
 	}
 
+	// Capability-aware discovery engine — matches task requirements to agent
+	// capabilities using service registry listings and reputation data.
+	discoveryEng := discovery.NewEngine(svcReg, reputationMgr)
+
 	return &nodeStack{
 		dag:          d,
 		transfer:     tl,
@@ -330,9 +336,10 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 		stakeManager: stakeMgr,
 		feeCollector: feeCollector,
 		walletMgr:    walletMgr,
-		taskMgr:       taskMgr,
-		escrowMgr:     escrowMgr,
-		reputationMgr: reputationMgr,
+		taskMgr:         taskMgr,
+		escrowMgr:       escrowMgr,
+		reputationMgr:   reputationMgr,
+		discoveryEngine: discoveryEng,
 	}
 }
 
@@ -413,6 +420,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	}
 	apiSrv.SetTaskManager(stack.taskMgr, stack.escrowMgr)
 	apiSrv.SetReputationManager(stack.reputationMgr)
+	if stack.discoveryEngine != nil {
+		apiSrv.SetDiscoveryEngine(stack.discoveryEngine)
+	}
 	apiSrv.SetEconomics(stack.walletMgr, stack.stakeManager, stack.feeCollector)
 	apiSrv.SetEventBus(bus)
 	apiSrv.SetRateLimiters(

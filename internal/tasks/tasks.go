@@ -43,6 +43,7 @@ var (
 	ErrTaskNotOpen        = errors.New("tasks: task is not open")
 	ErrWrongClaimer       = errors.New("tasks: not the claimer")
 	ErrWrongPoster        = errors.New("tasks: not the poster")
+	ErrNotClaimer         = errors.New("tasks: caller is not the task claimer")
 )
 
 // Task is a unit of work posted to the marketplace.
@@ -63,6 +64,11 @@ type Task struct {
 	ClaimedAt         int64            `json:"claimed_at,omitempty"`
 	SubmittedAt       int64            `json:"submitted_at,omitempty"`
 	CompletedAt       int64            `json:"completed_at,omitempty"`
+	// Task chain fields — set when this task is part of a subtask hierarchy.
+	Tags         []string `json:"tags,omitempty"`
+	ParentTaskID string   `json:"parent_task_id,omitempty"`
+	SubtaskIDs   []string `json:"subtask_ids,omitempty"`
+	IsSubtask    bool     `json:"is_subtask,omitempty"`
 }
 
 // taskStore is the subset of store.Store used by TaskManager.
@@ -380,6 +386,95 @@ func (m *TaskManager) Stats() Stats {
 		}
 	}
 	return s
+}
+
+// CreateSubtask creates a child task on behalf of the claimer of an existing
+// claimed task. The subtask budget is deducted from the parent's remaining
+// budget. Only the current claimer of the parent task may create subtasks.
+//
+// Returns ErrTaskNotFound if the parent does not exist, ErrTaskNotClaimed if
+// the parent is not in Claimed state, ErrNotClaimer if claimerID does not
+// match the parent's claimer, or an error when the requested budget exceeds
+// the parent's available budget.
+func (m *TaskManager) CreateSubtask(parentTaskID string, claimerID crypto.AgentID, title, description, category string, budget uint64) (*Task, error) {
+	if title == "" {
+		return nil, fmt.Errorf("tasks: title required")
+	}
+	if budget == 0 {
+		return nil, fmt.Errorf("tasks: budget must be > 0")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	parent, ok := m.tasks[parentTaskID]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrTaskNotFound, parentTaskID)
+	}
+	if parent.Status != TaskStatusClaimed {
+		return nil, fmt.Errorf("%w: %s (status: %s)", ErrTaskNotClaimed, parentTaskID, parent.Status)
+	}
+	if parent.ClaimerID != string(claimerID) {
+		return nil, fmt.Errorf("%w: %s", ErrNotClaimer, parentTaskID)
+	}
+	if budget > parent.Budget {
+		return nil, fmt.Errorf("tasks: subtask budget %d exceeds parent remaining budget %d", budget, parent.Budget)
+	}
+
+	now := time.Now()
+	subtask := &Task{
+		ID:           m.generateID(parentTaskID),
+		Title:        title,
+		Description:  description,
+		Category:     category,
+		PosterID:     string(claimerID),
+		Budget:       budget,
+		Status:       TaskStatusOpen,
+		PostedAt:     now.UnixNano(),
+		ParentTaskID: parentTaskID,
+		IsSubtask:    true,
+	}
+
+	// Deduct subtask budget from parent and register the relationship.
+	parent.Budget -= budget
+	parent.SubtaskIDs = append(parent.SubtaskIDs, subtask.ID)
+
+	m.tasks[subtask.ID] = subtask
+	m.persist(subtask)
+	m.persist(parent)
+	return subtask, nil
+}
+
+// AllSubtasksComplete reports whether all subtasks of the given task have
+// reached Completed status. Returns (true, nil) when the task has no
+// subtasks (vacuously complete). Returns ErrTaskNotFound when the task does
+// not exist.
+func (m *TaskManager) AllSubtasksComplete(taskID string) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return false, fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
+	}
+	if len(task.SubtaskIDs) == 0 {
+		return true, nil
+	}
+	for _, subID := range task.SubtaskIDs {
+		sub, ok := m.tasks[subID]
+		if !ok || sub.Status != TaskStatusCompleted {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// generateID creates a unique ID for a subtask based on the parent task ID,
+// current nanosecond time, and the current task count. Returns 32 hex chars
+// (16 bytes of SHA-256).
+func (m *TaskManager) generateID(prefix string) string {
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%d", prefix, time.Now().UnixNano(), len(m.tasks))))
+	return hex.EncodeToString(h[:16])
 }
 
 // persist serialises the task to the store. Must be called with m.mu held (write lock).

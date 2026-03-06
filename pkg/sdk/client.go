@@ -610,6 +610,24 @@ type Task struct {
 	ClaimedAt         int64          `json:"claimed_at,omitempty"`
 	SubmittedAt       int64          `json:"submitted_at,omitempty"`
 	CompletedAt       int64          `json:"completed_at,omitempty"`
+	Tags         []string `json:"tags,omitempty"`
+	ParentTaskID string   `json:"parent_task_id,omitempty"`
+	SubtaskIDs   []string `json:"subtask_ids,omitempty"`
+	IsSubtask    bool     `json:"is_subtask,omitempty"`
+}
+
+// Match is a ranked discovery result from GET /v1/discover.
+type Match struct {
+	AgentID         string  `json:"agent_id"`
+	ServiceName     string  `json:"service_name"`
+	Category        string  `json:"category"`
+	Price           uint64  `json:"price_aet"`
+	RelevanceScore  float64 `json:"relevance_score"`
+	ReputationScore float64 `json:"reputation_score"`
+	CompletionRate  float64 `json:"completion_rate"`
+	TasksCompleted  uint64  `json:"tasks_completed"`
+	AvgDelivery     float64 `json:"avg_delivery_secs"`
+	OverallRank     float64 `json:"overall_rank"`
 }
 
 // TaskStats holds aggregate marketplace statistics.
@@ -834,6 +852,67 @@ func (c *Client) GetCategoryRankings(category string, limit int) ([]*AgentReputa
 		return nil, err
 	}
 	return result, nil
+}
+
+// Discover queries the capability-aware discovery engine. Returns agents ranked
+// by a composite score of relevance, reputation, completion rate, and price.
+// Pass empty strings/zeros for unset filters. limit=0 returns all results.
+func (c *Client) Discover(query string, category string, maxBudget uint64, minReputation float64, limit int) ([]*Match, error) {
+	path := "/v1/discover"
+	sep := "?"
+	if query != "" {
+		path += sep + "q=" + query
+		sep = "&"
+	}
+	if category != "" {
+		path += sep + "category=" + category
+		sep = "&"
+	}
+	if maxBudget > 0 {
+		path += sep + fmt.Sprintf("max_budget=%d", maxBudget)
+		sep = "&"
+	}
+	if minReputation > 0 {
+		path += sep + fmt.Sprintf("min_reputation=%g", minReputation)
+		sep = "&"
+	}
+	if limit > 0 {
+		path += sep + fmt.Sprintf("limit=%d", limit)
+	}
+	resp, err := c.do(http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	return checkAndDecode[[]*Match](resp, http.StatusOK)
+}
+
+// CreateSubtask creates a child task under the given parent task. Only the
+// current claimer of the parent task may call this. The subtask budget is
+// deducted from the parent's remaining budget. Returns the created subtask.
+func (c *Client) CreateSubtask(parentTaskID, title, description, category string, budget uint64) (*Task, error) {
+	resp, err := c.do(http.MethodPost, "/v1/tasks/"+parentTaskID+"/subtask", map[string]any{
+		"title":       title,
+		"description": description,
+		"category":    category,
+		"budget":      budget,
+	})
+	if err != nil {
+		return nil, err
+	}
+	result, err := checkAndDecode[Task](resp, http.StatusCreated)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// GetSubtasks returns all child tasks of the given parent task.
+func (c *Client) GetSubtasks(taskID string) ([]Task, error) {
+	resp, err := c.do(http.MethodGet, "/v1/tasks/subtasks/"+taskID, nil)
+	if err != nil {
+		return nil, err
+	}
+	return checkAndDecode[[]Task](resp, http.StatusOK)
 }
 
 // DeactivateService marks the node's own service listing as inactive.
