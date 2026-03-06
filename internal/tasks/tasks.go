@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/evidence"
 )
 
 // TaskStatus represents the lifecycle state of a task.
@@ -46,19 +47,22 @@ var (
 
 // Task is a unit of work posted to the marketplace.
 type Task struct {
-	ID          string     `json:"id"`
-	Title       string     `json:"title"`
-	Description string     `json:"description"`
-	Category    string     `json:"category"`
-	PosterID    string     `json:"poster_id"`
-	ClaimerID   string     `json:"claimer_id,omitempty"`
-	Budget      uint64     `json:"budget"`
-	Status      TaskStatus `json:"status"`
-	ResultHash  string     `json:"result_hash,omitempty"`
-	PostedAt    int64      `json:"posted_at"`
-	ClaimedAt   int64      `json:"claimed_at,omitempty"`
-	SubmittedAt int64      `json:"submitted_at,omitempty"`
-	CompletedAt int64      `json:"completed_at,omitempty"`
+	ID                string           `json:"id"`
+	Title             string           `json:"title"`
+	Description       string           `json:"description"`
+	Category          string           `json:"category"`
+	PosterID          string           `json:"poster_id"`
+	ClaimerID         string           `json:"claimer_id,omitempty"`
+	Budget            uint64           `json:"budget"`
+	Status            TaskStatus       `json:"status"`
+	ResultHash        string           `json:"result_hash,omitempty"`
+	ResultNote        string           `json:"result_note,omitempty"`
+	ResultURI         string           `json:"result_uri,omitempty"`
+	VerificationScore *evidence.Score  `json:"verification_score,omitempty"`
+	PostedAt          int64            `json:"posted_at"`
+	ClaimedAt         int64            `json:"claimed_at,omitempty"`
+	SubmittedAt       int64            `json:"submitted_at,omitempty"`
+	CompletedAt       int64            `json:"completed_at,omitempty"`
 }
 
 // taskStore is the subset of store.Store used by TaskManager.
@@ -178,9 +182,11 @@ func (m *TaskManager) ClaimTask(taskID string, claimerID crypto.AgentID) error {
 	return nil
 }
 
-// SubmitResult records the worker's result hash for a claimed task.
-// Returns ErrTaskNotFound, ErrTaskNotClaimed, or ErrWrongClaimer.
-func (m *TaskManager) SubmitResult(taskID string, claimerID crypto.AgentID, resultHash string) error {
+// SubmitResult records the worker's result for a claimed task.
+// resultNote is a human-readable summary of the work; resultURI is an optional
+// URI pointing to the full output. Returns ErrTaskNotFound, ErrTaskNotClaimed,
+// or ErrWrongClaimer.
+func (m *TaskManager) SubmitResult(taskID string, claimerID crypto.AgentID, resultHash, resultNote, resultURI string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -196,8 +202,25 @@ func (m *TaskManager) SubmitResult(taskID string, claimerID crypto.AgentID, resu
 	}
 
 	task.ResultHash = resultHash
+	task.ResultNote = resultNote
+	task.ResultURI = resultURI
 	task.Status = TaskStatusSubmitted
 	task.SubmittedAt = time.Now().UnixNano()
+	m.persist(task)
+	return nil
+}
+
+// SetVerificationScore stores the evidence quality score on a task.
+// Returns ErrTaskNotFound when the task doesn't exist.
+func (m *TaskManager) SetVerificationScore(taskID string, score *evidence.Score) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
+	}
+	task.VerificationScore = score
 	m.persist(task)
 	return nil
 }

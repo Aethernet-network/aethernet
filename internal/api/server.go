@@ -61,6 +61,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/metrics"
 	"github.com/Aethernet-network/aethernet/internal/network"
+	"github.com/Aethernet-network/aethernet/internal/evidence"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 	svcregistry "github.com/Aethernet-network/aethernet/internal/registry"
@@ -565,8 +566,11 @@ type claimTaskRequest struct {
 }
 
 type submitTaskRequest struct {
-	ClaimerID  string `json:"claimer_id,omitempty"`
-	ResultHash string `json:"result_hash"`
+	ClaimerID  string             `json:"claimer_id,omitempty"`
+	ResultHash string             `json:"result_hash"`
+	ResultNote string             `json:"result_note,omitempty"`
+	ResultURI  string             `json:"result_uri,omitempty"`
+	Evidence   *evidence.Evidence `json:"evidence,omitempty"`
 }
 
 type approveTaskRequest struct {
@@ -725,7 +729,25 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	taskID := r.PathValue("id")
-	if err := s.taskMgr.SubmitResult(taskID, crypto.AgentID(claimerID), req.ResultHash); err != nil {
+
+	// If structured evidence is provided, use its hash; otherwise fall back to
+	// the legacy result_hash field.
+	resultHash := req.ResultHash
+	resultNote := req.ResultNote
+	resultURI := req.ResultURI
+	if req.Evidence != nil {
+		if req.Evidence.Hash != "" {
+			resultHash = req.Evidence.Hash
+		}
+		if req.Evidence.Summary != "" {
+			resultNote = req.Evidence.Summary
+		}
+		if req.Evidence.OutputURL != "" {
+			resultURI = req.Evidence.OutputURL
+		}
+	}
+
+	if err := s.taskMgr.SubmitResult(taskID, crypto.AgentID(claimerID), resultHash, resultNote, resultURI); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

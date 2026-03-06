@@ -215,26 +215,36 @@ if HAS_AGENTS_SDK:
     def aethernet_submit_task_result(
         task_id: str,
         claimer_id: str,
-        result_uri: str,
-        result_hash: str = "",
+        output: str,
+        output_type: str = "text",
+        summary: str = "",
+        result_uri: str = "",
     ) -> str:
-        """Submit completed work for a claimed AetherNet task.
+        """Submit completed work for a claimed AetherNet task with structured evidence.
+
+        The auto-validator scores the evidence for quality. High-scoring submissions
+        are auto-approved after 10 seconds on testnet, releasing the escrowed payment.
 
         Args:
             task_id: ID of the task you are submitting results for.
             claimer_id: Your AgentID (must match the claimer).
-            result_uri: URI pointing to the completed work (https://, ipfs://, ar://).
-            result_hash: SHA-256 hash of the result (sha256:...); auto-computed if omitted.
+            output: The full output/result text produced for this task.
+            output_type: One of: text, json, code, data, image (default: text).
+            summary: Human-readable description of the work done (aids quality scoring).
+            result_uri: Optional URI pointing to the completed work.
         """
         try:
-            import hashlib
-            if not result_hash:
-                result_hash = "sha256:" + hashlib.sha256(result_uri.encode()).hexdigest()
+            from .client import Evidence
+            ev = Evidence(
+                output=output,
+                output_type=output_type,
+                summary=summary or output[:200],
+                output_url=result_uri,
+            )
             _holder.client.submit_task_result(
                 task_id=task_id,
                 claimer_id=claimer_id,
-                result_uri=result_uri,
-                result_hash=result_hash,
+                evidence=ev,
             )
             return (
                 f"Result submitted for task {task_id[:16]}. "
@@ -409,16 +419,18 @@ def get_aethernet_function_definitions() -> List[Dict[str, Any]]:
         },
         {
             "name": "aethernet_submit_task_result",
-            "description": "Submit completed work for a claimed AetherNet task to trigger poster review",
+            "description": "Submit completed work for a claimed AetherNet task with structured evidence for quality scoring",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "task_id": {"type": "string", "description": "ID of the task you are submitting"},
                     "claimer_id": {"type": "string", "description": "Your AgentID (must match claimer)"},
-                    "result_uri": {"type": "string", "description": "URI of the completed work (https://, ipfs://, ar://)"},
-                    "result_hash": {"type": "string", "description": "SHA-256 hash of the result (sha256:...)"},
+                    "output": {"type": "string", "description": "The full output/result text produced for this task"},
+                    "output_type": {"type": "string", "description": "Output type: text, json, code, data, or image", "enum": ["text", "json", "code", "data", "image"]},
+                    "summary": {"type": "string", "description": "Human-readable summary of the work performed"},
+                    "result_uri": {"type": "string", "description": "Optional URI pointing to the completed work"},
                 },
-                "required": ["task_id", "claimer_id", "result_uri"],
+                "required": ["task_id", "claimer_id", "output"],
             },
         },
     ]
@@ -487,13 +499,19 @@ def handle_function_call(
             task_id = arguments.get("task_id", "")
             return f"Task {task_id[:16]} claimed. Complete the work and submit the result."
         elif function_name == "aethernet_submit_task_result":
-            import hashlib
-            if not arguments.get("result_hash"):
-                arguments = dict(arguments)
-                arguments["result_hash"] = (
-                    "sha256:" + hashlib.sha256(arguments.get("result_uri", "").encode()).hexdigest()
-                )
-            client.submit_task_result(**arguments)
+            from .client import Evidence
+            output = arguments.get("output", "")
+            ev = Evidence(
+                output=output,
+                output_type=arguments.get("output_type", "text"),
+                summary=arguments.get("summary", "") or output[:200],
+                output_url=arguments.get("result_uri", ""),
+            )
+            client.submit_task_result(
+                task_id=arguments["task_id"],
+                claimer_id=arguments.get("claimer_id", ""),
+                evidence=ev,
+            )
             task_id = arguments.get("task_id", "")
             return f"Result submitted for task {task_id[:16]}. Awaiting poster approval."
         else:

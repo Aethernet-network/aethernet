@@ -1,6 +1,6 @@
 """AetherNet Python SDK."""
 
-from .client import AetherNetClient, AetherNetError
+from .client import AetherNetClient, AetherNetError, Evidence
 
 
 def quick_start(
@@ -33,4 +33,4 @@ def quick_start(
 
 
 __version__ = "0.1.0"
-__all__ = ["AetherNetClient", "AetherNetError", "quick_start"]
+__all__ = ["AetherNetClient", "AetherNetError", "Evidence", "quick_start"]

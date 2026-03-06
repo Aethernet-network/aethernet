@@ -14,9 +14,64 @@ Quick start::
     print(f"Balance: {balance['balance']} {balance['currency']}")
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import requests
+
+
+class Evidence:
+    """Structured proof-of-work attached to a task submission.
+
+    Automatically computes a sha256 hash of the output and captures size and
+    an optional preview for quality scoring by the auto-validator.
+
+    Args:
+        output:      Raw output bytes or string (e.g. generated text, JSON, code).
+        output_type: One of: "text", "json", "code", "data", "image".
+        summary:     Human-readable description of what was produced (used for
+                     relevance scoring against the task description).
+        metrics:     Optional dict of string metrics (e.g. {"accuracy": "0.95"}).
+        input_hash:  Optional sha256 hash of the input the work was based on.
+        output_url:  Optional URI where the full output can be retrieved.
+    """
+
+    def __init__(
+        self,
+        output: Union[str, bytes],
+        output_type: str = "text",
+        summary: str = "",
+        metrics: Optional[Dict[str, str]] = None,
+        input_hash: str = "",
+        output_url: str = "",
+    ):
+        import hashlib
+
+        raw = output.encode() if isinstance(output, str) else output
+        self.hash = "sha256:" + hashlib.sha256(raw).hexdigest()
+        self.output_type = output_type
+        self.output_size = len(raw)
+        self.summary = summary
+        self.metrics = metrics or {}
+        self.input_hash = input_hash
+        self.output_url = output_url
+        self.output_preview = (output[:500] if isinstance(output, str) else raw[:500].decode("utf-8", errors="replace"))
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialise to a dict suitable for the AetherNet API."""
+        d: Dict[str, Any] = {
+            "hash": self.hash,
+            "output_type": self.output_type,
+            "output_size": self.output_size,
+            "summary": self.summary,
+            "output_preview": self.output_preview,
+        }
+        if self.metrics:
+            d["metrics"] = self.metrics
+        if self.input_hash:
+            d["input_hash"] = self.input_hash
+        if self.output_url:
+            d["output_url"] = self.output_url
+        return d
 
 
 class AetherNetClient:
@@ -446,17 +501,42 @@ class AetherNetClient:
             body["claimer_id"] = claimer_id
         return self._post(f"/v1/tasks/{task_id}/claim", body)
 
-    def submit_task_result(self, task_id: str, result_hash: str, claimer_id: str = "") -> Dict[str, Any]:
-        """Submit a result hash for a claimed task.
+    def submit_task_result(
+        self,
+        task_id: str,
+        result_hash: Optional[str] = None,
+        result_note: Optional[str] = None,
+        evidence: Optional["Evidence"] = None,
+        claimer_id: str = "",
+    ) -> Dict[str, Any]:
+        """Submit a result for a claimed task.
+
+        Pass structured *evidence* for quality-scored auto-approval. Legacy
+        callers can continue passing *result_hash* alone — both work.
 
         Args:
             task_id:     The task being worked on.
-            result_hash: Content-addressed hash of the deliverable.
+            result_hash: Content-addressed hash of the deliverable (legacy).
+            result_note: Human-readable summary of the work performed.
+            evidence:    :class:`Evidence` instance; hash/summary extracted automatically.
             claimer_id:  The claiming agent's ID; defaults to the node's own identity.
 
         Returns the updated task dict.
         """
-        body: Dict[str, Any] = {"result_hash": result_hash}
+        body: Dict[str, Any] = {}
+        if evidence is not None:
+            body["evidence"] = evidence.to_dict()
+            # Provide hash + note at top-level for backward-compat with older nodes.
+            body["result_hash"] = evidence.hash
+            if evidence.summary:
+                body["result_note"] = evidence.summary
+            if evidence.output_url:
+                body["result_uri"] = evidence.output_url
+        else:
+            if result_hash:
+                body["result_hash"] = result_hash
+            if result_note:
+                body["result_note"] = result_note
         if claimer_id:
             body["claimer_id"] = claimer_id
         return self._post(f"/v1/tasks/{task_id}/submit", body)

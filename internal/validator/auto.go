@@ -20,6 +20,7 @@ import (
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
+	"github.com/Aethernet-network/aethernet/internal/evidence"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 )
@@ -81,15 +82,31 @@ func (av *AutoValidator) Stop() {
 	av.once.Do(func() { close(av.stop) })
 }
 
-// processSubmittedTasks auto-approves marketplace tasks that have been in
-// Submitted state for more than 10 seconds. This prevents tasks from sitting
-// unapproved forever when the poster is offline or unresponsive.
+// processSubmittedTasks assesses submitted marketplace tasks using the evidence
+// Verifier. Tasks that pass the quality threshold are auto-approved; those below
+// are held for manual review with a log message. Only tasks older than 10 seconds
+// are evaluated to give the poster time to approve manually first.
 func (av *AutoValidator) processSubmittedTasks() {
 	submitted := av.taskMgr.Search(tasks.TaskStatusSubmitted, "", 0)
 	cutoff := time.Now().UnixNano() - int64(10*time.Second)
+	verifier := evidence.NewVerifier()
 	for _, task := range submitted {
 		if task.SubmittedAt > cutoff {
 			continue // submitted too recently
+		}
+		ev := &evidence.Evidence{
+			Hash:       task.ResultHash,
+			Summary:    task.ResultNote,
+			OutputType: "text",
+			OutputSize: uint64(len(task.ResultNote)),
+			OutputURL:  task.ResultURI,
+		}
+		score, passed := verifier.Verify(ev, task.Title, task.Description, task.Budget)
+		_ = av.taskMgr.SetVerificationScore(task.ID, score)
+		if !passed {
+			log.Printf("auto-validator: HELD task %s (score: %.2f, below threshold %.2f)",
+				task.ID, score.Overall, evidence.PassThreshold)
+			continue
 		}
 		if err := av.taskMgr.ApproveTask(task.ID, av.validatorID); err != nil {
 			log.Printf("auto-validator: could not approve task %s: %v", task.ID, err)
@@ -100,7 +117,8 @@ func (av *AutoValidator) processSubmittedTasks() {
 				log.Printf("auto-validator: could not release escrow for task %s: %v", task.ID, err)
 			}
 		}
-		log.Printf("auto-validator: auto-approved task %s (claimer: %s)", task.ID, task.ClaimerID)
+		log.Printf("auto-validator: APPROVED task %s (score: %.2f, claimer: %s)",
+			task.ID, score.Overall, task.ClaimerID)
 	}
 }
 

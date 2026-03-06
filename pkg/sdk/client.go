@@ -18,6 +18,8 @@ package sdk
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -550,21 +552,64 @@ func (c *Client) ListCategories() (map[string]int, error) {
 // Task marketplace
 // ---------------------------------------------------------------------------
 
+// EvidenceScore mirrors evidence.Score without importing internal packages.
+type EvidenceScore struct {
+	Relevance    float64 `json:"relevance"`
+	Completeness float64 `json:"completeness"`
+	Quality      float64 `json:"quality"`
+	Overall      float64 `json:"overall"`
+}
+
+// Evidence captures the structured output of AI work submitted for a task.
+// Construct with NewEvidence for automatic hash computation.
+type Evidence struct {
+	Hash          string            `json:"hash"`
+	OutputType    string            `json:"output_type"`
+	OutputSize    uint64            `json:"output_size"`
+	Summary       string            `json:"summary"`
+	InputHash     string            `json:"input_hash,omitempty"`
+	Metrics       map[string]string `json:"metrics,omitempty"`
+	OutputPreview string            `json:"output_preview,omitempty"`
+	OutputURL     string            `json:"output_url,omitempty"`
+}
+
+// NewEvidence creates Evidence for output bytes, computing the hash automatically.
+// outputType is one of: "text", "json", "code", "data", "image".
+func NewEvidence(output []byte, outputType, summary string) *Evidence {
+	h := sha256.Sum256(output)
+	preview := ""
+	if len(output) > 500 {
+		preview = string(output[:500])
+	} else {
+		preview = string(output)
+	}
+	return &Evidence{
+		Hash:          "sha256:" + hex.EncodeToString(h[:]),
+		OutputType:    outputType,
+		OutputSize:    uint64(len(output)),
+		Summary:       summary,
+		OutputPreview: preview,
+	}
+}
+
 // Task is a task marketplace posting as returned by the API.
 type Task struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Category    string `json:"category"`
-	PosterID    string `json:"poster_id"`
-	ClaimerID   string `json:"claimer_id,omitempty"`
-	Budget      uint64 `json:"budget"`
-	Status      string `json:"status"`
-	ResultHash  string `json:"result_hash,omitempty"`
-	PostedAt    int64  `json:"posted_at"`
-	ClaimedAt   int64  `json:"claimed_at,omitempty"`
-	SubmittedAt int64  `json:"submitted_at,omitempty"`
-	CompletedAt int64  `json:"completed_at,omitempty"`
+	ID                string         `json:"id"`
+	Title             string         `json:"title"`
+	Description       string         `json:"description"`
+	Category          string         `json:"category"`
+	PosterID          string         `json:"poster_id"`
+	ClaimerID         string         `json:"claimer_id,omitempty"`
+	Budget            uint64         `json:"budget"`
+	Status            string         `json:"status"`
+	ResultHash        string         `json:"result_hash,omitempty"`
+	ResultNote        string         `json:"result_note,omitempty"`
+	ResultURI         string         `json:"result_uri,omitempty"`
+	VerificationScore *EvidenceScore `json:"verification_score,omitempty"`
+	PostedAt          int64          `json:"posted_at"`
+	ClaimedAt         int64          `json:"claimed_at,omitempty"`
+	SubmittedAt       int64          `json:"submitted_at,omitempty"`
+	CompletedAt       int64          `json:"completed_at,omitempty"`
 }
 
 // TaskStats holds aggregate marketplace statistics.
@@ -647,12 +692,18 @@ func (c *Client) ClaimTask(taskID string) (*Task, error) {
 	return &result, nil
 }
 
-// SubmitTaskResult records the worker's result hash for a claimed task.
+// SubmitTaskResult records the worker's result for a claimed task.
+// Pass an optional Evidence value for quality scoring; omit for legacy hash-only
+// submission (backward compatible — existing callers need no changes).
 // Returns the updated task.
-func (c *Client) SubmitTaskResult(taskID, resultHash string) (*Task, error) {
-	resp, err := c.do(http.MethodPost, "/v1/tasks/"+taskID+"/submit", map[string]any{
+func (c *Client) SubmitTaskResult(taskID, resultHash string, ev ...*Evidence) (*Task, error) {
+	body := map[string]any{
 		"result_hash": resultHash,
-	})
+	}
+	if len(ev) > 0 && ev[0] != nil {
+		body["evidence"] = ev[0]
+	}
+	resp, err := c.do(http.MethodPost, "/v1/tasks/"+taskID+"/submit", body)
 	if err != nil {
 		return nil, err
 	}

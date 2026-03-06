@@ -113,7 +113,7 @@ func TestSubmitResult(t *testing.T) {
 	task, _ := m.PostTask("alice", "Summarize text", "", "nlp", 2_000)
 	_ = m.ClaimTask(task.ID, "bob")
 
-	if err := m.SubmitResult(task.ID, "bob", "sha256:abc123"); err != nil {
+	if err := m.SubmitResult(task.ID, "bob", "sha256:abc123", "", ""); err != nil {
 		t.Fatalf("SubmitResult: %v", err)
 	}
 
@@ -134,7 +134,7 @@ func TestSubmitResult_WrongClaimer(t *testing.T) {
 	task, _ := m.PostTask("alice", "Translate", "", "nlp", 3_000)
 	_ = m.ClaimTask(task.ID, "bob")
 
-	err := m.SubmitResult(task.ID, "charlie", "hash")
+	err := m.SubmitResult(task.ID, "charlie", "hash", "", "")
 	if !errors.Is(err, tasks.ErrWrongClaimer) {
 		t.Errorf("expected ErrWrongClaimer; got %v", err)
 	}
@@ -148,7 +148,7 @@ func TestApproveTask(t *testing.T) {
 	m := tasks.NewTaskManager()
 	task, _ := m.PostTask("alice", "Generate code", "", "code", 8_000)
 	_ = m.ClaimTask(task.ID, "bob")
-	_ = m.SubmitResult(task.ID, "bob", "sha256:result")
+	_ = m.SubmitResult(task.ID, "bob", "sha256:result", "", "")
 
 	if err := m.ApproveTask(task.ID, "alice"); err != nil {
 		t.Fatalf("ApproveTask: %v", err)
@@ -183,7 +183,7 @@ func TestDisputeTask(t *testing.T) {
 	m := tasks.NewTaskManager()
 	task, _ := m.PostTask("alice", "Run inference", "", "ml", 4_000)
 	_ = m.ClaimTask(task.ID, "bob")
-	_ = m.SubmitResult(task.ID, "bob", "hash")
+	_ = m.SubmitResult(task.ID, "bob", "hash", "", "")
 
 	if err := m.DisputeTask(task.ID, "alice"); err != nil {
 		t.Fatalf("DisputeTask: %v", err)
@@ -199,7 +199,7 @@ func TestDisputeTask_WrongPoster(t *testing.T) {
 	m := tasks.NewTaskManager()
 	task, _ := m.PostTask("alice", "Evaluate model", "", "ml", 3_000)
 	_ = m.ClaimTask(task.ID, "bob")
-	_ = m.SubmitResult(task.ID, "bob", "hash")
+	_ = m.SubmitResult(task.ID, "bob", "hash", "", "")
 
 	err := m.DisputeTask(task.ID, "charlie")
 	if !errors.Is(err, tasks.ErrWrongPoster) {
@@ -249,7 +249,7 @@ func TestStats(t *testing.T) {
 
 	// Claim t2, submit, complete
 	_ = m.ClaimTask(t2.ID, "bob")
-	_ = m.SubmitResult(t2.ID, "bob", "hash")
+	_ = m.SubmitResult(t2.ID, "bob", "hash", "", "")
 	_ = m.ApproveTask(t2.ID, "alice")
 
 	// Cancel t3

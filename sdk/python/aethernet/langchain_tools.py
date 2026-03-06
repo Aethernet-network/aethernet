@@ -276,31 +276,38 @@ if HAS_LANGCHAIN:
     class _SubmitResultInput(BaseModel):
         task_id: str = Field(description="ID of the task you are submitting results for")
         claimer_id: str = Field(description="Your AgentID (must match the agent that claimed the task)")
-        result_uri: str = Field(description="URI pointing to the completed work (https://, ipfs://, or ar://)")
-        result_hash: str = Field(default="", description="SHA-256 hash of the result for integrity verification (sha256:...)")
+        output: str = Field(description="The full output/result text produced for this task")
+        output_type: str = Field(default="text", description="Output type: text, json, code, data, or image")
+        summary: str = Field(default="", description="Human-readable summary of the work performed (used for quality scoring)")
+        result_uri: str = Field(default="", description="Optional URI pointing to the completed work (https://, ipfs://, ar://)")
 
     class AetherNetSubmitResultTool(BaseTool):
         """Submit completed work for a claimed AetherNet task to trigger poster review."""
 
         name: str = "aethernet_submit_result"
         description: str = (
-            "Submit the result of a claimed task on AetherNet. "
-            "The task moves to 'Submitted' state and the poster can approve (releasing escrow "
-            "to you) or dispute. The auto-validator settles unreviewed submissions after 10s on testnet. "
-            "Input: task_id (str), claimer_id (your AgentID), result_uri (str), optional result_hash (str)."
+            "Submit the result of a claimed task on AetherNet with structured evidence. "
+            "The auto-validator scores the evidence for quality; high-scoring submissions "
+            "are auto-approved after 10 seconds on testnet, releasing the escrowed payment. "
+            "Input: task_id (str), claimer_id (your AgentID), output (str — the full result), "
+            "optional output_type (str, default 'text'), optional summary (str), optional result_uri (str)."
         )
         args_schema: type[BaseModel] = _SubmitResultInput
         client: object  # AetherNetClient
 
-        def _run(self, task_id: str, claimer_id: str, result_uri: str, result_hash: str = "") -> str:
-            import hashlib, time
-            if not result_hash:
-                result_hash = "sha256:" + hashlib.sha256(result_uri.encode()).hexdigest()
+        def _run(self, task_id: str, claimer_id: str, output: str,
+                 output_type: str = "text", summary: str = "", result_uri: str = "") -> str:
+            from .client import Evidence
+            ev = Evidence(
+                output=output,
+                output_type=output_type,
+                summary=summary or output[:200],
+                output_url=result_uri,
+            )
             self.client.submit_task_result(
                 task_id=task_id,
                 claimer_id=claimer_id,
-                result_uri=result_uri,
-                result_hash=result_hash,
+                evidence=ev,
             )
             return (
                 f"Result submitted for task {task_id[:16]}. "

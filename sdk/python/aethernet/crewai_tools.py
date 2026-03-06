@@ -288,16 +288,20 @@ if HAS_CREWAI:
     class _SubmitResultInput(BaseModel):
         task_id: str = Field(description="ID of the task you are submitting results for")
         claimer_id: str = Field(description="Your AgentID (must match the claimer)")
-        result_uri: str = Field(description="URI pointing to the completed work (https://, ipfs://, ar://)")
-        result_hash: str = Field(default="", description="SHA-256 hash of the result (sha256:...); auto-computed if omitted")
+        output: str = Field(description="The full output/result text produced for this task")
+        output_type: str = Field(default="text", description="Output type: text, json, code, data, or image")
+        summary: str = Field(default="", description="Human-readable summary of the work performed (used for quality scoring)")
+        result_uri: str = Field(default="", description="Optional URI pointing to the completed work (https://, ipfs://, ar://)")
 
     class AetherNetSubmitResultTool(BaseTool):
         """Submit completed work for a claimed AetherNet task."""
 
         name: str = "AetherNet Submit Result"
         description: str = (
-            "Submit completed work for a claimed AetherNet task. "
-            "Moves the task to 'Submitted' state; the poster approves to release escrow payment."
+            "Submit completed work for a claimed AetherNet task with structured evidence. "
+            "The auto-validator scores the evidence; high-scoring submissions are auto-approved "
+            "after 10 seconds on testnet, releasing the escrowed payment to you. "
+            "Provide the full output text for quality scoring."
         )
         args_schema: Type[BaseModel] = _SubmitResultInput
         client: Optional[AetherNetClient] = None
@@ -305,16 +309,20 @@ if HAS_CREWAI:
         class Config:
             arbitrary_types_allowed = True
 
-        def _run(self, task_id: str, claimer_id: str, result_uri: str, result_hash: str = "") -> str:
+        def _run(self, task_id: str, claimer_id: str, output: str,
+                 output_type: str = "text", summary: str = "", result_uri: str = "") -> str:
             try:
-                import hashlib
-                if not result_hash:
-                    result_hash = "sha256:" + hashlib.sha256(result_uri.encode()).hexdigest()
+                from .client import Evidence
+                ev = Evidence(
+                    output=output,
+                    output_type=output_type,
+                    summary=summary or output[:200],
+                    output_url=result_uri,
+                )
                 self.client.submit_task_result(
                     task_id=task_id,
                     claimer_id=claimer_id,
-                    result_uri=result_uri,
-                    result_hash=result_hash,
+                    evidence=ev,
                 )
                 return (
                     f"Result submitted for task {task_id[:16]}. "
