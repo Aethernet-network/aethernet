@@ -348,6 +348,10 @@ type registerAgentResponse struct {
 }
 
 type transferRequest struct {
+	// FromAgent is the economic identity of the sender. When provided it is
+	// used for balance and trust-limit checks, and as TransferPayload.FromAgent.
+	// When absent the node's own identity (s.agentID) is used.
+	FromAgent   string          `json:"from_agent,omitempty"`
 	ToAgent     string          `json:"to_agent"`
 	Amount      uint64          `json:"amount"`
 	Currency    string          `json:"currency,omitempty"`
@@ -831,15 +835,24 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
 		req.Currency = "AET"
 	}
 
+	// Resolve the economic sender identity.
+	// fromAgentID is used for balance/trust lookups and as TransferPayload.FromAgent.
+	// The DAG event itself is still signed by the node's keypair (s.agentID / s.kp),
+	// which is required by crypto.SignEvent.
+	fromAgentID := s.agentID
+	if req.FromAgent != "" {
+		fromAgentID = crypto.AgentID(req.FromAgent)
+	}
+
 	// Trust limit enforcement: amount must not exceed the sender's trust limit.
 	if s.stakeManager != nil {
 		var tasksCompleted uint64
-		if fp, err := s.registry.Get(s.agentID); err == nil {
+		if fp, err := s.registry.Get(fromAgentID); err == nil {
 			tasksCompleted = fp.TasksCompleted
 		}
-		staked := s.stakeManager.StakedAmount(s.agentID)
-		since := s.stakeManager.StakedSince(s.agentID)
-		lastAct := s.stakeManager.LastActivity(s.agentID)
+		staked := s.stakeManager.StakedAmount(fromAgentID)
+		since := s.stakeManager.StakedSince(fromAgentID)
+		lastAct := s.stakeManager.LastActivity(fromAgentID)
 		trustLimit := staking.TrustLimitFull(staked, tasksCompleted, since, lastAct, time.Now().Unix())
 		if req.Amount > trustLimit {
 			writeCodedError(w, http.StatusForbidden, "trust_limit_exceeded",
@@ -850,7 +863,7 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	payload := event.TransferPayload{
-		FromAgent: string(s.agentID),
+		FromAgent: string(fromAgentID),
 		ToAgent:   req.ToAgent,
 		Amount:    req.Amount,
 		Currency:  req.Currency,
