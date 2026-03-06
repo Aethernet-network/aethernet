@@ -870,8 +870,16 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
 		Memo:      req.Memo,
 	}
 
+	// Default stake_amount to the engine's minimum when the client omits it.
+	// Without this, every request without an explicit stake_amount would be
+	// rejected by the OCS engine with ErrInsufficientStake.
+	stakeAmount := req.StakeAmount
+	if stakeAmount == 0 {
+		stakeAmount = s.engine.MinEventStake()
+	}
+
 	refs, priorTS := s.buildCausalRefs(req.CausalRefs)
-	e, err := event.New(event.EventTypeTransfer, refs, payload, string(s.agentID), priorTS, req.StakeAmount)
+	e, err := event.New(event.EventTypeTransfer, refs, payload, string(s.agentID), priorTS, stakeAmount)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "build event: "+err.Error())
 		return
@@ -919,8 +927,14 @@ func (s *Server) handleGeneration(w http.ResponseWriter, r *http.Request) {
 		TaskDescription:  req.TaskDescription,
 	}
 
+	// Default stake_amount to the engine's minimum when the client omits it.
+	stakeAmount := req.StakeAmount
+	if stakeAmount == 0 {
+		stakeAmount = s.engine.MinEventStake()
+	}
+
 	refs, priorTS := s.buildCausalRefs(req.CausalRefs)
-	e, err := event.New(event.EventTypeGeneration, refs, payload, string(s.agentID), priorTS, req.StakeAmount)
+	e, err := event.New(event.EventTypeGeneration, refs, payload, string(s.agentID), priorTS, stakeAmount)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "build event: "+err.Error())
 		return

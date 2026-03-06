@@ -237,6 +237,14 @@ func (e *Engine) SetEconomics(fc *fees.Collector, sm *staking.StakeManager, trea
 	e.treasuryID = treasuryID
 }
 
+// MinEventStake returns the minimum StakeAmount every submitted event must
+// carry. Callers (e.g. the HTTP API) use this to auto-fill stake_amount when
+// the client omits it, so that Submit never rejects a well-formed request with
+// ErrInsufficientStake due to a missing field.
+func (e *Engine) MinEventStake() uint64 {
+	return e.config.MinStakeRequired
+}
+
 // SetStore attaches a persistence backend to the Engine. After this call Submit
 // writes new PendingItems through to the store and ProcessResult deletes them.
 // s must satisfy ocsPersistence; *store.Store from the store package does so.

@@ -384,6 +384,68 @@ func TestHandleTransfer_FromAgentTrustLimit(t *testing.T) {
 	}
 }
 
+// TestHandleTransfer_DefaultStake verifies that omitting stake_amount from the
+// request body does not cause OCS to reject the event with ErrInsufficientStake.
+// The server must auto-fill stake_amount with the engine's MinEventStake.
+func TestHandleTransfer_DefaultStake(t *testing.T) {
+	setup := newTestSetup(t)
+
+	stakeMgr := staking.NewStakeManager()
+	feeCollector := fees.NewCollector(setup.tl)
+	walletMgr := wallet.New()
+	setup.srv.SetEconomics(walletMgr, stakeMgr, feeCollector)
+
+	kpSender, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	kpReceiver, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("generate receiver keypair: %v", err)
+	}
+
+	// Register sender — receives onboarding AET and is auto-staked.
+	r := post(t, setup.ts, "/v1/agents", map[string]any{
+		"agent_id":       "sender-no-stake-field",
+		"public_key_b64": base64.StdEncoding.EncodeToString(kpSender.PublicKey),
+	})
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("register sender: want 201, got %d", r.StatusCode)
+	}
+	r.Body.Close()
+
+	// Register receiver.
+	r2 := post(t, setup.ts, "/v1/agents", map[string]any{
+		"agent_id":       "receiver-no-stake-field",
+		"public_key_b64": base64.StdEncoding.EncodeToString(kpReceiver.PublicKey),
+	})
+	if r2.StatusCode != http.StatusCreated {
+		t.Fatalf("register receiver: want 201, got %d", r2.StatusCode)
+	}
+	r2.Body.Close()
+
+	// Transfer without stake_amount — server must default it to MinEventStake.
+	txResp := post(t, setup.ts, "/v1/transfer", map[string]any{
+		"from_agent": "sender-no-stake-field",
+		"to_agent":   "receiver-no-stake-field",
+		"amount":     500_000,
+		"currency":   "AET",
+		// stake_amount intentionally omitted
+	})
+	if txResp.StatusCode != http.StatusCreated {
+		var errBody map[string]any
+		decodeJSON(t, txResp, &errBody)
+		t.Fatalf("transfer without stake_amount: want 201, got %d: %v", txResp.StatusCode, errBody)
+	}
+	var txResult struct {
+		EventID string `json:"event_id"`
+	}
+	decodeJSON(t, txResp, &txResult)
+	if txResult.EventID == "" {
+		t.Error("transfer event_id must not be empty")
+	}
+}
+
 func TestHandleGeneration_GetEvent(t *testing.T) {
 	setup := newTestSetup(t)
 
