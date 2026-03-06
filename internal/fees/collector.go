@@ -1,9 +1,11 @@
 // Package fees implements settlement fee collection for the AetherNet OCS engine.
 //
-// Every settled transaction pays a 10 basis-point (0.1%) fee split three ways:
-//   - 70% credited to the validating agent as a direct incentive
+// Every settled transaction pays a 10 basis-point (0.1%) fee split two ways:
+//   - 80% credited to the validating agent as a direct incentive
 //   - 20% credited to the protocol treasury
-//   - 10% burned (removed from circulation by not crediting anyone)
+//
+// All fees stay in circulation — there is no burn. This maximises liquidity and
+// keeps fees flowing between agents rather than leaving the network.
 //
 // Fee collection is optional: when no Collector is wired into the OCS engine the
 // settlement path is unchanged and all existing tests continue to pass.
@@ -21,13 +23,13 @@ const (
 	FeeBasisPoints uint64 = 10
 
 	// ValidatorShare is the percentage of each fee credited to the verifying agent.
-	ValidatorShare uint64 = 70
+	ValidatorShare uint64 = 80
 
 	// TreasuryShare is the percentage credited to the protocol treasury.
 	TreasuryShare uint64 = 20
 
-	// BurnShare is the percentage permanently removed from circulation.
-	BurnShare uint64 = 10
+	// BurnShare is zero — all fees stay in circulation.
+	BurnShare uint64 = 0
 )
 
 // Collector accumulates fee statistics and distributes each collected fee across
@@ -51,12 +53,13 @@ func CalculateFee(amount uint64) uint64 {
 	return amount * FeeBasisPoints / 10_000
 }
 
-// CollectFee splits a settlement fee three ways: validator share, treasury share,
-// and burn. It credits validator and treasury via the TransferLedger and tracks
-// all splits internally for reporting via Stats.
+// CollectFee splits a settlement fee between the validator (80%) and the
+// protocol treasury (20%). It credits both via the TransferLedger and tracks
+// all splits internally for reporting via Stats. The burn amount is always 0 —
+// all fees stay in circulation.
 //
-// Returns the total fee and the amount burned. Both are zero when the fee
-// rounds to zero (small transaction amounts).
+// Returns the total fee and the amount burned (always 0). Both are zero when
+// the fee rounds to zero (small transaction amounts).
 func (c *Collector) CollectFee(
 	amount uint64,
 	validatorID crypto.AgentID,

@@ -28,8 +28,8 @@ func TestCalculateFee(t *testing.T) {
 	}
 }
 
-// TestCollectFee_Split verifies that a collected fee is split across validator
-// (70%), treasury (20%), and burn (10%) with no rounding loss.
+// TestCollectFee_Split verifies that a collected fee is split between validator
+// (80%) and treasury (20%) with no burn and no rounding loss.
 func TestCollectFee_Split(t *testing.T) {
 	tl := ledger.NewTransferLedger()
 	validatorID := crypto.AgentID("test-validator")
@@ -43,9 +43,9 @@ func TestCollectFee_Split(t *testing.T) {
 		t.Fatalf("fee = %d, want 1000", fee)
 	}
 
-	wantValidator := uint64(700) // 70% of 1000
+	wantValidator := uint64(800) // 80% of 1000
 	wantTreasury := uint64(200)  // 20% of 1000
-	wantBurned := uint64(100)    // 10% of 1000
+	wantBurned := uint64(0)      // 0% burned — all fees stay in circulation
 
 	if burned != wantBurned {
 		t.Errorf("burned = %d, want %d", burned, wantBurned)
@@ -89,8 +89,8 @@ func TestCollectFee_Stats(t *testing.T) {
 	if collected != 3_000 {
 		t.Errorf("totalCollected = %d, want 3000", collected)
 	}
-	if burned != 300 {
-		t.Errorf("totalBurned = %d, want 300", burned)
+	if burned != 0 {
+		t.Errorf("totalBurned = %d, want 0 (no burn)", burned)
 	}
 	if treasury != 600 {
 		t.Errorf("treasuryAccrued = %d, want 600", treasury)

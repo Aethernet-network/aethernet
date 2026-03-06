@@ -66,7 +66,10 @@ function fmtNum(n) {
 
 function fmtAET(microAET) {
   if (!microAET) return '0 AET';
-  return (microAET / 1e6).toFixed(4) + ' AET';
+  const aet = microAET / 1e6;
+  if (aet >= 1e6) return (aet / 1e6).toFixed(1) + 'M AET';
+  if (aet >= 1e3) return (aet / 1e3).toFixed(1) + 'K AET';
+  return aet.toFixed(2) + ' AET';
 }
 
 function EventBadge({ type }) {
@@ -269,7 +272,7 @@ function DagStatsPanel({ stats, fees, loading }) {
       {fees && (
         <div className="mt-2 flex justify-between text-xs text-slate-500">
           <span>Fees today: <span className="text-slate-300">{fmtAET(fees.total_collected)}</span></span>
-          <span>Burned: <span className="text-red-400">{fmtAET(fees.total_burned)}</span></span>
+          <span>Treasury: <span className="text-slate-300">{fmtAET(fees.treasury_accrued)}</span></span>
         </div>
       )}
     </div>
@@ -350,7 +353,6 @@ function EconomicsBar({ econ, loading }) {
     { label: 'Circulating',     value: fmtAET(econ.circulating_supply) },
     { label: 'Onboarding Pool', value: fmtAET(econ.onboarding_pool_total) },
     { label: 'Allocated',       value: fmtAET(econ.onboarding_allocated) },
-    { label: 'Total Burned',    value: fmtAET(econ.total_burned), highlight: 'text-red-400' },
     { label: 'Treasury',        value: fmtAET(econ.treasury_accrued) },
     { label: 'Fee (bps)',       value: econ.fee_basis_points },
   ];

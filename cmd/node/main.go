@@ -46,6 +46,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/registry"
 	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/store"
+	"github.com/Aethernet-network/aethernet/internal/validator"
 	"github.com/Aethernet-network/aethernet/internal/wallet"
 )
 
@@ -209,6 +210,7 @@ type nodeStack struct {
 	metricsReg   *metrics.Registry
 	nodeMetrics  *metrics.AetherNetMetrics
 	metricsStop  chan struct{} // closed to terminate the gauge-update goroutine
+	autoVal      *validator.AutoValidator
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
@@ -342,6 +344,19 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		os.Exit(1)
 	}
 
+	// Auto-validator: on testnet, automatically settle pending transactions
+	// every 5 seconds so the explorer shows Settled events and fees flow.
+	// The "testnet-validator" agent is registered in the identity registry so
+	// it appears in the explorer as a known participant.
+	testnetValidatorID := crypto.AgentID("testnet-validator")
+	tvFP, err := identity.NewFingerprint(testnetValidatorID, make([]byte, 32), nil)
+	if err == nil {
+		_ = stack.reg.Register(tvFP)
+	}
+	av := validator.NewAutoValidator(stack.engine, testnetValidatorID, 5*time.Second)
+	av.Start()
+	stack.autoVal = av
+
 	cfg := network.DefaultNodeConfig(agentID)
 	cfg.ListenAddr = p2pAddr
 	node := network.NewNode(cfg, stack.dag)
@@ -404,6 +419,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 func stopStack(node *network.Node, stack *nodeStack) {
 	if stack.metricsStop != nil {
 		close(stack.metricsStop)
+	}
+	if stack.autoVal != nil {
+		stack.autoVal.Stop()
 	}
 	if stack.apiSrv != nil {
 		stack.apiSrv.Stop()

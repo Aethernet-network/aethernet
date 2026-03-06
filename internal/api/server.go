@@ -454,6 +454,18 @@ type dagStatsResponse struct {
 	MaxDepth     uint64         `json:"max_depth"`
 }
 
+// agentSummaryEntry is returned by GET /v1/agents. It enriches the registry
+// fingerprint with live balance and stake data so callers do not need follow-up
+// calls to /balance and /stake for each agent.
+type agentSummaryEntry struct {
+	AgentID         string `json:"agent_id"`
+	ReputationScore uint64 `json:"reputation_score"`
+	TasksCompleted  uint64 `json:"tasks_completed"`
+	Balance         uint64 `json:"balance"`
+	StakedAmount    uint64 `json:"staked_amount"`
+	TrustLimit      uint64 `json:"trust_limit"`
+}
+
 type leaderboardEntry struct {
 	Rank            int    `json:"rank"`
 	AgentID         string `json:"agent_id"`
@@ -779,10 +791,31 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleListAgents returns all registered agent fingerprints.
+// handleListAgents returns all registered agents enriched with live balance and
+// stake data from the TransferLedger and StakeManager.
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
-	agents := s.registry.All(0, 0)
-	writeJSON(w, http.StatusOK, agents)
+	fps := s.registry.All(0, 0)
+	now := time.Now().Unix()
+	entries := make([]agentSummaryEntry, 0, len(fps))
+	for _, fp := range fps {
+		bal, _ := s.transfer.Balance(fp.AgentID)
+		var staked, trustLimit uint64
+		if s.stakeManager != nil {
+			staked = s.stakeManager.StakedAmount(fp.AgentID)
+			since := s.stakeManager.StakedSince(fp.AgentID)
+			lastAct := s.stakeManager.LastActivity(fp.AgentID)
+			trustLimit = staking.TrustLimitFull(staked, fp.TasksCompleted, since, lastAct, now)
+		}
+		entries = append(entries, agentSummaryEntry{
+			AgentID:         string(fp.AgentID),
+			ReputationScore: fp.ReputationScore,
+			TasksCompleted:  fp.TasksCompleted,
+			Balance:         bal,
+			StakedAmount:    staked,
+			TrustLimit:      trustLimit,
+		})
+	}
+	writeJSON(w, http.StatusOK, entries)
 }
 
 // handleGetAgent returns the capability fingerprint for agent_id.

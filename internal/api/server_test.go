@@ -1310,3 +1310,94 @@ func TestHandleRegisterAgent_HumanReadableIDs(t *testing.T) {
 	}
 	r1b.Body.Close()
 }
+
+// TestHandleLeaderboard_LiveData verifies that GET /v1/agents/leaderboard and
+// GET /v1/agents both return non-zero balance and staked_amount after an agent
+// is registered with staking wired — i.e. they read live data from the
+// TransferLedger and StakeManager, not the stale identity fingerprint.
+func TestHandleLeaderboard_LiveData(t *testing.T) {
+	setup := newTestSetup(t)
+
+	// Wire staking so registration auto-stakes the onboarding allocation.
+	stakeMgr := staking.NewStakeManager()
+	feeCollector := fees.NewCollector(setup.tl)
+	walletMgr := wallet.New()
+	setup.srv.SetEconomics(walletMgr, stakeMgr, feeCollector)
+
+	kp, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+
+	// Register the agent — receives onboarding AET and is auto-staked.
+	r := post(t, setup.ts, "/v1/agents", map[string]any{
+		"agent_id":       "leaderboard-live-test",
+		"public_key_b64": base64.StdEncoding.EncodeToString(kp.PublicKey),
+	})
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("register: want 201, got %d", r.StatusCode)
+	}
+	r.Body.Close()
+
+	// ── Leaderboard ───────────────────────────────────────────────────────────
+	lb := get(t, setup.ts, "/v1/agents/leaderboard?sort=balance&limit=10")
+	if lb.StatusCode != http.StatusOK {
+		t.Fatalf("leaderboard: want 200, got %d", lb.StatusCode)
+	}
+	var lbEntries []struct {
+		AgentID      string `json:"agent_id"`
+		Balance      uint64 `json:"balance"`
+		StakedAmount uint64 `json:"staked_amount"`
+		TrustLimit   uint64 `json:"trust_limit"`
+	}
+	decodeJSON(t, lb, &lbEntries)
+
+	var foundLB bool
+	for _, e := range lbEntries {
+		if e.AgentID != "leaderboard-live-test" {
+			continue
+		}
+		foundLB = true
+		if e.Balance == 0 {
+			t.Error("leaderboard: balance should be non-zero after onboarding")
+		}
+		if e.StakedAmount == 0 {
+			t.Error("leaderboard: staked_amount should be non-zero after auto-stake")
+		}
+		if e.TrustLimit == 0 {
+			t.Error("leaderboard: trust_limit should be non-zero after staking")
+		}
+	}
+	if !foundLB {
+		t.Errorf("leaderboard: 'leaderboard-live-test' not found in %+v", lbEntries)
+	}
+
+	// ── Agent list ────────────────────────────────────────────────────────────
+	al := get(t, setup.ts, "/v1/agents")
+	if al.StatusCode != http.StatusOK {
+		t.Fatalf("/v1/agents: want 200, got %d", al.StatusCode)
+	}
+	var alEntries []struct {
+		AgentID      string `json:"agent_id"`
+		Balance      uint64 `json:"balance"`
+		StakedAmount uint64 `json:"staked_amount"`
+	}
+	decodeJSON(t, al, &alEntries)
+
+	var foundAL bool
+	for _, a := range alEntries {
+		if a.AgentID != "leaderboard-live-test" {
+			continue
+		}
+		foundAL = true
+		if a.Balance == 0 {
+			t.Error("/v1/agents: balance should be non-zero after onboarding")
+		}
+		if a.StakedAmount == 0 {
+			t.Error("/v1/agents: staked_amount should be non-zero after auto-stake")
+		}
+	}
+	if !foundAL {
+		t.Errorf("/v1/agents: 'leaderboard-live-test' not found in %+v", alEntries)
+	}
+}
