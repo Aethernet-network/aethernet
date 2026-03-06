@@ -16,6 +16,7 @@
 //	AETHERNET_LISTEN  p2p TCP listen address  (default: "0.0.0.0:8337")
 //	AETHERNET_API     REST API listen address (default: ":8338")
 //	AETHERNET_PEER    peer to auto-connect on startup (default: "")
+//	AETHERNET_RESET   set to "true" to wipe the database on startup (testnet recovery)
 package main
 
 import (
@@ -79,8 +80,63 @@ func keyFilePath() string {
 }
 
 // storePath returns the path to the BadgerDB data store.
+// The store lives directly inside the data directory, not in a "data"
+// subdirectory — that would produce a double-nested path when AETHERNET_DATA
+// is already set to something like "/data".
 func storePath() string {
-	return filepath.Join(dataDir(), "data", "aethernet.db")
+	return filepath.Join(dataDir(), "aethernet.db")
+}
+
+// wipePath removes all files inside dir and recreates it as an empty directory.
+// It is used for database recovery and AETHERNET_RESET.
+func wipePath(dir string) error {
+	if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.MkdirAll(dir, 0o700)
+}
+
+// openStoreWithRecovery opens the BadgerDB store at path, handling two
+// recovery scenarios:
+//
+//  1. AETHERNET_RESET=true — wipe the directory unconditionally before opening
+//     (testnet operator recovery via environment variable).
+//  2. Open failure (e.g. corrupt SST file) — log the error, wipe the directory,
+//     and retry once.  If the retry also fails the process exits.
+func openStoreWithRecovery(path string) *store.Store {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		slog.Error("failed to create store parent directory", "err", err)
+		os.Exit(1)
+	}
+
+	if os.Getenv("AETHERNET_RESET") == "true" {
+		slog.Warn("AETHERNET_RESET=true: wiping database before open", "path", path)
+		if err := wipePath(path); err != nil {
+			slog.Error("AETHERNET_RESET: failed to wipe database", "path", path, "err", err)
+			os.Exit(1)
+		}
+	}
+
+	s, err := store.NewStore(path)
+	if err == nil {
+		return s
+	}
+
+	// First open failed — attempt self-healing recovery.
+	slog.Error("store open failed, attempting recovery by wiping database",
+		"path", path, "err", err)
+	if wipeErr := wipePath(path); wipeErr != nil {
+		slog.Error("recovery: failed to wipe database directory", "path", path, "err", wipeErr)
+		os.Exit(1)
+	}
+	slog.Warn("database wiped; retrying open with fresh store")
+	s, err = store.NewStore(path)
+	if err != nil {
+		slog.Error("store open failed after recovery — cannot start", "path", path, "err", err)
+		os.Exit(1)
+	}
+	slog.Info("database recovered successfully; node starting with empty store")
+	return s
 }
 
 func main() {
@@ -120,6 +176,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  AETHERNET_LISTEN  p2p listen address (default: 0.0.0.0:8337)\n")
 	fmt.Fprintf(os.Stderr, "  AETHERNET_API     API listen address (default: :8338)\n")
 	fmt.Fprintf(os.Stderr, "  AETHERNET_PEER    peer to connect on startup\n")
+	fmt.Fprintf(os.Stderr, "  AETHERNET_RESET   set to \"true\" to wipe the database on startup\n")
 }
 
 // readPassphrase prints prompt and reads one line from stdin, stripping the
@@ -515,7 +572,7 @@ func cmdInit() {
 		slog.Error("failed to create key directory", "err", err)
 		os.Exit(1)
 	}
-	if err := os.MkdirAll(filepath.Join(dataDir(), "data"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(storePath()), 0o700); err != nil {
 		slog.Error("failed to create data directory", "err", err)
 		os.Exit(1)
 	}
@@ -560,15 +617,7 @@ func cmdStart() {
 
 	slog.Info("starting AetherNet node", "version", VERSION, "agent_id", agentID)
 
-	if err := os.MkdirAll(filepath.Dir(storePath()), 0o700); err != nil {
-		slog.Error("failed to create data directory", "err", err)
-		os.Exit(1)
-	}
-	s, err := store.NewStore(storePath())
-	if err != nil {
-		slog.Error("failed to open store", "err", err)
-		os.Exit(1)
-	}
+	s := openStoreWithRecovery(storePath())
 
 	stack := buildStack(s, kp)
 
@@ -627,15 +676,7 @@ func cmdConnect() {
 
 	slog.Info("starting AetherNet node", "version", VERSION, "agent_id", agentID)
 
-	if err := os.MkdirAll(filepath.Dir(storePath()), 0o700); err != nil {
-		slog.Error("failed to create data directory", "err", err)
-		os.Exit(1)
-	}
-	s, err := store.NewStore(storePath())
-	if err != nil {
-		slog.Error("failed to open store", "err", err)
-		os.Exit(1)
-	}
+	s := openStoreWithRecovery(storePath())
 
 	stack := buildStack(s, kp)
 	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr)
