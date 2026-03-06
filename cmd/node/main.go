@@ -35,8 +35,10 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/api"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
+	"github.com/Aethernet-network/aethernet/internal/demo"
 	"github.com/Aethernet-network/aethernet/internal/discovery"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
+	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/eventbus"
 	"github.com/Aethernet-network/aethernet/internal/fees"
 	"github.com/Aethernet-network/aethernet/internal/genesis"
@@ -276,6 +278,7 @@ type nodeStack struct {
 	escrowMgr       *escrow.Escrow
 	reputationMgr   *reputation.ReputationManager
 	discoveryEngine *discovery.Engine
+	activityGen     *demo.ActivityGenerator
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
@@ -454,7 +457,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	// Seed the task marketplace on first run. Only runs when the marketplace
 	// is empty (TotalTasks == 0) to avoid duplicating tasks across restarts.
 	if stack.taskMgr.Stats().TotalTasks == 0 {
-		seedMarketplace(stack.transfer, stack.reg, stack.taskMgr, stack.escrowMgr)
+		seedMarketplace(stack.transfer, stack.reg, stack.taskMgr, stack.escrowMgr, stack.stakeManager)
 	}
 
 	cfg := network.DefaultNodeConfig(agentID)
@@ -516,12 +519,49 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		}
 	}()
 
+	// Background activity generator — simulates transfers between seed agents
+	// every 30 s so the explorer's activity feed stays live on the testnet.
+	activityAgents := []string{"alpha-researcher", "data-scientist", "code-auditor", "doc-writer"}
+	transferFn := func(from, to string, amount uint64, memo string) error {
+		tips := stack.dag.Tips()
+		priorTS := make(map[event.EventID]uint64, len(tips))
+		for _, ref := range tips {
+			if ev, err := stack.dag.Get(ref); err == nil {
+				priorTS[ref] = ev.CausalTimestamp
+			}
+		}
+		e, err := event.New(
+			event.EventTypeTransfer,
+			tips,
+			event.TransferPayload{FromAgent: from, ToAgent: to, Amount: amount, Currency: "AET", Memo: memo},
+			string(agentID),
+			priorTS,
+			stack.engine.MinEventStake(),
+		)
+		if err != nil {
+			return err
+		}
+		if err := crypto.SignEvent(e, stack.kp); err != nil {
+			return err
+		}
+		if err := stack.engine.Submit(e); err != nil {
+			return err
+		}
+		return stack.dag.Add(e)
+	}
+	actGen := demo.NewActivityGenerator(transferFn, activityAgents, 30*time.Second)
+	actGen.Start()
+	stack.activityGen = actGen
+
 	return node
 }
 
 // stopStack tears down the API server, network node, OCS engine, and persistence
 // store in safe reverse-startup order.
 func stopStack(node *network.Node, stack *nodeStack) {
+	if stack.activityGen != nil {
+		stack.activityGen.Stop()
+	}
 	if stack.metricsStop != nil {
 		close(stack.metricsStop)
 	}
@@ -705,16 +745,17 @@ func cmdConnect() {
 // interactive economy from the moment the node starts.
 //
 // This is intentionally testnet-only: on mainnet, real agents post real tasks.
-func seedMarketplace(tl *ledger.TransferLedger, reg *identity.Registry, taskMgr *tasks.TaskManager, escrowMgr *escrow.Escrow) {
+func seedMarketplace(tl *ledger.TransferLedger, reg *identity.Registry, taskMgr *tasks.TaskManager, escrowMgr *escrow.Escrow, stakeMgr *staking.StakeManager) {
 	type poster struct {
 		id    string
 		funds uint64
+		stake uint64
 	}
 	posters := []poster{
-		{"alpha-researcher", 500_000},
-		{"data-scientist", 800_000},
-		{"code-auditor", 1_000_000},
-		{"doc-writer", 400_000},
+		{"alpha-researcher", 500_000, 100_000},
+		{"data-scientist", 800_000, 150_000},
+		{"code-auditor", 1_000_000, 200_000},
+		{"doc-writer", 400_000, 75_000},
 	}
 
 	// Register each poster agent in the identity registry so it shows up in
@@ -727,6 +768,9 @@ func seedMarketplace(tl *ledger.TransferLedger, reg *identity.Registry, taskMgr 
 		}
 		if err := tl.FundAgent(crypto.AgentID(p.id), p.funds); err != nil {
 			slog.Warn("seedMarketplace: failed to fund poster", "id", p.id, "err", err)
+		}
+		if stakeMgr != nil {
+			stakeMgr.Stake(crypto.AgentID(p.id), p.stake)
 		}
 	}
 

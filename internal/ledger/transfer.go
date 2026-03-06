@@ -209,6 +209,18 @@ func (l *TransferLedger) Settle(eventID event.EventID, state event.SettlementSta
 	return nil
 }
 
+// GetSettlement returns the OCS settlement state recorded for eventID.
+// Returns (SettlementOptimistic, false) when the event is not in the ledger.
+func (l *TransferLedger) GetSettlement(eventID event.EventID) (event.SettlementState, bool) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	entry, ok := l.entries[eventID]
+	if !ok {
+		return event.SettlementOptimistic, false
+	}
+	return entry.Settlement, true
+}
+
 // Balance returns the spendable balance for agentID in all currencies combined
 // as a single micro-AET equivalent.
 //

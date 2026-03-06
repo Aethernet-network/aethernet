@@ -492,6 +492,7 @@ type economicsResponse struct {
 	TotalCollected      uint64 `json:"total_collected"`
 	TotalBurned         uint64 `json:"total_burned"`
 	TreasuryAccrued     uint64 `json:"treasury_accrued"`
+	TreasuryBalance     uint64 `json:"treasury_balance"`
 	FeeBasisPoints      uint64 `json:"fee_basis_points"`
 }
 
@@ -507,6 +508,11 @@ type recentEventItem struct {
 	CausalTimestamp uint64 `json:"causal_timestamp"`
 	StakeAmount     uint64 `json:"stake_amount"`
 	SettlementState string `json:"settlement_state"`
+	// Enriched fields populated for Transfer events.
+	From   string `json:"from,omitempty"`
+	To     string `json:"to,omitempty"`
+	Amount uint64 `json:"amount,omitempty"`
+	Memo   string `json:"memo,omitempty"`
 }
 
 type dagStatsResponse struct {
@@ -1334,10 +1340,18 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 			lastAct := s.stakeManager.LastActivity(fp.AgentID)
 			trustLimit = staking.TrustLimitFull(staked, fp.TasksCompleted, since, lastAct, now)
 		}
+		// Use live reputation score from the reputation manager when available.
+		repScore := fp.ReputationScore
+		tasksCompleted := fp.TasksCompleted
+		if s.reputationMgr != nil {
+			rep := s.reputationMgr.GetReputation(fp.AgentID)
+			repScore = uint64(rep.OverallScore)
+			tasksCompleted = rep.TotalCompleted
+		}
 		entries = append(entries, agentSummaryEntry{
 			AgentID:         string(fp.AgentID),
-			ReputationScore: fp.ReputationScore,
-			TasksCompleted:  fp.TasksCompleted,
+			ReputationScore: repScore,
+			TasksCompleted:  tasksCompleted,
 			Balance:         bal,
 			StakedAmount:    staked,
 			TrustLimit:      trustLimit,
@@ -1682,6 +1696,11 @@ func (s *Server) handleEconomics(w http.ResponseWriter, r *http.Request) {
 		circulating = genesis.TotalSupply - burned
 	}
 
+	// Include the live treasury account balance (genesis allocation + all fee
+	// credits), not just the in-session fee-accrued counter which resets on
+	// restart. This lets the explorer show the real treasury at all times.
+	treasuryBalance, _ := s.transfer.Balance(crypto.AgentID(genesis.BucketTreasury))
+
 	writeJSON(w, http.StatusOK, economicsResponse{
 		TotalSupply:         genesis.TotalSupply,
 		CirculatingSupply:   circulating,
@@ -1691,6 +1710,7 @@ func (s *Server) handleEconomics(w http.ResponseWriter, r *http.Request) {
 		TotalCollected:      collected,
 		TotalBurned:         burned,
 		TreasuryAccrued:     treasury,
+		TreasuryBalance:     treasuryBalance,
 		FeeBasisPoints:      fees.FeeBasisPoints,
 	})
 }
@@ -1795,7 +1815,7 @@ func (s *Server) handleRecentEvents(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]recentEventItem, len(all))
 	for i, e := range all {
-		items[i] = recentEventItem{
+		item := recentEventItem{
 			ID:              string(e.ID),
 			Type:            string(e.Type),
 			AgentID:         e.AgentID,
@@ -1803,6 +1823,25 @@ func (s *Server) handleRecentEvents(w http.ResponseWriter, r *http.Request) {
 			StakeAmount:     e.StakeAmount,
 			SettlementState: string(e.SettlementState),
 		}
+		// Issue 4: use live settlement state from the ledger / engine rather
+		// than the immutable DAG event field which stays Optimistic forever.
+		if e.Type == event.EventTypeTransfer {
+			if state, ok := s.transfer.GetSettlement(e.ID); ok {
+				item.SettlementState = string(state)
+			}
+		} else if !s.engine.IsPending(e.ID) && e.SettlementState == event.SettlementOptimistic {
+			item.SettlementState = string(event.SettlementSettled)
+		}
+		// Issue 5: enrich Transfer events with payload fields for the activity feed.
+		if e.Type == event.EventTypeTransfer {
+			if tp, err := event.GetPayload[event.TransferPayload](e); err == nil {
+				item.From = tp.FromAgent
+				item.To = tp.ToAgent
+				item.Amount = tp.Amount
+				item.Memo = tp.Memo
+			}
+		}
+		items[i] = item
 	}
 	writeJSON(w, http.StatusOK, items)
 }
@@ -1860,10 +1899,19 @@ func (s *Server) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
 			lastAct := s.stakeManager.LastActivity(fp.AgentID)
 			trustLimit = staking.TrustLimitFull(staked, fp.TasksCompleted, since, lastAct, now)
 		}
+		// Use live reputation score from the reputation manager when available;
+		// fall back to the identity fingerprint's cached score otherwise.
+		repScore := fp.ReputationScore
+		tasksCompleted := fp.TasksCompleted
+		if s.reputationMgr != nil {
+			rep := s.reputationMgr.GetReputation(fp.AgentID)
+			repScore = uint64(rep.OverallScore)
+			tasksCompleted = rep.TotalCompleted
+		}
 		entries = append(entries, leaderboardEntry{
 			AgentID:         string(fp.AgentID),
-			ReputationScore: fp.ReputationScore,
-			TasksCompleted:  fp.TasksCompleted,
+			ReputationScore: repScore,
+			TasksCompleted:  tasksCompleted,
 			Balance:         bal,
 			TrustLimit:      trustLimit,
 			StakedAmount:    staked,

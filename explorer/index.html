@@ -145,8 +145,8 @@ function fmtNum(n) {
 function fmtAET(microAET) {
   if (!microAET) return '0 AET';
   const aet = microAET / 1e6;
-  if (aet >= 1e6) return (aet / 1e6).toFixed(1) + 'M AET';
-  if (aet >= 1e3) return (aet / 1e3).toFixed(1) + 'K AET';
+  if (aet >= 1e6) return (aet / 1e6).toFixed(2) + 'M AET';
+  if (aet >= 1e3) return (aet / 1e3).toFixed(2) + 'K AET';
   return aet.toFixed(2) + ' AET';
 }
 
@@ -830,9 +830,15 @@ function ActivityFeed({ events, loading }) {
                 <EventBadge type={ev.type} />
                 <div className="flex-1 min-w-0">
                   <div className="text-xs font-mono text-slate-300 truncate">{truncate(ev.id, 16)}</div>
-                  <div className="text-xs text-slate-500 mt-0.5">
-                    agent {truncate(ev.agent_id)} · ts {ev.causal_timestamp} · stake {fmtAET(ev.stake_amount)}
-                  </div>
+                  {ev.type === 'Transfer' && ev.from ? (
+                    <div className="text-xs text-slate-500 mt-0.5">
+                      {truncate(ev.from, 10)} → {truncate(ev.to, 10)} · {fmtAET(ev.amount)}{ev.memo ? ` · ${ev.memo}` : ''}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-slate-500 mt-0.5">
+                      agent {truncate(ev.agent_id)} · ts {ev.causal_timestamp} · stake {fmtAET(ev.stake_amount)}
+                    </div>
+                  )}
                 </div>
                 <span className={`text-xs px-1.5 py-0.5 rounded ${
                   ev.settlement_state === 'Settled' ? 'bg-green-900/50 text-green-400' :
@@ -944,7 +950,7 @@ function DagStatsPanel({ stats, fees, loading }) {
       {fees && (
         <div className="mt-2 flex justify-between text-xs text-slate-500">
           <span>Fees today: <span className="text-slate-300">{fmtAET(fees.total_collected)}</span></span>
-          <span>Treasury: <span className="text-slate-300">{fmtAET(fees.treasury_accrued)}</span></span>
+          <span>Treasury: <span className="text-slate-300">{fmtAET(fees.treasury_balance ?? fees.treasury_accrued)}</span></span>
         </div>
       )}
     </div>
@@ -1025,7 +1031,7 @@ function EconomicsBar({ econ, loading }) {
     { label: 'Circulating',     value: fmtAET(econ.circulating_supply) },
     { label: 'Onboarding Pool', value: fmtAET(econ.onboarding_pool_total) },
     { label: 'Allocated',       value: fmtAET(econ.onboarding_allocated) },
-    { label: 'Treasury',        value: fmtAET(econ.treasury_accrued) },
+    { label: 'Treasury',        value: fmtAET(econ.treasury_balance ?? econ.treasury_accrued) },
     { label: 'Fee (bps)',       value: econ.fee_basis_points },
   ];
 
