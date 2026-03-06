@@ -64,6 +64,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/network"
 	"github.com/Aethernet-network/aethernet/internal/evidence"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
+	"github.com/Aethernet-network/aethernet/internal/platform"
 	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 	svcregistry "github.com/Aethernet-network/aethernet/internal/registry"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
@@ -117,6 +118,11 @@ type Server struct {
 	// When nil, no rate limiting is applied (safe for tests).
 	writeLimiter *ratelimit.Limiter // POST/DELETE/PUT/PATCH endpoints
 	readLimiter  *ratelimit.Limiter // GET endpoints
+
+	// Platform API key manager — optional; set via SetPlatformKeys after construction.
+	// When non-nil, X-API-Key headers are validated; requests with invalid keys
+	// are rejected with 401. Keyless requests are still accepted (backward compat).
+	platformKeys *platform.KeyManager
 
 	// Metrics — optional; set via SetMetrics after construction.
 	// When nil, no metrics are recorded (safe for tests).
@@ -217,6 +223,12 @@ func NewServer(
 	mux.HandleFunc("GET /v1/agents/{id}/reputation", s.handleGetReputation)
 	mux.HandleFunc("GET /v1/reputation/rankings", s.handleGetReputationRankings)
 
+	// Developer platform endpoints — API key management and usage stats.
+	mux.HandleFunc("POST /v1/platform/keys", s.handleGenerateKey)
+	mux.HandleFunc("GET /v1/platform/keys/{key}", s.handleGetKey)
+	mux.HandleFunc("DELETE /v1/platform/keys/{key}", s.handleRevokeKey)
+	mux.HandleFunc("GET /v1/platform/stats", s.handlePlatformStats)
+
 	// WebSocket endpoint for real-time event streaming.
 	mux.Handle("GET /v1/ws", s.wsHandler())
 
@@ -287,6 +299,14 @@ func (s *Server) SetRateLimiters(writeLimiter, readLimiter *ratelimit.Limiter) {
 	s.readLimiter = readLimiter
 }
 
+// SetPlatformKeys wires the developer API key manager into the server.
+// Call before Start. When non-nil, requests that include an X-API-Key header
+// have that key validated; an invalid or revoked key results in a 401 response.
+// Requests without X-API-Key continue to be served normally (backward-compatible).
+func (s *Server) SetPlatformKeys(km *platform.KeyManager) {
+	s.platformKeys = km
+}
+
 // SetMetrics wires a metrics registry and metric set into the server.
 // Call before Start. When not called (e.g. in tests), metrics are nil and no
 // instrumentation is applied. The /metrics endpoint returns an empty response
@@ -307,6 +327,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
+	}
+
+	// API key validation — backward-compatible: keyless requests are accepted.
+	// If an X-API-Key header is present and the key manager is wired in, the
+	// key must be known and active; invalid keys are rejected with 401.
+	if apiKey := r.Header.Get("X-API-Key"); apiKey != "" && s.platformKeys != nil {
+		if _, ok := s.platformKeys.Validate(apiKey); !ok {
+			writeCodedError(w, http.StatusUnauthorized, "invalid_api_key",
+				"invalid or revoked API key", "")
+			return
+		}
 	}
 
 	switch r.Method {
@@ -1120,7 +1151,7 @@ type APIError struct {
 func corsHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -2189,4 +2220,87 @@ func (s *Server) handleUnstake(w http.ResponseWriter, r *http.Request) {
 			Data:      map[string]any{"agent_id": req.AgentID, "amount": req.Amount},
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Developer Platform Handlers
+// ---------------------------------------------------------------------------
+
+// handleGenerateKey handles POST /v1/platform/keys.
+// Creates a new API key for a third-party developer application.
+func (s *Server) handleGenerateKey(w http.ResponseWriter, r *http.Request) {
+	if s.platformKeys == nil {
+		writeError(w, http.StatusNotImplemented, "platform API keys not enabled")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req struct {
+		Name  string         `json:"name"`
+		Email string         `json:"email"`
+		Tier  platform.Tier  `json:"tier"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if req.Name == "" || req.Email == "" {
+		writeError(w, http.StatusBadRequest, "name and email are required")
+		return
+	}
+	if req.Tier == "" {
+		req.Tier = platform.TierFree
+	}
+	key := s.platformKeys.GenerateKey(req.Name, req.Email, req.Tier)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"key":        key.Key,
+		"name":       key.Name,
+		"tier":       key.Tier,
+		"rate_limit": platform.RateLimit(key.Tier),
+	})
+}
+
+// handleGetKey handles GET /v1/platform/keys/{key}.
+// Returns metadata and usage stats for a specific API key.
+func (s *Server) handleGetKey(w http.ResponseWriter, r *http.Request) {
+	if s.platformKeys == nil {
+		writeError(w, http.StatusNotImplemented, "platform API keys not enabled")
+		return
+	}
+	keyStr := r.PathValue("key")
+	key, ok := s.platformKeys.GetKey(keyStr)
+	if !ok {
+		writeError(w, http.StatusNotFound, "key not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, key)
+}
+
+// handleRevokeKey handles DELETE /v1/platform/keys/{key}.
+// Deactivates an API key so it can no longer be used.
+func (s *Server) handleRevokeKey(w http.ResponseWriter, r *http.Request) {
+	if s.platformKeys == nil {
+		writeError(w, http.StatusNotImplemented, "platform API keys not enabled")
+		return
+	}
+	keyStr := r.PathValue("key")
+	if !s.platformKeys.Revoke(keyStr) {
+		writeError(w, http.StatusNotFound, "key not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
+}
+
+// handlePlatformStats handles GET /v1/platform/stats.
+// Returns aggregate usage statistics across all developer API keys.
+func (s *Server) handlePlatformStats(w http.ResponseWriter, r *http.Request) {
+	if s.platformKeys == nil {
+		writeError(w, http.StatusNotImplemented, "platform API keys not enabled")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.platformKeys.Stats())
 }

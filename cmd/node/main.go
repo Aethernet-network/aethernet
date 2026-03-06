@@ -37,6 +37,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/dag"
 	"github.com/Aethernet-network/aethernet/internal/demo"
 	"github.com/Aethernet-network/aethernet/internal/discovery"
+	platformpkg "github.com/Aethernet-network/aethernet/internal/platform"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/eventbus"
@@ -279,6 +280,7 @@ type nodeStack struct {
 	reputationMgr   *reputation.ReputationManager
 	discoveryEngine *discovery.Engine
 	activityGen     *demo.ActivityGenerator
+	platformKeys    *platformpkg.KeyManager
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
@@ -383,6 +385,9 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 	// capabilities using service registry listings and reputation data.
 	discoveryEng := discovery.NewEngine(svcReg, reputationMgr)
 
+	// Developer platform API key manager — tracks third-party apps building on AetherNet.
+	platformKeys := platformpkg.NewKeyManager()
+
 	return &nodeStack{
 		dag:          d,
 		transfer:     tl,
@@ -400,6 +405,7 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 		escrowMgr:       escrowMgr,
 		reputationMgr:   reputationMgr,
 		discoveryEngine: discoveryEng,
+		platformKeys:    platformKeys,
 	}
 }
 
@@ -485,6 +491,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	}
 	apiSrv.SetEconomics(stack.walletMgr, stack.stakeManager, stack.feeCollector)
 	apiSrv.SetEventBus(bus)
+	if stack.platformKeys != nil {
+		apiSrv.SetPlatformKeys(stack.platformKeys)
+	}
 	apiSrv.SetRateLimiters(
 		ratelimit.New(ratelimit.DefaultConfig()),
 		ratelimit.New(ratelimit.ReadOnlyConfig()),
