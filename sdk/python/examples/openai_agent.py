@@ -5,11 +5,11 @@ Works two ways:
 
 1. OpenAI Agents SDK::
 
-       pip install aethernet[openai] openai-agents
+       pip install aethernet-sdk[openai] openai-agents
 
 2. Raw OpenAI function calling::
 
-       pip install aethernet openai
+       pip install aethernet-sdk openai
 """
 
 from aethernet.openai_tools import get_aethernet_function_definitions

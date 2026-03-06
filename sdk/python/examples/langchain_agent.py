@@ -3,7 +3,7 @@
 
 Requires::
 
-    pip install aethernet[langchain] langchain-openai
+    pip install aethernet-sdk[langchain] langchain-openai
 """
 
 from aethernet.langchain_tools import get_aethernet_tools

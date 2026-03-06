@@ -6,7 +6,7 @@ custom HTTP code.
 
 Install the optional dependency::
 
-    pip install aethernet[langchain]
+    pip install aethernet-sdk[langchain]
 
 Usage::
 
@@ -36,7 +36,7 @@ def _require_langchain():
     if not HAS_LANGCHAIN:
         raise ImportError(
             "LangChain integration requires langchain-core. "
-            "Install it with: pip install aethernet[langchain]"
+            "Install it with: pip install aethernet-sdk[langchain]"
         )
 
 

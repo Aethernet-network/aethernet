@@ -3,7 +3,7 @@
 
 Requires::
 
-    pip install aethernet[crewai] crewai
+    pip install aethernet-sdk[crewai] crewai
 """
 
 from aethernet.crewai_tools import get_aethernet_crewai_tools

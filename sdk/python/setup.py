@@ -4,7 +4,7 @@ with open("README.md", "r", encoding="utf-8") as f:
     long_description = f.read()
 
 setup(
-    name="aethernet",
+    name="aethernet-sdk",
     version="0.1.0",
     author="AetherNet",
     description="Python SDK for AetherNet — financial infrastructure for AI agents",

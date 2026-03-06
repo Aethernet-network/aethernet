@@ -1,7 +1,7 @@
 """Zero-config AetherNet testnet quickstart.
 
 Run with:
-    pip install aethernet[crypto]
+    pip install aethernet-sdk[crypto]
     python testnet_quickstart.py
 
 On first run, a local Ed25519 keypair is generated and cached in

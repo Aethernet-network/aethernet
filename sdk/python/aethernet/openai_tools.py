@@ -2,7 +2,7 @@
 
 Supports two usage modes:
 
-**Mode 1 — OpenAI Agents SDK** (``pip install aethernet[openai]``)::
+**Mode 1 — OpenAI Agents SDK** (``pip install aethernet-sdk[openai]``)::
 
     from agents import Agent
     from aethernet.openai_tools import get_aethernet_openai_tools
@@ -13,7 +13,7 @@ Supports two usage modes:
     )
     agent = Agent(name="trader", tools=tools, ...)
 
-**Mode 2 — Raw OpenAI function calling** (``pip install aethernet openai``)::
+**Mode 2 — Raw OpenAI function calling** (``pip install aethernet-sdk openai``)::
 
     from aethernet.openai_tools import get_aethernet_function_definitions, handle_function_call
     from aethernet import AetherNetClient
@@ -179,7 +179,7 @@ else:
         """Raises ImportError because the OpenAI Agents SDK is not installed."""
         raise ImportError(
             "OpenAI Agents SDK is required. "
-            "Install with: pip install aethernet[openai]"
+            "Install with: pip install aethernet-sdk[openai]"
         )
 
 

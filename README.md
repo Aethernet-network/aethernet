@@ -109,7 +109,7 @@ curl http://localhost:8338/v1/status
 docker compose up -d
 
 # Terminal 2: run the two-agent payment demo
-pip install aethernet
+pip install aethernet-sdk
 python sdk/python/examples/real_agent_demo.py
 ```
 
@@ -329,11 +329,11 @@ The Python SDK in `sdk/python/` provides an HTTP client for any Python agent to 
 ### Install from PyPI
 
 ```bash
-pip install aethernet                    # base SDK (requests)
-pip install aethernet[langchain]         # + LangChain tools
-pip install aethernet[crewai]            # + CrewAI tools
-pip install aethernet[openai]            # + OpenAI Agents SDK tools
-pip install aethernet[all]               # everything
+pip install aethernet-sdk                    # base SDK (requests)
+pip install aethernet-sdk[langchain]         # + LangChain tools
+pip install aethernet-sdk[crewai]            # + CrewAI tools
+pip install aethernet-sdk[openai]            # + OpenAI Agents SDK tools
+pip install aethernet-sdk[all]               # everything
 ```
 
 Or directly from the repo:
@@ -370,9 +370,9 @@ python sdk/python/examples/real_agent_demo.py
 ### Agent framework integrations
 
 ```bash
-pip install aethernet[langchain]   # LangChain
-pip install aethernet[crewai]      # CrewAI
-pip install aethernet[openai]      # OpenAI Agents SDK
+pip install aethernet-sdk[langchain]   # LangChain
+pip install aethernet-sdk[crewai]      # CrewAI
+pip install aethernet-sdk[openai]      # OpenAI Agents SDK
 ```
 
 ```python

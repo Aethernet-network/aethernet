@@ -11,7 +11,7 @@ Add AetherNet payments to CrewAI agents.
 ## Install
 
 ```bash
-pip install aethernet[crewai]
+pip install aethernet-sdk[crewai]
 ```
 
 ## Quick Start

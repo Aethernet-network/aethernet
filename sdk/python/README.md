@@ -5,7 +5,7 @@ Python client for the [AetherNet](../../README.md) node REST API.
 ## Install
 
 ```bash
-pip install aethernet
+pip install aethernet-sdk
 ```
 
 Or directly from the repo:
@@ -17,10 +17,10 @@ pip install -e sdk/python/
 ### Optional framework integrations
 
 ```bash
-pip install aethernet[langchain]   # LangChain tools
-pip install aethernet[crewai]      # CrewAI tools
-pip install aethernet[openai]      # OpenAI Agents SDK tools
-pip install aethernet[all]         # everything above
+pip install aethernet-sdk[langchain]   # LangChain tools
+pip install aethernet-sdk[crewai]      # CrewAI tools
+pip install aethernet-sdk[openai]      # OpenAI Agents SDK tools
+pip install aethernet-sdk[all]         # everything above
 ```
 
 ## Quick start

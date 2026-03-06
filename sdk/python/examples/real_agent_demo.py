@@ -12,7 +12,7 @@ Prerequisites:
           docker compose up -d
        or:
           ./aethernet start
-    2. pip install aethernet
+    2. pip install aethernet-sdk
     3. python sdk/python/examples/real_agent_demo.py
 
 No LLM API key needed — this demo exercises the full AetherNet payment flow

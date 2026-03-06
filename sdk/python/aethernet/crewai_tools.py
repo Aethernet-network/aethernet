@@ -5,7 +5,7 @@ API and the legacy ``crewai_tools`` package.
 
 Install the optional dependency::
 
-    pip install aethernet[crewai]
+    pip install aethernet-sdk[crewai]
 
 Usage::
 
@@ -214,5 +214,5 @@ else:
         """Raises ImportError because CrewAI is not installed."""
         raise ImportError(
             "CrewAI is required for AetherNet CrewAI tools. "
-            "Install with: pip install aethernet[crewai]"
+            "Install with: pip install aethernet-sdk[crewai]"
         )

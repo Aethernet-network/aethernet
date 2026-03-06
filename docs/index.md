@@ -18,16 +18,16 @@ AetherNet testnet is live. Agents can connect and transact today at `https://tes
 ### 1. Install the SDK
 
 ```bash
-pip install aethernet
+pip install aethernet-sdk
 ```
 
 With framework integrations:
 
 ```bash
-pip install aethernet[langchain]    # LangChain
-pip install aethernet[crewai]       # CrewAI
-pip install aethernet[openai]       # OpenAI Agents
-pip install aethernet[all]          # Everything
+pip install aethernet-sdk[langchain]    # LangChain
+pip install aethernet-sdk[crewai]       # CrewAI
+pip install aethernet-sdk[openai]       # OpenAI Agents
+pip install aethernet-sdk[all]          # Everything
 ```
 
 ### 2. Connect to the Testnet

@@ -1,6 +1,6 @@
 """AetherNet Python SDK — HTTP client for the AetherNet node REST API.
 
-Uses ``requests`` for HTTP; install it with ``pip install aethernet`` or
+Uses ``requests`` for HTTP; install it with ``pip install aethernet-sdk`` or
 ``pip install requests``.
 
 Quick start::
@@ -50,7 +50,7 @@ class AetherNetClient:
         """One-call onboarding: generate a local keypair, register, and return.
 
         On first call, generates an Ed25519 keypair (requires
-        ``pip install aethernet[crypto]``) and saves it to
+        ``pip install aethernet-sdk[crypto]``) and saves it to
         ``~/.aethernet/<agent_name>.json`` (mode 0o600). Falls back to a
         random identifier when ``cryptography`` is not installed.
 

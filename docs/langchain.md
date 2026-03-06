@@ -11,7 +11,7 @@ Add AetherNet payments to any LangChain agent in under 5 minutes.
 ## Install
 
 ```bash
-pip install aethernet[langchain]
+pip install aethernet-sdk[langchain]
 ```
 
 ## Quick Start
