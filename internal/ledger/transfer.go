@@ -290,6 +290,46 @@ func (l *TransferLedger) FundAgent(agentID crypto.AgentID, amount uint64) error 
 	return nil
 }
 
+// TransferFromBucket creates a settled transfer entry from a genesis bucket to
+// an agent, properly debiting the source bucket. Unlike FundAgent (which mints
+// from "system"), this method decrements the bucket's spendable balance so the
+// genesis pool cannot exceed its seeded amount.
+//
+// Returns ErrInsufficientBalance if fromID does not have enough settled balance
+// to cover the allocation.
+func (l *TransferLedger) TransferFromBucket(fromID crypto.AgentID, toID crypto.AgentID, amount uint64) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	available := l.balanceLocked(fromID)
+	if available < amount {
+		return fmt.Errorf("%w: bucket %s balance %d < allocation %d",
+			ErrInsufficientBalance, fromID, available, amount)
+	}
+
+	eid := event.EventID(fmt.Sprintf("onboarding:%s:%s:%d:%d", fromID, toID, amount, len(l.entries)))
+	if _, exists := l.entries[eid]; exists {
+		return fmt.Errorf("%w: %s", ErrDuplicateEntry, eid)
+	}
+
+	l.entries[eid] = &TransferEntry{
+		EventID:    eid,
+		FromAgent:  fromID,
+		ToAgent:    toID,
+		Amount:     amount,
+		Currency:   "AET",
+		Memo:       "onboarding allocation",
+		Timestamp:  0,
+		Settlement: event.SettlementSettled,
+		RecordedAt: time.Now(),
+		IsGenesis:  true,
+	}
+	if l.store != nil {
+		_ = l.store.PutTransfer(l.entries[eid])
+	}
+	return nil
+}
+
 // PendingOutgoing returns the total outgoing amount across all Optimistic
 // (not yet settled) transfers initiated by agentID.
 //

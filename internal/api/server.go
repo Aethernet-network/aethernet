@@ -684,13 +684,18 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		s.onboardingAllocated += allocation
 		s.onboardingMu.Unlock()
 
-		_ = s.transfer.FundAgent(s.agentID, allocation)
-		resp.OnboardingAllocation = allocation
-
-		if s.stakeManager != nil {
-			s.stakeManager.Stake(s.agentID, allocation)
-			since := s.stakeManager.StakedSince(s.agentID)
-			resp.TrustLimit = staking.TrustLimit(allocation, 0, since, time.Now().Unix())
+		if err := s.transfer.TransferFromBucket(crypto.AgentID(genesis.BucketEcosystem), s.agentID, allocation); err != nil {
+			// Ecosystem exhausted or race — roll back the counter and skip.
+			s.onboardingMu.Lock()
+			s.onboardingAllocated -= allocation
+			s.onboardingMu.Unlock()
+		} else {
+			resp.OnboardingAllocation = allocation
+			if s.stakeManager != nil {
+				s.stakeManager.Stake(s.agentID, allocation)
+				since := s.stakeManager.StakedSince(s.agentID)
+				resp.TrustLimit = staking.TrustLimit(allocation, 0, since, time.Now().Unix())
+			}
 		}
 	} else {
 		s.onboardingMu.Unlock()

@@ -10,10 +10,14 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/api"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
+	"github.com/Aethernet-network/aethernet/internal/fees"
+	"github.com/Aethernet-network/aethernet/internal/genesis"
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/registry"
+	"github.com/Aethernet-network/aethernet/internal/staking"
+	"github.com/Aethernet-network/aethernet/internal/wallet"
 )
 
 // testSetup holds the components for a test API server.
@@ -897,5 +901,85 @@ func TestDeleteRegistry(t *testing.T) {
 		if l["name"] == "To Be Deleted" {
 			t.Error("deactivated listing still appears in search")
 		}
+	}
+}
+
+// TestHandleRegisterAgent_OnboardingFunded verifies that when the ecosystem pool
+// is seeded and economics are wired in, a newly registered agent receives a
+// non-zero onboarding allocation that is immediately spendable and auto-staked.
+func TestHandleRegisterAgent_OnboardingFunded(t *testing.T) {
+	kp, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+
+	d := dag.New()
+	tl := ledger.NewTransferLedger()
+	gl := ledger.NewGenerationLedger()
+	reg := identity.NewRegistry()
+	eng := ocs.NewEngine(ocs.DefaultConfig(), tl, gl, reg)
+	if err := eng.Start(); err != nil {
+		t.Fatalf("start engine: %v", err)
+	}
+	t.Cleanup(eng.Stop)
+	sm := ledger.NewSupplyManager(tl, gl)
+
+	// Seed the ecosystem bucket so onboarding allocations can be drawn from it.
+	if err := tl.FundAgent(crypto.AgentID(genesis.BucketEcosystem), genesis.EcosystemAllocation); err != nil {
+		t.Fatalf("seed ecosystem: %v", err)
+	}
+
+	srv := api.NewServer("", d, tl, gl, reg, eng, sm, nil, kp)
+	srv.SetServiceRegistry(registry.New())
+
+	// Wire in staking, fees, and wallet so the full onboarding path runs.
+	stakeMgr := staking.NewStakeManager()
+	feeCollector := fees.NewCollector(tl)
+	walletMgr := wallet.New()
+	srv.SetEconomics(walletMgr, stakeMgr, feeCollector)
+
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	// Register the agent.
+	r := post(t, ts, "/v1/agents", map[string]any{})
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("want 201, got %d", r.StatusCode)
+	}
+
+	var regResp struct {
+		AgentID             string `json:"agent_id"`
+		OnboardingAllocation uint64 `json:"onboarding_allocation"`
+		TrustLimit           uint64 `json:"trust_limit"`
+	}
+	decodeJSON(t, r, &regResp)
+
+	if regResp.OnboardingAllocation == 0 {
+		t.Error("onboarding_allocation must be non-zero after seeded genesis")
+	}
+	if regResp.TrustLimit == 0 {
+		t.Error("trust_limit must be non-zero when staking is wired in")
+	}
+
+	// Verify the agent has a spendable balance in the transfer ledger.
+	agentID := crypto.AgentID(kp.AgentID())
+	bal, err := tl.Balance(agentID)
+	if err != nil {
+		t.Fatalf("balance check: %v", err)
+	}
+	if bal == 0 {
+		t.Error("agent balance must be non-zero after onboarding")
+	}
+
+	// Verify the agent has a staked amount.
+	staked := stakeMgr.StakedAmount(agentID)
+	if staked == 0 {
+		t.Error("agent staked amount must be non-zero after auto-stake")
+	}
+
+	// Verify the ecosystem bucket was debited (its balance decreased).
+	ecosystemBal, _ := tl.Balance(crypto.AgentID(genesis.BucketEcosystem))
+	if ecosystemBal >= genesis.EcosystemAllocation {
+		t.Errorf("ecosystem balance should have decreased: got %d, seeded %d", ecosystemBal, genesis.EcosystemAllocation)
 	}
 }
