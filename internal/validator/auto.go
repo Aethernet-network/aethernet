@@ -22,6 +22,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/evidence"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
+	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 )
 
@@ -35,8 +36,9 @@ type AutoValidator struct {
 	once        sync.Once
 
 	// Task marketplace — optional. When set, auto-settles submitted tasks.
-	taskMgr   *tasks.TaskManager
-	escrowMgr *escrow.Escrow
+	taskMgr      *tasks.TaskManager
+	escrowMgr    *escrow.Escrow
+	reputationMgr *reputation.ReputationManager
 }
 
 // NewAutoValidator creates an AutoValidator that polls engine every interval
@@ -55,6 +57,12 @@ func NewAutoValidator(engine *ocs.Engine, validatorID crypto.AgentID, interval t
 func (av *AutoValidator) SetTaskManager(tm *tasks.TaskManager, e *escrow.Escrow) {
 	av.taskMgr = tm
 	av.escrowMgr = e
+}
+
+// SetReputationManager wires optional reputation tracking. When set, task
+// completions and failures are recorded for category-level reputation scoring.
+func (av *AutoValidator) SetReputationManager(rm *reputation.ReputationManager) {
+	av.reputationMgr = rm
 }
 
 // Start launches the background approval goroutine. It is safe to call once.
@@ -108,6 +116,7 @@ func (av *AutoValidator) processSubmittedTasks() {
 				task.ID, score.Overall, evidence.PassThreshold)
 			continue
 		}
+		approvedAt := time.Now().UnixNano()
 		if err := av.taskMgr.ApproveTask(task.ID, av.validatorID); err != nil {
 			log.Printf("auto-validator: could not approve task %s: %v", task.ID, err)
 			continue
@@ -116,6 +125,16 @@ func (av *AutoValidator) processSubmittedTasks() {
 			if err := av.escrowMgr.Release(task.ID, crypto.AgentID(task.ClaimerID)); err != nil {
 				log.Printf("auto-validator: could not release escrow for task %s: %v", task.ID, err)
 			}
+		}
+		if av.reputationMgr != nil && task.ClaimerID != "" {
+			deliverySecs := float64(approvedAt-task.ClaimedAt) / 1e9
+			av.reputationMgr.RecordCompletion(
+				crypto.AgentID(task.ClaimerID),
+				task.Category,
+				task.Budget,
+				score.Overall,
+				deliverySecs,
+			)
 		}
 		log.Printf("auto-validator: APPROVED task %s (score: %.2f, claimer: %s)",
 			task.ID, score.Overall, task.ClaimerID)

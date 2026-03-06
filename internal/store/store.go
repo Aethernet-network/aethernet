@@ -504,6 +504,67 @@ func (s *Store) AllTasks() (map[string][]byte, error) {
 	return result, err
 }
 
+// ---------------------------------------------------------------------------
+// Reputation records (raw JSON blobs)
+// ---------------------------------------------------------------------------
+
+const prefixReputation = "rep:"
+
+// PutReputation stores a raw JSON-encoded AgentReputation under "rep:<agentID>".
+func (s *Store) PutReputation(agentID string, data []byte) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(prefixReputation+agentID), data)
+	})
+}
+
+// GetReputation retrieves the raw JSON blob for the reputation identified by agentID.
+// Returns an error wrapping badger.ErrKeyNotFound when absent.
+func (s *Store) GetReputation(agentID string) ([]byte, error) {
+	var data []byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(prefixReputation + agentID))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			data = make([]byte, len(val))
+			copy(data, val)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: get reputation %s: %w", agentID, err)
+	}
+	return data, nil
+}
+
+// AllReputations returns all stored reputation blobs as a map from agentID to raw JSON.
+func (s *Store) AllReputations() (map[string][]byte, error) {
+	result := make(map[string][]byte)
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(prefixReputation)
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		prefixLen := len(prefixReputation)
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := string(item.Key()[prefixLen:])
+			if err := item.Value(func(val []byte) error {
+				blob := make([]byte, len(val))
+				copy(blob, val)
+				result[key] = blob
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return result, err
+}
+
 // PutListing stores a raw JSON-encoded ServiceListing under "reg:<agentID>".
 func (s *Store) PutListing(agentID string, data []byte) error {
 	return s.db.Update(func(txn *badger.Txn) error {

@@ -778,6 +778,64 @@ func (c *Client) TaskStats() (*TaskStats, error) {
 	return &result, nil
 }
 
+// ---------------------------------------------------------------------------
+// Reputation
+// ---------------------------------------------------------------------------
+
+// CategoryRecord mirrors reputation.CategoryRecord without importing internals.
+type CategoryRecord struct {
+	Category         string  `json:"category"`
+	TasksCompleted   uint64  `json:"tasks_completed"`
+	TasksFailed      uint64  `json:"tasks_failed"`
+	TotalValueEarned uint64  `json:"total_value_earned"`
+	AvgScore         float64 `json:"avg_score"`
+	AvgDeliveryTime  float64 `json:"avg_delivery_secs"`
+	LastActive       int64   `json:"last_active"`
+}
+
+// AgentReputation mirrors reputation.AgentReputation without importing internals.
+type AgentReputation struct {
+	AgentID        string                     `json:"agent_id"`
+	OverallScore   float64                    `json:"overall_score"`
+	TotalCompleted uint64                     `json:"total_completed"`
+	TotalFailed    uint64                     `json:"total_failed"`
+	TotalEarned    uint64                     `json:"total_earned"`
+	Categories     map[string]*CategoryRecord `json:"categories"`
+	TopCategory    string                     `json:"top_category"`
+	MemberSince    int64                      `json:"member_since"`
+}
+
+// GetReputation returns the full category-level reputation profile for agentID.
+func (c *Client) GetReputation(agentID string) (*AgentReputation, error) {
+	resp, err := c.do(http.MethodGet, "/v1/agents/"+agentID+"/reputation", nil)
+	if err != nil {
+		return nil, err
+	}
+	result, err := checkAndDecode[AgentReputation](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// GetCategoryRankings returns agents ranked by performance in the given category.
+// limit=0 uses the server default (10).
+func (c *Client) GetCategoryRankings(category string, limit int) ([]*AgentReputation, error) {
+	path := "/v1/reputation/rankings?category=" + category
+	if limit > 0 {
+		path += fmt.Sprintf("&limit=%d", limit)
+	}
+	resp, err := c.do(http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	result, err := checkAndDecode[[]*AgentReputation](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // DeactivateService marks the node's own service listing as inactive.
 // It first calls Status() to resolve the node's agentID, then issues DELETE.
 func (c *Client) DeactivateService() error {

@@ -602,6 +602,45 @@ class AetherNetClient:
         return self._get("/v1/tasks/stats")
 
     # ------------------------------------------------------------------
+    # Reputation endpoints
+    # ------------------------------------------------------------------
+
+    def get_reputation(self, agent_id: str = "") -> Dict[str, Any]:
+        """Return the full category-level reputation profile for *agent_id*.
+
+        Returns a dict with ``overall_score``, ``total_completed``, ``total_failed``,
+        ``total_earned``, ``top_category``, ``member_since``, and a ``categories``
+        mapping each category name to its record (tasks, avg_score, avg_delivery_secs, …).
+
+        Uses ``self.agent_id`` when *agent_id* is omitted.
+        """
+        aid = agent_id or self.agent_id
+        if not aid:
+            raise ValueError("agent_id required: pass to AetherNetClient() or get_reputation()")
+        return self._get(f"/v1/agents/{aid}/reputation")
+
+    def get_category_rankings(self, category: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Return agents ranked by performance in *category*.
+
+        Sorted descending by ``tasks_completed × avg_score``.
+
+        Args:
+            category: Category to rank agents in (e.g. "writing", "code", "ml").
+            limit:    Maximum number of results. Defaults to 10.
+
+        Returns a list of reputation profile dicts.
+        """
+        params = {"category": category, "limit": limit}
+        resp = self.session.get(self.node_url + "/v1/reputation/rankings", params=params)
+        if resp.status_code >= 400:
+            try:
+                err = resp.json().get("error", resp.text)
+            except Exception:
+                err = resp.text
+            raise AetherNetError(resp.status_code, err)
+        return resp.json()
+
+    # ------------------------------------------------------------------
     # Transport helpers
     # ------------------------------------------------------------------
 

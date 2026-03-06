@@ -65,6 +65,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 	svcregistry "github.com/Aethernet-network/aethernet/internal/registry"
+	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/wallet"
@@ -98,6 +99,10 @@ type Server struct {
 	// When nil, the /v1/tasks endpoints return 501.
 	taskMgr   *tasks.TaskManager
 	escrowMgr *escrow.Escrow
+
+	// Reputation tracking — optional; set via SetReputationManager after construction.
+	// When nil, reputation endpoints return 501 and completion recording is skipped.
+	reputationMgr *reputation.ReputationManager
 
 	// Event bus — optional; set via SetEventBus after construction.
 	// When non-nil, handlers publish events for real-time WebSocket streaming.
@@ -196,6 +201,10 @@ func NewServer(
 	mux.HandleFunc("POST /v1/tasks/{id}/dispute", s.handleDisputeTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/cancel", s.handleCancelTask)
 
+	// Reputation endpoints.
+	mux.HandleFunc("GET /v1/agents/{id}/reputation", s.handleGetReputation)
+	mux.HandleFunc("GET /v1/reputation/rankings", s.handleGetReputationRankings)
+
 	// WebSocket endpoint for real-time event streaming.
 	mux.Handle("GET /v1/ws", s.wsHandler())
 
@@ -235,6 +244,13 @@ func (s *Server) SetServiceRegistry(r *svcregistry.Registry) {
 func (s *Server) SetTaskManager(tm *tasks.TaskManager, e *escrow.Escrow) {
 	s.taskMgr = tm
 	s.escrowMgr = e
+}
+
+// SetReputationManager wires reputation tracking into the server. Call before
+// Start. When nil, GET /v1/agents/{id}/reputation and /v1/reputation/rankings
+// return 501, and task approval/dispute does not record reputation events.
+func (s *Server) SetReputationManager(rm *reputation.ReputationManager) {
+	s.reputationMgr = rm
 }
 
 // SetEventBus wires the event bus into the server. Call before Start.
@@ -797,6 +813,26 @@ func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	task, _ := s.taskMgr.Get(taskID)
+
+	// Record reputation completion (best-effort).
+	if s.reputationMgr != nil && taskBefore.ClaimerID != "" {
+		verScore := 0.5 // neutral default when no verification score available
+		if task != nil && task.VerificationScore != nil {
+			verScore = task.VerificationScore.Overall
+		}
+		var deliverySecs float64
+		if task != nil && task.CompletedAt > 0 && taskBefore.ClaimedAt > 0 {
+			deliverySecs = float64(task.CompletedAt-taskBefore.ClaimedAt) / 1e9
+		}
+		s.reputationMgr.RecordCompletion(
+			crypto.AgentID(taskBefore.ClaimerID),
+			taskBefore.Category,
+			taskBefore.Budget,
+			verScore,
+			deliverySecs,
+		)
+	}
+
 	writeJSON(w, http.StatusOK, task)
 }
 
@@ -815,9 +851,21 @@ func (s *Server) handleDisputeTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	taskID := r.PathValue("id")
+
+	// Capture task state before disputing so we can record reputation failure.
+	taskBefore, _ := s.taskMgr.Get(taskID)
+
 	if err := s.taskMgr.DisputeTask(taskID, crypto.AgentID(posterID)); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+
+	// Record reputation failure for the claimer (best-effort).
+	if s.reputationMgr != nil && taskBefore != nil && taskBefore.ClaimerID != "" {
+		s.reputationMgr.RecordFailure(
+			crypto.AgentID(taskBefore.ClaimerID),
+			taskBefore.Category,
+		)
 	}
 
 	task, _ := s.taskMgr.Get(taskID)
@@ -850,6 +898,44 @@ func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 
 	task, _ := s.taskMgr.Get(taskID)
 	writeJSON(w, http.StatusOK, task)
+}
+
+// ---------------------------------------------------------------------------
+// Reputation handlers
+// ---------------------------------------------------------------------------
+
+// handleGetReputation handles GET /v1/agents/{id}/reputation.
+// Returns the full category-level reputation profile for an agent.
+func (s *Server) handleGetReputation(w http.ResponseWriter, r *http.Request) {
+	if s.reputationMgr == nil {
+		writeError(w, http.StatusNotImplemented, "reputation tracking not enabled")
+		return
+	}
+	agentID := r.PathValue("id")
+	rep := s.reputationMgr.GetReputation(crypto.AgentID(agentID))
+	writeJSON(w, http.StatusOK, rep)
+}
+
+// handleGetReputationRankings handles GET /v1/reputation/rankings.
+// Query params: category (required), limit (optional, default 10).
+func (s *Server) handleGetReputationRankings(w http.ResponseWriter, r *http.Request) {
+	if s.reputationMgr == nil {
+		writeError(w, http.StatusNotImplemented, "reputation tracking not enabled")
+		return
+	}
+	category := r.URL.Query().Get("category")
+	if category == "" {
+		writeError(w, http.StatusBadRequest, "category query parameter required")
+		return
+	}
+	limit := 10
+	if ls := r.URL.Query().Get("limit"); ls != "" {
+		if n, err := strconv.Atoi(ls); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	rankings := s.reputationMgr.RankByCategory(category, limit)
+	writeJSON(w, http.StatusOK, rankings)
 }
 
 // ---------------------------------------------------------------------------

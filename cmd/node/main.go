@@ -45,6 +45,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 	"github.com/Aethernet-network/aethernet/internal/registry"
+	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/store"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
@@ -212,9 +213,10 @@ type nodeStack struct {
 	metricsReg   *metrics.Registry
 	nodeMetrics  *metrics.AetherNetMetrics
 	metricsStop  chan struct{} // closed to terminate the gauge-update goroutine
-	autoVal      *validator.AutoValidator
-	taskMgr      *tasks.TaskManager
-	escrowMgr    *escrow.Escrow
+	autoVal       *validator.AutoValidator
+	taskMgr       *tasks.TaskManager
+	escrowMgr     *escrow.Escrow
+	reputationMgr *reputation.ReputationManager
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
@@ -306,6 +308,15 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 		}
 	}
 
+	// Category-specific reputation tracking.
+	reputationMgr := reputation.NewReputationManager()
+	if s != nil {
+		reputationMgr.SetStore(s)
+		if err := reputationMgr.LoadFromStore(); err != nil {
+			slog.Warn("failed to restore reputation data from store", "err", err)
+		}
+	}
+
 	return &nodeStack{
 		dag:          d,
 		transfer:     tl,
@@ -319,8 +330,9 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 		stakeManager: stakeMgr,
 		feeCollector: feeCollector,
 		walletMgr:    walletMgr,
-		taskMgr:      taskMgr,
-		escrowMgr:    escrowMgr,
+		taskMgr:       taskMgr,
+		escrowMgr:     escrowMgr,
+		reputationMgr: reputationMgr,
 	}
 }
 
@@ -371,6 +383,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	}
 	av := validator.NewAutoValidator(stack.engine, testnetValidatorID, 5*time.Second)
 	av.SetTaskManager(stack.taskMgr, stack.escrowMgr)
+	av.SetReputationManager(stack.reputationMgr)
 	av.Start()
 	stack.autoVal = av
 
@@ -399,6 +412,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		apiSrv.SetServiceRegistry(stack.svcRegistry)
 	}
 	apiSrv.SetTaskManager(stack.taskMgr, stack.escrowMgr)
+	apiSrv.SetReputationManager(stack.reputationMgr)
 	apiSrv.SetEconomics(stack.walletMgr, stack.stakeManager, stack.feeCollector)
 	apiSrv.SetEventBus(bus)
 	apiSrv.SetRateLimiters(
