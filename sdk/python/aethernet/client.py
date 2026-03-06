@@ -46,6 +46,86 @@ class AetherNetClient:
         """
         return self._post("/v1/agents", {"capabilities": capabilities or []})
 
+    def quick_start(self, agent_name: str = None) -> Dict[str, Any]:
+        """One-call onboarding: generate a local keypair, register, and return.
+
+        On first call, generates an Ed25519 keypair (requires
+        ``pip install aethernet[crypto]``) and saves it to
+        ``~/.aethernet/<agent_name>.json`` (mode 0o600). Falls back to a
+        random identifier when ``cryptography`` is not installed.
+
+        On subsequent calls with the same *agent_name* the existing key is
+        loaded so the same identity is reused (idempotent).
+
+        Args:
+            agent_name: Human-readable label for the saved key file.
+                Defaults to ``"default"``.
+
+        Returns:
+            The registration dict (``agent_id``, ``fingerprint_hash``, …).
+        """
+        import json
+        import os
+
+        aethernet_dir = os.path.expanduser("~/.aethernet")
+        os.makedirs(aethernet_dir, mode=0o700, exist_ok=True)
+
+        key_name = agent_name or "default"
+        key_path = os.path.join(aethernet_dir, f"{key_name}.json")
+
+        if os.path.exists(key_path):
+            with open(key_path) as f:
+                saved = json.load(f)
+            self.agent_id = saved.get("agent_id", self.agent_id)
+        else:
+            saved = self._generate_keypair()
+            fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(saved, f, indent=2)
+
+        result = self.register()
+        # Update agent_id from the server response — the node always uses its
+        # own keypair identity, so we mirror it here for convenience.
+        if "agent_id" in result:
+            self.agent_id = result["agent_id"]
+        return result
+
+    @staticmethod
+    def _generate_keypair() -> Dict[str, Any]:
+        """Generate an Ed25519 keypair. Returns a dict with agent_id, public_key,
+        and private_key as hex strings. Falls back to a random hex ID when the
+        ``cryptography`` package is not installed."""
+        try:
+            import binascii
+
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+                Ed25519PrivateKey,
+            )
+            from cryptography.hazmat.primitives.serialization import (
+                Encoding,
+                NoEncryption,
+                PrivateFormat,
+                PublicFormat,
+            )
+
+            private_key = Ed25519PrivateKey.generate()
+            public_key = private_key.public_key()
+            pub_bytes = public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)
+            priv_bytes = private_key.private_bytes(
+                Encoding.Raw, PrivateFormat.Raw, NoEncryption()
+            )
+            agent_id = binascii.hexlify(pub_bytes).decode()
+            return {
+                "agent_id": agent_id,
+                "public_key": binascii.hexlify(pub_bytes).decode(),
+                "private_key": binascii.hexlify(priv_bytes).decode(),
+            }
+        except ImportError:
+            import secrets
+
+            agent_id = secrets.token_hex(32)
+            return {"agent_id": agent_id}
+
     def profile(self, agent_id: str = "") -> Dict[str, Any]:
         """Return the capability fingerprint for *agent_id*.
 

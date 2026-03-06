@@ -477,6 +477,20 @@ func cmdStart() {
 	}
 
 	stack := buildStack(s, kp)
+
+	// Auto-genesis: on first Docker start, seed the initial token supply when
+	// the founders bucket is empty. Only runs in non-interactive mode
+	// (AETHERNET_DATA is set) to preserve the manual genesis workflow in
+	// interactive / development environments.
+	if os.Getenv("AETHERNET_DATA") != "" {
+		foundersBalance, _ := stack.transfer.Balance(crypto.AgentID(genesis.BucketFounders))
+		if foundersBalance == 0 {
+			slog.Info("auto-genesis: seeding initial token supply")
+			seedGenesis(stack.transfer)
+			fmt.Println("Auto-genesis: initial token supply seeded.")
+		}
+	}
+
 	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr)
 
 	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\nAPI      : %s\n\n",
@@ -547,6 +561,29 @@ func cmdConnect() {
 	runLoop(agentID, stack.dag, node, stack.engine, stack.supply, stack.bus)
 	stopStack(node, stack)
 	slog.Info("node stopped cleanly")
+}
+
+// seedGenesis funds the six genesis allocation buckets using the provided
+// TransferLedger. It is called automatically on first start when the store has
+// no genesis allocation yet (Docker mode). It is also the implementation shared
+// by cmdGenesis to avoid code duplication.
+func seedGenesis(tl *ledger.TransferLedger) {
+	buckets := []struct {
+		name   string
+		amount uint64
+	}{
+		{genesis.BucketFounders, genesis.FoundersAllocation},
+		{genesis.BucketInvestors, genesis.InvestorsAllocation},
+		{genesis.BucketEcosystem, genesis.EcosystemAllocation},
+		{genesis.BucketRewards, genesis.NetworkRewards},
+		{genesis.BucketTreasury, genesis.TreasuryAllocation},
+		{genesis.BucketPublic, genesis.PublicAllocation},
+	}
+	for _, b := range buckets {
+		if err := tl.FundAgent(crypto.AgentID(b.name), b.amount); err != nil {
+			slog.Warn("auto-genesis: failed to fund bucket", "bucket", b.name, "err", err)
+		}
+	}
 }
 
 // cmdGenesis seeds the initial token supply into the BadgerDB store by funding

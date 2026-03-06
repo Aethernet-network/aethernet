@@ -143,6 +143,9 @@ func NewServer(
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"name": "AetherNet Testnet", "version": "0.1.0", "docs": "https://github.com/Aethernet-network/aethernet", "endpoints": map[string]string{"status": "/v1/status", "agents": "/v1/agents", "economics": "/v1/economics", "explorer": "/explorer/"}})
+	})
 	mux.HandleFunc("POST /v1/agents", s.handleRegisterAgent)
 	mux.HandleFunc("GET /v1/agents/leaderboard", s.handleLeaderboard)
 	mux.HandleFunc("GET /v1/agents", s.handleListAgents)
@@ -229,11 +232,19 @@ func (s *Server) SetMetrics(reg *metrics.Registry, m *metrics.AetherNetMetrics) 
 	s.nodeMetrics = m
 }
 
-// ServeHTTP implements http.Handler. Applies per-IP rate limiting (when
-// configured) before dispatching to the route mux. Tests that construct the
-// Server via httptest.NewServer(s) pass through here without rate limiting
-// because SetRateLimiters is not called in tests.
+// ServeHTTP implements http.Handler. Applies CORS headers, handles OPTIONS
+// preflight, applies per-IP rate limiting (when configured), then dispatches
+// to the route mux. Tests that construct the Server via httptest.NewServer(s)
+// pass through here without rate limiting because SetRateLimiters is not called
+// in tests.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// CORS — required for browser-based clients (explorer, developer frontends).
+	corsHeaders(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	switch r.Method {
 	case http.MethodPost, http.MethodDelete, http.MethodPut, http.MethodPatch:
 		if s.writeLimiter != nil && !s.writeLimiter.Allow(ratelimit.ExtractIP(r)) {
@@ -241,9 +252,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				s.nodeMetrics.RateLimitRejects.Inc()
 			}
 			w.Header().Set("Retry-After", "1")
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte(`{"error":"rate limit exceeded"}`))
+			writeCodedError(w, http.StatusTooManyRequests, "rate_limited", "rate limit exceeded", "")
 			return
 		}
 	default:
@@ -252,9 +261,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				s.nodeMetrics.RateLimitRejects.Inc()
 			}
 			w.Header().Set("Retry-After", "1")
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte(`{"error":"rate limit exceeded"}`))
+			writeCodedError(w, http.StatusTooManyRequests, "rate_limited", "rate limit exceeded", "")
 			return
 		}
 	}
@@ -533,14 +540,40 @@ func explorerPath() string {
 	return ""
 }
 
+// APIError is the standard error response body for all API error responses.
+// Error is always present. Code and Details are present for specific error
+// conditions to allow programmatic error handling by clients.
+type APIError struct {
+	Error   string `json:"error"`
+	Code    string `json:"code,omitempty"`
+	Details string `json:"details,omitempty"`
+}
+
+// corsHeaders sets CORS headers required for browser-based clients to call the
+// API. Applied unconditionally on every response including errors.
+func corsHeaders(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeError writes a JSON error response with the standard {"error": msg} body.
 func writeError(w http.ResponseWriter, code int, msg string) {
-	writeJSON(w, code, map[string]string{"error": msg})
+	writeJSON(w, code, APIError{Error: msg})
+}
+
+// writeCodedError writes a structured JSON error response including a machine-
+// readable error code and optional details string. Use this for errors that
+// clients may want to handle programmatically (e.g. trust_limit_exceeded,
+// agent_not_found).
+func writeCodedError(w http.ResponseWriter, status int, code, msg, details string) {
+	writeJSON(w, status, APIError{Error: msg, Code: code, Details: details})
 }
 
 // buildCausalRefs returns the causal ref list (falling back to current DAG tips
@@ -598,7 +631,7 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 			return
 		}
-		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		writeCodedError(w, http.StatusBadRequest, "invalid_request", "invalid request body: "+err.Error(), "")
 		return
 	}
 
@@ -642,9 +675,12 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Onboarding allocation: grant from ecosystem pool, auto-stake.
+	// Only grant when the ecosystem pool has been seeded (genesis was run).
+	// This prevents minting from nothing on fresh nodes without genesis.
+	ecosystemBal, _ := s.transfer.Balance(crypto.AgentID(genesis.BucketEcosystem))
 	s.onboardingMu.Lock()
 	allocation := genesis.OnboardingAllocation(agentCountBefore)
-	if allocation > 0 && s.onboardingAllocated+allocation <= genesis.OnboardingPoolTotal {
+	if allocation > 0 && ecosystemBal >= allocation && s.onboardingAllocated+allocation <= genesis.OnboardingPoolTotal {
 		s.onboardingAllocated += allocation
 		s.onboardingMu.Unlock()
 
@@ -685,7 +721,7 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 	agentID := r.PathValue("agent_id")
 	fp, err := s.registry.Get(crypto.AgentID(agentID))
 	if err != nil {
-		writeError(w, http.StatusNotFound, "agent not found")
+		writeCodedError(w, http.StatusNotFound, "agent_not_found", "agent not found", "agent_id: "+agentID)
 		return
 	}
 	writeJSON(w, http.StatusOK, fp)
@@ -719,7 +755,7 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 			return
 		}
-		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		writeCodedError(w, http.StatusBadRequest, "invalid_request", "invalid request body: "+err.Error(), "")
 		return
 	}
 	if req.ToAgent == "" {
@@ -741,7 +777,9 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
 		lastAct := s.stakeManager.LastActivity(s.agentID)
 		trustLimit := staking.TrustLimitFull(staked, tasksCompleted, since, lastAct, time.Now().Unix())
 		if req.Amount > trustLimit {
-			writeError(w, http.StatusForbidden, "amount exceeds trust limit")
+			writeCodedError(w, http.StatusForbidden, "trust_limit_exceeded",
+				"amount exceeds trust limit",
+				fmt.Sprintf("trust_limit: %d, requested: %d", trustLimit, req.Amount))
 			return
 		}
 	}
@@ -890,7 +928,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, ocs.ErrSelfDealing) {
-			writeError(w, http.StatusForbidden, err.Error())
+			writeCodedError(w, http.StatusForbidden, "self_dealing", err.Error(), "")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())

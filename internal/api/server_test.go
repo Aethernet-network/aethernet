@@ -736,6 +736,119 @@ func TestGetCategories(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// CORS tests
+// ---------------------------------------------------------------------------
+
+func TestCORS_Headers(t *testing.T) {
+	setup := newTestSetup(t)
+
+	resp := get(t, setup.ts, "/v1/status")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("Access-Control-Allow-Origin: got %q, want *", got)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Methods"); got == "" {
+		t.Error("Access-Control-Allow-Methods header missing")
+	}
+}
+
+func TestCORS_Preflight(t *testing.T) {
+	setup := newTestSetup(t)
+
+	req, err := http.NewRequest(http.MethodOptions, setup.ts.URL+"/v1/transfer", nil)
+	if err != nil {
+		t.Fatalf("build OPTIONS request: %v", err)
+	}
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("OPTIONS request: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("preflight: want 204, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("Access-Control-Allow-Origin: got %q, want *", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Structured error response tests
+// ---------------------------------------------------------------------------
+
+func TestErrorResponse_Format(t *testing.T) {
+	setup := newTestSetup(t)
+
+	// Any 404 should return an APIError struct with at minimum an "error" field.
+	resp := get(t, setup.ts, "/v1/agents/nonexistent")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("want 404, got %d", resp.StatusCode)
+	}
+
+	var apiErr struct {
+		Error   string `json:"error"`
+		Code    string `json:"code"`
+		Details string `json:"details"`
+	}
+	decodeJSON(t, resp, &apiErr)
+	if apiErr.Error == "" {
+		t.Error("error field must not be empty")
+	}
+	if apiErr.Code == "" {
+		t.Error("code field must not be empty for agent_not_found")
+	}
+}
+
+func TestErrorResponse_AgentNotFound(t *testing.T) {
+	setup := newTestSetup(t)
+
+	resp := get(t, setup.ts, "/v1/agents/doesnotexist2")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("want 404, got %d", resp.StatusCode)
+	}
+
+	var apiErr struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	decodeJSON(t, resp, &apiErr)
+	if apiErr.Code != "agent_not_found" {
+		t.Errorf("code: want agent_not_found, got %q", apiErr.Code)
+	}
+}
+
+func TestErrorResponse_InvalidJSON(t *testing.T) {
+	setup := newTestSetup(t)
+
+	// Send malformed JSON to a POST endpoint.
+	resp, err := http.Post(setup.ts.URL+"/v1/transfer", "application/json",
+		bytes.NewReader([]byte(`{invalid json`)))
+	if err != nil {
+		t.Fatalf("POST /v1/transfer: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d", resp.StatusCode)
+	}
+
+	var apiErr struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	decodeJSON(t, resp, &apiErr)
+	if apiErr.Code != "invalid_request" {
+		t.Errorf("code: want invalid_request, got %q", apiErr.Code)
+	}
+}
+
 func TestDeleteRegistry(t *testing.T) {
 	setup := newTestSetup(t)
 
