@@ -34,6 +34,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/api"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
+	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/eventbus"
 	"github.com/Aethernet-network/aethernet/internal/fees"
 	"github.com/Aethernet-network/aethernet/internal/genesis"
@@ -46,6 +47,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/registry"
 	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/store"
+	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/validator"
 	"github.com/Aethernet-network/aethernet/internal/wallet"
 )
@@ -211,6 +213,8 @@ type nodeStack struct {
 	nodeMetrics  *metrics.AetherNetMetrics
 	metricsStop  chan struct{} // closed to terminate the gauge-update goroutine
 	autoVal      *validator.AutoValidator
+	taskMgr      *tasks.TaskManager
+	escrowMgr    *escrow.Escrow
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
@@ -292,6 +296,16 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 		}
 	}
 
+	// Task marketplace: task manager + escrow.
+	taskMgr := tasks.NewTaskManager()
+	escrowMgr := escrow.New(tl)
+	if s != nil {
+		taskMgr.SetStore(s)
+		if err := taskMgr.LoadFromStore(s); err != nil {
+			slog.Warn("failed to restore task marketplace from store", "err", err)
+		}
+	}
+
 	return &nodeStack{
 		dag:          d,
 		transfer:     tl,
@@ -305,6 +319,8 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 		stakeManager: stakeMgr,
 		feeCollector: feeCollector,
 		walletMgr:    walletMgr,
+		taskMgr:      taskMgr,
+		escrowMgr:    escrowMgr,
 	}
 }
 
@@ -354,6 +370,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		_ = stack.reg.Register(tvFP)
 	}
 	av := validator.NewAutoValidator(stack.engine, testnetValidatorID, 5*time.Second)
+	av.SetTaskManager(stack.taskMgr, stack.escrowMgr)
 	av.Start()
 	stack.autoVal = av
 
@@ -375,6 +392,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	if stack.svcRegistry != nil {
 		apiSrv.SetServiceRegistry(stack.svcRegistry)
 	}
+	apiSrv.SetTaskManager(stack.taskMgr, stack.escrowMgr)
 	apiSrv.SetEconomics(stack.walletMgr, stack.stakeManager, stack.feeCollector)
 	apiSrv.SetEventBus(bus)
 	apiSrv.SetRateLimiters(

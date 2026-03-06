@@ -11,12 +11,14 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/api"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
+	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/fees"
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/registry"
 	"github.com/Aethernet-network/aethernet/internal/staking"
+	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/wallet"
 )
 
@@ -30,6 +32,8 @@ type testSetup struct {
 	eng      *ocs.Engine
 	srv      *api.Server
 	ts       *httptest.Server
+	taskMgr  *tasks.TaskManager
+	escrowMgr *escrow.Escrow
 }
 
 // newTestSetup constructs a complete in-memory node stack and an httptest server.
@@ -52,12 +56,27 @@ func newTestSetup(t *testing.T) *testSetup {
 	t.Cleanup(eng.Stop)
 	sm := ledger.NewSupplyManager(tl, gl)
 
+	taskMgr := tasks.NewTaskManager()
+	escrowMgr := escrow.New(tl)
+
 	srv := api.NewServer("", d, tl, gl, reg, eng, sm, nil, kp)
 	srv.SetServiceRegistry(registry.New())
+	srv.SetTaskManager(taskMgr, escrowMgr)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
-	return &testSetup{kp: kp, d: d, tl: tl, gl: gl, reg: reg, eng: eng, srv: srv, ts: ts}
+	return &testSetup{
+		kp:        kp,
+		d:         d,
+		tl:        tl,
+		gl:        gl,
+		reg:       reg,
+		eng:       eng,
+		srv:       srv,
+		ts:        ts,
+		taskMgr:   taskMgr,
+		escrowMgr: escrowMgr,
+	}
 }
 
 // newVerifierServer creates a second API server sharing the same internal
@@ -1399,5 +1418,274 @@ func TestHandleLeaderboard_LiveData(t *testing.T) {
 	}
 	if !foundAL {
 		t.Errorf("/v1/agents: 'leaderboard-live-test' not found in %+v", alEntries)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Task Marketplace API tests
+// ---------------------------------------------------------------------------
+
+// postJSON is a helper that POSTs JSON body and returns the response.
+func postJSON(t *testing.T, ts *httptest.Server, path string, body any) *http.Response {
+	t.Helper()
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	resp, err := http.Post(ts.URL+path, "application/json", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("POST %s: %v", path, err)
+	}
+	return resp
+}
+
+func TestPostTask_API(t *testing.T) {
+	setup := newTestSetup(t)
+
+	// Fund the poster (node's own identity is the poster when poster_id is omitted).
+	agentID := setup.kp.AgentID()
+	if err := setup.tl.FundAgent(agentID, 100_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
+	resp := postJSON(t, setup.ts, "/v1/tasks", map[string]any{
+		"title":       "Run inference",
+		"description": "GPT-4o on dataset X",
+		"category":    "ml",
+		"budget":      uint64(10_000),
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /v1/tasks: got %d; want 201", resp.StatusCode)
+	}
+
+	var task struct {
+		ID       string `json:"id"`
+		Title    string `json:"title"`
+		PosterID string `json:"poster_id"`
+		Budget   uint64 `json:"budget"`
+		Status   string `json:"status"`
+	}
+	decodeJSON(t, resp, &task)
+
+	if task.ID == "" {
+		t.Error("task ID must not be empty")
+	}
+	if task.Title != "Run inference" {
+		t.Errorf("Title = %q; want 'Run inference'", task.Title)
+	}
+	if task.Status != "open" {
+		t.Errorf("Status = %q; want 'open'", task.Status)
+	}
+	if task.Budget != 10_000 {
+		t.Errorf("Budget = %d; want 10000", task.Budget)
+	}
+}
+
+func TestClaimTask_API(t *testing.T) {
+	setup := newTestSetup(t)
+
+	agentID := setup.kp.AgentID()
+	if err := setup.tl.FundAgent(agentID, 100_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
+	// Post a task
+	postResp := postJSON(t, setup.ts, "/v1/tasks", map[string]any{
+		"title":  "Classify images",
+		"budget": uint64(5_000),
+	})
+	var task struct{ ID string `json:"id"` }
+	decodeJSON(t, postResp, &task)
+
+	// Claim it
+	claimResp := postJSON(t, setup.ts, "/v1/tasks/"+task.ID+"/claim", map[string]any{
+		"claimer_id": "worker-agent",
+	})
+	if claimResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST .../claim: got %d; want 200", claimResp.StatusCode)
+	}
+
+	var claimed struct {
+		Status    string `json:"status"`
+		ClaimerID string `json:"claimer_id"`
+	}
+	decodeJSON(t, claimResp, &claimed)
+	if claimed.Status != "claimed" {
+		t.Errorf("Status = %q; want 'claimed'", claimed.Status)
+	}
+	if claimed.ClaimerID != "worker-agent" {
+		t.Errorf("ClaimerID = %q; want 'worker-agent'", claimed.ClaimerID)
+	}
+}
+
+func TestSubmitTask_API(t *testing.T) {
+	setup := newTestSetup(t)
+
+	agentID := setup.kp.AgentID()
+	if err := setup.tl.FundAgent(agentID, 100_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
+	postResp := postJSON(t, setup.ts, "/v1/tasks", map[string]any{
+		"title":  "Summarize doc",
+		"budget": uint64(3_000),
+	})
+	var task struct{ ID string `json:"id"` }
+	decodeJSON(t, postResp, &task)
+
+	postJSON(t, setup.ts, "/v1/tasks/"+task.ID+"/claim", map[string]any{
+		"claimer_id": "summarizer",
+	})
+
+	submitResp := postJSON(t, setup.ts, "/v1/tasks/"+task.ID+"/submit", map[string]any{
+		"claimer_id":  "summarizer",
+		"result_hash": "sha256:abc",
+	})
+	if submitResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST .../submit: got %d; want 200", submitResp.StatusCode)
+	}
+
+	var submitted struct {
+		Status     string `json:"status"`
+		ResultHash string `json:"result_hash"`
+	}
+	decodeJSON(t, submitResp, &submitted)
+	if submitted.Status != "submitted" {
+		t.Errorf("Status = %q; want 'submitted'", submitted.Status)
+	}
+}
+
+func TestApproveTask_API(t *testing.T) {
+	setup := newTestSetup(t)
+
+	agentID := setup.kp.AgentID()
+	if err := setup.tl.FundAgent(agentID, 100_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
+	postResp := postJSON(t, setup.ts, "/v1/tasks", map[string]any{
+		"title":  "Generate embeddings",
+		"budget": uint64(8_000),
+	})
+	var task struct{ ID string `json:"id"` }
+	decodeJSON(t, postResp, &task)
+
+	postJSON(t, setup.ts, "/v1/tasks/"+task.ID+"/claim", map[string]any{"claimer_id": "embed-worker"})
+	postJSON(t, setup.ts, "/v1/tasks/"+task.ID+"/submit", map[string]any{
+		"claimer_id":  "embed-worker",
+		"result_hash": "sha256:xyz",
+	})
+
+	approveResp := postJSON(t, setup.ts, "/v1/tasks/"+task.ID+"/approve", map[string]any{})
+	if approveResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST .../approve: got %d; want 200", approveResp.StatusCode)
+	}
+
+	var approved struct{ Status string `json:"status"` }
+	decodeJSON(t, approveResp, &approved)
+	if approved.Status != "completed" {
+		t.Errorf("Status = %q; want 'completed'", approved.Status)
+	}
+
+	// embed-worker should have received the escrowed budget.
+	workerBal, err := setup.tl.Balance("embed-worker")
+	if err != nil {
+		t.Fatalf("Balance: %v", err)
+	}
+	if workerBal != 8_000 {
+		t.Errorf("embed-worker balance = %d; want 8000", workerBal)
+	}
+}
+
+func TestCancelTask_API(t *testing.T) {
+	setup := newTestSetup(t)
+
+	agentID := setup.kp.AgentID()
+	if err := setup.tl.FundAgent(agentID, 50_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
+	balBefore, _ := setup.tl.Balance(agentID)
+
+	postResp := postJSON(t, setup.ts, "/v1/tasks", map[string]any{
+		"title":  "Fine-tune model",
+		"budget": uint64(20_000),
+	})
+	var task struct{ ID string `json:"id"` }
+	decodeJSON(t, postResp, &task)
+
+	cancelResp := postJSON(t, setup.ts, "/v1/tasks/"+task.ID+"/cancel", map[string]any{})
+	if cancelResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST .../cancel: got %d; want 200", cancelResp.StatusCode)
+	}
+
+	var cancelled struct{ Status string `json:"status"` }
+	decodeJSON(t, cancelResp, &cancelled)
+	if cancelled.Status != "cancelled" {
+		t.Errorf("Status = %q; want 'cancelled'", cancelled.Status)
+	}
+
+	// Budget should have been refunded — balance should be restored.
+	balAfter, _ := setup.tl.Balance(agentID)
+	if balAfter != balBefore {
+		t.Errorf("balance after cancel = %d; want %d (refunded)", balAfter, balBefore)
+	}
+}
+
+func TestTaskSearch_API(t *testing.T) {
+	setup := newTestSetup(t)
+
+	agentID := setup.kp.AgentID()
+	if err := setup.tl.FundAgent(agentID, 100_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
+	// Post two tasks
+	postJSON(t, setup.ts, "/v1/tasks", map[string]any{"title": "Task A", "budget": uint64(1_000), "category": "ml"})
+	postJSON(t, setup.ts, "/v1/tasks", map[string]any{"title": "Task B", "budget": uint64(2_000), "category": "nlp"})
+
+	// List all open tasks
+	resp := get(t, setup.ts, "/v1/tasks?status=open")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /v1/tasks: got %d; want 200", resp.StatusCode)
+	}
+
+	var taskList []struct{ Title string `json:"title"` }
+	decodeJSON(t, resp, &taskList)
+	if len(taskList) < 2 {
+		t.Errorf("expected at least 2 open tasks; got %d", len(taskList))
+	}
+}
+
+func TestTaskStats_API(t *testing.T) {
+	setup := newTestSetup(t)
+
+	agentID := setup.kp.AgentID()
+	if err := setup.tl.FundAgent(agentID, 100_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
+	postJSON(t, setup.ts, "/v1/tasks", map[string]any{"title": "Stats task 1", "budget": uint64(5_000)})
+	postJSON(t, setup.ts, "/v1/tasks", map[string]any{"title": "Stats task 2", "budget": uint64(3_000)})
+
+	resp := get(t, setup.ts, "/v1/tasks/stats")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /v1/tasks/stats: got %d; want 200", resp.StatusCode)
+	}
+
+	var stats struct {
+		TotalTasks  int    `json:"total_tasks"`
+		OpenTasks   int    `json:"open_tasks"`
+		TotalBudget uint64 `json:"total_budget"`
+	}
+	decodeJSON(t, resp, &stats)
+	if stats.TotalTasks < 2 {
+		t.Errorf("TotalTasks = %d; want >= 2", stats.TotalTasks)
+	}
+	if stats.OpenTasks < 2 {
+		t.Errorf("OpenTasks = %d; want >= 2", stats.OpenTasks)
+	}
+	if stats.TotalBudget < 8_000 {
+		t.Errorf("TotalBudget = %d; want >= 8000", stats.TotalBudget)
 	}
 }

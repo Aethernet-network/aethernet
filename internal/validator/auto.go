@@ -5,6 +5,10 @@
 // that role: it polls the OCS engine every interval and auto-approves every
 // pending item, moving them from Optimistic → Settled within a single tick.
 //
+// It also auto-settles task marketplace submissions: any task in Submitted
+// state for more than 10 seconds is automatically approved so the explorer
+// shows completed tasks without manual operator intervention.
+//
 // This is TESTNET ONLY. On mainnet, real validator nodes earn fees by doing
 // genuine verification work; auto-approval would defeat the trust model.
 package validator
@@ -15,7 +19,9 @@ import (
 	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
+	"github.com/Aethernet-network/aethernet/internal/tasks"
 )
 
 // AutoValidator periodically checks for pending OCS items and auto-approves
@@ -26,6 +32,10 @@ type AutoValidator struct {
 	interval    time.Duration
 	stop        chan struct{}
 	once        sync.Once
+
+	// Task marketplace — optional. When set, auto-settles submitted tasks.
+	taskMgr   *tasks.TaskManager
+	escrowMgr *escrow.Escrow
 }
 
 // NewAutoValidator creates an AutoValidator that polls engine every interval
@@ -39,6 +49,13 @@ func NewAutoValidator(engine *ocs.Engine, validatorID crypto.AgentID, interval t
 	}
 }
 
+// SetTaskManager wires optional task marketplace components. When set, the
+// auto-validator auto-approves submitted tasks older than 10 seconds.
+func (av *AutoValidator) SetTaskManager(tm *tasks.TaskManager, e *escrow.Escrow) {
+	av.taskMgr = tm
+	av.escrowMgr = e
+}
+
 // Start launches the background approval goroutine. It is safe to call once.
 func (av *AutoValidator) Start() {
 	go func() {
@@ -48,6 +65,9 @@ func (av *AutoValidator) Start() {
 			select {
 			case <-ticker.C:
 				av.processPending()
+				if av.taskMgr != nil {
+					av.processSubmittedTasks()
+				}
 			case <-av.stop:
 				return
 			}
@@ -59,6 +79,29 @@ func (av *AutoValidator) Start() {
 // Stop shuts down the background goroutine. Safe to call multiple times.
 func (av *AutoValidator) Stop() {
 	av.once.Do(func() { close(av.stop) })
+}
+
+// processSubmittedTasks auto-approves marketplace tasks that have been in
+// Submitted state for more than 10 seconds. This prevents tasks from sitting
+// unapproved forever when the poster is offline or unresponsive.
+func (av *AutoValidator) processSubmittedTasks() {
+	submitted := av.taskMgr.Search(tasks.TaskStatusSubmitted, "", 0)
+	cutoff := time.Now().UnixNano() - int64(10*time.Second)
+	for _, task := range submitted {
+		if task.SubmittedAt > cutoff {
+			continue // submitted too recently
+		}
+		if err := av.taskMgr.ApproveTask(task.ID, av.validatorID); err != nil {
+			log.Printf("auto-validator: could not approve task %s: %v", task.ID, err)
+			continue
+		}
+		if av.escrowMgr != nil && task.ClaimerID != "" {
+			if err := av.escrowMgr.Release(task.ID, crypto.AgentID(task.ClaimerID)); err != nil {
+				log.Printf("auto-validator: could not release escrow for task %s: %v", task.ID, err)
+			}
+		}
+		log.Printf("auto-validator: auto-approved task %s (claimer: %s)", task.ID, task.ClaimerID)
+	}
 }
 
 // processPending fetches all pending OCS items and submits a positive verdict

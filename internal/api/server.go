@@ -52,6 +52,7 @@ import (
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
+	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/eventbus"
 	"github.com/Aethernet-network/aethernet/internal/fees"
@@ -64,6 +65,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 	svcregistry "github.com/Aethernet-network/aethernet/internal/registry"
 	"github.com/Aethernet-network/aethernet/internal/staking"
+	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/wallet"
 )
 
@@ -90,6 +92,11 @@ type Server struct {
 
 	// Service registry — optional; set via SetServiceRegistry after construction.
 	svcRegistry *svcregistry.Registry
+
+	// Task marketplace — optional; set via SetTaskManager after construction.
+	// When nil, the /v1/tasks endpoints return 501.
+	taskMgr   *tasks.TaskManager
+	escrowMgr *escrow.Escrow
 
 	// Event bus — optional; set via SetEventBus after construction.
 	// When non-nil, handlers publish events for real-time WebSocket streaming.
@@ -175,6 +182,19 @@ func NewServer(
 	mux.HandleFunc("DELETE /v1/registry/{agent_id}", s.handleDeleteRegistry)
 	mux.HandleFunc("GET /v1/registry/{agent_id}", s.handleGetRegistryListing)
 
+	// Task marketplace endpoints.
+	// Literal paths (/stats, /agent/{id}) beat wildcards in Go 1.22 routing.
+	mux.HandleFunc("POST /v1/tasks", s.handlePostTask)
+	mux.HandleFunc("GET /v1/tasks/stats", s.handleTaskStats)
+	mux.HandleFunc("GET /v1/tasks/agent/{agent_id}", s.handleAgentTasks)
+	mux.HandleFunc("GET /v1/tasks", s.handleListTasks)
+	mux.HandleFunc("GET /v1/tasks/{id}", s.handleGetTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/claim", s.handleClaimTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/submit", s.handleSubmitTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/approve", s.handleApproveTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/dispute", s.handleDisputeTask)
+	mux.HandleFunc("POST /v1/tasks/{id}/cancel", s.handleCancelTask)
+
 	// WebSocket endpoint for real-time event streaming.
 	mux.Handle("GET /v1/ws", s.wsHandler())
 
@@ -207,6 +227,13 @@ func (s *Server) SetEconomics(w *wallet.Wallet, sm *staking.StakeManager, fc *fe
 // Call before Start. When nil, the /v1/registry endpoints return 501.
 func (s *Server) SetServiceRegistry(r *svcregistry.Registry) {
 	s.svcRegistry = r
+}
+
+// SetTaskManager wires the task marketplace manager and escrow system into the
+// server. Call before Start. When nil, the /v1/tasks endpoints return 501.
+func (s *Server) SetTaskManager(tm *tasks.TaskManager, e *escrow.Escrow) {
+	s.taskMgr = tm
+	s.escrowMgr = e
 }
 
 // SetEventBus wires the event bus into the server. Call before Start.
@@ -519,6 +546,288 @@ type unstakeOpResponse struct {
 	StakedAmount uint64 `json:"staked_amount"`
 	TrustLimit   uint64 `json:"trust_limit"`
 	Success      bool   `json:"success"`
+}
+
+// ---------------------------------------------------------------------------
+// Task marketplace request / response types
+// ---------------------------------------------------------------------------
+
+type postTaskRequest struct {
+	PosterID    string `json:"poster_id,omitempty"`
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+	Category    string `json:"category,omitempty"`
+	Budget      uint64 `json:"budget"`
+}
+
+type claimTaskRequest struct {
+	ClaimerID string `json:"claimer_id,omitempty"`
+}
+
+type submitTaskRequest struct {
+	ClaimerID  string `json:"claimer_id,omitempty"`
+	ResultHash string `json:"result_hash"`
+}
+
+type approveTaskRequest struct {
+	ApproverID string `json:"approver_id,omitempty"`
+}
+
+type disputeTaskRequest struct {
+	PosterID string `json:"poster_id,omitempty"`
+}
+
+type cancelTaskRequest struct {
+	PosterID string `json:"poster_id,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Task marketplace handlers
+// ---------------------------------------------------------------------------
+
+// handlePostTask handles POST /v1/tasks. It creates a new task and escrows
+// the budget from the poster's balance. Returns 501 when task manager is nil.
+func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
+	if s.taskMgr == nil || s.escrowMgr == nil {
+		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
+		return
+	}
+
+	var req postTaskRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	posterID := req.PosterID
+	if posterID == "" {
+		posterID = string(s.agentID)
+	}
+
+	// Validate poster has sufficient balance before creating the task.
+	if err := s.transfer.BalanceCheck(crypto.AgentID(posterID), req.Budget); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	task, err := s.taskMgr.PostTask(posterID, req.Title, req.Description, req.Category, req.Budget)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Escrow the budget. Balance was validated above so this should succeed,
+	// but TOCTOU is possible; on failure we log and continue (testnet behaviour).
+	if err := s.escrowMgr.Hold(task.ID, crypto.AgentID(posterID), req.Budget); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, task)
+}
+
+// handleListTasks handles GET /v1/tasks. Supports ?status=&category=&limit= query params.
+func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
+	if s.taskMgr == nil {
+		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
+		return
+	}
+
+	status := tasks.TaskStatus(r.URL.Query().Get("status"))
+	category := r.URL.Query().Get("category")
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+
+	result := s.taskMgr.Search(status, category, limit)
+	if result == nil {
+		result = []*tasks.Task{}
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// handleTaskStats handles GET /v1/tasks/stats.
+func (s *Server) handleTaskStats(w http.ResponseWriter, r *http.Request) {
+	if s.taskMgr == nil {
+		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.taskMgr.Stats())
+}
+
+// handleAgentTasks handles GET /v1/tasks/agent/{agent_id}.
+func (s *Server) handleAgentTasks(w http.ResponseWriter, r *http.Request) {
+	if s.taskMgr == nil {
+		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
+		return
+	}
+
+	agentID := r.PathValue("agent_id")
+	result := s.taskMgr.AgentTasks(agentID)
+	if result == nil {
+		result = []*tasks.Task{}
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// handleGetTask handles GET /v1/tasks/{id}.
+func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
+	if s.taskMgr == nil {
+		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
+		return
+	}
+
+	taskID := r.PathValue("id")
+	task, err := s.taskMgr.Get(taskID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
+// handleClaimTask handles POST /v1/tasks/{id}/claim.
+func (s *Server) handleClaimTask(w http.ResponseWriter, r *http.Request) {
+	if s.taskMgr == nil {
+		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
+		return
+	}
+
+	var req claimTaskRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	claimerID := req.ClaimerID
+	if claimerID == "" {
+		claimerID = string(s.agentID)
+	}
+
+	taskID := r.PathValue("id")
+	if err := s.taskMgr.ClaimTask(taskID, crypto.AgentID(claimerID)); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	task, _ := s.taskMgr.Get(taskID)
+	writeJSON(w, http.StatusOK, task)
+}
+
+// handleSubmitTask handles POST /v1/tasks/{id}/submit.
+func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
+	if s.taskMgr == nil {
+		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
+		return
+	}
+
+	var req submitTaskRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	claimerID := req.ClaimerID
+	if claimerID == "" {
+		claimerID = string(s.agentID)
+	}
+
+	taskID := r.PathValue("id")
+	if err := s.taskMgr.SubmitResult(taskID, crypto.AgentID(claimerID), req.ResultHash); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	task, _ := s.taskMgr.Get(taskID)
+	writeJSON(w, http.StatusOK, task)
+}
+
+// handleApproveTask handles POST /v1/tasks/{id}/approve. It releases the escrowed
+// budget to the claimer and records task completion in the identity registry.
+func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
+	if s.taskMgr == nil || s.escrowMgr == nil {
+		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
+		return
+	}
+
+	var req approveTaskRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	approverID := req.ApproverID
+	if approverID == "" {
+		approverID = string(s.agentID)
+	}
+
+	taskID := r.PathValue("id")
+
+	// Get task before approving to capture claimer_id.
+	taskBefore, err := s.taskMgr.Get(taskID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	if err := s.taskMgr.ApproveTask(taskID, crypto.AgentID(approverID)); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Release escrow to the claimer. Best-effort — the task is already approved.
+	if taskBefore.ClaimerID != "" {
+		_ = s.escrowMgr.Release(taskID, crypto.AgentID(taskBefore.ClaimerID))
+		// Record task completion in the identity registry (best-effort).
+		_ = s.registry.RecordTaskCompletion(
+			crypto.AgentID(taskBefore.ClaimerID),
+			taskBefore.Budget,
+			taskBefore.Category,
+		)
+	}
+
+	task, _ := s.taskMgr.Get(taskID)
+	writeJSON(w, http.StatusOK, task)
+}
+
+// handleDisputeTask handles POST /v1/tasks/{id}/dispute.
+func (s *Server) handleDisputeTask(w http.ResponseWriter, r *http.Request) {
+	if s.taskMgr == nil {
+		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
+		return
+	}
+
+	var req disputeTaskRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	posterID := req.PosterID
+	if posterID == "" {
+		posterID = string(s.agentID)
+	}
+
+	taskID := r.PathValue("id")
+	if err := s.taskMgr.DisputeTask(taskID, crypto.AgentID(posterID)); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	task, _ := s.taskMgr.Get(taskID)
+	writeJSON(w, http.StatusOK, task)
+}
+
+// handleCancelTask handles POST /v1/tasks/{id}/cancel. Refunds the escrowed budget
+// to the poster.
+func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
+	if s.taskMgr == nil || s.escrowMgr == nil {
+		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
+		return
+	}
+
+	var req cancelTaskRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	posterID := req.PosterID
+	if posterID == "" {
+		posterID = string(s.agentID)
+	}
+
+	taskID := r.PathValue("id")
+	if err := s.taskMgr.CancelTask(taskID, crypto.AgentID(posterID)); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Refund escrow to poster. Best-effort — the task is already cancelled.
+	_ = s.escrowMgr.Refund(taskID)
+
+	task, _ := s.taskMgr.Get(taskID)
+	writeJSON(w, http.StatusOK, task)
 }
 
 // ---------------------------------------------------------------------------

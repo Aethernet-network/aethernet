@@ -372,6 +372,156 @@ class AetherNetClient:
         return self._delete(f"/v1/registry/{agent_id}")
 
     # ------------------------------------------------------------------
+    # Task marketplace endpoints
+    # ------------------------------------------------------------------
+
+    def post_task(
+        self,
+        title: str,
+        description: str = "",
+        category: str = "",
+        budget: int = 0,
+    ) -> Dict[str, Any]:
+        """Post a new task to the marketplace.
+
+        The budget is escrowed from the node's own agent balance immediately.
+
+        Args:
+            title:       Short task title.
+            description: Detailed task description.
+            category:    Capability category (e.g. "ml", "nlp", "code").
+            budget:      Task budget in micro-AET.
+
+        Returns:
+            The created task dict including ``id`` and ``status``.
+        """
+        return self._post("/v1/tasks", {
+            "title": title,
+            "description": description,
+            "category": category,
+            "budget": budget,
+        })
+
+    def browse_tasks(
+        self,
+        status: str = "",
+        category: str = "",
+        limit: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List tasks with optional filters.
+
+        Args:
+            status:   Filter by task status (e.g. "open", "claimed").
+            category: Filter by category.
+            limit:    Maximum number of results; 0 = no limit.
+
+        Returns a list of task dicts.
+        """
+        params: Dict[str, Any] = {}
+        if status:
+            params["status"] = status
+        if category:
+            params["category"] = category
+        if limit > 0:
+            params["limit"] = limit
+        resp = self.session.get(self.node_url + "/v1/tasks", params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_task(self, task_id: str) -> Dict[str, Any]:
+        """Return a single task by ID."""
+        return self._get(f"/v1/tasks/{task_id}")
+
+    def claim_task(self, task_id: str, claimer_id: str = "") -> Dict[str, Any]:
+        """Claim an open task.
+
+        Args:
+            task_id:    The task to claim.
+            claimer_id: The claiming agent's ID; defaults to the node's own identity.
+
+        Returns the updated task dict.
+        """
+        body: Dict[str, Any] = {}
+        if claimer_id:
+            body["claimer_id"] = claimer_id
+        return self._post(f"/v1/tasks/{task_id}/claim", body)
+
+    def submit_task_result(self, task_id: str, result_hash: str, claimer_id: str = "") -> Dict[str, Any]:
+        """Submit a result hash for a claimed task.
+
+        Args:
+            task_id:     The task being worked on.
+            result_hash: Content-addressed hash of the deliverable.
+            claimer_id:  The claiming agent's ID; defaults to the node's own identity.
+
+        Returns the updated task dict.
+        """
+        body: Dict[str, Any] = {"result_hash": result_hash}
+        if claimer_id:
+            body["claimer_id"] = claimer_id
+        return self._post(f"/v1/tasks/{task_id}/submit", body)
+
+    def approve_task(self, task_id: str, approver_id: str = "") -> Dict[str, Any]:
+        """Approve a submitted task, releasing the escrowed budget to the worker.
+
+        Args:
+            task_id:     The task to approve.
+            approver_id: The approving agent's ID; defaults to the node's own identity.
+
+        Returns the updated task dict (status = "completed").
+        """
+        body: Dict[str, Any] = {}
+        if approver_id:
+            body["approver_id"] = approver_id
+        return self._post(f"/v1/tasks/{task_id}/approve", body)
+
+    def dispute_task(self, task_id: str, poster_id: str = "") -> Dict[str, Any]:
+        """Dispute a submitted task, holding funds in escrow.
+
+        Args:
+            task_id:   The task to dispute.
+            poster_id: The poster's agent ID; defaults to the node's own identity.
+
+        Returns the updated task dict (status = "disputed").
+        """
+        body: Dict[str, Any] = {}
+        if poster_id:
+            body["poster_id"] = poster_id
+        return self._post(f"/v1/tasks/{task_id}/dispute", body)
+
+    def cancel_task(self, task_id: str, poster_id: str = "") -> Dict[str, Any]:
+        """Cancel an open task and refund the budget to the poster.
+
+        Args:
+            task_id:   The open task to cancel.
+            poster_id: The poster's agent ID; defaults to the node's own identity.
+
+        Returns the updated task dict (status = "cancelled").
+        """
+        body: Dict[str, Any] = {}
+        if poster_id:
+            body["poster_id"] = poster_id
+        return self._post(f"/v1/tasks/{task_id}/cancel", body)
+
+    def my_tasks(self, agent_id: str = "") -> List[Dict[str, Any]]:
+        """Return all tasks where *agent_id* is poster or claimer.
+
+        Uses ``self.agent_id`` when *agent_id* is omitted.
+        """
+        aid = agent_id or self.agent_id
+        if not aid:
+            raise ValueError("agent_id required: pass to AetherNetClient() or my_tasks()")
+        return self._get(f"/v1/tasks/agent/{aid}")
+
+    def task_stats(self) -> Dict[str, Any]:
+        """Return aggregate marketplace statistics.
+
+        Returns a dict with ``total_tasks``, ``open_tasks``, ``completed_tasks``,
+        ``total_budget``, and per-status counts.
+        """
+        return self._get("/v1/tasks/stats")
+
+    # ------------------------------------------------------------------
     # Transport helpers
     # ------------------------------------------------------------------
 

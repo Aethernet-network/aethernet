@@ -546,6 +546,187 @@ func (c *Client) ListCategories() (map[string]int, error) {
 	return result, nil
 }
 
+// ---------------------------------------------------------------------------
+// Task marketplace
+// ---------------------------------------------------------------------------
+
+// Task is a task marketplace posting as returned by the API.
+type Task struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Category    string `json:"category"`
+	PosterID    string `json:"poster_id"`
+	ClaimerID   string `json:"claimer_id,omitempty"`
+	Budget      uint64 `json:"budget"`
+	Status      string `json:"status"`
+	ResultHash  string `json:"result_hash,omitempty"`
+	PostedAt    int64  `json:"posted_at"`
+	ClaimedAt   int64  `json:"claimed_at,omitempty"`
+	SubmittedAt int64  `json:"submitted_at,omitempty"`
+	CompletedAt int64  `json:"completed_at,omitempty"`
+}
+
+// TaskStats holds aggregate marketplace statistics.
+type TaskStats struct {
+	TotalTasks     int    `json:"total_tasks"`
+	OpenTasks      int    `json:"open_tasks"`
+	ClaimedTasks   int    `json:"claimed_tasks"`
+	SubmittedTasks int    `json:"submitted_tasks"`
+	CompletedTasks int    `json:"completed_tasks"`
+	DisputedTasks  int    `json:"disputed_tasks"`
+	CancelledTasks int    `json:"cancelled_tasks"`
+	TotalBudget    uint64 `json:"total_budget"`
+}
+
+// PostTask posts a new task and returns it. The budget is escrowed from
+// the poster's balance immediately.
+func (c *Client) PostTask(title, description, category string, budget uint64) (*Task, error) {
+	resp, err := c.do(http.MethodPost, "/v1/tasks", map[string]any{
+		"title":       title,
+		"description": description,
+		"category":    category,
+		"budget":      budget,
+	})
+	if err != nil {
+		return nil, err
+	}
+	result, err := checkAndDecode[Task](resp, http.StatusCreated)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// BrowseTasks lists tasks with optional status and category filters.
+// Pass empty strings to match all. limit=0 returns all results.
+func (c *Client) BrowseTasks(status, category string, limit int) ([]Task, error) {
+	path := "/v1/tasks"
+	sep := "?"
+	if status != "" {
+		path += sep + "status=" + status
+		sep = "&"
+	}
+	if category != "" {
+		path += sep + "category=" + category
+		sep = "&"
+	}
+	if limit > 0 {
+		path += sep + fmt.Sprintf("limit=%d", limit)
+	}
+	resp, err := c.do(http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	return checkAndDecode[[]Task](resp, http.StatusOK)
+}
+
+// GetTask returns a single task by ID.
+func (c *Client) GetTask(taskID string) (*Task, error) {
+	resp, err := c.do(http.MethodGet, "/v1/tasks/"+taskID, nil)
+	if err != nil {
+		return nil, err
+	}
+	result, err := checkAndDecode[Task](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// ClaimTask assigns a task to the node's own agent. Returns the updated task.
+func (c *Client) ClaimTask(taskID string) (*Task, error) {
+	resp, err := c.do(http.MethodPost, "/v1/tasks/"+taskID+"/claim", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	result, err := checkAndDecode[Task](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// SubmitTaskResult records the worker's result hash for a claimed task.
+// Returns the updated task.
+func (c *Client) SubmitTaskResult(taskID, resultHash string) (*Task, error) {
+	resp, err := c.do(http.MethodPost, "/v1/tasks/"+taskID+"/submit", map[string]any{
+		"result_hash": resultHash,
+	})
+	if err != nil {
+		return nil, err
+	}
+	result, err := checkAndDecode[Task](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// ApproveTask approves a submitted task, releasing the budget to the worker.
+// Returns the updated task.
+func (c *Client) ApproveTask(taskID string) (*Task, error) {
+	resp, err := c.do(http.MethodPost, "/v1/tasks/"+taskID+"/approve", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	result, err := checkAndDecode[Task](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// DisputeTask moves a submitted task into Disputed state.
+// Returns the updated task.
+func (c *Client) DisputeTask(taskID string) (*Task, error) {
+	resp, err := c.do(http.MethodPost, "/v1/tasks/"+taskID+"/dispute", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	result, err := checkAndDecode[Task](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// CancelTask cancels an open task, refunding the budget to the poster.
+// Returns the updated task.
+func (c *Client) CancelTask(taskID string) (*Task, error) {
+	resp, err := c.do(http.MethodPost, "/v1/tasks/"+taskID+"/cancel", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	result, err := checkAndDecode[Task](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// MyTasks returns all tasks where the given agentID is poster or claimer.
+func (c *Client) MyTasks(agentID string) ([]Task, error) {
+	resp, err := c.do(http.MethodGet, "/v1/tasks/agent/"+agentID, nil)
+	if err != nil {
+		return nil, err
+	}
+	return checkAndDecode[[]Task](resp, http.StatusOK)
+}
+
+// TaskStats returns aggregate marketplace statistics.
+func (c *Client) TaskStats() (*TaskStats, error) {
+	resp, err := c.do(http.MethodGet, "/v1/tasks/stats", nil)
+	if err != nil {
+		return nil, err
+	}
+	result, err := checkAndDecode[TaskStats](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // DeactivateService marks the node's own service listing as inactive.
 // It first calls Status() to resolve the node's agentID, then issues DELETE.
 func (c *Client) DeactivateService() error {
