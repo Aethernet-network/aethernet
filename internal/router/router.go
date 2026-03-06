@@ -5,27 +5,44 @@
 // AetherNet from a pull-based marketplace (agents poll for tasks) into a
 // push-based routing engine (the protocol pushes tasks to agents).
 //
-// Scoring is a weighted composite of four signals:
+// Scoring for established agents is a weighted composite of four signals:
 //
 //	Category match  40% — exact category or tag overlap
 //	Reputation      30% — avg verification score × completion rate
 //	Price           15% — task budget ÷ agent price (lower price = better)
 //	Availability    15% — 1 − (active_tasks / max_concurrent)
 //
-// Agents register their capabilities via RegisterCapability, opting in to
-// automatic task assignment. The routing loop runs every [interval] seconds.
-// On match the Router calls the provided claimFunc to atomically claim the
-// task, then sends a signed webhook notification to the agent's endpoint.
+// Newcomer fairness: 20% of task assignments are reserved for agents with
+// fewer than NewcomerThreshold completed tasks in the relevant category.
+// Newcomers compete on capability match, price, and availability only —
+// they are not penalised for zero reputation. Progressive budget tiers
+// ensure new agents start with smaller tasks and earn larger ones as their
+// track record grows.
 package router
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
+)
+
+const (
+	// NewcomerThreshold is the number of category-specific task completions
+	// required before an agent graduates from the newcomer pool.
+	NewcomerThreshold = uint64(10)
+
+	// NewcomerAllocation is the target fraction of task routes reserved for
+	// newcomer agents. The router uses a ratio controller to maintain this level.
+	NewcomerAllocation = 0.20
+
+	// MaxNewcomerBudget is the maximum task budget (micro-AET) that may be
+	// routed via the newcomer slot. High-value tasks always go to established agents.
+	MaxNewcomerBudget = uint64(5_000_000)
 )
 
 // AgentCapability describes a registered agent's routing profile.
@@ -48,21 +65,21 @@ type AgentCapability struct {
 	CompletionRate float64 `json:"completion_rate"`
 }
 
-// RouteResult records a single routing decision.
-type RouteResult struct {
-	TaskID   string         `json:"task_id"`
-	AgentID  crypto.AgentID `json:"agent_id"`
-	Score    float64        `json:"match_score"`
-	Reason   string         `json:"reason"`
-	RoutedAt int64          `json:"routed_at"`
+// matchCandidate holds the result of a match-scoring pass.
+type matchCandidate struct {
+	AgentID crypto.AgentID
+	Score   float64
+	Reason  string
 }
 
-// RouterStats holds aggregate statistics about the routing engine.
-type RouterStats struct {
-	RegisteredAgents int `json:"registered_agents"`
-	AvailableAgents  int `json:"available_agents"`
-	TotalRouted      int `json:"total_routed"`
-	PendingTasks     int `json:"pending_tasks"`
+// RouteResult records a single routing decision.
+type RouteResult struct {
+	TaskID     string         `json:"task_id"`
+	AgentID    crypto.AgentID `json:"agent_id"`
+	Score      float64        `json:"match_score"`
+	Reason     string         `json:"reason"`
+	RoutedAt   int64          `json:"routed_at"`
+	IsNewcomer bool           `json:"is_newcomer"`
 }
 
 // Router watches the task marketplace and pushes open tasks to the best
@@ -85,7 +102,7 @@ type Router struct {
 //   - claimFn is called to atomically claim a matched task. It must be safe for
 //     concurrent calls.
 //   - repFn returns live reputation metrics for an agent in a specific category.
-//     It may be nil (all reputation scores will be 0).
+//     It may be nil (all reputation scores will be 0 and all agents treated as newcomers).
 //   - interval controls how often the routing loop runs.
 func New(
 	tm *tasks.TaskManager,
@@ -187,26 +204,31 @@ func (r *Router) RecentRoutes(limit int) []*RouteResult {
 	return cp
 }
 
-// Stats returns a point-in-time aggregate view of the routing engine.
-func (r *Router) Stats() RouterStats {
+// Stats returns a point-in-time aggregate view of the routing engine,
+// including newcomer fairness metrics.
+func (r *Router) Stats() map[string]any {
 	r.mu.RLock()
 	registered := len(r.capabilities)
-	available := 0
-	for _, cap := range r.capabilities {
-		if cap.Available {
-			available++
+	available := r.countAvailableLocked()
+	totalRouted := len(r.routeHistory)
+	newcomerRoutes := 0
+	for _, rr := range r.routeHistory {
+		if rr.IsNewcomer {
+			newcomerRoutes++
 		}
 	}
-	totalRouted := len(r.routeHistory)
 	r.mu.RUnlock()
 
 	pending := len(r.taskManager.OpenTasks(0))
 
-	return RouterStats{
-		RegisteredAgents: registered,
-		AvailableAgents:  available,
-		TotalRouted:      totalRouted,
-		PendingTasks:     pending,
+	return map[string]any{
+		"registered_agents":    registered,
+		"available_agents":     available,
+		"total_routed":         totalRouted,
+		"pending_tasks":        pending,
+		"newcomer_routes":      newcomerRoutes,
+		"newcomer_threshold":   NewcomerThreshold,
+		"newcomer_allocation":  NewcomerAllocation,
 	}
 }
 
@@ -226,54 +248,77 @@ func (r *Router) RegisteredAgents() []*AgentCapability {
 // Internal routing logic
 // ---------------------------------------------------------------------------
 
-// routePending fetches all open tasks and attempts to match each to the best
-// available registered agent. Successfully matched tasks are claimed via
-// claimFunc and a webhook notification is sent asynchronously.
+// routePending fetches all open tasks, then acquires the write lock and
+// attempts to match each task to the best available registered agent.
+// It maintains a 20% allocation for newcomer agents via a ratio controller.
 func (r *Router) routePending() {
 	open := r.taskManager.OpenTasks(0)
+	if len(open) == 0 {
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	routeCount := 0
+	newcomerRoutes := 0
+
 	for _, task := range open {
-		best, score := r.findBestMatch(task)
-		if best == nil {
+		routeCount++
+
+		// Ratio controller: use the newcomer slot when the current newcomer
+		// fraction is below the target allocation.
+		newcomerRatio := float64(newcomerRoutes) / float64(routeCount)
+		useNewcomer := newcomerRatio < NewcomerAllocation
+
+		var match *matchCandidate
+		if useNewcomer && task.Budget <= MaxNewcomerBudget {
+			match = r.findNewcomerMatchLocked(task)
+		}
+		// Fall through to the best overall match when no newcomer is available.
+		if match == nil {
+			match = r.findBestMatchLocked(task)
+		}
+		if match == nil {
 			continue
 		}
-		if err := r.claimFunc(task.ID, best.AgentID); err != nil {
-			// Task may have been claimed by another agent between the open-task
-			// listing and our claim attempt — not an error worth logging loudly.
+
+		if err := r.claimFunc(task.ID, match.AgentID); err != nil {
 			continue
+		}
+
+		isNewcomer := r.isNewcomer(match.AgentID, task.Category)
+		if isNewcomer {
+			newcomerRoutes++
 		}
 
 		result := &RouteResult{
-			TaskID:   task.ID,
-			AgentID:  best.AgentID,
-			Score:    score,
-			Reason:   fmt.Sprintf("category=%q score=%.3f", task.Category, score),
-			RoutedAt: time.Now().UnixNano(),
+			TaskID:     task.ID,
+			AgentID:    match.AgentID,
+			Score:      match.Score,
+			Reason:     match.Reason,
+			RoutedAt:   time.Now().UnixNano(),
+			IsNewcomer: isNewcomer,
 		}
-
-		r.mu.Lock()
 		r.routeHistory = append(r.routeHistory, result)
-		// Cap history at 100 entries to bound memory usage.
 		if len(r.routeHistory) > 100 {
 			r.routeHistory = r.routeHistory[len(r.routeHistory)-100:]
 		}
-		r.mu.Unlock()
 
 		// Webhook notification is best-effort and must not block the routing loop.
+		// Spawn the goroutine with captured values so it doesn't race against the
+		// loop variable; it will acquire RLock after we release the write lock.
 		go func(agentID crypto.AgentID, t *tasks.Task) {
 			_ = r.NotifyAgent(agentID, t)
-		}(best.AgentID, task)
+		}(match.AgentID, task)
 	}
 }
 
-// findBestMatch returns the highest-scoring registered agent for task,
-// together with the composite score. Returns (nil, 0) when no eligible
-// agent is found.
-func (r *Router) findBestMatch(task *tasks.Task) (*AgentCapability, float64) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	var bestAgent *AgentCapability
-	bestScore := 0.0 // require a positive score; zero means no category alignment
+// findBestMatchLocked returns the highest-scoring agent for task considering
+// all registered agents (newcomers and established alike). Assumes r.mu is held.
+func (r *Router) findBestMatchLocked(task *tasks.Task) *matchCandidate {
+	var best *matchCandidate
+	bestScore := 0.0 // require positive score (zero means no category alignment)
 
 	for _, cap := range r.capabilities {
 		if !cap.Available {
@@ -282,23 +327,173 @@ func (r *Router) findBestMatch(task *tasks.Task) (*AgentCapability, float64) {
 		if cap.MaxConcurrent > 0 && cap.ActiveTasks >= cap.MaxConcurrent {
 			continue
 		}
-		// An agent must not be routed its own tasks.
 		if string(cap.AgentID) == task.PosterID {
 			continue
 		}
-		// Agent's price must fit within the task budget.
 		if cap.PricePerTask > 0 && task.Budget > 0 && cap.PricePerTask > task.Budget {
+			continue
+		}
+		// Progressive budget ceiling: skip agents whose track record doesn't
+		// yet qualify them for tasks of this size.
+		if task.Budget > r.maxBudgetForAgent(cap.AgentID, task.Category) {
 			continue
 		}
 
 		score := r.scoreMatch(cap, task)
 		if score > bestScore {
 			bestScore = score
-			bestAgent = cap
+			best = &matchCandidate{
+				AgentID: cap.AgentID,
+				Score:   score,
+				Reason:  fmt.Sprintf("category=%q score=%.3f", task.Category, score),
+			}
+		}
+	}
+	return best
+}
+
+// findNewcomerMatchLocked finds the best agent from the newcomer pool only.
+// Newcomers are scored WITHOUT reputation weight — they compete on capability
+// match, price, and availability only. Assumes r.mu is held.
+func (r *Router) findNewcomerMatchLocked(task *tasks.Task) *matchCandidate {
+	var candidates []matchCandidate
+
+	for _, cap := range r.capabilities {
+		if !cap.Available || (cap.MaxConcurrent > 0 && cap.ActiveTasks >= cap.MaxConcurrent) {
+			continue
+		}
+		if string(cap.AgentID) == task.PosterID {
+			continue
+		}
+		if cap.PricePerTask > 0 && cap.PricePerTask > task.Budget {
+			continue
+		}
+		if task.Budget > r.maxBudgetForAgent(cap.AgentID, task.Category) {
+			continue
+		}
+		if !r.isNewcomer(cap.AgentID, task.Category) {
+			continue
+		}
+
+		score, reason := r.scoreNewcomer(task, cap)
+		if score > 0 {
+			candidates = append(candidates, matchCandidate{
+				AgentID: cap.AgentID,
+				Score:   score,
+				Reason:  "newcomer+" + reason,
+			})
 		}
 	}
 
-	return bestAgent, bestScore
+	if len(candidates) == 0 {
+		return nil
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].Score > candidates[j].Score
+	})
+	return &candidates[0]
+}
+
+// scoreNewcomer scores a newcomer agent WITHOUT reputation weight.
+// Weights: category match 50%, price efficiency 30%, tag specificity 20%.
+// Returns (0, "") when the agent has no category or tag alignment with the task.
+func (r *Router) scoreNewcomer(task *tasks.Task, cap *AgentCapability) (float64, string) {
+	score := 0.0
+	var reasons []string
+
+	// Category match (50%)
+	categoryMatch := false
+	for _, cat := range cap.Categories {
+		if strings.EqualFold(cat, task.Category) {
+			categoryMatch = true
+			break
+		}
+	}
+	if categoryMatch {
+		score += 0.5
+		reasons = append(reasons, "category")
+	} else {
+		tagOvl := tagOverlap(cap.Tags, task.Tags)
+		if tagOvl > 0 {
+			score += 0.2 * tagOvl
+			reasons = append(reasons, "tags")
+		} else {
+			return 0, "" // no relevance at all
+		}
+	}
+
+	// Price efficiency (30%): newcomers can compete on price
+	if cap.PricePerTask > 0 && task.Budget > 0 {
+		priceRatio := 1.0 - float64(cap.PricePerTask)/float64(task.Budget)
+		if priceRatio < 0 {
+			priceRatio = 0
+		}
+		score += 0.3 * priceRatio
+		reasons = append(reasons, "price")
+	} else {
+		score += 0.2 // default when no price constraint
+	}
+
+	// Tag specificity (20%): reward detailed capability descriptions
+	if len(cap.Tags) > 0 && len(task.Tags) > 0 {
+		score += 0.2 * tagOverlap(cap.Tags, task.Tags)
+		reasons = append(reasons, "specificity")
+	} else {
+		score += 0.1
+	}
+
+	return score, strings.Join(reasons, "+")
+}
+
+// isNewcomer returns true when agentID has fewer than NewcomerThreshold
+// completed tasks in category. Agents with no reputation data are treated
+// as newcomers.
+func (r *Router) isNewcomer(agentID crypto.AgentID, category string) bool {
+	if r.reputationFunc == nil {
+		return true
+	}
+	completed, _, _, _ := r.reputationFunc(agentID, category)
+	return completed < NewcomerThreshold
+}
+
+// maxBudgetForAgent returns the maximum task budget (micro-AET) that agentID
+// qualifies for based on their completed task count in category.
+//
+// Progressive tiers:
+//
+//	0–2 tasks:          2 AET  (2,000,000 micro)
+//	3–9 tasks:          5 AET  (5,000,000 micro)
+//	10–49 tasks:       20 AET  (20,000,000 micro)
+//	50–99 tasks:       50 AET  (50,000,000 micro)
+//	100+ tasks, avgScore > 0.8: unlimited
+func (r *Router) maxBudgetForAgent(agentID crypto.AgentID, category string) uint64 {
+	if r.reputationFunc == nil {
+		return MaxNewcomerBudget
+	}
+	completed, avgScore, _, _ := r.reputationFunc(agentID, category)
+	switch {
+	case completed >= 100 && avgScore > 0.8:
+		return ^uint64(0) // unlimited
+	case completed >= 50:
+		return 50_000_000
+	case completed >= 10:
+		return 20_000_000
+	case completed >= 3:
+		return 5_000_000
+	default:
+		return 2_000_000
+	}
+}
+
+// countAvailableLocked counts available agents. Must be called with r.mu held.
+func (r *Router) countAvailableLocked() int {
+	count := 0
+	for _, cap := range r.capabilities {
+		if cap.Available {
+			count++
+		}
+	}
+	return count
 }
 
 // scoreMatch computes the composite match score between an agent capability
@@ -308,6 +503,8 @@ func (r *Router) findBestMatch(task *tasks.Task) (*AgentCapability, float64) {
 //	reputation 30%
 //	price      15%
 //	availability 15%
+//
+// scoreMatch does not acquire any locks and is safe to call from locked context.
 func (r *Router) scoreMatch(cap *AgentCapability, task *tasks.Task) float64 {
 	// ── Category match (40%) ────────────────────────────────────────────────
 	categoryScore := 0.0

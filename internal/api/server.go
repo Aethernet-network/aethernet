@@ -82,7 +82,7 @@ type taskRouterInterface interface {
 	SetAvailability(agentID crypto.AgentID, available bool) bool
 	RegisteredAgents() []*router.AgentCapability
 	RecentRoutes(limit int) []*router.RouteResult
-	Stats() router.RouterStats
+	Stats() map[string]any
 }
 
 // Server is the HTTP REST API for an AetherNet node.

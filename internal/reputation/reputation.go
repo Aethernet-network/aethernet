@@ -97,6 +97,17 @@ func (rm *ReputationManager) RecordCompletion(agentID crypto.AgentID, category s
 	rep.TotalCompleted++
 	rep.TotalEarned += valueEarned
 	rm.updateOverallScore(rep)
+
+	// First-task visibility boost: high-quality early completions set a
+	// reputation floor so new agents appear in discovery searches immediately.
+	// The boost applies for the first 5 tasks; the natural score takes over
+	// as volume grows.
+	if cat.TasksCompleted <= 5 && verificationScore > 0.8 {
+		if rep.OverallScore < 30 {
+			rep.OverallScore = 30
+		}
+	}
+
 	rm.persist(agentID, rep)
 }
 

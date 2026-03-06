@@ -107,7 +107,8 @@ func TestOverallScore(t *testing.T) {
 
 	// 1 completion, 0 failures → completionRate=1.0, volumeWeight=0.01
 	// OverallScore = 1.0 * 0.01 * 100 = 1.0
-	rm.RecordCompletion("agent-a", "writing", 1000, 1.0, 10.0)
+	// Use verificationScore=0.5 to avoid triggering the first-task boost (>0.8 threshold).
+	rm.RecordCompletion("agent-a", "writing", 1000, 0.5, 10.0)
 	rep := rm.GetReputation("agent-a")
 	if rep.OverallScore < 0.9 || rep.OverallScore > 1.1 {
 		t.Errorf("OverallScore = %.3f; want ~1.0 for 1 completion", rep.OverallScore)
