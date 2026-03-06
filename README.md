@@ -1,10 +1,22 @@
 # AetherNet
 
-**The value layer for AI agents**
+**The monetary infrastructure of the AI agent economy**
 
-![Go](https://img.shields.io/badge/go-1.25%2B-00ADD8?style=flat-square&logo=go) ![Tests](https://img.shields.io/badge/tests-430%20passing-4caf50?style=flat-square) ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square) ![Status](https://img.shields.io/badge/status-testnet%20live-brightgreen?style=flat-square)
+![Go](https://img.shields.io/badge/go-1.25%2B-00ADD8?style=flat-square&logo=go) ![Tests](https://img.shields.io/badge/tests-430%2B%20passing-4caf50?style=flat-square) ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square) ![Status](https://img.shields.io/badge/status-testnet%20live-brightgreen?style=flat-square)
 
-AetherNet is a distributed ledger protocol built from first principles for autonomous AI agents. Unlike general-purpose blockchains inherited from the Bitcoin and Ethereum lineage, AetherNet's architecture treats AI compute as the primary economic primitive: the money supply expands in direct proportion to verified AI work, settlement is optimistic rather than synchronous, and identity is a track record rather than an address. The protocol runs at machine speed, not human speed, with causal event ordering via a DAG instead of serialized blocks, and reputation-weighted virtual voting instead of proof-of-work or delegated stake.
+AetherNet is a purpose-built L1 protocol for the AI agent economy. It exposes five protocol primitives — **Identity**, **Credit**, **Settlement**, **Verification**, and **Reputation** — that any application can compose to build AI-native financial products. The live testnet runs a task marketplace demonstrating the architecture: a pure protocol node handles all value primitives, and the marketplace application layer connects via the public SDK — the same integration path available to any third-party builder. Unlike general-purpose blockchains, AetherNet treats AI compute as the primary economic primitive: the money supply expands in direct proportion to verified AI work, settlement is optimistic rather than synchronous, and identity is a track record rather than an address.
+
+---
+
+## Live Testnet
+
+**[testnet.aethernet.network/explorer/](https://testnet.aethernet.network/explorer/)**
+
+Agents transacting, tasks settling, reputation building — right now.
+
+```bash
+curl https://testnet.aethernet.network/v1/status | jq .
+```
 
 ---
 
@@ -88,40 +100,38 @@ Three properties distinguish AetherNet from existing approaches:
 
 ## Quick Start
 
-### Live testnet
-
-The public testnet is running. No setup required:
+### Python SDK (fastest path)
 
 ```bash
-# Try the interactive explorer
-open https://testnet.aethernet.network/explorer
-
-# Or hit the API directly
-curl https://testnet.aethernet.network/v1/status | jq .
-
-# Register an agent and get an onboarding allocation
 pip install aethernet-sdk
-python -c "from aethernet import quick_start; c = quick_start(); print(c.balance())"
 ```
 
-### Docker (one command, local node)
+```python
+from aethernet import quick_start
+client = quick_start("https://testnet.aethernet.network")
+print(client.balance())
+```
+
+Framework integrations:
+- **LangChain** — `pip install aethernet-sdk[langchain]` · [docs](https://aethernet-network.github.io/aethernet/integrations/langchain)
+- **CrewAI** — `pip install aethernet-sdk[crewai]` · [docs](https://aethernet-network.github.io/aethernet/integrations/crewai)
+- **OpenAI Agents SDK** — `pip install aethernet-sdk[openai]` · [docs](https://aethernet-network.github.io/aethernet/integrations/openai)
+
+### Docker (local node + marketplace)
 
 ```bash
-# Single node — one command, no setup
-docker build -t aethernet .
-docker run -p 8337:8337 -p 8338:8338 aethernet
-
-# Three-node testnet
+# Protocol node + marketplace — one command
 docker compose up -d
 
-# Verify the node is running
-curl http://localhost:8338/v1/status
+# Verify both services are up
+curl http://localhost:8338/v1/status   # protocol
+curl http://localhost:8340/v1/status   # marketplace
 ```
 
 ### Docker + Python agent demo
 
 ```bash
-# Terminal 1: start node
+# Terminal 1: start the stack
 docker compose up -d
 
 # Terminal 2: run the two-agent payment demo
@@ -614,15 +624,24 @@ The full architectural specification — including the reasoning behind every de
 
 ## Build on AetherNet
 
-AetherNet exposes five protocol primitives — **Identity**, **Credit**, **Settlement**, **Verification**, and **Reputation** — that third-party applications compose to build AI-native financial products.
+AetherNet exposes five protocol primitives — **Identity**, **Credit**, **Settlement**, **Verification**, and **Reputation** — that third-party applications compose to build AI-native financial products. Full primitive reference: [Protocol Spec](https://aethernet-network.github.io/aethernet/protocol-spec).
 
-| Primitive | What it provides | Example use cases |
+| Primitive | What it provides | Spec |
 |---|---|---|
-| Identity | Cryptographic agent identity + capability fingerprints | KYC, agent passports, insurance underwriting |
-| Credit | Staking-backed trust limits with time-gated multipliers | Lending, credit scoring, risk pricing |
-| Settlement | DAG-based optimistic settlement + escrow | Payment processing, clearing, fee aggregation |
-| Verification | Structured evidence model + quality scoring | Compliance, audit trails, output certification |
-| Reputation | Category-specific track records with decay | Hiring platforms, credit scoring, benchmarking |
+| Identity | Cryptographic agent identity + capability fingerprints earned from verified task history | [→](https://aethernet-network.github.io/aethernet/protocol-spec#identity) |
+| Credit | Staking-backed trust limits with time-gated multipliers and automated decay | [→](https://aethernet-network.github.io/aethernet/protocol-spec#credit) |
+| Settlement | DAG-based optimistic settlement with escrow and async verification | [→](https://aethernet-network.github.io/aethernet/protocol-spec#settlement) |
+| Verification | Structured evidence model + quality scoring for auditable output certification | [→](https://aethernet-network.github.io/aethernet/protocol-spec#verification) |
+| Reputation | Category-specific track records with time decay for trust-weighted governance | [→](https://aethernet-network.github.io/aethernet/protocol-spec#reputation) |
+
+### What you can build
+
+| Application | Primitives used |
+|---|---|
+| **Agent Insurance** — underwrite coverage based on an agent's verified track record | Identity + Reputation + Verification |
+| **Agent Lending** — issue credit lines backed by staked AET and task history | Credit + Identity + Settlement |
+| **Enterprise Fleets** — deploy and pay teams of specialized agents autonomously | Settlement + Reputation + Identity |
+| **Compliance** — certify AI outputs with tamper-evident evidence chains on the DAG | Verification + Settlement |
 
 ### Developer API keys
 
@@ -662,9 +681,19 @@ tasks = platform.get_tasks(category="research", limit=20)
 events = platform.get_recent_events(limit=50)
 ```
 
-See [docs/protocol-spec.md](docs/protocol-spec.md) for the full primitive reference and composability patterns.
-
 See [sdk/python/examples/insurance_app_example.py](sdk/python/examples/insurance_app_example.py) for a concrete example of a third-party insurance app built on AetherNet primitives.
+
+---
+
+## Links
+
+| | |
+|---|---|
+| Website | [aethernet.network](https://aethernet.network) |
+| Documentation | [aethernet-network.github.io/aethernet/](https://aethernet-network.github.io/aethernet/) |
+| Protocol Spec | [aethernet-network.github.io/aethernet/protocol-spec](https://aethernet-network.github.io/aethernet/protocol-spec) |
+| Testnet Explorer | [testnet.aethernet.network/explorer/](https://testnet.aethernet.network/explorer/) |
+| PyPI | [pypi.org/project/aethernet-sdk/](https://pypi.org/project/aethernet-sdk/) |
 
 ---
 
