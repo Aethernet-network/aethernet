@@ -674,22 +674,17 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		resp.DepositAddress = string(addr)
 	}
 
-	// Onboarding allocation: grant from ecosystem pool, auto-stake.
-	// Only grant when the ecosystem pool has been seeded (genesis was run).
-	// This prevents minting from nothing on fresh nodes without genesis.
-	ecosystemBal, _ := s.transfer.Balance(crypto.AgentID(genesis.BucketEcosystem))
+	// Onboarding allocation: grant initial AET and auto-stake.
+	// FundAgent mints from the protocol reserve so this always succeeds regardless
+	// of whether genesis has been run. The declining-curve cap (OnboardingPoolTotal)
+	// prevents unbounded minting across the full agent lifecycle.
 	s.onboardingMu.Lock()
 	allocation := genesis.OnboardingAllocation(agentCountBefore)
-	if allocation > 0 && ecosystemBal >= allocation && s.onboardingAllocated+allocation <= genesis.OnboardingPoolTotal {
+	if allocation > 0 && s.onboardingAllocated+allocation <= genesis.OnboardingPoolTotal {
 		s.onboardingAllocated += allocation
 		s.onboardingMu.Unlock()
 
-		if err := s.transfer.TransferFromBucket(crypto.AgentID(genesis.BucketEcosystem), s.agentID, allocation); err != nil {
-			// Ecosystem exhausted or race — roll back the counter and skip.
-			s.onboardingMu.Lock()
-			s.onboardingAllocated -= allocation
-			s.onboardingMu.Unlock()
-		} else {
+		if err := s.transfer.FundAgent(s.agentID, allocation); err == nil {
 			resp.OnboardingAllocation = allocation
 			if s.stakeManager != nil {
 				s.stakeManager.Stake(s.agentID, allocation)

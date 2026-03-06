@@ -11,7 +11,6 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
 	"github.com/Aethernet-network/aethernet/internal/fees"
-	"github.com/Aethernet-network/aethernet/internal/genesis"
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
@@ -904,9 +903,9 @@ func TestDeleteRegistry(t *testing.T) {
 	}
 }
 
-// TestHandleRegisterAgent_OnboardingFunded verifies that when the ecosystem pool
-// is seeded and economics are wired in, a newly registered agent receives a
-// non-zero onboarding allocation that is immediately spendable and auto-staked.
+// TestHandleRegisterAgent_OnboardingFunded verifies that a newly registered agent
+// receives a non-zero onboarding allocation that is immediately spendable and
+// auto-staked, without requiring prior genesis seeding.
 func TestHandleRegisterAgent_OnboardingFunded(t *testing.T) {
 	kp, err := crypto.GenerateKeyPair()
 	if err != nil {
@@ -924,11 +923,6 @@ func TestHandleRegisterAgent_OnboardingFunded(t *testing.T) {
 	t.Cleanup(eng.Stop)
 	sm := ledger.NewSupplyManager(tl, gl)
 
-	// Seed the ecosystem bucket so onboarding allocations can be drawn from it.
-	if err := tl.FundAgent(crypto.AgentID(genesis.BucketEcosystem), genesis.EcosystemAllocation); err != nil {
-		t.Fatalf("seed ecosystem: %v", err)
-	}
-
 	srv := api.NewServer("", d, tl, gl, reg, eng, sm, nil, kp)
 	srv.SetServiceRegistry(registry.New())
 
@@ -941,21 +935,21 @@ func TestHandleRegisterAgent_OnboardingFunded(t *testing.T) {
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
-	// Register the agent.
+	// Register the agent — no prior genesis seeding required.
 	r := post(t, ts, "/v1/agents", map[string]any{})
 	if r.StatusCode != http.StatusCreated {
 		t.Fatalf("want 201, got %d", r.StatusCode)
 	}
 
 	var regResp struct {
-		AgentID             string `json:"agent_id"`
+		AgentID              string `json:"agent_id"`
 		OnboardingAllocation uint64 `json:"onboarding_allocation"`
 		TrustLimit           uint64 `json:"trust_limit"`
 	}
 	decodeJSON(t, r, &regResp)
 
 	if regResp.OnboardingAllocation == 0 {
-		t.Error("onboarding_allocation must be non-zero after seeded genesis")
+		t.Error("onboarding_allocation must be non-zero after registration")
 	}
 	if regResp.TrustLimit == 0 {
 		t.Error("trust_limit must be non-zero when staking is wired in")
@@ -974,12 +968,6 @@ func TestHandleRegisterAgent_OnboardingFunded(t *testing.T) {
 	// Verify the agent has a staked amount.
 	staked := stakeMgr.StakedAmount(agentID)
 	if staked == 0 {
-		t.Error("agent staked amount must be non-zero after auto-stake")
-	}
-
-	// Verify the ecosystem bucket was debited (its balance decreased).
-	ecosystemBal, _ := tl.Balance(crypto.AgentID(genesis.BucketEcosystem))
-	if ecosystemBal >= genesis.EcosystemAllocation {
-		t.Errorf("ecosystem balance should have decreased: got %d, seeded %d", ecosystemBal, genesis.EcosystemAllocation)
+		t.Error("agent staked_amount must be non-zero after auto-stake")
 	}
 }
