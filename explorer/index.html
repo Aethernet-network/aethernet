@@ -40,9 +40,9 @@
     .stat-value { font-size: 1.5rem; font-weight: 700; color: #00D4AA; }
     .stat-label { font-size: 0.75rem; color: #64748b; margin-top: 0.125rem; }
     /* Sidebar */
-    .sidebar-container { flex-shrink: 0; overflow: hidden; transition: width 0.25s cubic-bezier(0.4,0,0.2,1); width: 380px; }
+    .sidebar-container { flex-shrink: 0; overflow: hidden; transition: width 0.25s cubic-bezier(0.4,0,0.2,1); width: 320px; }
     .sidebar-container.sidebar-closed { width: 0; }
-    .sidebar { background: #1E2D40; border-right: 1px solid #2d4a6b; width: 380px; height: 100%; }
+    .sidebar { background: #15202E; border-right: 1px solid #2d4a6b; width: 320px; height: 100%; }
     select.ifield { appearance: none; cursor: pointer; }
     /* Form controls */
     .ifield { background: #0A1220; border: 1px solid #2d4a6b; border-radius: 0.5rem;
@@ -705,7 +705,7 @@ function Sidebar({ open, onClose, agent, setAgent, addToast }) {
         </div>
 
         {/* Panel tabs */}
-        <div className="flex border-b border-slate-700/50 flex-shrink-0" style={{background:'#0d1926'}}>
+        <div className="flex border-b border-slate-700/50 flex-shrink-0" style={{background:'#0f1923'}}>
           {tabs.map(t => (
             <button
               key={t.id}
@@ -1052,7 +1052,7 @@ function App() {
   const [sortField, setSortField] = useState('reputation');
   const [loading,   setLoading]   = useState(true);
   const [error,     setError]     = useState(null);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [agent,     setAgent]     = useState(() => {
     try {
       const s = localStorage.getItem('aethernet_agent');
