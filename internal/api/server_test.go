@@ -1075,3 +1075,86 @@ func TestHandleRegisterAgent_TwoDistinctAgents(t *testing.T) {
 	}
 	r1b.Body.Close()
 }
+
+// TestHandleRegisterAgent_HumanReadableIDs verifies that agents can be registered
+// with arbitrary human-readable IDs (e.g. "researcher-agent") paired with an
+// Ed25519 public key, and that both appear correctly in the agent listing.
+func TestHandleRegisterAgent_HumanReadableIDs(t *testing.T) {
+	setup := newTestSetup(t)
+
+	// Generate keypairs for the two agents.
+	kp1, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("generate kp1: %v", err)
+	}
+	kp2, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("generate kp2: %v", err)
+	}
+
+	pub1B64 := base64.StdEncoding.EncodeToString(kp1.PublicKey)
+	pub2B64 := base64.StdEncoding.EncodeToString(kp2.PublicKey)
+
+	// Register "researcher-agent" with kp1's public key.
+	r1 := post(t, setup.ts, "/v1/agents", map[string]any{
+		"agent_id":       "researcher-agent",
+		"public_key_b64": pub1B64,
+	})
+	if r1.StatusCode != http.StatusCreated {
+		t.Fatalf("researcher registration: want 201, got %d", r1.StatusCode)
+	}
+	var resp1 struct {
+		AgentID string `json:"agent_id"`
+	}
+	decodeJSON(t, r1, &resp1)
+	if resp1.AgentID != "researcher-agent" {
+		t.Errorf("want agent_id %q, got %q", "researcher-agent", resp1.AgentID)
+	}
+
+	// Register "writer-agent" with kp2's public key.
+	r2 := post(t, setup.ts, "/v1/agents", map[string]any{
+		"agent_id":       "writer-agent",
+		"public_key_b64": pub2B64,
+	})
+	if r2.StatusCode != http.StatusCreated {
+		t.Fatalf("writer registration: want 201, got %d", r2.StatusCode)
+	}
+	var resp2 struct {
+		AgentID string `json:"agent_id"`
+	}
+	decodeJSON(t, r2, &resp2)
+	if resp2.AgentID != "writer-agent" {
+		t.Errorf("want agent_id %q, got %q", "writer-agent", resp2.AgentID)
+	}
+
+	// List all agents and confirm both appear with the correct IDs.
+	listResp := get(t, setup.ts, "/v1/agents")
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("list agents: want 200, got %d", listResp.StatusCode)
+	}
+	var agents []struct {
+		AgentID string `json:"agent_id"`
+	}
+	decodeJSON(t, listResp, &agents)
+
+	found := map[string]bool{}
+	for _, a := range agents {
+		found[a.AgentID] = true
+	}
+	if !found["researcher-agent"] {
+		t.Error("researcher-agent not found in agent listing")
+	}
+	if !found["writer-agent"] {
+		t.Error("writer-agent not found in agent listing")
+	}
+
+	// Re-registering the same human-readable ID is idempotent (200, not 201).
+	r1b := post(t, setup.ts, "/v1/agents", map[string]any{
+		"agent_id":       "researcher-agent",
+		"public_key_b64": pub1B64,
+	})
+	if r1b.StatusCode != http.StatusOK {
+		t.Fatalf("re-registration: want 200, got %d", r1b.StatusCode)
+	}
+	r1b.Body.Close()
+}

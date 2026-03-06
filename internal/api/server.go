@@ -654,11 +654,14 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 	// Resolve the agent identity to register.
 	//
 	// Priority:
-	//   1. Caller supplies public_key_b64 (+ optional agent_id for validation).
-	//      The public key is decoded; agent_id is derived as hex(pubkey) and
-	//      validated against the supplied value when both are present.
-	//   2. Caller supplies agent_id alone. It must be a 64-char hex-encoded
-	//      Ed25519 public key so the raw key bytes can be recovered.
+	//   1. Caller supplies public_key_b64 (base64-encoded Ed25519, 32 bytes).
+	//      The public key is decoded to bytes. agent_id is used as-is when
+	//      provided; if omitted it is derived as hex(pubkey). Any non-empty
+	//      agent_id is accepted — it need not equal hex(pubkey), allowing
+	//      human-readable names like "researcher-agent".
+	//   2. Caller supplies agent_id alone without public_key_b64.
+	//      It must be a 64-char hex-encoded Ed25519 public key so the raw
+	//      key bytes can be recovered (AgentID = hex(pubkey) invariant).
 	//   3. Neither field supplied → fall back to the node's own keypair identity
 	//      (backward-compatible default; preserves existing single-node behaviour).
 	regAgentID := s.agentID
@@ -676,20 +679,21 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("public_key_b64 must decode to 32 bytes (Ed25519), got %d", len(decoded)), "")
 			return
 		}
-		derived := hex.EncodeToString(decoded)
-		if req.AgentID != "" && req.AgentID != derived {
-			writeCodedError(w, http.StatusBadRequest, "invalid_request",
-				"agent_id does not match public_key_b64", "")
-			return
+		// Use the caller-supplied agent_id as-is. When absent, derive it from
+		// the public key (hex-encoding preserves the cryptographic identity).
+		agentIDStr := req.AgentID
+		if agentIDStr == "" {
+			agentIDStr = hex.EncodeToString(decoded)
 		}
-		regAgentID = crypto.AgentID(derived)
+		regAgentID = crypto.AgentID(agentIDStr)
 		regPubKey = decoded
 	} else if req.AgentID != "" {
-		// AgentID alone: must be hex(ed25519 pubkey) — 64 hex chars → 32 bytes.
+		// agent_id without public_key_b64: must be hex(ed25519 pubkey) so the
+		// raw key bytes can be recovered. Arbitrary names require public_key_b64.
 		decoded, err := hex.DecodeString(req.AgentID)
 		if err != nil || len(decoded) != 32 {
 			writeCodedError(w, http.StatusBadRequest, "invalid_request",
-				"agent_id must be a 64-char hex-encoded Ed25519 public key", "")
+				"agent_id without public_key_b64 must be a 64-char hex-encoded Ed25519 public key", "")
 			return
 		}
 		regAgentID = crypto.AgentID(req.AgentID)
