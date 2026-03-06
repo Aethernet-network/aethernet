@@ -35,6 +35,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
 	"github.com/Aethernet-network/aethernet/internal/eventbus"
+	"github.com/Aethernet-network/aethernet/internal/fees"
 	"github.com/Aethernet-network/aethernet/internal/genesis"
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
@@ -43,7 +44,9 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 	"github.com/Aethernet-network/aethernet/internal/registry"
+	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/store"
+	"github.com/Aethernet-network/aethernet/internal/wallet"
 )
 
 // VERSION is the protocol and build version broadcast during handshake.
@@ -189,20 +192,23 @@ func autoInitKeyPair(path string) *crypto.KeyPair {
 // nodeStack bundles the runtime components so they can be passed around and
 // shut down together.
 type nodeStack struct {
-	dag         *dag.DAG
-	transfer    *ledger.TransferLedger
-	generation  *ledger.GenerationLedger
-	supply      *ledger.SupplyManager
-	reg         *identity.Registry
-	engine      *ocs.Engine
-	store       *store.Store
-	kp          *crypto.KeyPair
-	apiSrv      *api.Server
-	svcRegistry *registry.Registry
-	bus         *eventbus.Bus
-	metricsReg  *metrics.Registry
-	nodeMetrics *metrics.AetherNetMetrics
-	metricsStop chan struct{} // closed to terminate the gauge-update goroutine
+	dag          *dag.DAG
+	transfer     *ledger.TransferLedger
+	generation   *ledger.GenerationLedger
+	supply       *ledger.SupplyManager
+	reg          *identity.Registry
+	engine       *ocs.Engine
+	store        *store.Store
+	kp           *crypto.KeyPair
+	apiSrv       *api.Server
+	svcRegistry  *registry.Registry
+	bus          *eventbus.Bus
+	stakeManager *staking.StakeManager
+	feeCollector *fees.Collector
+	walletMgr    *wallet.Wallet
+	metricsReg   *metrics.Registry
+	nodeMetrics  *metrics.AetherNetMetrics
+	metricsStop  chan struct{} // closed to terminate the gauge-update goroutine
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
@@ -257,6 +263,24 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 			os.Exit(1)
 		}
 	}
+
+	// Economics: staking, fee collection, and deposit-address wallet.
+	// These are optional — engine and API server nil-check them — but the
+	// node should always wire them so that trust limits, fee distribution,
+	// and the /stake endpoints work correctly.
+	stakeMgr := staking.NewStakeManager()
+	if s != nil {
+		stakeMgr.SetStore(s)
+		if err := stakeMgr.LoadFromStore(s); err != nil {
+			// Non-fatal: node can still run, stake timestamps just reset.
+			slog.Warn("failed to restore stake metadata from store", "err", err)
+		}
+	}
+	feeCollector := fees.NewCollector(tl)
+	walletMgr := wallet.New()
+	treasuryID := crypto.AgentID(genesis.BucketTreasury)
+	eng.SetEconomics(feeCollector, stakeMgr, treasuryID)
+
 	svcReg := registry.New()
 	if s != nil {
 		svcReg.SetStore(s)
@@ -267,15 +291,18 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 	}
 
 	return &nodeStack{
-		dag:         d,
-		transfer:    tl,
-		generation:  gl,
-		supply:      sm,
-		reg:         reg,
-		engine:      eng,
-		store:       s,
-		kp:          kp,
-		svcRegistry: svcReg,
+		dag:          d,
+		transfer:     tl,
+		generation:   gl,
+		supply:       sm,
+		reg:          reg,
+		engine:       eng,
+		store:        s,
+		kp:           kp,
+		svcRegistry:  svcReg,
+		stakeManager: stakeMgr,
+		feeCollector: feeCollector,
+		walletMgr:    walletMgr,
 	}
 }
 
@@ -333,6 +360,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	if stack.svcRegistry != nil {
 		apiSrv.SetServiceRegistry(stack.svcRegistry)
 	}
+	apiSrv.SetEconomics(stack.walletMgr, stack.stakeManager, stack.feeCollector)
 	apiSrv.SetEventBus(bus)
 	apiSrv.SetRateLimiters(
 		ratelimit.New(ratelimit.DefaultConfig()),
