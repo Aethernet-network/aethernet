@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -970,4 +971,107 @@ func TestHandleRegisterAgent_OnboardingFunded(t *testing.T) {
 	if staked == 0 {
 		t.Error("agent staked_amount must be non-zero after auto-stake")
 	}
+}
+
+// TestHandleRegisterAgent_TwoDistinctAgents verifies that two different external
+// agents can register through the same node using their own keypairs, receive
+// separate identities, and accumulate independent balances and staked amounts.
+func TestHandleRegisterAgent_TwoDistinctAgents(t *testing.T) {
+	setup := newTestSetup(t)
+
+	// Wire staking and economics so onboarding grants are auto-staked.
+	stakeMgr := staking.NewStakeManager()
+	feeCollector := fees.NewCollector(setup.tl)
+	walletMgr := wallet.New()
+	setup.srv.SetEconomics(walletMgr, stakeMgr, feeCollector)
+
+	// Generate two independent keypairs representing distinct external agents.
+	kp1, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("generate kp1: %v", err)
+	}
+	kp2, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("generate kp2: %v", err)
+	}
+
+	pubKeyB64_1 := base64.StdEncoding.EncodeToString(kp1.PublicKey)
+	pubKeyB64_2 := base64.StdEncoding.EncodeToString(kp2.PublicKey)
+
+	// Register agent 1.
+	r1 := post(t, setup.ts, "/v1/agents", map[string]any{
+		"agent_id":       string(kp1.AgentID()),
+		"public_key_b64": pubKeyB64_1,
+	})
+	if r1.StatusCode != http.StatusCreated {
+		t.Fatalf("agent1 registration: want 201, got %d", r1.StatusCode)
+	}
+	var resp1 struct {
+		AgentID              string `json:"agent_id"`
+		OnboardingAllocation uint64 `json:"onboarding_allocation"`
+	}
+	decodeJSON(t, r1, &resp1)
+
+	// Register agent 2.
+	r2 := post(t, setup.ts, "/v1/agents", map[string]any{
+		"agent_id":       string(kp2.AgentID()),
+		"public_key_b64": pubKeyB64_2,
+	})
+	if r2.StatusCode != http.StatusCreated {
+		t.Fatalf("agent2 registration: want 201, got %d", r2.StatusCode)
+	}
+	var resp2 struct {
+		AgentID              string `json:"agent_id"`
+		OnboardingAllocation uint64 `json:"onboarding_allocation"`
+	}
+	decodeJSON(t, r2, &resp2)
+
+	// The two agents must have distinct identities.
+	if resp1.AgentID == resp2.AgentID {
+		t.Errorf("agents must have different agent_ids, both got %q", resp1.AgentID)
+	}
+	if resp1.AgentID != string(kp1.AgentID()) {
+		t.Errorf("agent1 id: want %q, got %q", kp1.AgentID(), resp1.AgentID)
+	}
+	if resp2.AgentID != string(kp2.AgentID()) {
+		t.Errorf("agent2 id: want %q, got %q", kp2.AgentID(), resp2.AgentID)
+	}
+
+	// Both agents received an onboarding allocation.
+	if resp1.OnboardingAllocation == 0 {
+		t.Error("agent1 onboarding_allocation must be non-zero")
+	}
+	if resp2.OnboardingAllocation == 0 {
+		t.Error("agent2 onboarding_allocation must be non-zero")
+	}
+
+	// Balances are separate — each agent has its own spendable balance.
+	bal1, _ := setup.tl.Balance(kp1.AgentID())
+	bal2, _ := setup.tl.Balance(kp2.AgentID())
+	if bal1 == 0 {
+		t.Error("agent1 balance must be non-zero after onboarding")
+	}
+	if bal2 == 0 {
+		t.Error("agent2 balance must be non-zero after onboarding")
+	}
+
+	// Staked amounts are separate.
+	staked1 := stakeMgr.StakedAmount(kp1.AgentID())
+	staked2 := stakeMgr.StakedAmount(kp2.AgentID())
+	if staked1 == 0 {
+		t.Error("agent1 staked_amount must be non-zero after auto-stake")
+	}
+	if staked2 == 0 {
+		t.Error("agent2 staked_amount must be non-zero after auto-stake")
+	}
+
+	// Registering the same agent again returns 200 (idempotent), not 201.
+	r1b := post(t, setup.ts, "/v1/agents", map[string]any{
+		"agent_id":       string(kp1.AgentID()),
+		"public_key_b64": pubKeyB64_1,
+	})
+	if r1b.StatusCode != http.StatusOK {
+		t.Fatalf("re-registration of agent1: want 200, got %d", r1b.StatusCode)
+	}
+	r1b.Body.Close()
 }
