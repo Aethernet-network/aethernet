@@ -498,13 +498,14 @@ class AetherNetClient:
 
         Args:
             task_id:    The task to claim.
-            claimer_id: The claiming agent's ID; defaults to the node's own identity.
+            claimer_id: The claiming agent's ID; defaults to ``self.agent_id``.
 
         Returns the updated task dict.
         """
         body: Dict[str, Any] = {}
-        if claimer_id:
-            body["claimer_id"] = claimer_id
+        effective_id = claimer_id or self.agent_id
+        if effective_id:
+            body["claimer_id"] = effective_id
         return self._post(f"/v1/tasks/{task_id}/claim", body)
 
     def submit_task_result(
@@ -543,8 +544,9 @@ class AetherNetClient:
                 body["result_hash"] = result_hash
             if result_note:
                 body["result_note"] = result_note
-        if claimer_id:
-            body["claimer_id"] = claimer_id
+        effective_id = claimer_id or self.agent_id
+        if effective_id:
+            body["claimer_id"] = effective_id
         return self._post(f"/v1/tasks/{task_id}/submit", body)
 
     def approve_task(self, task_id: str, approver_id: str = "") -> Dict[str, Any]:
@@ -552,13 +554,14 @@ class AetherNetClient:
 
         Args:
             task_id:     The task to approve.
-            approver_id: The approving agent's ID; defaults to the node's own identity.
+            approver_id: The approving agent's ID; defaults to ``self.agent_id``.
 
         Returns the updated task dict (status = "completed").
         """
         body: Dict[str, Any] = {}
-        if approver_id:
-            body["approver_id"] = approver_id
+        effective_id = approver_id or self.agent_id
+        if effective_id:
+            body["approver_id"] = effective_id
         return self._post(f"/v1/tasks/{task_id}/approve", body)
 
     def dispute_task(self, task_id: str, poster_id: str = "") -> Dict[str, Any]:
@@ -566,13 +569,14 @@ class AetherNetClient:
 
         Args:
             task_id:   The task to dispute.
-            poster_id: The poster's agent ID; defaults to the node's own identity.
+            poster_id: The poster's agent ID; defaults to ``self.agent_id``.
 
         Returns the updated task dict (status = "disputed").
         """
         body: Dict[str, Any] = {}
-        if poster_id:
-            body["poster_id"] = poster_id
+        effective_id = poster_id or self.agent_id
+        if effective_id:
+            body["poster_id"] = effective_id
         return self._post(f"/v1/tasks/{task_id}/dispute", body)
 
     def cancel_task(self, task_id: str, poster_id: str = "") -> Dict[str, Any]:
@@ -580,13 +584,14 @@ class AetherNetClient:
 
         Args:
             task_id:   The open task to cancel.
-            poster_id: The poster's agent ID; defaults to the node's own identity.
+            poster_id: The poster's agent ID; defaults to ``self.agent_id``.
 
         Returns the updated task dict (status = "cancelled").
         """
         body: Dict[str, Any] = {}
-        if poster_id:
-            body["poster_id"] = poster_id
+        effective_id = poster_id or self.agent_id
+        if effective_id:
+            body["poster_id"] = effective_id
         return self._post(f"/v1/tasks/{task_id}/cancel", body)
 
     def my_tasks(self, agent_id: str = "") -> List[Dict[str, Any]]:
@@ -706,8 +711,9 @@ class AetherNetClient:
             "category": category,
             "budget": budget,
         }
-        if claimer_id:
-            body["claimer_id"] = claimer_id
+        effective_id = claimer_id or self.agent_id
+        if effective_id:
+            body["claimer_id"] = effective_id
         return self._post(f"/v1/tasks/{parent_task_id}/subtask", body)
 
     def get_subtasks(self, task_id: str) -> List[Dict[str, Any]]:
