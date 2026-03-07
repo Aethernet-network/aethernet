@@ -34,6 +34,13 @@ const (
 	TaskStatusCancelled TaskStatus = "cancelled"
 )
 
+// DefaultClaimDeadline is the testnet claim timeout. When a task is claimed,
+// the claimer must submit work within this window or the auto-validator
+// releases the task back to open and penalises the claimer's reputation.
+// On mainnet this would be 24 hours; testnet uses 10 minutes so test cycles
+// complete quickly without waiting for the full period.
+const DefaultClaimDeadline = 10 * time.Minute
+
 // Sentinel errors returned by TaskManager methods.
 var (
 	ErrTaskNotFound       = errors.New("tasks: task not found")
@@ -62,7 +69,9 @@ type Task struct {
 	VerificationScore *evidence.Score  `json:"verification_score,omitempty"`
 	PostedAt          int64            `json:"posted_at"`
 	ClaimedAt         int64            `json:"claimed_at,omitempty"`
+	ClaimDeadline     int64            `json:"claim_deadline,omitempty"`  // unix-nano; 0 means no deadline set
 	SubmittedAt       int64            `json:"submitted_at,omitempty"`
+	DisputedAt        int64            `json:"disputed_at,omitempty"`     // unix-nano; set when poster disputes
 	CompletedAt       int64            `json:"completed_at,omitempty"`
 	// Task chain fields — set when this task is part of a subtask hierarchy.
 	Tags         []string `json:"tags,omitempty"`
@@ -183,7 +192,9 @@ func (m *TaskManager) ClaimTask(taskID string, claimerID crypto.AgentID) error {
 
 	task.ClaimerID = string(claimerID)
 	task.Status = TaskStatusClaimed
-	task.ClaimedAt = time.Now().UnixNano()
+	now := time.Now()
+	task.ClaimedAt = now.UnixNano()
+	task.ClaimDeadline = now.Add(DefaultClaimDeadline).UnixNano()
 	m.persist(task)
 	return nil
 }
@@ -252,6 +263,32 @@ func (m *TaskManager) ApproveTask(taskID string, approverID crypto.AgentID) erro
 	return nil
 }
 
+// ResolveDispute finalises a disputed task. approve=true sets status Completed
+// (work accepted, escrow released to worker by caller); approve=false sets status
+// Cancelled (work rejected, escrow refunded to poster by caller).
+// Returns ErrTaskNotFound when absent, or an error when the task is not in Disputed state.
+func (m *TaskManager) ResolveDispute(taskID string, resolverID crypto.AgentID, approve bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
+	}
+	if task.Status != TaskStatusDisputed {
+		return fmt.Errorf("tasks: task %s is not in disputed state (status: %s)", taskID, task.Status)
+	}
+
+	if approve {
+		task.Status = TaskStatusCompleted
+		task.CompletedAt = time.Now().UnixNano()
+	} else {
+		task.Status = TaskStatusCancelled // rejected by dispute resolution
+	}
+	m.persist(task)
+	return nil
+}
+
 // DisputeTask moves a submitted task into Disputed state. Only the poster may
 // dispute. Returns ErrTaskNotFound, ErrTaskNotSubmitted, or ErrWrongPoster.
 func (m *TaskManager) DisputeTask(taskID string, posterID crypto.AgentID) error {
@@ -270,6 +307,7 @@ func (m *TaskManager) DisputeTask(taskID string, posterID crypto.AgentID) error 
 	}
 
 	task.Status = TaskStatusDisputed
+	task.DisputedAt = time.Now().UnixNano()
 	m.persist(task)
 	return nil
 }
@@ -294,6 +332,35 @@ func (m *TaskManager) CancelTask(taskID string, posterID crypto.AgentID) error {
 	task.Status = TaskStatusCancelled
 	m.persist(task)
 	return nil
+}
+
+// ReleaseTask resets a claimed task back to Open state when the claimer's
+// deadline has passed without a submission. It clears the claimer identity and
+// timestamps so the task can be claimed by another agent. The escrow bucket is
+// intentionally left intact — the poster's funds remain locked for the task.
+//
+// Returns the former claimer's agent ID (for reputation penalty) and
+// ErrTaskNotFound when the task doesn't exist. Returns an error if the task
+// is not in Claimed status.
+func (m *TaskManager) ReleaseTask(taskID string) (formerClaimerID string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return "", fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
+	}
+	if task.Status != TaskStatusClaimed {
+		return "", fmt.Errorf("tasks: task %s is not claimed (status: %s)", taskID, task.Status)
+	}
+
+	formerClaimerID = task.ClaimerID
+	task.Status = TaskStatusOpen
+	task.ClaimerID = ""
+	task.ClaimedAt = 0
+	task.ClaimDeadline = 0
+	m.persist(task)
+	return formerClaimerID, nil
 }
 
 // Get returns a copy of the task by ID. Returns ErrTaskNotFound when absent.

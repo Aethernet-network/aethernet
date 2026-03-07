@@ -232,6 +232,10 @@ class AetherNetClient:
             "memo": memo,
             "stake_amount": stake_amount,
         }
+        # Include from_agent so the server charges the correct account.
+        # Without this, the server defaults to the node's own keypair identity.
+        if self.agent_id:
+            body["from_agent"] = self.agent_id
         if causal_refs:
             body["causal_refs"] = causal_refs
         resp = self._post("/v1/transfer", body)
@@ -341,9 +345,15 @@ class AetherNetClient:
 
         Returns a dict with ``total_supply``, ``onboarding_pool_total``,
         ``onboarding_max_agents``, ``onboarding_allocated``, ``total_collected``,
-        ``total_burned``, ``treasury_accrued``, and ``fee_basis_points``.
+        ``total_burned``, ``treasury_accrued``, ``fee_basis_points``, and
+        ``total_generated_value`` (cumulative verified AI output in micro-AET).
         """
         return self._get("/v1/economics")
+
+    # Alias used by the E2E test and docs — same as economics().
+    def get_economics(self) -> Dict[str, Any]:
+        """Alias for :meth:`economics`."""
+        return self.economics()
 
     # ------------------------------------------------------------------
     # Service registry endpoints

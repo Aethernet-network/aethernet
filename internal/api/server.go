@@ -47,6 +47,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -132,8 +133,9 @@ type Server struct {
 
 	// Rate limiters — optional; set via SetRateLimiters after construction.
 	// When nil, no rate limiting is applied (safe for tests).
-	writeLimiter *ratelimit.Limiter // POST/DELETE/PUT/PATCH endpoints
-	readLimiter  *ratelimit.Limiter // GET endpoints
+	writeLimiter        *ratelimit.Limiter // POST/DELETE/PUT/PATCH endpoints
+	readLimiter         *ratelimit.Limiter // GET endpoints
+	registrationLimiter *ratelimit.Limiter // agent registration: max 5/hour per IP (sybil resistance)
 
 	// Platform API key manager — optional; set via SetPlatformKeys after construction.
 	// When non-nil, X-API-Key headers are validated; requests with invalid keys
@@ -327,6 +329,14 @@ func (s *Server) SetEventBus(b *eventbus.Bus) {
 func (s *Server) SetRateLimiters(writeLimiter, readLimiter *ratelimit.Limiter) {
 	s.writeLimiter = writeLimiter
 	s.readLimiter = readLimiter
+}
+
+// SetRegistrationLimiter wires the agent-registration rate limiter.
+// This is a separate, stricter limiter (5 registrations per hour per IP) used
+// as a first line of sybil resistance on POST /v1/agents.
+// When nil (default, safe for tests), no registration rate limit is applied.
+func (s *Server) SetRegistrationLimiter(l *ratelimit.Limiter) {
+	s.registrationLimiter = l
 }
 
 // SetPlatformKeys wires the developer API key manager into the server.
@@ -545,16 +555,17 @@ type stakeInfoResponse struct {
 }
 
 type economicsResponse struct {
-	TotalSupply         uint64 `json:"total_supply"`
-	CirculatingSupply   uint64 `json:"circulating_supply"`
-	OnboardingPoolTotal uint64 `json:"onboarding_pool_total"`
-	OnboardingMaxAgents uint64 `json:"onboarding_max_agents"`
-	OnboardingAllocated uint64 `json:"onboarding_allocated"`
-	TotalCollected      uint64 `json:"total_collected"`
-	TotalBurned         uint64 `json:"total_burned"`
-	TreasuryAccrued     uint64 `json:"treasury_accrued"`
-	TreasuryBalance     uint64 `json:"treasury_balance"`
-	FeeBasisPoints      uint64 `json:"fee_basis_points"`
+	TotalSupply          uint64 `json:"total_supply"`
+	CirculatingSupply    uint64 `json:"circulating_supply"`
+	OnboardingPoolTotal  uint64 `json:"onboarding_pool_total"`
+	OnboardingMaxAgents  uint64 `json:"onboarding_max_agents"`
+	OnboardingAllocated  uint64 `json:"onboarding_allocated"`
+	TotalCollected       uint64 `json:"total_collected"`
+	TotalBurned          uint64 `json:"total_burned"`
+	TreasuryAccrued      uint64 `json:"treasury_accrued"`
+	TreasuryBalance      uint64 `json:"treasury_balance"`
+	FeeBasisPoints       uint64 `json:"fee_basis_points"`
+	TotalGeneratedValue  uint64 `json:"total_generated_value"`  // cumulative verified AI output (micro-AET)
 }
 
 type resolveAddressResponse struct {
@@ -1158,6 +1169,27 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// clientIPFromRequest extracts the client IP from an HTTP request.
+// It honours X-Forwarded-For (set by load balancers / reverse proxies) and
+// falls back to r.RemoteAddr. Only the IP portion is returned (port stripped).
+func clientIPFromRequest(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// X-Forwarded-For may contain a comma-separated list; the first entry
+		// is the originating client IP.
+		if idx := strings.IndexByte(xff, ','); idx >= 0 {
+			xff = xff[:idx]
+		}
+		xff = strings.TrimSpace(xff)
+		if xff != "" {
+			return xff
+		}
+	}
+	if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return ip
+	}
+	return r.RemoteAddr
+}
+
 func explorerPath() string {
 	for _, p := range []string{"./explorer", "/usr/local/share/aethernet/explorer"} {
 		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
@@ -1249,7 +1281,23 @@ func (s *Server) submitAndAdd(e *event.Event) error {
 //   - Registers a deposit address in the wallet
 //   - Grants an onboarding allocation from the ecosystem pool (declining curve)
 //   - Auto-stakes the onboarding allocation
+//
+// Sybil resistance: when a registrationLimiter is configured, this endpoint
+// enforces a maximum of 5 registrations per IP per hour. Requests that exceed
+// the limit receive HTTP 429 Too Many Requests. This is a first-line defence
+// against bulk agent creation from a single source; the declining onboarding
+// curve provides a complementary economic deterrent.
 func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
+	// Sybil resistance: check per-IP registration rate limit before doing anything.
+	if s.registrationLimiter != nil {
+		clientIP := clientIPFromRequest(r)
+		if !s.registrationLimiter.Allow(clientIP) {
+			writeCodedError(w, http.StatusTooManyRequests, "rate_limit_exceeded",
+				"registration rate limit exceeded: max 5 registrations per hour per IP", "")
+			return
+		}
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req registerAgentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1762,6 +1810,12 @@ func (s *Server) handleEconomics(w http.ResponseWriter, r *http.Request) {
 	// restart. This lets the explorer show the real treasury at all times.
 	treasuryBalance, _ := s.transfer.Balance(crypto.AgentID(genesis.BucketTreasury))
 
+	// Sum all-time verified AI output across the generation ledger.
+	var totalGeneratedValue uint64
+	if s.generation != nil {
+		totalGeneratedValue, _ = s.generation.TotalVerifiedValue(365 * 24 * time.Hour)
+	}
+
 	writeJSON(w, http.StatusOK, economicsResponse{
 		TotalSupply:         genesis.TotalSupply,
 		CirculatingSupply:   circulating,
@@ -1773,6 +1827,7 @@ func (s *Server) handleEconomics(w http.ResponseWriter, r *http.Request) {
 		TreasuryAccrued:     treasury,
 		TreasuryBalance:     treasuryBalance,
 		FeeBasisPoints:      fees.FeeBasisPoints,
+		TotalGeneratedValue: totalGeneratedValue,
 	})
 }
 

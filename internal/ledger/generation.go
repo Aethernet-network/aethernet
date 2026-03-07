@@ -300,6 +300,47 @@ func (l *GenerationLedger) ContributionScore(agentID crypto.AgentID) (uint64, er
 	return score, nil
 }
 
+// RecordTaskGeneration records a verified task completion directly in the ledger
+// without requiring an OCS event. This is the primary path by which the
+// Generation Ledger accumulates verified productive AI computation — every
+// settled marketplace task creates one entry here.
+//
+// The entry is created in Settled state immediately because task completion has
+// already been verified by the auto-validator's evidence scoring (score ≥ 0.60).
+// verifiedValue = uint64(task.Budget × score.Overall) captures how much of the
+// budget was economically validated by the evidence.
+//
+// Idempotent: returns nil without creating a duplicate if taskID was already
+// recorded (safe to call from a retrying ticker).
+func (l *GenerationLedger) RecordTaskGeneration(agentID crypto.AgentID, evidenceHash, taskDescription string, verifiedValue uint64, taskID string) error {
+	entryID := event.EventID("task-completion:" + taskID)
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if _, exists := l.entries[entryID]; exists {
+		return nil // idempotent
+	}
+
+	entry := &GenerationEntry{
+		EventID:          entryID,
+		GeneratingAgent:  agentID,
+		BeneficiaryAgent: agentID,
+		ClaimedValue:     verifiedValue,
+		VerifiedValue:    verifiedValue, // Already verified by evidence scoring
+		EvidenceHash:     evidenceHash,
+		TaskDescription:  taskDescription,
+		Timestamp:        uint64(time.Now().UnixNano()),
+		Settlement:       event.SettlementSettled,
+		RecordedAt:       time.Now(),
+	}
+	l.entries[entryID] = entry
+	if l.store != nil {
+		_ = l.store.PutGeneration(entry)
+	}
+	return nil
+}
+
 // LoadGenerationLedgerFromStore reconstructs a GenerationLedger from a persisted
 // store, bypassing event validation (all entries were already validated on first
 // Record). The returned ledger has s attached so subsequent mutations write through.

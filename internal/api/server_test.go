@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/api"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
@@ -16,6 +17,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
+	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 	"github.com/Aethernet-network/aethernet/internal/registry"
 	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
@@ -220,6 +222,74 @@ func TestHandleRegisterAgent_AlreadyExists(t *testing.T) {
 	decodeJSON(t, r2, &result)
 	if result.AgentID != string(setup.kp.AgentID()) {
 		t.Errorf("agent_id mismatch on re-registration")
+	}
+}
+
+// TestHandleRegisterAgent_RateLimit verifies that the IP-based sybil-resistance
+// rate limiter returns 429 after the burst limit is exhausted.
+// A burst-5 limiter with 0 token refill rate (essentially a counter) is wired
+// into a dedicated server so we can exhaust its budget in isolation.
+func TestHandleRegisterAgent_RateLimit(t *testing.T) {
+	kp, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	d := dag.New()
+	tl := ledger.NewTransferLedger()
+	gl := ledger.NewGenerationLedger()
+	reg := identity.NewRegistry()
+	eng := ocs.NewEngine(ocs.DefaultConfig(), tl, gl, reg)
+	if err := eng.Start(); err != nil {
+		t.Fatalf("start engine: %v", err)
+	}
+	t.Cleanup(eng.Stop)
+	sm := ledger.NewSupplyManager(tl, gl)
+
+	srv := api.NewServer("", d, tl, gl, reg, eng, sm, nil, kp)
+	// Wire a rate limiter with burst=5 and near-zero refill so it acts as a
+	// simple 5-request counter — 6th and subsequent requests are rejected.
+	limiter := ratelimit.New(ratelimit.Config{
+		Rate:       0.0001, // effectively no refill during the test
+		Burst:      5,
+		CleanupAge: time.Minute,
+	})
+	t.Cleanup(limiter.Stop)
+	srv.SetRegistrationLimiter(limiter)
+
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	// First 5 registrations must succeed (status 200 or 201).
+	for i := 0; i < 5; i++ {
+		resp, err := http.Post(ts.URL+"/v1/agents", "application/json",
+			bytes.NewReader([]byte(`{}`)))
+		if err != nil {
+			t.Fatalf("request %d: %v", i+1, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+			t.Fatalf("request %d: want 200 or 201, got %d", i+1, resp.StatusCode)
+		}
+	}
+
+	// 6th registration must be rate-limited.
+	resp, err := http.Post(ts.URL+"/v1/agents", "application/json",
+		bytes.NewReader([]byte(`{}`)))
+	if err != nil {
+		t.Fatalf("6th request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("6th request: want 429, got %d", resp.StatusCode)
+	}
+
+	var apiErr struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&apiErr); err == nil {
+		if apiErr.Code != "rate_limit_exceeded" {
+			t.Errorf("code: want rate_limit_exceeded, got %q", apiErr.Code)
+		}
 	}
 }
 

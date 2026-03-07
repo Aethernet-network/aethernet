@@ -481,6 +481,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	av.SetTaskManager(stack.taskMgr, stack.escrowMgr)
 	av.SetReputationManager(stack.reputationMgr)
 	av.SetFeeCollector(stack.feeCollector, crypto.AgentID(genesis.BucketTreasury))
+	av.SetGenerationLedger(stack.generation)
 	av.Start()
 	stack.autoVal = av
 
@@ -529,6 +530,14 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		ratelimit.New(ratelimit.DefaultConfig()),
 		ratelimit.New(ratelimit.ReadOnlyConfig()),
 	)
+	// Sybil resistance: limit registrations to 5 per hour per IP.
+	// Rate = 5/3600 tokens/second ≈ 0.00139; burst = 5 allows a small burst
+	// for legitimate simultaneous registrations (e.g. onboarding a small team).
+	apiSrv.SetRegistrationLimiter(ratelimit.New(ratelimit.Config{
+		Rate:       float64(5) / 3600, // 5 registrations per hour
+		Burst:      5,
+		CleanupAge: 2 * time.Hour,
+	}))
 	apiSrv.SetMetrics(metricsReg, nodeMetrics)
 	if err := apiSrv.Start(); err != nil {
 		slog.Error("failed to start API server", "addr", apiListenAddr, "err", err)
