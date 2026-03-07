@@ -480,6 +480,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	av := validator.NewAutoValidator(stack.engine, testnetValidatorID, 5*time.Second)
 	av.SetTaskManager(stack.taskMgr, stack.escrowMgr)
 	av.SetReputationManager(stack.reputationMgr)
+	av.SetFeeCollector(stack.feeCollector, crypto.AgentID(genesis.BucketTreasury))
 	av.Start()
 	stack.autoVal = av
 

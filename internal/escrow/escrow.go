@@ -88,6 +88,32 @@ func (e *Escrow) Release(taskID string, claimerID crypto.AgentID) error {
 	return nil
 }
 
+// ReleaseNet releases exactly amount (the worker's net payment after fee
+// deduction) from the task bucket to claimerID, then deletes the escrow entry.
+// The caller is responsible for computing amount = entry.Amount - fee before
+// calling; the remaining fee tokens in the bucket are effectively burned
+// (stranded in the virtual bucket with no entry to reclaim them), which is
+// offset by the fee collector crediting the validator and treasury separately.
+//
+// Returns ErrEscrowNotFound if no escrow exists for taskID.
+func (e *Escrow) ReleaseNet(taskID string, claimerID crypto.AgentID, amount uint64) error {
+	e.mu.RLock()
+	_, ok := e.entries[taskID]
+	e.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("%w: task %s", ErrEscrowNotFound, taskID)
+	}
+
+	if err := e.ledger.TransferFromBucket(bucketID(taskID), claimerID, amount); err != nil {
+		return fmt.Errorf("escrow: release-net for task %s: %w", taskID, err)
+	}
+
+	e.mu.Lock()
+	delete(e.entries, taskID)
+	e.mu.Unlock()
+	return nil
+}
+
 // Refund returns the escrowed amount from the task bucket back to the poster.
 // Returns ErrEscrowNotFound if no escrow exists for taskID.
 func (e *Escrow) Refund(taskID string) error {

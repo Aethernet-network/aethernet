@@ -21,6 +21,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/evidence"
+	"github.com/Aethernet-network/aethernet/internal/fees"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
@@ -36,19 +37,30 @@ type AutoValidator struct {
 	once        sync.Once
 
 	// Task marketplace — optional. When set, auto-settles submitted tasks.
-	taskMgr      *tasks.TaskManager
-	escrowMgr    *escrow.Escrow
+	taskMgr       *tasks.TaskManager
+	escrowMgr     *escrow.Escrow
 	reputationMgr *reputation.ReputationManager
+
+	// Fee collection — optional. When set, deducts a settlement fee from each
+	// approved task budget before releasing funds to the worker.
+	feeCollector *fees.Collector
+	treasuryID   crypto.AgentID
+
+	// taskStaleness is the minimum age a submitted task must reach before the
+	// auto-validator processes it. Defaults to 10 seconds so the task poster
+	// has a window to approve manually first. Set to 0 in tests.
+	taskStaleness time.Duration
 }
 
 // NewAutoValidator creates an AutoValidator that polls engine every interval
 // and approves all pending items as validatorID.
 func NewAutoValidator(engine *ocs.Engine, validatorID crypto.AgentID, interval time.Duration) *AutoValidator {
 	return &AutoValidator{
-		engine:      engine,
-		validatorID: validatorID,
-		interval:    interval,
-		stop:        make(chan struct{}),
+		engine:        engine,
+		validatorID:   validatorID,
+		interval:      interval,
+		stop:          make(chan struct{}),
+		taskStaleness: 10 * time.Second,
 	}
 }
 
@@ -63,6 +75,21 @@ func (av *AutoValidator) SetTaskManager(tm *tasks.TaskManager, e *escrow.Escrow)
 // completions and failures are recorded for category-level reputation scoring.
 func (av *AutoValidator) SetReputationManager(rm *reputation.ReputationManager) {
 	av.reputationMgr = rm
+}
+
+// SetFeeCollector wires optional fee collection. When set, a 0.1% settlement
+// fee is deducted from each approved task budget: the worker receives
+// (budget - fee), and the fee is split 80/20 between the validator and treasury.
+func (av *AutoValidator) SetFeeCollector(fc *fees.Collector, treasuryID crypto.AgentID) {
+	av.feeCollector = fc
+	av.treasuryID = treasuryID
+}
+
+// SetTaskStalenessThreshold overrides the minimum age a submitted task must
+// reach before the auto-validator processes it. The default is 10 seconds.
+// Set to 0 in tests to process tasks immediately.
+func (av *AutoValidator) SetTaskStalenessThreshold(d time.Duration) {
+	av.taskStaleness = d
 }
 
 // Start launches the background approval goroutine. It is safe to call once.
@@ -96,7 +123,7 @@ func (av *AutoValidator) Stop() {
 // are evaluated to give the poster time to approve manually first.
 func (av *AutoValidator) processSubmittedTasks() {
 	submitted := av.taskMgr.Search(tasks.TaskStatusSubmitted, "", 0)
-	cutoff := time.Now().UnixNano() - int64(10*time.Second)
+	cutoff := time.Now().UnixNano() - int64(av.taskStaleness)
 	verifier := evidence.NewVerifier()
 	for _, task := range submitted {
 		if task.SubmittedAt > cutoff {
@@ -122,8 +149,16 @@ func (av *AutoValidator) processSubmittedTasks() {
 			continue
 		}
 		if av.escrowMgr != nil && task.ClaimerID != "" {
-			if err := av.escrowMgr.Release(task.ID, crypto.AgentID(task.ClaimerID)); err != nil {
+			fee := fees.CalculateFee(task.Budget)
+			netAmount := task.Budget - fee
+			if err := av.escrowMgr.ReleaseNet(task.ID, crypto.AgentID(task.ClaimerID), netAmount); err != nil {
 				log.Printf("auto-validator: could not release escrow for task %s: %v", task.ID, err)
+			} else if av.feeCollector != nil && fee > 0 {
+				// CollectFee expects the full settlement amount and computes the
+				// 0.1% fee internally — pass task.Budget, not the pre-computed fee.
+				av.feeCollector.CollectFee(task.Budget, av.validatorID, av.treasuryID)
+				log.Printf("auto-validator: collected fee %d for task %s (net to worker: %d)",
+					fee, task.ID, netAmount)
 			}
 		}
 		if av.reputationMgr != nil && task.ClaimerID != "" {
