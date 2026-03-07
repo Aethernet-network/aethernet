@@ -439,7 +439,10 @@ class AetherNetClient:
     ) -> Dict[str, Any]:
         """Post a new task to the marketplace.
 
-        The budget is escrowed from the node's own agent balance immediately.
+        The budget is escrowed from the poster's balance immediately.  When
+        ``self.agent_id`` is set the request includes ``poster_id`` so the
+        server charges the correct account; otherwise the node's own identity
+        is used (single-binary deployments).
 
         Args:
             title:       Short task title.
@@ -450,12 +453,15 @@ class AetherNetClient:
         Returns:
             The created task dict including ``id`` and ``status``.
         """
-        return self._post("/v1/tasks", {
+        body: Dict[str, Any] = {
             "title": title,
             "description": description,
             "category": category,
             "budget": budget,
-        })
+        }
+        if self.agent_id:
+            body["poster_id"] = self.agent_id
+        return self._post("/v1/tasks", body)
 
     def browse_tasks(
         self,
