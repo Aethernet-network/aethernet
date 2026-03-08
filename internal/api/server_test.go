@@ -19,8 +19,10 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 	"github.com/Aethernet-network/aethernet/internal/registry"
+	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
+	"github.com/Aethernet-network/aethernet/internal/validator"
 	"github.com/Aethernet-network/aethernet/internal/wallet"
 )
 
@@ -1758,5 +1760,179 @@ func TestTaskStats_API(t *testing.T) {
 	}
 	if stats.TotalBudget < 8_000 {
 		t.Errorf("TotalBudget = %d; want >= 8000", stats.TotalBudget)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// E2E: full task lifecycle verified against real subsystems
+// ---------------------------------------------------------------------------
+
+// TestE2EFullTaskFlow exercises the complete task lifecycle end-to-end:
+//  1. Poster registers and posts a task.
+//  2. Worker claims via agent_id (Issue 3 fix: not the node's own identity).
+//  3. Worker submits rich evidence that passes the verifier.
+//  4. Auto-validator auto-approves and settles the task.
+//  5. Assertions: worker balance = budget−fee, fee_collector.total_collected > 0,
+//     generation ledger has an entry, worker reputation updated.
+func TestE2EFullTaskFlow(t *testing.T) {
+	setup := newTestSetup(t)
+
+	// Wire economics: staking, fee collection, wallet.
+	stakeMgr := staking.NewStakeManager()
+	feeCollector := fees.NewCollector(setup.tl)
+	walletMgr := wallet.New()
+	setup.srv.SetEconomics(walletMgr, stakeMgr, feeCollector)
+
+	// Wire reputation tracking.
+	reputationMgr := reputation.NewReputationManager()
+	setup.srv.SetReputationManager(reputationMgr)
+
+	// Register worker in the identity registry so RecordTaskCompletion can update trust limits.
+	workerKP, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("generate worker keypair: %v", err)
+	}
+	workerFP, err := identity.NewFingerprint(crypto.AgentID("e2e-worker"), workerKP.PublicKey, nil)
+	if err != nil {
+		t.Fatalf("NewFingerprint worker: %v", err)
+	}
+	if err := setup.reg.Register(workerFP); err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+
+	// Start the auto-validator with a fast tick and zero staleness so submitted
+	// tasks are picked up on the very next iteration.
+	av := validator.NewAutoValidator(setup.eng, "e2e-validator", 5*time.Millisecond)
+	av.SetTaskStalenessThreshold(0)
+	av.SetTaskManager(setup.taskMgr, setup.escrowMgr)
+	av.SetFeeCollector(feeCollector, crypto.AgentID("genesis:treasury"))
+	av.SetGenerationLedger(setup.gl)
+	av.SetReputationManager(reputationMgr)
+	av.SetRegistry(setup.reg)
+	av.Start()
+	t.Cleanup(av.Stop)
+
+	const (
+		posterID = "e2e-poster"
+		workerID = "e2e-worker"
+		budget   = uint64(20_000) // large enough that CalculateFee returns > 0
+	)
+
+	// Fund the poster.
+	if err := setup.tl.FundAgent(crypto.AgentID(posterID), 100_000); err != nil {
+		t.Fatalf("FundAgent poster: %v", err)
+	}
+
+	// Step 1: Post a task.
+	postResp := postJSON(t, setup.ts, "/v1/tasks", map[string]any{
+		"poster_id":   posterID,
+		"title":       "Climate Analysis Report",
+		"description": "Analyse climate change temperature data and produce a written report.",
+		"budget":      budget,
+		"category":    "analysis",
+	})
+	if postResp.StatusCode != http.StatusCreated {
+		t.Fatalf("post task: got %d; want 201", postResp.StatusCode)
+	}
+	var taskBody struct {
+		ID string `json:"id"`
+	}
+	decodeJSON(t, postResp, &taskBody)
+	taskID := taskBody.ID
+
+	// Step 2: Worker claims using the agent_id field (Issue 3 fix).
+	claimResp := postJSON(t, setup.ts, "/v1/tasks/"+taskID+"/claim", map[string]any{
+		"agent_id": workerID,
+	})
+	if claimResp.StatusCode != http.StatusOK {
+		t.Fatalf("claim task: got %d; want 200", claimResp.StatusCode)
+	}
+	var claimed struct {
+		Status    string `json:"status"`
+		ClaimerID string `json:"claimer_id"`
+	}
+	decodeJSON(t, claimResp, &claimed)
+	// Issue 3 assertion: claimer must be the worker, not the node's own identity.
+	if claimed.ClaimerID != workerID {
+		t.Errorf("claimer_id = %q; want %q (agent_id field not respected)", claimed.ClaimerID, workerID)
+	}
+	if claimed.Status != "claimed" {
+		t.Errorf("status after claim = %q; want 'claimed'", claimed.Status)
+	}
+
+	// Step 3: Worker submits rich evidence that will pass the evidence verifier.
+	// The result_note contains keywords from title+description (climate, change,
+	// temperature, analyse, report) and is > 100 chars for completeness = 1.0.
+	resultNote := "Analysed climate change temperature data and produced a detailed analysis report " +
+		"covering multiple datasets with written conclusions on temperature trends."
+	submitResp := postJSON(t, setup.ts, "/v1/tasks/"+taskID+"/submit", map[string]any{
+		"claimer_id":  workerID,
+		"result_hash": "sha256:climate-analysis-e2e",
+		"result_note": resultNote,
+		"result_uri":  "https://example.com/climate-report",
+	})
+	if submitResp.StatusCode != http.StatusOK {
+		t.Fatalf("submit task: got %d; want 200", submitResp.StatusCode)
+	}
+	submitResp.Body.Close()
+
+	// Step 4: Wait for the auto-validator to settle the task (up to 3 seconds).
+	deadline := time.Now().Add(3 * time.Second)
+	settled := false
+	for time.Now().Before(deadline) {
+		resp := get(t, setup.ts, "/v1/tasks/"+taskID)
+		var taskState struct {
+			Status string `json:"status"`
+		}
+		if resp.StatusCode == http.StatusOK {
+			decodeJSON(t, resp, &taskState)
+			if taskState.Status == "completed" {
+				settled = true
+				break
+			} else {
+				resp.Body.Close()
+			}
+		} else {
+			resp.Body.Close()
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !settled {
+		t.Fatal("task was not auto-settled within 3 seconds")
+	}
+
+	// Step 5: Worker balance must equal budget minus the protocol fee.
+	fee := fees.CalculateFee(budget)
+	wantBalance := budget - fee
+	workerBal, err := setup.tl.Balance(crypto.AgentID(workerID))
+	if err != nil {
+		t.Fatalf("worker balance: %v", err)
+	}
+	if workerBal != wantBalance {
+		t.Errorf("worker balance = %d; want %d (budget %d − fee %d)", workerBal, wantBalance, budget, fee)
+	}
+
+	// Step 6: Fee collector must show total_collected > 0 (Issue 1 fix).
+	collected, _, _ := feeCollector.Stats()
+	if collected == 0 {
+		t.Error("fee_collector total_collected = 0; want > 0 after auto-settlement")
+	}
+	if collected != fee {
+		t.Errorf("fee_collector total_collected = %d; want %d", collected, fee)
+	}
+
+	// Step 7: Generation ledger must have an entry for the settled task.
+	totalGenerated, err := setup.gl.TotalVerifiedValue(24 * time.Hour)
+	if err != nil {
+		t.Fatalf("TotalVerifiedValue: %v", err)
+	}
+	if totalGenerated == 0 {
+		t.Error("generation ledger total verified value = 0; want > 0 after task settlement")
+	}
+
+	// Step 8: Worker reputation must be updated.
+	rep := reputationMgr.GetReputation(crypto.AgentID(workerID))
+	if rep.TotalCompleted == 0 {
+		t.Error("worker reputation TotalCompleted = 0; want > 0 after task settlement")
 	}
 }

@@ -703,7 +703,8 @@ type postTaskRequest struct {
 }
 
 type claimTaskRequest struct {
-	ClaimerID string `json:"claimer_id,omitempty"`
+	AgentID   string `json:"agent_id,omitempty"`   // preferred: explicit claimer identity
+	ClaimerID string `json:"claimer_id,omitempty"` // legacy alias accepted for compatibility
 }
 
 type submitTaskRequest struct {
@@ -837,7 +838,11 @@ func (s *Server) handleClaimTask(w http.ResponseWriter, r *http.Request) {
 
 	var req claimTaskRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	claimerID := req.ClaimerID
+	// Prefer agent_id (the canonical field); fall back to claimer_id (legacy), then the node's own identity.
+	claimerID := req.AgentID
+	if claimerID == "" {
+		claimerID = req.ClaimerID
+	}
 	if claimerID == "" {
 		claimerID = string(s.agentID)
 	}

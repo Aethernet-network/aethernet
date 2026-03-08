@@ -358,6 +358,10 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 	// preventing over-staking beyond available funds (Fix 12).
 	stakeMgr.SetTransferLedger(tl)
 	feeCollector := fees.NewCollector(tl)
+	if s != nil {
+		// Persist fee stats so total_collected survives node restarts.
+		feeCollector.SetStore(s)
+	}
 	walletMgr := wallet.New()
 	treasuryID := crypto.AgentID(genesis.BucketTreasury)
 	eng.SetEconomics(feeCollector, stakeMgr, treasuryID)
@@ -1014,8 +1018,14 @@ func seedGenesis(tl *ledger.TransferLedger, s genesisStore) {
 	if s != nil {
 		data, _ := s.GetMeta(genesisMarkerKey)
 		if len(data) > 0 {
-			slog.Info("auto-genesis: genesis already complete, skipping")
-			return
+			// Verify the treasury was actually funded. If the ledger was wiped but the
+			// marker survived (partial store state), re-seed rather than leave all
+			// balances at zero.
+			if bal, _ := tl.Balance(crypto.AgentID(genesis.BucketTreasury)); bal > 0 {
+				slog.Info("auto-genesis: genesis already complete, skipping")
+				return
+			}
+			slog.Warn("auto-genesis: genesis marker present but treasury balance is zero; re-seeding")
 		}
 	}
 

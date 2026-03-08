@@ -12,11 +12,21 @@
 package fees
 
 import (
+	"encoding/binary"
 	"sync"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 )
+
+// feeStore is the subset of store.Store used by Collector for stat persistence.
+// *store.Store from the store package satisfies this interface.
+type feeStore interface {
+	PutMeta(key string, value []byte) error
+	GetMeta(key string) ([]byte, error)
+}
+
+const feeStatsKey = "fee_collector_stats"
 
 const (
 	// FeeBasisPoints is the settlement fee expressed in basis points (10 bps = 0.1%).
@@ -40,11 +50,40 @@ type Collector struct {
 	totalBurned     uint64
 	treasuryAccrued uint64
 	transfer        *ledger.TransferLedger
+	store           feeStore // optional; when set, stats are persisted across restarts
 }
 
 // NewCollector returns a Collector backed by tl for validator and treasury credits.
 func NewCollector(tl *ledger.TransferLedger) *Collector {
 	return &Collector{transfer: tl}
+}
+
+// SetStore attaches a persistence backend. When set, cumulative fee statistics
+// are loaded immediately and saved after every CollectFee call, so totals
+// survive node restarts. Call before the node starts processing transactions.
+func (c *Collector) SetStore(s feeStore) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.store = s
+	// Load persisted stats so we resume from the previous session's totals.
+	if data, err := s.GetMeta(feeStatsKey); err == nil && len(data) == 24 {
+		c.totalCollected = binary.LittleEndian.Uint64(data[0:8])
+		c.totalBurned = binary.LittleEndian.Uint64(data[8:16])
+		c.treasuryAccrued = binary.LittleEndian.Uint64(data[16:24])
+	}
+}
+
+// persistStatsLocked writes the current counters to the store.
+// Must be called with c.mu held.
+func (c *Collector) persistStatsLocked() {
+	if c.store == nil {
+		return
+	}
+	var buf [24]byte
+	binary.LittleEndian.PutUint64(buf[0:8], c.totalCollected)
+	binary.LittleEndian.PutUint64(buf[8:16], c.totalBurned)
+	binary.LittleEndian.PutUint64(buf[16:24], c.treasuryAccrued)
+	_ = c.store.PutMeta(feeStatsKey, buf[:])
 }
 
 // CalculateFee returns the fee for a transaction of the given amount.
@@ -79,6 +118,7 @@ func (c *Collector) CollectFee(
 	c.totalCollected += fee
 	c.totalBurned += burned
 	c.treasuryAccrued += treasuryAmount
+	c.persistStatsLocked()
 	c.mu.Unlock()
 
 	// Best-effort credits — errors are ignored because fee distribution should
