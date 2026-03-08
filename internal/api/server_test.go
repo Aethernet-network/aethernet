@@ -1516,7 +1516,7 @@ func TestPostTask_API(t *testing.T) {
 
 	// Fund the poster (node's own identity is the poster when poster_id is omitted).
 	agentID := setup.kp.AgentID()
-	if err := setup.tl.FundAgent(agentID, 100_000); err != nil {
+	if err := setup.tl.FundAgent(agentID, 200_000); err != nil {
 		t.Fatalf("FundAgent: %v", err)
 	}
 
@@ -1524,7 +1524,7 @@ func TestPostTask_API(t *testing.T) {
 		"title":       "Run inference",
 		"description": "GPT-4o on dataset X",
 		"category":    "ml",
-		"budget":      uint64(10_000),
+		"budget":      uint64(100_000),
 	})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("POST /v1/tasks: got %d; want 201", resp.StatusCode)
@@ -1548,8 +1548,8 @@ func TestPostTask_API(t *testing.T) {
 	if task.Status != "open" {
 		t.Errorf("Status = %q; want 'open'", task.Status)
 	}
-	if task.Budget != 10_000 {
-		t.Errorf("Budget = %d; want 10000", task.Budget)
+	if task.Budget != 100_000 {
+		t.Errorf("Budget = %d; want 100000", task.Budget)
 	}
 }
 
@@ -1557,14 +1557,14 @@ func TestClaimTask_API(t *testing.T) {
 	setup := newTestSetup(t)
 
 	agentID := setup.kp.AgentID()
-	if err := setup.tl.FundAgent(agentID, 100_000); err != nil {
+	if err := setup.tl.FundAgent(agentID, 200_000); err != nil {
 		t.Fatalf("FundAgent: %v", err)
 	}
 
 	// Post a task
 	postResp := postJSON(t, setup.ts, "/v1/tasks", map[string]any{
 		"title":  "Classify images",
-		"budget": uint64(5_000),
+		"budget": uint64(100_000),
 	})
 	var task struct{ ID string `json:"id"` }
 	decodeJSON(t, postResp, &task)
@@ -1594,13 +1594,13 @@ func TestSubmitTask_API(t *testing.T) {
 	setup := newTestSetup(t)
 
 	agentID := setup.kp.AgentID()
-	if err := setup.tl.FundAgent(agentID, 100_000); err != nil {
+	if err := setup.tl.FundAgent(agentID, 200_000); err != nil {
 		t.Fatalf("FundAgent: %v", err)
 	}
 
 	postResp := postJSON(t, setup.ts, "/v1/tasks", map[string]any{
 		"title":  "Summarize doc",
-		"budget": uint64(3_000),
+		"budget": uint64(100_000),
 	})
 	var task struct{ ID string `json:"id"` }
 	decodeJSON(t, postResp, &task)
@@ -1631,13 +1631,13 @@ func TestApproveTask_API(t *testing.T) {
 	setup := newTestSetup(t)
 
 	agentID := setup.kp.AgentID()
-	if err := setup.tl.FundAgent(agentID, 100_000); err != nil {
+	if err := setup.tl.FundAgent(agentID, 200_000); err != nil {
 		t.Fatalf("FundAgent: %v", err)
 	}
 
 	postResp := postJSON(t, setup.ts, "/v1/tasks", map[string]any{
 		"title":  "Generate embeddings",
-		"budget": uint64(8_000),
+		"budget": uint64(100_000),
 	})
 	var task struct{ ID string `json:"id"` }
 	decodeJSON(t, postResp, &task)
@@ -1664,7 +1664,7 @@ func TestApproveTask_API(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Balance: %v", err)
 	}
-	wantWorkerBal := uint64(8_000) - fees.CalculateFee(8_000)
+	wantWorkerBal := uint64(100_000) - fees.CalculateFee(100_000)
 	if workerBal != wantWorkerBal {
 		t.Errorf("embed-worker balance = %d; want %d", workerBal, wantWorkerBal)
 	}
@@ -1674,7 +1674,7 @@ func TestCancelTask_API(t *testing.T) {
 	setup := newTestSetup(t)
 
 	agentID := setup.kp.AgentID()
-	if err := setup.tl.FundAgent(agentID, 50_000); err != nil {
+	if err := setup.tl.FundAgent(agentID, 200_000); err != nil {
 		t.Fatalf("FundAgent: %v", err)
 	}
 
@@ -1682,7 +1682,7 @@ func TestCancelTask_API(t *testing.T) {
 
 	postResp := postJSON(t, setup.ts, "/v1/tasks", map[string]any{
 		"title":  "Fine-tune model",
-		"budget": uint64(20_000),
+		"budget": uint64(100_000),
 	})
 	var task struct{ ID string `json:"id"` }
 	decodeJSON(t, postResp, &task)
@@ -1709,13 +1709,13 @@ func TestTaskSearch_API(t *testing.T) {
 	setup := newTestSetup(t)
 
 	agentID := setup.kp.AgentID()
-	if err := setup.tl.FundAgent(agentID, 100_000); err != nil {
+	if err := setup.tl.FundAgent(agentID, 400_000); err != nil {
 		t.Fatalf("FundAgent: %v", err)
 	}
 
 	// Post two tasks
-	postJSON(t, setup.ts, "/v1/tasks", map[string]any{"title": "Task A", "budget": uint64(1_000), "category": "ml"})
-	postJSON(t, setup.ts, "/v1/tasks", map[string]any{"title": "Task B", "budget": uint64(2_000), "category": "nlp"})
+	postJSON(t, setup.ts, "/v1/tasks", map[string]any{"title": "Task A", "budget": uint64(100_000), "category": "ml"})
+	postJSON(t, setup.ts, "/v1/tasks", map[string]any{"title": "Task B", "budget": uint64(100_000), "category": "nlp"})
 
 	// List all open tasks
 	resp := get(t, setup.ts, "/v1/tasks?status=open")
@@ -1734,12 +1734,12 @@ func TestTaskStats_API(t *testing.T) {
 	setup := newTestSetup(t)
 
 	agentID := setup.kp.AgentID()
-	if err := setup.tl.FundAgent(agentID, 100_000); err != nil {
+	if err := setup.tl.FundAgent(agentID, 400_000); err != nil {
 		t.Fatalf("FundAgent: %v", err)
 	}
 
-	postJSON(t, setup.ts, "/v1/tasks", map[string]any{"title": "Stats task 1", "budget": uint64(5_000)})
-	postJSON(t, setup.ts, "/v1/tasks", map[string]any{"title": "Stats task 2", "budget": uint64(3_000)})
+	postJSON(t, setup.ts, "/v1/tasks", map[string]any{"title": "Stats task 1", "budget": uint64(100_000)})
+	postJSON(t, setup.ts, "/v1/tasks", map[string]any{"title": "Stats task 2", "budget": uint64(100_000)})
 
 	resp := get(t, setup.ts, "/v1/tasks/stats")
 	if resp.StatusCode != http.StatusOK {
@@ -1758,8 +1758,8 @@ func TestTaskStats_API(t *testing.T) {
 	if stats.OpenTasks < 2 {
 		t.Errorf("OpenTasks = %d; want >= 2", stats.OpenTasks)
 	}
-	if stats.TotalBudget < 8_000 {
-		t.Errorf("TotalBudget = %d; want >= 8000", stats.TotalBudget)
+	if stats.TotalBudget < 200_000 {
+		t.Errorf("TotalBudget = %d; want >= 200000", stats.TotalBudget)
 	}
 }
 
@@ -1815,11 +1815,11 @@ func TestE2EFullTaskFlow(t *testing.T) {
 	const (
 		posterID = "e2e-poster"
 		workerID = "e2e-worker"
-		budget   = uint64(20_000) // large enough that CalculateFee returns > 0
+		budget   = uint64(100_000) // meets MinTaskBudget; CalculateFee returns 100
 	)
 
-	// Fund the poster.
-	if err := setup.tl.FundAgent(crypto.AgentID(posterID), 100_000); err != nil {
+	// Fund the poster with enough to cover the budget.
+	if err := setup.tl.FundAgent(crypto.AgentID(posterID), 200_000); err != nil {
 		t.Fatalf("FundAgent poster: %v", err)
 	}
 

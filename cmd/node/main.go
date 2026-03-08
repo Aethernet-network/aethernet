@@ -411,8 +411,11 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 	// Autonomous task router — matches open tasks to the best registered agent.
 	// The claimFunc and reputationFunc closures bridge the router to the live
 	// task and reputation managers without creating an import cycle.
+	// ROUTING: The router marks tasks with RoutedTo (assigns) rather than
+	// immediately claiming them. The assigned agent then claims explicitly via
+	// the API, benefiting from 60-second priority over unregistered agents.
 	claimFn := func(taskID string, agentID crypto.AgentID) error {
-		return taskMgr.ClaimTask(taskID, agentID)
+		return taskMgr.SetRoutedTo(taskID, string(agentID))
 	}
 	repFn := func(agentID crypto.AgentID, category string) (uint64, float64, float64, float64) {
 		rep := reputationMgr.GetReputation(agentID)

@@ -9,6 +9,7 @@
 package tasks
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -41,6 +42,17 @@ const (
 // complete quickly without waiting for the full period.
 const DefaultClaimDeadline = 10 * time.Minute
 
+// MinTaskBudget is the minimum budget (in micro-AET) for a task posted via
+// the HTTP API. This ensures fees are non-trivial and guards against spam.
+// 100,000 µAET = 0.1 AET.
+const MinTaskBudget = uint64(100_000)
+
+// MaxCompletedAge is the maximum time a completed or cancelled task stays in
+// memory before being archived. Tasks older than this are evicted from the
+// in-memory map on the hourly cleanup pass; they remain in the persistence
+// store and can be recovered on restart.
+const MaxCompletedAge = 7 * 24 * time.Hour
+
 // Sentinel errors returned by TaskManager methods.
 var (
 	ErrTaskNotFound       = errors.New("tasks: task not found")
@@ -51,6 +63,8 @@ var (
 	ErrWrongClaimer       = errors.New("tasks: not the claimer")
 	ErrWrongPoster        = errors.New("tasks: not the poster")
 	ErrNotClaimer         = errors.New("tasks: caller is not the task claimer")
+	ErrSelfClaim          = errors.New("tasks: poster cannot claim their own task")
+	ErrTaskAlreadyRouted  = errors.New("tasks: task already routed to another agent")
 )
 
 // Task is a unit of work posted to the marketplace.
@@ -78,6 +92,12 @@ type Task struct {
 	ParentTaskID string   `json:"parent_task_id,omitempty"`
 	SubtaskIDs   []string `json:"subtask_ids,omitempty"`
 	IsSubtask    bool     `json:"is_subtask,omitempty"`
+	// Routing fields — set by the autonomous task router.
+	// RoutedTo is the AgentID the router has assigned this task to. When set,
+	// only that agent may claim the task; other agents must wait until the
+	// router assignment times out (60 seconds after posting).
+	RoutedTo string `json:"routed_to,omitempty"`
+	RoutedAt int64  `json:"routed_at,omitempty"`
 }
 
 // taskStore is the subset of store.Store used by TaskManager.
@@ -104,9 +124,11 @@ type Stats struct {
 // TaskManager manages the task marketplace lifecycle.
 // It is safe for concurrent use by multiple goroutines.
 type TaskManager struct {
-	mu    sync.RWMutex
-	tasks map[string]*Task
-	store taskStore
+	mu     sync.RWMutex
+	tasks  map[string]*Task
+	store  taskStore
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // NewTaskManager returns a new empty TaskManager.
@@ -118,6 +140,70 @@ func NewTaskManager() *TaskManager {
 // write through to the store on every change.
 func (m *TaskManager) SetStore(s taskStore) {
 	m.store = s
+}
+
+// Start launches the background cleanup goroutine that archives old completed
+// and cancelled tasks from the in-memory map to prevent unbounded growth.
+// Tasks are persisted before eviction so they survive node restarts.
+// Call Stop when the node is shutting down. Multiple Start calls are idempotent.
+func (m *TaskManager) Start() {
+	m.mu.Lock()
+	if m.cancel != nil {
+		m.mu.Unlock()
+		return // already running
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.ctx = ctx
+	m.cancel = cancel
+	m.mu.Unlock()
+	go m.cleanupLoop(ctx)
+}
+
+// Stop shuts down the background cleanup goroutine. It is a no-op if Start
+// was not called or has already been stopped.
+func (m *TaskManager) Stop() {
+	m.mu.Lock()
+	cancel := m.cancel
+	m.cancel = nil
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// cleanupLoop runs the hourly archive sweep until ctx is cancelled.
+func (m *TaskManager) cleanupLoop(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.archiveCompleted()
+		}
+	}
+}
+
+// archiveCompleted evicts completed or cancelled tasks older than MaxCompletedAge
+// from the in-memory map. The tasks are already persisted to the store, so
+// they can be recovered on the next restart via LoadFromStore.
+// Must be called without m.mu held (acquires write lock internally).
+func (m *TaskManager) archiveCompleted() {
+	cutoff := time.Now().Add(-MaxCompletedAge)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, task := range m.tasks {
+		if task.CompletedAt == 0 {
+			continue // not yet completed/cancelled
+		}
+		if task.Status != TaskStatusCompleted && task.Status != TaskStatusCancelled {
+			continue
+		}
+		if time.Unix(0, task.CompletedAt).Before(cutoff) {
+			delete(m.tasks, id)
+		}
+	}
 }
 
 // LoadFromStore reconstructs tasks from a persisted store.
@@ -171,8 +257,9 @@ func (m *TaskManager) PostTask(posterID, title, description, category string, bu
 }
 
 // ClaimTask assigns a task to claimerID. Returns ErrTaskNotFound if the task
-// doesn't exist, ErrTaskAlreadyClaimed if already claimed, or ErrTaskNotOpen
-// if the task is in any other non-open state.
+// doesn't exist, ErrTaskAlreadyClaimed if already claimed, ErrTaskNotOpen
+// if the task is in any other non-open state, or ErrSelfClaim if the claimer
+// is the same agent that posted the task.
 func (m *TaskManager) ClaimTask(taskID string, claimerID crypto.AgentID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -190,11 +277,41 @@ func (m *TaskManager) ClaimTask(taskID string, claimerID crypto.AgentID) error {
 		return fmt.Errorf("%w: %s (status: %s)", ErrTaskNotOpen, taskID, task.Status)
 	}
 
+	// C4: prevent poster from claiming their own task.
+	if task.PosterID == string(claimerID) {
+		return fmt.Errorf("%w: %s", ErrSelfClaim, taskID)
+	}
+
 	task.ClaimerID = string(claimerID)
 	task.Status = TaskStatusClaimed
 	now := time.Now()
 	task.ClaimedAt = now.UnixNano()
 	task.ClaimDeadline = now.Add(DefaultClaimDeadline).UnixNano()
+	m.persist(task)
+	return nil
+}
+
+// SetRoutedTo marks a task as assigned to a specific agent by the autonomous
+// router. The task remains Open — the agent must still call ClaimTask to start
+// work. Returns ErrTaskNotFound if absent, ErrTaskNotOpen if the task is not
+// in Open state, or ErrTaskAlreadyRouted if routed to a different agent.
+func (m *TaskManager) SetRoutedTo(taskID, agentID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
+	}
+	if task.Status != TaskStatusOpen {
+		return fmt.Errorf("%w: %s (status: %s)", ErrTaskNotOpen, taskID, task.Status)
+	}
+	if task.RoutedTo != "" && task.RoutedTo != agentID {
+		return fmt.Errorf("%w: task %s already routed to %s", ErrTaskAlreadyRouted, taskID, task.RoutedTo)
+	}
+
+	task.RoutedTo = agentID
+	task.RoutedAt = time.Now().UnixNano()
 	m.persist(task)
 	return nil
 }

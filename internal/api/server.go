@@ -749,6 +749,26 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		posterID = string(s.agentID)
 	}
 
+	// I4: Enforce minimum task budget (0.1 AET = 100,000 µAET).
+	if req.Budget < tasks.MinTaskBudget {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("budget must be at least %d µAET (0.1 AET)", tasks.MinTaskBudget))
+		return
+	}
+
+	// I10: Input validation — field length limits.
+	if len(req.Title) > 200 {
+		writeError(w, http.StatusBadRequest, "title must be at most 200 characters")
+		return
+	}
+	if len(req.Description) > 5000 {
+		writeError(w, http.StatusBadRequest, "description must be at most 5000 characters")
+		return
+	}
+	if len(req.Category) > 50 {
+		writeError(w, http.StatusBadRequest, "category must be at most 50 characters")
+		return
+	}
+
 	// Validate poster has sufficient balance before creating the task.
 	if err := s.transfer.BalanceCheck(crypto.AgentID(posterID), req.Budget); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -848,6 +868,27 @@ func (s *Server) handleClaimTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	taskID := r.PathValue("id")
+
+	// ROUTING: Enforce auto-router priority when the router is configured.
+	// If the task has been assigned to a specific agent, only that agent may
+	// claim it. If not yet assigned but posted within the last 60 seconds, hold
+	// off to give the router a chance to find the best match.
+	if s.taskRouter != nil {
+		if taskBefore, tErr := s.taskMgr.Get(taskID); tErr == nil {
+			if taskBefore.RoutedTo != "" && taskBefore.RoutedTo != claimerID {
+				writeError(w, http.StatusConflict, "task already assigned to another agent by the router")
+				return
+			}
+			if taskBefore.RoutedTo == "" {
+				taskAge := time.Now().UnixNano() - taskBefore.PostedAt
+				if taskAge < int64(60*time.Second) {
+					writeError(w, http.StatusConflict, "task is pending router assignment; please retry after 60 seconds")
+					return
+				}
+			}
+		}
+	}
+
 	if err := s.taskMgr.ClaimTask(taskID, crypto.AgentID(claimerID)); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -931,15 +972,23 @@ func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Release escrow to the claimer minus the protocol fee. Best-effort — the task
-	// is already approved. Fees are collected via feeCollector if available.
+	// Release escrow: distribute budget across worker, validator, and treasury
+	// directly from the escrow bucket (C1/C2 fix — no token minting).
 	if taskBefore.ClaimerID != "" {
 		fee := fees.CalculateFee(taskBefore.Budget)
 		netAmount := taskBefore.Budget - fee
-		if err := s.escrowMgr.ReleaseNet(taskID, crypto.AgentID(taskBefore.ClaimerID), netAmount); err != nil {
+		validatorAmount := fee * fees.ValidatorShare / 100
+		treasuryAmount := fee * fees.TreasuryShare / 100
+		burned := fee - validatorAmount - treasuryAmount
+		if err := s.escrowMgr.ReleaseNet(
+			taskID,
+			crypto.AgentID(taskBefore.ClaimerID), netAmount,
+			s.agentID, validatorAmount,
+			crypto.AgentID(genesis.BucketTreasury), treasuryAmount,
+		); err != nil {
 			slog.Warn("handleApproveTask: escrow release failed", "task_id", taskID, "err", err)
 		} else if s.feeCollector != nil && fee > 0 {
-			s.feeCollector.CollectFee(taskBefore.Budget, s.agentID, crypto.AgentID(genesis.BucketTreasury))
+			s.feeCollector.TrackFee(fee, burned, treasuryAmount)
 		}
 		// Record task completion in the identity registry (best-effort).
 		_ = s.registry.RecordTaskCompletion(
@@ -1252,7 +1301,9 @@ func corsHeaders(w http.ResponseWriter) {
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Error("api: json encode error", "err", err)
+	}
 }
 
 // writeError writes a JSON error response with the standard {"error": msg} body.
@@ -1406,6 +1457,12 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 	// canonical cryptographic identity (AgentID = hex(pubkey) or caller-provided).
 	// This allows agents to have friendly names while retaining cryptographic anchoring.
 	if req.AgentID != "" && req.PublicKeyB64 != "" {
+		// I10: Display name length limit (64 chars).
+		if len(req.AgentID) > 64 {
+			writeCodedError(w, http.StatusBadRequest, "invalid_request",
+				"display name (agent_id) must be at most 64 characters", "")
+			return
+		}
 		fp.DisplayName = req.AgentID
 	} else if req.AgentID != "" && req.PublicKeyB64 == "" {
 		// agent_id without public_key_b64: the id IS the canonical id, no display name.
@@ -2198,6 +2255,21 @@ func (s *Server) handlePostRegistry(w http.ResponseWriter, r *http.Request) {
 	if req.Category == "" {
 		writeError(w, http.StatusBadRequest, "category is required")
 		return
+	}
+	// I10: Input validation for registry listings.
+	if len(req.Name) > 64 {
+		writeError(w, http.StatusBadRequest, "name must be at most 64 characters")
+		return
+	}
+	if len(req.Tags) > 10 {
+		writeError(w, http.StatusBadRequest, "at most 10 tags allowed")
+		return
+	}
+	for _, tag := range req.Tags {
+		if len(tag) > 50 {
+			writeError(w, http.StatusBadRequest, "each tag must be at most 50 characters")
+			return
+		}
 	}
 
 	// Accept any agent_id from the body; fall back to the node's own identity.

@@ -264,6 +264,12 @@ func (r *Router) routePending() {
 	newcomerRoutes := 0
 
 	for _, task := range open {
+		// Skip tasks already routed to an agent — they are waiting for that
+		// agent to claim them and should not be re-routed to someone else.
+		if task.RoutedTo != "" {
+			continue
+		}
+
 		routeCount++
 
 		// Ratio controller: use the newcomer slot when the current newcomer

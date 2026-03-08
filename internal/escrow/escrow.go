@@ -88,15 +88,26 @@ func (e *Escrow) Release(taskID string, claimerID crypto.AgentID) error {
 	return nil
 }
 
-// ReleaseNet releases exactly amount (the worker's net payment after fee
-// deduction) from the task bucket to claimerID, then deletes the escrow entry.
-// The caller is responsible for computing amount = entry.Amount - fee before
-// calling; the remaining fee tokens in the bucket are effectively burned
-// (stranded in the virtual bucket with no entry to reclaim them), which is
-// offset by the fee collector crediting the validator and treasury separately.
+// ReleaseNet releases the escrowed budget across three recipients — worker,
+// validator, and treasury — all from the task's escrow bucket. After the
+// transfers the escrow bucket balance is zero and the entry is deleted.
+//
+// Parameters:
+//   - claimerID / netAmount:    worker's share (budget minus fee)
+//   - validatorID / validatorAmount: validator's share of the fee (80%)
+//   - treasuryID / treasuryAmount:   treasury's share of the fee (20%)
+//
+// The caller is responsible for computing the split using fees.CalculateFee,
+// fees.ValidatorShare, and fees.TreasuryShare before calling. Any remainder
+// (burned amount) is intentionally left in the bucket if non-zero.
 //
 // Returns ErrEscrowNotFound if no escrow exists for taskID.
-func (e *Escrow) ReleaseNet(taskID string, claimerID crypto.AgentID, amount uint64) error {
+func (e *Escrow) ReleaseNet(
+	taskID string,
+	claimerID crypto.AgentID, netAmount uint64,
+	validatorID crypto.AgentID, validatorAmount uint64,
+	treasuryID crypto.AgentID, treasuryAmount uint64,
+) error {
 	e.mu.RLock()
 	_, ok := e.entries[taskID]
 	e.mu.RUnlock()
@@ -104,8 +115,25 @@ func (e *Escrow) ReleaseNet(taskID string, claimerID crypto.AgentID, amount uint
 		return fmt.Errorf("%w: task %s", ErrEscrowNotFound, taskID)
 	}
 
-	if err := e.ledger.TransferFromBucket(bucketID(taskID), claimerID, amount); err != nil {
-		return fmt.Errorf("escrow: release-net for task %s: %w", taskID, err)
+	bucket := bucketID(taskID)
+
+	// Transfer the worker's net share first.
+	if err := e.ledger.TransferFromBucket(bucket, claimerID, netAmount); err != nil {
+		return fmt.Errorf("escrow: release-net worker for task %s: %w", taskID, err)
+	}
+
+	// Distribute validator share from the remaining escrow balance.
+	if validatorAmount > 0 {
+		if err := e.ledger.TransferFromBucket(bucket, validatorID, validatorAmount); err != nil {
+			return fmt.Errorf("escrow: release-net validator for task %s: %w", taskID, err)
+		}
+	}
+
+	// Distribute treasury share from the remaining escrow balance.
+	if treasuryAmount > 0 {
+		if err := e.ledger.TransferFromBucket(bucket, treasuryID, treasuryAmount); err != nil {
+			return fmt.Errorf("escrow: release-net treasury for task %s: %w", taskID, err)
+		}
 	}
 
 	e.mu.Lock()

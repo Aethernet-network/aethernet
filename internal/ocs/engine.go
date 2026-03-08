@@ -509,6 +509,20 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 	// domains through richer VerificationResult metadata in future iterations.
 	domain := string(item.EventType)
 
+	// C3: Re-check stake at settlement time for Transfer events.
+	// An agent that unstaked after Submit to exploit the optimistic window is
+	// treated as a failed verification and their remaining stake is slashed.
+	if result.Verdict && item.EventType == event.EventTypeTransfer && e.stakeManager != nil {
+		if e.stakeManager.StakedAmount(item.AgentID) < e.config.MinStakeRequired {
+			result.Verdict = false
+			if result.Reason != "" {
+				result.Reason = "stake dropped below minimum before settlement: " + result.Reason
+			} else {
+				result.Reason = "stake dropped below minimum before settlement"
+			}
+		}
+	}
+
 	if result.Verdict {
 		switch item.EventType {
 		case event.EventTypeTransfer:

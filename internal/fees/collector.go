@@ -132,6 +132,22 @@ func (c *Collector) CollectFee(
 	return fee, burned
 }
 
+// TrackFee records fee statistics without minting new tokens. Use this instead
+// of CollectFee when the fee has already been distributed via escrow bucket
+// transfers (e.g. ReleaseNet). This avoids double-crediting the validator and
+// treasury while still keeping the cumulative statistics accurate.
+func (c *Collector) TrackFee(fee, burned, treasury uint64) {
+	if fee == 0 {
+		return
+	}
+	c.mu.Lock()
+	c.totalCollected += fee
+	c.totalBurned += burned
+	c.treasuryAccrued += treasury
+	c.persistStatsLocked()
+	c.mu.Unlock()
+}
+
 // Stats returns cumulative fee collection statistics as a point-in-time snapshot.
 func (c *Collector) Stats() (collected, burned, treasury uint64) {
 	c.mu.RLock()

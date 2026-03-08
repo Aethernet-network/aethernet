@@ -289,14 +289,22 @@ func (av *AutoValidator) processDisputedTasks() {
 				log.Printf("auto-validator: could not resolve dispute (approve) for task %s: %v", task.ID, err)
 				continue
 			}
-			// Release escrow and collect fee exactly like normal settlement.
+			// Release escrow and distribute fee from the escrow bucket (C1/C2 fix).
 			if av.escrowMgr != nil && task.ClaimerID != "" {
 				fee := fees.CalculateFee(task.Budget)
 				netAmount := task.Budget - fee
-				if err := av.escrowMgr.ReleaseNet(task.ID, crypto.AgentID(task.ClaimerID), netAmount); err != nil {
+				validatorAmount := fee * fees.ValidatorShare / 100
+				treasuryAmount := fee * fees.TreasuryShare / 100
+				burned := fee - validatorAmount - treasuryAmount
+				if err := av.escrowMgr.ReleaseNet(
+					task.ID,
+					crypto.AgentID(task.ClaimerID), netAmount,
+					av.validatorID, validatorAmount,
+					av.treasuryID, treasuryAmount,
+				); err != nil {
 					log.Printf("auto-validator: could not release escrow (dispute approve) for task %s: %v", task.ID, err)
 				} else if av.feeCollector != nil && fee > 0 {
-					av.feeCollector.CollectFee(task.Budget, av.validatorID, av.treasuryID)
+					av.feeCollector.TrackFee(fee, burned, treasuryAmount)
 				}
 			}
 			if av.generationLedger != nil && task.ClaimerID != "" && score != nil {
@@ -357,12 +365,19 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score) {
 	if av.escrowMgr != nil && task.ClaimerID != "" {
 		fee := fees.CalculateFee(task.Budget)
 		netAmount := task.Budget - fee
-		if err := av.escrowMgr.ReleaseNet(task.ID, crypto.AgentID(task.ClaimerID), netAmount); err != nil {
+		validatorAmount := fee * fees.ValidatorShare / 100
+		treasuryAmount := fee * fees.TreasuryShare / 100
+		burned := fee - validatorAmount - treasuryAmount
+		// C1/C2: Distribute all fee splits from the escrow bucket (no minting).
+		if err := av.escrowMgr.ReleaseNet(
+			task.ID,
+			crypto.AgentID(task.ClaimerID), netAmount,
+			av.validatorID, validatorAmount,
+			av.treasuryID, treasuryAmount,
+		); err != nil {
 			log.Printf("auto-validator: could not release escrow for task %s: %v", task.ID, err)
 		} else if av.feeCollector != nil && fee > 0 {
-			// CollectFee expects the full settlement amount and computes the
-			// 0.1% fee internally — pass task.Budget, not the pre-computed fee.
-			av.feeCollector.CollectFee(task.Budget, av.validatorID, av.treasuryID)
+			av.feeCollector.TrackFee(fee, burned, treasuryAmount)
 			log.Printf("auto-validator: collected fee %d for task %s (net to worker: %d)",
 				fee, task.ID, netAmount)
 		}
