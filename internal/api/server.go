@@ -1457,9 +1457,10 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		if err := s.transfer.FundAgent(regAgentID, allocation); err == nil {
 			resp.OnboardingAllocation = allocation
 			if s.stakeManager != nil {
-				s.stakeManager.Stake(regAgentID, allocation)
+				stakeAmount := allocation / 2
+				s.stakeManager.Stake(regAgentID, stakeAmount)
 				since := s.stakeManager.StakedSince(regAgentID)
-				resp.TrustLimit = staking.TrustLimit(allocation, 0, since, time.Now().Unix())
+				resp.TrustLimit = staking.TrustLimit(stakeAmount, 0, since, time.Now().Unix())
 			}
 		}
 	} else {
