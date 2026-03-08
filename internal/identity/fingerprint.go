@@ -86,6 +86,12 @@ type CapabilityFingerprint struct {
 	// AgentID is the stable anchor.
 	AgentID crypto.AgentID `json:"agent_id"`
 
+	// DisplayName is a human-readable alias for the agent. Unlike AgentID, it
+	// is not required to be unique or cryptographically derived — it is purely
+	// a convenience label chosen by the agent at registration time (e.g. "my-llm-agent").
+	// Agents may be looked up by DisplayName via Registry.GetByDisplayName.
+	DisplayName string `json:"display_name,omitempty"`
+
 	// PublicKey is the raw Ed25519 public key bytes (32 bytes), allowing
 	// signature verification without decoding AgentID from hex on the hot path.
 	PublicKey []byte `json:"public_key"`
@@ -154,6 +160,7 @@ type CapabilityFingerprint struct {
 // any mutation produces a detectably different hash.
 type fingerprintCanonical struct {
 	AgentID               crypto.AgentID `json:"agent_id"`
+	DisplayName           string         `json:"display_name,omitempty"`
 	PublicKey             []byte         `json:"public_key"`
 	Capabilities          []Capability   `json:"capabilities"`
 	TasksCompleted        uint64         `json:"tasks_completed"`
@@ -207,6 +214,7 @@ func NewFingerprint(agentID crypto.AgentID, publicKey []byte, capabilities []Cap
 func (fp *CapabilityFingerprint) ComputeHash() (string, error) {
 	canon := fingerprintCanonical{
 		AgentID:               fp.AgentID,
+		DisplayName:           fp.DisplayName,
 		PublicKey:             fp.PublicKey,
 		Capabilities:          fp.Capabilities,
 		TasksCompleted:        fp.TasksCompleted,

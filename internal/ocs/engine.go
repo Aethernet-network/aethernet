@@ -216,9 +216,10 @@ type Engine struct {
 	// Nil-safe throughout Submit and ProcessResult.
 	nodeMetrics *metrics.AetherNetMetrics
 
-	pending   map[event.EventID]*PendingItem
-	processed map[event.EventID]struct{} // tracks already-settled events for idempotency
-	results   chan VerificationResult
+	pending      map[event.EventID]*PendingItem
+	processed    map[event.EventID]struct{}    // tracks already-settled events for idempotency
+	processedAt  map[event.EventID]time.Time   // wall-clock time each event was settled (for GC)
+	results      chan VerificationResult
 
 	store ocsPersistence // optional; nil means in-memory only
 
@@ -279,13 +280,14 @@ func NewEngine(
 		config = DefaultConfig()
 	}
 	return &Engine{
-		config:     config,
-		transfer:   tl,
-		generation: gl,
-		identity:   reg,
-		pending:    make(map[event.EventID]*PendingItem),
-		processed:  make(map[event.EventID]struct{}),
-		results:    make(chan VerificationResult, resultsBufferSize),
+		config:      config,
+		transfer:    tl,
+		generation:  gl,
+		identity:    reg,
+		pending:     make(map[event.EventID]*PendingItem),
+		processed:   make(map[event.EventID]struct{}),
+		processedAt: make(map[event.EventID]time.Time),
+		results:     make(chan VerificationResult, resultsBufferSize),
 	}
 }
 
@@ -496,6 +498,7 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 
 	delete(e.pending, result.EventID)
 	e.processed[result.EventID] = struct{}{}
+	e.processedAt[result.EventID] = time.Now()
 	if e.store != nil {
 		_ = e.store.DeletePending(result.EventID)
 	}
@@ -619,14 +622,25 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 // prevent races with concurrent real verdicts. The processed set ensures that
 // if a real verdict was applied between collection and processing, the expiry
 // is silently skipped (idempotent).
+//
+// Also sweeps processedAt for entries older than 1 hour to prevent the
+// idempotency map from growing without bound over time.
 func (e *Engine) checkExpired() {
 	now := time.Now()
+	processedCutoff := now.Add(-1 * time.Hour)
 
 	e.mu.Lock()
 	var expired []event.EventID
 	for id, item := range e.pending {
 		if now.Sub(item.OptimisticAt) > item.Deadline {
 			expired = append(expired, id)
+		}
+	}
+	// GC: remove processed entries older than 1 hour from the idempotency maps.
+	for id, settledAt := range e.processedAt {
+		if settledAt.Before(processedCutoff) {
+			delete(e.processed, id)
+			delete(e.processedAt, id)
 		}
 	}
 	e.mu.Unlock()

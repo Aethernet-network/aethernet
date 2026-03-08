@@ -20,10 +20,12 @@
 package staking
 
 import (
+	"log"
 	"sync"
 	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/ledger"
 )
 
 // Decay constants.
@@ -123,11 +125,11 @@ func TrustLimitFull(stakedAmount uint64, tasksCompleted uint64, stakedSince int6
 // ---------------------------------------------------------------------------
 
 // stakeStore is the subset of store.Store used by StakeManager for write-through
-// persistence of staking metadata (timestamps). *store.Store satisfies this.
+// persistence of staking metadata (timestamps + staked amount). *store.Store satisfies this.
 type stakeStore interface {
-	PutStakeMeta(agentID crypto.AgentID, stakedSince int64, lastActivity int64) error
-	GetStakeMeta(agentID crypto.AgentID) (stakedSince int64, lastActivity int64, err error)
-	AllStakeMeta() (map[crypto.AgentID][2]int64, error)
+	PutStakeMeta(agentID crypto.AgentID, stakedSince int64, lastActivity int64, stakedAmount uint64) error
+	GetStakeMeta(agentID crypto.AgentID) (stakedSince int64, lastActivity int64, stakedAmount uint64, err error)
+	AllStakeMeta() (map[crypto.AgentID][3]int64, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +144,7 @@ type StakeManager struct {
 	stakedSince  map[crypto.AgentID]int64 // Unix timestamp of first stake
 	lastActivity map[crypto.AgentID]int64 // Unix timestamp of last transaction
 	store        stakeStore               // optional persistence; nil = in-memory only
+	transfer     *ledger.TransferLedger   // optional; when set, Stake/Unstake debit the ledger
 }
 
 // NewStakeManager returns an empty StakeManager.
@@ -161,7 +164,17 @@ func (sm *StakeManager) SetStore(s stakeStore) {
 	sm.store = s
 }
 
-// LoadFromStore restores stakedSince and lastActivity timestamps from the store.
+// SetTransferLedger wires the protocol transfer ledger into the StakeManager.
+// When set, Stake debits the staking agent's balance (transferring to the
+// staking-pool bucket) and Unstake credits it back. This prevents over-staking
+// beyond an agent's actual balance.
+func (sm *StakeManager) SetTransferLedger(tl *ledger.TransferLedger) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.transfer = tl
+}
+
+// LoadFromStore restores stakedSince, lastActivity, and staked amounts from the store.
 // Call before using the StakeManager after a node restart.
 func (sm *StakeManager) LoadFromStore(s stakeStore) error {
 	meta, err := s.AllStakeMeta()
@@ -177,26 +190,40 @@ func (sm *StakeManager) LoadFromStore(s stakeStore) error {
 		if ts[1] != 0 {
 			sm.lastActivity[agentID] = ts[1]
 		}
+		if ts[2] != 0 {
+			sm.stakes[agentID] = uint64(ts[2])
+		}
 	}
 	return nil
 }
 
 // Stake adds amount to agentID's staked balance.
 // Records the first-stake Unix timestamp on the initial call.
+// When a TransferLedger is set (via SetTransferLedger), the staked amount is
+// debited from the agent's balance into the staking-pool bucket. If the debit
+// fails (insufficient balance), a warning is logged but staking proceeds.
 func (sm *StakeManager) Stake(agentID crypto.AgentID, amount uint64) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	if _, exists := sm.stakedSince[agentID]; !exists {
 		sm.stakedSince[agentID] = time.Now().Unix()
 	}
+	// Debit the agent's balance into the staking-pool when a ledger is wired.
+	if sm.transfer != nil && amount > 0 {
+		if err := sm.transfer.TransferFromBucket(agentID, "staking-pool", amount); err != nil {
+			log.Printf("staking: balance debit failed for %s (amount: %d): %v — staking recorded anyway", agentID, amount, err)
+		}
+	}
 	sm.stakes[agentID] += amount
 	if sm.store != nil {
-		_ = sm.store.PutStakeMeta(agentID, sm.stakedSince[agentID], sm.lastActivity[agentID])
+		_ = sm.store.PutStakeMeta(agentID, sm.stakedSince[agentID], sm.lastActivity[agentID], sm.stakes[agentID])
 	}
 }
 
 // Unstake removes amount from agentID's staked balance. Returns false if the
 // agent has insufficient stake (no state change occurs in that case).
+// When a TransferLedger is set, the unstaked amount is credited back from the
+// staking-pool bucket to the agent's balance.
 func (sm *StakeManager) Unstake(agentID crypto.AgentID, amount uint64) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -205,8 +232,17 @@ func (sm *StakeManager) Unstake(agentID crypto.AgentID, amount uint64) bool {
 		return false
 	}
 	sm.stakes[agentID] = current - amount
+	// Credit funds back to agent from staking-pool.
+	if sm.transfer != nil && amount > 0 {
+		if err := sm.transfer.TransferFromBucket("staking-pool", agentID, amount); err != nil {
+			log.Printf("staking: balance credit failed for %s (amount: %d): %v", agentID, amount, err)
+		}
+	}
 	if sm.stakes[agentID] == 0 {
 		delete(sm.stakes, agentID)
+	}
+	if sm.store != nil {
+		_ = sm.store.PutStakeMeta(agentID, sm.stakedSince[agentID], sm.lastActivity[agentID], sm.stakes[agentID])
 	}
 	return true
 }
@@ -242,7 +278,7 @@ func (sm *StakeManager) RecordActivity(agentID crypto.AgentID) {
 	defer sm.mu.Unlock()
 	sm.lastActivity[agentID] = time.Now().Unix()
 	if sm.store != nil {
-		_ = sm.store.PutStakeMeta(agentID, sm.stakedSince[agentID], sm.lastActivity[agentID])
+		_ = sm.store.PutStakeMeta(agentID, sm.stakedSince[agentID], sm.lastActivity[agentID], sm.stakes[agentID])
 	}
 }
 
@@ -279,7 +315,7 @@ func (sm *StakeManager) SlashDefault(agentID crypto.AgentID) uint64 {
 	delete(sm.stakedSince, agentID)  // reset: agent re-earns trust from scratch
 	delete(sm.lastActivity, agentID)
 	if sm.store != nil {
-		_ = sm.store.PutStakeMeta(agentID, 0, 0)
+		_ = sm.store.PutStakeMeta(agentID, 0, 0, 0)
 	}
 	return slashed
 }

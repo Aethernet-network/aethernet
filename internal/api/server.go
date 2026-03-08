@@ -37,6 +37,7 @@ package api
 import (
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -74,6 +75,13 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/wallet"
 )
+
+// onboardingStore is the subset of *store.Store used by the API server to
+// persist the onboarding allocation counter across restarts.
+type onboardingStore interface {
+	PutMeta(key string, value []byte) error
+	GetMeta(key string) ([]byte, error)
+}
 
 // taskRouterInterface is the subset of *router.Router used by the API server.
 // Using a local interface keeps the server testable without a real router.
@@ -152,6 +160,10 @@ type Server struct {
 	// Onboarding tracking. Protected by onboardingMu.
 	onboardingMu        sync.Mutex
 	onboardingAllocated uint64
+
+	// Persistence store — optional; set via SetStore after construction.
+	// When set, the onboarding counter is persisted so it survives restarts.
+	store onboardingStore
 
 	mux        *http.ServeMux
 	srv        *http.Server
@@ -272,6 +284,23 @@ func NewServer(
 	s.srv = &http.Server{Addr: listenAddr, Handler: s}
 
 	return s
+}
+
+// SetStore attaches a persistence backend for the onboarding counter. When set,
+// the counter is loaded on startup and written through on every allocation so
+// the declining-curve state survives node restarts.
+// s must satisfy onboardingStore; *store.Store from the store package does so.
+func (s *Server) SetStore(st onboardingStore) {
+	s.store = st
+	if st == nil {
+		return
+	}
+	// Load persisted onboarding counter.
+	if data, err := st.GetMeta("onboarding_allocated"); err == nil && len(data) == 8 {
+		s.onboardingMu.Lock()
+		s.onboardingAllocated = binary.BigEndian.Uint64(data)
+		s.onboardingMu.Unlock()
+	}
 }
 
 // SetEconomics wires optional economics components (wallet, staking, fee collection)
@@ -897,9 +926,16 @@ func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Release escrow to the claimer. Best-effort — the task is already approved.
+	// Release escrow to the claimer minus the protocol fee. Best-effort — the task
+	// is already approved. Fees are collected via feeCollector if available.
 	if taskBefore.ClaimerID != "" {
-		_ = s.escrowMgr.Release(taskID, crypto.AgentID(taskBefore.ClaimerID))
+		fee := fees.CalculateFee(taskBefore.Budget)
+		netAmount := taskBefore.Budget - fee
+		if err := s.escrowMgr.ReleaseNet(taskID, crypto.AgentID(taskBefore.ClaimerID), netAmount); err != nil {
+			slog.Warn("handleApproveTask: escrow release failed", "task_id", taskID, "err", err)
+		} else if s.feeCollector != nil && fee > 0 {
+			s.feeCollector.CollectFee(taskBefore.Budget, s.agentID, crypto.AgentID(genesis.BucketTreasury))
+		}
 		// Record task completion in the identity registry (best-effort).
 		_ = s.registry.RecordTaskCompletion(
 			crypto.AgentID(taskBefore.ClaimerID),
@@ -933,6 +969,9 @@ func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDisputeTask handles POST /v1/tasks/{id}/dispute.
+// Note: reputation failure is NOT pre-recorded here. The auto-validator records
+// a failure only after resolving the dispute — if the evidence score is below
+// the pass threshold. Pre-recording penalises the claimer before any review.
 func (s *Server) handleDisputeTask(w http.ResponseWriter, r *http.Request) {
 	if s.taskMgr == nil {
 		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
@@ -948,20 +987,9 @@ func (s *Server) handleDisputeTask(w http.ResponseWriter, r *http.Request) {
 
 	taskID := r.PathValue("id")
 
-	// Capture task state before disputing so we can record reputation failure.
-	taskBefore, _ := s.taskMgr.Get(taskID)
-
 	if err := s.taskMgr.DisputeTask(taskID, crypto.AgentID(posterID)); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
-	}
-
-	// Record reputation failure for the claimer (best-effort).
-	if s.reputationMgr != nil && taskBefore != nil && taskBefore.ClaimerID != "" {
-		s.reputationMgr.RecordFailure(
-			crypto.AgentID(taskBefore.ClaimerID),
-			taskBefore.Category,
-		)
 	}
 
 	task, _ := s.taskMgr.Get(taskID)
@@ -1368,6 +1396,16 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// When the caller supplied a human-readable agent_id alongside a public_key_b64,
+	// treat the agent_id as a display name and store it separately from the
+	// canonical cryptographic identity (AgentID = hex(pubkey) or caller-provided).
+	// This allows agents to have friendly names while retaining cryptographic anchoring.
+	if req.AgentID != "" && req.PublicKeyB64 != "" {
+		fp.DisplayName = req.AgentID
+	} else if req.AgentID != "" && req.PublicKeyB64 == "" {
+		// agent_id without public_key_b64: the id IS the canonical id, no display name.
+	}
+
 	if err := s.registry.Register(fp); err != nil {
 		if errors.Is(err, identity.ErrAgentAlreadyExists) {
 			existing, _ := s.registry.Get(regAgentID)
@@ -1406,7 +1444,15 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 	allocation := genesis.OnboardingAllocation(agentCountBefore)
 	if allocation > 0 && s.onboardingAllocated+allocation <= genesis.OnboardingPoolTotal {
 		s.onboardingAllocated += allocation
+		newAllocated := s.onboardingAllocated
 		s.onboardingMu.Unlock()
+
+		// Persist the updated counter so it survives restarts.
+		if s.store != nil {
+			buf := make([]byte, 8)
+			binary.BigEndian.PutUint64(buf, newAllocated)
+			_ = s.store.PutMeta("onboarding_allocated", buf)
+		}
 
 		if err := s.transfer.FundAgent(regAgentID, allocation); err == nil {
 			resp.OnboardingAllocation = allocation

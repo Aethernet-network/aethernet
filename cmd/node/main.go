@@ -354,6 +354,9 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 			slog.Warn("failed to restore stake metadata from store", "err", err)
 		}
 	}
+	// Wire the transfer ledger so that Stake/Unstake debit the agent's balance,
+	// preventing over-staking beyond available funds (Fix 12).
+	stakeMgr.SetTransferLedger(tl)
 	feeCollector := fees.NewCollector(tl)
 	walletMgr := wallet.New()
 	treasuryID := crypto.AgentID(genesis.BucketTreasury)
@@ -392,7 +395,14 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 	discoveryEng := discovery.NewEngine(svcReg, reputationMgr)
 
 	// Developer platform API key manager — tracks third-party apps building on AetherNet.
+	// Persist keys to the store so they survive restarts.
 	platformKeys := platformpkg.NewKeyManager()
+	if s != nil {
+		platformKeys.SetStore(s)
+		if err := platformKeys.LoadFromStore(s); err != nil {
+			slog.Warn("failed to restore platform API keys from store", "err", err)
+		}
+	}
 
 	// Autonomous task router — matches open tasks to the best registered agent.
 	// The claimFunc and reputationFunc closures bridge the router to the live
@@ -449,8 +459,9 @@ func printStatus(agentID crypto.AgentID, d *dag.DAG, n *network.Node, eng *ocs.E
 
 // startStack starts the OCS engine, network node, and HTTP API server.
 // p2pAddr and apiListenAddr override the defaults and may come from flags or
-// environment variables.
-func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr string) *network.Node {
+// environment variables. enableMarketplace controls whether task marketplace
+// components (task routing, auto-settlement, discovery) are started.
+func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr string, enableMarketplace bool) *network.Node {
 	// Create the metrics registry and wire it to the OCS engine.
 	metricsReg := metrics.NewRegistry()
 	nodeMetrics := metrics.NewAetherNetMetrics(metricsReg)
@@ -468,8 +479,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		os.Exit(1)
 	}
 
-	// Auto-validator: on testnet, automatically settle pending transactions
-	// every 5 seconds so the explorer shows Settled events and fees flow.
+	// Auto-validator: on testnet, automatically settle pending OCS transactions.
 	// The "testnet-validator" agent is registered in the identity registry so
 	// it appears in the explorer as a known participant.
 	testnetValidatorID := crypto.AgentID("testnet-validator")
@@ -478,16 +488,20 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		_ = stack.reg.Register(tvFP)
 	}
 	av := validator.NewAutoValidator(stack.engine, testnetValidatorID, 5*time.Second)
-	av.SetTaskManager(stack.taskMgr, stack.escrowMgr)
-	av.SetReputationManager(stack.reputationMgr)
 	av.SetFeeCollector(stack.feeCollector, crypto.AgentID(genesis.BucketTreasury))
 	av.SetGenerationLedger(stack.generation)
+	av.SetRegistry(stack.reg)
+	// Task marketplace integration is conditional on --marketplace flag.
+	if enableMarketplace {
+		av.SetTaskManager(stack.taskMgr, stack.escrowMgr)
+		av.SetReputationManager(stack.reputationMgr)
+	}
 	av.Start()
 	stack.autoVal = av
 
-	// Seed the task marketplace on first run. Only runs when the marketplace
-	// is empty (TotalTasks == 0) to avoid duplicating tasks across restarts.
-	if stack.taskMgr.Stats().TotalTasks == 0 {
+	// Seed the task marketplace on first run only when marketplace is enabled.
+	// Only runs when TotalTasks == 0 to avoid duplicating tasks across restarts.
+	if enableMarketplace && stack.taskMgr.Stats().TotalTasks == 0 {
 		seedMarketplace(stack.transfer, stack.reg, stack.taskMgr, stack.escrowMgr, stack.stakeManager)
 	}
 
@@ -506,25 +520,30 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		stack.reg, stack.engine, stack.supply,
 		node, stack.kp,
 	)
+	if stack.store != nil {
+		// Persist onboarding counter so the declining-curve survives restarts.
+		apiSrv.SetStore(stack.store)
+	}
 	if stack.svcRegistry != nil {
 		apiSrv.SetServiceRegistry(stack.svcRegistry)
 	}
-	apiSrv.SetTaskManager(stack.taskMgr, stack.escrowMgr)
-	apiSrv.SetReputationManager(stack.reputationMgr)
-	if stack.discoveryEngine != nil {
-		apiSrv.SetDiscoveryEngine(stack.discoveryEngine)
+	// Marketplace endpoints are only wired when --marketplace is active.
+	if enableMarketplace {
+		apiSrv.SetTaskManager(stack.taskMgr, stack.escrowMgr)
+		apiSrv.SetReputationManager(stack.reputationMgr)
+		if stack.discoveryEngine != nil {
+			apiSrv.SetDiscoveryEngine(stack.discoveryEngine)
+		}
+		if stack.taskRouter != nil {
+			seedRouterCapabilities(stack.taskRouter)
+			stack.taskRouter.Start()
+			apiSrv.SetTaskRouter(stack.taskRouter)
+		}
 	}
 	apiSrv.SetEconomics(stack.walletMgr, stack.stakeManager, stack.feeCollector)
 	apiSrv.SetEventBus(bus)
 	if stack.platformKeys != nil {
 		apiSrv.SetPlatformKeys(stack.platformKeys)
-	}
-	if stack.taskRouter != nil {
-		// Register seed agent capabilities so the testnet router has agents to
-		// assign tasks to from the moment it starts.
-		seedRouterCapabilities(stack.taskRouter)
-		stack.taskRouter.Start()
-		apiSrv.SetTaskRouter(stack.taskRouter)
 	}
 	apiSrv.SetRateLimiters(
 		ratelimit.New(ratelimit.DefaultConfig()),
@@ -570,37 +589,42 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 
 	// Background activity generator — simulates transfers between seed agents
 	// every 30 s so the explorer's activity feed stays live on the testnet.
-	activityAgents := []string{"alpha-researcher", "data-scientist", "code-auditor", "doc-writer"}
-	transferFn := func(from, to string, amount uint64, memo string) error {
-		tips := stack.dag.Tips()
-		priorTS := make(map[event.EventID]uint64, len(tips))
-		for _, ref := range tips {
-			if ev, err := stack.dag.Get(ref); err == nil {
-				priorTS[ref] = ev.CausalTimestamp
+	// Gated behind AETHERNET_TESTNET=true to prevent spurious activity on
+	// mainnet or production nodes that don't need synthetic traffic.
+	if os.Getenv("AETHERNET_TESTNET") == "true" {
+		activityAgents := []string{"alpha-researcher", "data-scientist", "code-auditor", "doc-writer"}
+		transferFn := func(from, to string, amount uint64, memo string) error {
+			tips := stack.dag.Tips()
+			priorTS := make(map[event.EventID]uint64, len(tips))
+			for _, ref := range tips {
+				if ev, err := stack.dag.Get(ref); err == nil {
+					priorTS[ref] = ev.CausalTimestamp
+				}
 			}
+			e, err := event.New(
+				event.EventTypeTransfer,
+				tips,
+				event.TransferPayload{FromAgent: from, ToAgent: to, Amount: amount, Currency: "AET", Memo: memo},
+				string(agentID),
+				priorTS,
+				stack.engine.MinEventStake(),
+			)
+			if err != nil {
+				return err
+			}
+			if err := crypto.SignEvent(e, stack.kp); err != nil {
+				return err
+			}
+			if err := stack.engine.Submit(e); err != nil {
+				return err
+			}
+			return stack.dag.Add(e)
 		}
-		e, err := event.New(
-			event.EventTypeTransfer,
-			tips,
-			event.TransferPayload{FromAgent: from, ToAgent: to, Amount: amount, Currency: "AET", Memo: memo},
-			string(agentID),
-			priorTS,
-			stack.engine.MinEventStake(),
-		)
-		if err != nil {
-			return err
-		}
-		if err := crypto.SignEvent(e, stack.kp); err != nil {
-			return err
-		}
-		if err := stack.engine.Submit(e); err != nil {
-			return err
-		}
-		return stack.dag.Add(e)
+		actGen := demo.NewActivityGenerator(transferFn, activityAgents, 30*time.Second)
+		actGen.Start()
+		stack.activityGen = actGen
+		slog.Info("testnet activity generator started")
 	}
-	actGen := demo.NewActivityGenerator(transferFn, activityAgents, 30*time.Second)
-	actGen.Start()
-	stack.activityGen = actGen
 
 	return node
 }
@@ -711,7 +735,9 @@ func cmdStart() {
 	// This flag preserves backward compatibility with existing deployments while
 	// introducing the separation between the protocol layer and the marketplace
 	// application layer. Use cmd/marketplace for the standalone deployment.
-	_ = enableMarketplace // wiring controlled below via stack.marketplace field
+	// Pass the flag to startStack so marketplace components are only wired
+	// when explicitly requested (protocol-only deployments skip them).
+	_ = enableMarketplace // used by startStack below
 
 	kp := loadKeyPair()
 	agentID := kp.AgentID()
@@ -725,17 +751,18 @@ func cmdStart() {
 	// Auto-genesis: on first Docker start, seed the initial token supply when
 	// the founders bucket is empty. Only runs in non-interactive mode
 	// (AETHERNET_DATA is set) to preserve the manual genesis workflow in
-	// interactive / development environments.
+	// interactive / development environments. Pass the store so seedGenesis
+	// writes an idempotency marker preventing double-runs.
 	if os.Getenv("AETHERNET_DATA") != "" {
 		foundersBalance, _ := stack.transfer.Balance(crypto.AgentID(genesis.BucketFounders))
 		if foundersBalance == 0 {
 			slog.Info("auto-genesis: seeding initial token supply")
-			seedGenesis(stack.transfer)
+			seedGenesis(stack.transfer, stack.store)
 			fmt.Println("Auto-genesis: initial token supply seeded.")
 		}
 	}
 
-	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr)
+	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, *enableMarketplace)
 
 	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\nAPI      : %s\n\n",
 		VERSION, agentID, node.ListenAddr(), *apiListenAddr)
@@ -780,7 +807,9 @@ func cmdConnect() {
 	s := openStoreWithRecovery(storePath())
 
 	stack := buildStack(s, kp)
-	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr)
+	// cmdConnect is the legacy subcommand; marketplace is disabled by default.
+	// Use 'aethernet start --marketplace' for the combined deployment.
+	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, false)
 
 	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\nAPI      : %s\n\n",
 		VERSION, agentID, node.ListenAddr(), *apiListenAddr)
@@ -965,11 +994,31 @@ func seedMarketplace(tl *ledger.TransferLedger, reg *identity.Registry, taskMgr 
 	slog.Info("seedMarketplace: seeded task marketplace", "tasks", len(seedTasks))
 }
 
+// genesisStore is the subset of store.Store used by genesis idempotency checks.
+type genesisStore interface {
+	PutMeta(key string, value []byte) error
+	GetMeta(key string) ([]byte, error)
+}
+
+const genesisMarkerKey = "genesis_complete"
+
 // seedGenesis funds the six genesis allocation buckets using the provided
 // TransferLedger. It is called automatically on first start when the store has
 // no genesis allocation yet (Docker mode). It is also the implementation shared
 // by cmdGenesis to avoid code duplication.
-func seedGenesis(tl *ledger.TransferLedger) {
+//
+// When s is non-nil, seedGenesis is idempotent: it checks for a
+// "meta:genesis_complete" marker and returns immediately if found, preventing
+// double-funding on repeated invocations.
+func seedGenesis(tl *ledger.TransferLedger, s genesisStore) {
+	if s != nil {
+		data, _ := s.GetMeta(genesisMarkerKey)
+		if len(data) > 0 {
+			slog.Info("auto-genesis: genesis already complete, skipping")
+			return
+		}
+	}
+
 	buckets := []struct {
 		name   string
 		amount uint64
@@ -986,12 +1035,16 @@ func seedGenesis(tl *ledger.TransferLedger) {
 			slog.Warn("auto-genesis: failed to fund bucket", "bucket", b.name, "err", err)
 		}
 	}
+
+	if s != nil {
+		_ = s.PutMeta(genesisMarkerKey, []byte("1"))
+	}
 }
 
 // cmdGenesis seeds the initial token supply into the BadgerDB store by funding
 // the six protocol-controlled allocation buckets. It is idempotent: running it
-// again after the store already has balances will add the allocations again, so
-// operators should call it exactly once on a fresh store.
+// a second time on a store that already has a genesis_complete marker is a
+// no-op, protecting operators from accidentally double-funding.
 //
 // Genesis allocations (micro-AET):
 //
@@ -1012,6 +1065,13 @@ func cmdGenesis() {
 		os.Exit(1)
 	}
 	defer s.Close()
+
+	// Idempotency check: refuse to run genesis twice on the same store.
+	if data, _ := s.GetMeta(genesisMarkerKey); len(data) > 0 {
+		fmt.Println("Genesis already complete on this store. Skipping.")
+		fmt.Println("To re-run genesis, delete the store first (AETHERNET_RESET=true or wipe manually).")
+		return
+	}
 
 	tl, err := ledger.LoadTransferLedgerFromStore(s)
 	if err != nil {
@@ -1042,6 +1102,12 @@ func cmdGenesis() {
 		total += b.amount
 	}
 	fmt.Printf("\n  %-30s %15d micro-AET\n", "TOTAL", total)
+
+	// Write idempotency marker so repeated runs are safe.
+	if err := s.PutMeta(genesisMarkerKey, []byte("1")); err != nil {
+		slog.Warn("cmdGenesis: failed to write genesis marker", "err", err)
+	}
+
 	fmt.Println("\nGenesis complete.")
 }
 

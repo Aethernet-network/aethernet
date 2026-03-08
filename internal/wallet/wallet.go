@@ -9,20 +9,47 @@ package wallet
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"sync"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 )
 
 // Address is a human-readable deposit address for an AetherNet agent.
-// Format: "aet1" followed by the first 40 hex characters of SHA-256(publicKey).
+// Format: "aet1" followed by 40 hex chars of SHA-256(publicKey) and a
+// 4-hex-char checksum (first 2 bytes of SHA-256 of the 40-char body).
+// Total length: 4 + 40 + 4 = 48 characters.
 type Address string
 
 // DeriveAddress generates a deterministic deposit address from an Ed25519 public key.
-// The same public key always produces the same address.
+// The address includes a 4-hex-char checksum so typos can be detected at input.
 func DeriveAddress(pubKey []byte) Address {
 	hash := sha256.Sum256(pubKey)
-	return Address("aet1" + hex.EncodeToString(hash[:])[:40])
+	body := hex.EncodeToString(hash[:])[:40]
+	// Compute checksum: first 2 bytes of SHA-256 of the body string.
+	checksumHash := sha256.Sum256([]byte(body))
+	checksum := hex.EncodeToString(checksumHash[:])[:4]
+	return Address("aet1" + body + checksum)
+}
+
+// ValidateAddress reports whether addr is a well-formed AetherNet deposit address
+// with a valid embedded checksum. Returns false for legacy 44-char addresses
+// (without checksum) or addresses with incorrect checksums.
+func ValidateAddress(addr Address) bool {
+	s := string(addr)
+	if !strings.HasPrefix(s, "aet1") {
+		return false
+	}
+	rest := s[4:] // strip "aet1"
+	// New format: 40-char body + 4-char checksum = 44 chars total after prefix.
+	if len(rest) != 44 {
+		return false
+	}
+	body := rest[:40]
+	checksum := rest[40:]
+	checksumHash := sha256.Sum256([]byte(body))
+	expected := hex.EncodeToString(checksumHash[:])[:4]
+	return checksum == expected
 }
 
 // Wallet maintains a bidirectional mapping between deposit addresses and agent IDs.

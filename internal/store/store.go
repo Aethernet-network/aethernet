@@ -33,6 +33,8 @@ const (
 	prefixIdentity   = "idn:"
 	prefixStakeMeta  = "stk:"
 	prefixRegistry   = "reg:"
+	prefixMeta       = "meta:" // generic metadata (genesis marker, onboarding counter, …)
+	prefixAPIKey     = "key:"  // platform developer API keys
 )
 
 // Store is the durable persistence layer for a single AetherNet node.
@@ -364,38 +366,45 @@ func (s *Store) AllIdentities() ([]*identity.CapabilityFingerprint, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Stake metadata (stakedSince, lastActivity timestamps)
+// Stake metadata (stakedSince, lastActivity timestamps + staked amount)
 // ---------------------------------------------------------------------------
 
-// stakeMetaValue encodes two int64 timestamps as a 16-byte big-endian blob.
-// Index 0–7 = stakedSince, index 8–15 = lastActivity.
-func stakeMetaValue(stakedSince, lastActivity int64) []byte {
-	buf := make([]byte, 16)
+// stakeMetaValue encodes two int64 timestamps and one uint64 amount as a
+// 24-byte big-endian blob.
+// Index  0– 7 = stakedSince (int64 as uint64)
+// Index  8–15 = lastActivity (int64 as uint64)
+// Index 16–23 = stakedAmount (uint64) — added in v2; absent in old 16-byte blobs
+func stakeMetaValue(stakedSince, lastActivity int64, stakedAmount uint64) []byte {
+	buf := make([]byte, 24)
 	binary.BigEndian.PutUint64(buf[0:8], uint64(stakedSince))
 	binary.BigEndian.PutUint64(buf[8:16], uint64(lastActivity))
+	binary.BigEndian.PutUint64(buf[16:24], stakedAmount)
 	return buf
 }
 
-func parseStakeMetaValue(val []byte) (stakedSince, lastActivity int64) {
+func parseStakeMetaValue(val []byte) (stakedSince, lastActivity int64, stakedAmount uint64) {
 	if len(val) < 16 {
-		return 0, 0
+		return 0, 0, 0
 	}
 	stakedSince = int64(binary.BigEndian.Uint64(val[0:8]))
 	lastActivity = int64(binary.BigEndian.Uint64(val[8:16]))
+	if len(val) >= 24 {
+		stakedAmount = binary.BigEndian.Uint64(val[16:24])
+	}
 	return
 }
 
-// PutStakeMeta stores stakedSince and lastActivity timestamps for agentID
+// PutStakeMeta stores stakedSince, lastActivity, and stakedAmount for agentID
 // under the key "stk:<agentID>".
-func (s *Store) PutStakeMeta(agentID crypto.AgentID, stakedSince int64, lastActivity int64) error {
+func (s *Store) PutStakeMeta(agentID crypto.AgentID, stakedSince int64, lastActivity int64, stakedAmount uint64) error {
 	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set([]byte(prefixStakeMeta+string(agentID)), stakeMetaValue(stakedSince, lastActivity))
+		return txn.Set([]byte(prefixStakeMeta+string(agentID)), stakeMetaValue(stakedSince, lastActivity, stakedAmount))
 	})
 }
 
-// GetStakeMeta retrieves the stakedSince and lastActivity timestamps for agentID.
-// Returns (0, 0, nil) if the key does not exist.
-func (s *Store) GetStakeMeta(agentID crypto.AgentID) (stakedSince int64, lastActivity int64, err error) {
+// GetStakeMeta retrieves the stakedSince, lastActivity, and stakedAmount for agentID.
+// Returns (0, 0, 0, nil) if the key does not exist.
+func (s *Store) GetStakeMeta(agentID crypto.AgentID) (stakedSince int64, lastActivity int64, stakedAmount uint64, err error) {
 	err = s.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get([]byte(prefixStakeMeta + string(agentID)))
 		if err != nil {
@@ -405,7 +414,7 @@ func (s *Store) GetStakeMeta(agentID crypto.AgentID) (stakedSince int64, lastAct
 			return err
 		}
 		return item.Value(func(val []byte) error {
-			stakedSince, lastActivity = parseStakeMetaValue(val)
+			stakedSince, lastActivity, stakedAmount = parseStakeMetaValue(val)
 			return nil
 		})
 	})
@@ -413,9 +422,10 @@ func (s *Store) GetStakeMeta(agentID crypto.AgentID) (stakedSince int64, lastAct
 }
 
 // AllStakeMeta returns all stored stake metadata as a map from AgentID to a
-// [2]int64 array where index 0 = stakedSince and index 1 = lastActivity.
-func (s *Store) AllStakeMeta() (map[crypto.AgentID][2]int64, error) {
-	result := make(map[crypto.AgentID][2]int64)
+// [3]int64 array where index 0 = stakedSince, index 1 = lastActivity, and
+// index 2 = stakedAmount (as int64 for uniformity; always non-negative).
+func (s *Store) AllStakeMeta() (map[crypto.AgentID][3]int64, error) {
+	result := make(map[crypto.AgentID][3]int64)
 	err := s.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.Prefix = []byte(prefixStakeMeta)
@@ -427,8 +437,99 @@ func (s *Store) AllStakeMeta() (map[crypto.AgentID][2]int64, error) {
 			item := it.Item()
 			key := string(item.Key()[prefixLen:]) // strip prefix
 			if err := item.Value(func(val []byte) error {
-				ss, la := parseStakeMetaValue(val)
-				result[crypto.AgentID(key)] = [2]int64{ss, la}
+				ss, la, amt := parseStakeMetaValue(val)
+				result[crypto.AgentID(key)] = [3]int64{ss, la, int64(amt)}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return result, err
+}
+
+// ---------------------------------------------------------------------------
+// Generic metadata key-value (genesis markers, counters, …)
+// ---------------------------------------------------------------------------
+
+// PutMeta stores an arbitrary byte value under "meta:<key>".
+func (s *Store) PutMeta(key string, value []byte) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(prefixMeta+key), value)
+	})
+}
+
+// GetMeta retrieves the byte value stored under "meta:<key>".
+// Returns (nil, nil) when the key does not exist.
+func (s *Store) GetMeta(key string) ([]byte, error) {
+	var data []byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(prefixMeta + key))
+		if err != nil {
+			if err == badger.ErrKeyNotFound {
+				return nil
+			}
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			data = make([]byte, len(val))
+			copy(data, val)
+			return nil
+		})
+	})
+	return data, err
+}
+
+// ---------------------------------------------------------------------------
+// Platform developer API keys (raw JSON blobs)
+// ---------------------------------------------------------------------------
+
+// PutAPIKey stores a raw JSON-encoded APIKey blob under "key:<key>".
+func (s *Store) PutAPIKey(key string, data []byte) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(prefixAPIKey+key), data)
+	})
+}
+
+// GetAPIKey retrieves the raw JSON blob for the API key.
+// Returns (nil, nil) when the key does not exist.
+func (s *Store) GetAPIKey(key string) ([]byte, error) {
+	var data []byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(prefixAPIKey + key))
+		if err != nil {
+			if err == badger.ErrKeyNotFound {
+				return nil
+			}
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			data = make([]byte, len(val))
+			copy(data, val)
+			return nil
+		})
+	})
+	return data, err
+}
+
+// AllAPIKeys returns all stored API key blobs as a map from key string to raw JSON.
+func (s *Store) AllAPIKeys() (map[string][]byte, error) {
+	result := make(map[string][]byte)
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(prefixAPIKey)
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		prefixLen := len(prefixAPIKey)
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := string(item.Key()[prefixLen:])
+			if err := item.Value(func(val []byte) error {
+				blob := make([]byte, len(val))
+				copy(blob, val)
+				result[key] = blob
 				return nil
 			}); err != nil {
 				return err

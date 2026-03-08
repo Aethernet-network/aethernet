@@ -106,6 +106,10 @@ type EventResponse struct {
 
 // TransferRequest is the input to Client.Transfer.
 type TransferRequest struct {
+	// FromAgent is the economic identity of the sender. When provided, the
+	// protocol node uses this as the economic from_agent for balance checks
+	// and ledger entries. When absent, the node's own identity is used.
+	FromAgent   string   `json:"from_agent,omitempty"`
 	ToAgent     string   `json:"to_agent"`
 	Amount      uint64   `json:"amount"`
 	Currency    string   `json:"currency,omitempty"`

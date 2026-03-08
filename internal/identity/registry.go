@@ -159,6 +159,23 @@ func (r *Registry) Get(agentID crypto.AgentID) (*CapabilityFingerprint, error) {
 	return fp.clone(), nil
 }
 
+// GetByDisplayName performs a linear scan and returns the first fingerprint whose
+// DisplayName matches name (case-sensitive). Returns (nil, false) when not found.
+// Use Get (by AgentID) for performance-critical lookups.
+func (r *Registry) GetByDisplayName(name string) (*CapabilityFingerprint, bool) {
+	if name == "" {
+		return nil, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, fp := range r.agents {
+		if fp.DisplayName == name {
+			return fp.clone(), true
+		}
+	}
+	return nil, false
+}
+
 // RecordTaskCompletion records a successful task for agentID in the given capability
 // domain, crediting valueGenerated micro-AET of generated value.
 //

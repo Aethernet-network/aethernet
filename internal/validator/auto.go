@@ -30,6 +30,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/evidence"
 	"github.com/Aethernet-network/aethernet/internal/fees"
+	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
@@ -49,6 +50,10 @@ type AutoValidator struct {
 	taskMgr       *tasks.TaskManager
 	escrowMgr     *escrow.Escrow
 	reputationMgr *reputation.ReputationManager
+
+	// Identity registry — optional. When set, auto-settlement syncs the
+	// capability fingerprint's TasksCompleted counter so trust limits improve.
+	identityRegistry *identity.Registry
 
 	// Fee collection — optional. When set, deducts a settlement fee from each
 	// approved task budget before releasing funds to the worker.
@@ -101,6 +106,13 @@ func (av *AutoValidator) SetTaskManager(tm *tasks.TaskManager, e *escrow.Escrow)
 // completions and failures are recorded for category-level reputation scoring.
 func (av *AutoValidator) SetReputationManager(rm *reputation.ReputationManager) {
 	av.reputationMgr = rm
+}
+
+// SetRegistry wires the identity registry into the auto-validator. When set,
+// every auto-settled task increments the claimer's TasksCompleted counter in
+// their CapabilityFingerprint, ensuring trust limits grow with task history.
+func (av *AutoValidator) SetRegistry(reg *identity.Registry) {
+	av.identityRegistry = reg
 }
 
 // SetFeeCollector wires optional fee collection. When set, a 0.1% settlement
@@ -300,6 +312,11 @@ func (av *AutoValidator) processDisputedTasks() {
 					crypto.AgentID(task.ClaimerID), task.Category, task.Budget, score.Overall, deliverySecs,
 				)
 			}
+			if av.identityRegistry != nil && task.ClaimerID != "" {
+				_ = av.identityRegistry.RecordTaskCompletion(
+					crypto.AgentID(task.ClaimerID), task.Budget, task.Category,
+				)
+			}
 		} else {
 			// Work was inadequate: refund poster, penalise worker.
 			overall := 0.0
@@ -373,6 +390,14 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score) {
 			task.Budget,
 			score.Overall,
 			deliverySecs,
+		)
+	}
+	// Sync the identity registry TasksCompleted so trust limits grow with history.
+	if av.identityRegistry != nil && task.ClaimerID != "" {
+		_ = av.identityRegistry.RecordTaskCompletion(
+			crypto.AgentID(task.ClaimerID),
+			task.Budget,
+			task.Category,
 		)
 	}
 	log.Printf("auto-validator: APPROVED task %s (score: %.2f, claimer: %s)",

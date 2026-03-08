@@ -1657,13 +1657,14 @@ func TestApproveTask_API(t *testing.T) {
 		t.Errorf("Status = %q; want 'completed'", approved.Status)
 	}
 
-	// embed-worker should have received the escrowed budget.
+	// embed-worker should have received the escrowed budget minus the protocol fee.
 	workerBal, err := setup.tl.Balance("embed-worker")
 	if err != nil {
 		t.Fatalf("Balance: %v", err)
 	}
-	if workerBal != 8_000 {
-		t.Errorf("embed-worker balance = %d; want 8000", workerBal)
+	wantWorkerBal := uint64(8_000) - fees.CalculateFee(8_000)
+	if workerBal != wantWorkerBal {
+		t.Errorf("embed-worker balance = %d; want %d", workerBal, wantWorkerBal)
 	}
 }
 

@@ -2,16 +2,25 @@
 //
 // Third-party developers building applications on top of AetherNet use API
 // keys to authenticate, track usage, and access tier-specific rate limits.
-// Keys are in-memory only (no persistence); they are recreated from config or
-// env on restart — appropriate for a testnet developer platform.
+// Keys are persisted to the BadgerDB store via a keyStore interface so they
+// survive node restarts.
 package platform
 
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"sync"
 	"time"
 )
+
+// keyStore is the persistence interface used by KeyManager.
+// *store.Store from the store package satisfies this.
+type keyStore interface {
+	PutAPIKey(key string, data []byte) error
+	GetAPIKey(key string) ([]byte, error)
+	AllAPIKeys() (map[string][]byte, error)
+}
 
 // Tier identifies a developer API key tier and its rate limit class.
 type Tier string
@@ -34,10 +43,12 @@ type APIKey struct {
 	Active       bool   `json:"active"`
 }
 
-// KeyManager manages developer API keys in memory. It is safe for concurrent use.
+// KeyManager manages developer API keys. It is safe for concurrent use.
+// Keys are persisted to the store when SetStore is called.
 type KeyManager struct {
-	mu   sync.RWMutex
-	keys map[string]*APIKey // keyed by API key string
+	mu    sync.RWMutex
+	keys  map[string]*APIKey // keyed by API key string
+	store keyStore           // optional; nil = in-memory only
 }
 
 // NewKeyManager returns an empty, ready-to-use KeyManager.
@@ -47,8 +58,36 @@ func NewKeyManager() *KeyManager {
 	}
 }
 
+// SetStore attaches a persistence backend. After this call GenerateKey and
+// Revoke write through to the store. Call LoadFromStore afterwards to
+// restore previously-issued keys.
+func (km *KeyManager) SetStore(s keyStore) {
+	km.mu.Lock()
+	defer km.mu.Unlock()
+	km.store = s
+}
+
+// LoadFromStore restores API keys from the persistence store.
+// Call after SetStore on node restart.
+func (km *KeyManager) LoadFromStore(s keyStore) error {
+	all, err := s.AllAPIKeys()
+	if err != nil {
+		return err
+	}
+	km.mu.Lock()
+	defer km.mu.Unlock()
+	for _, blob := range all {
+		var k APIKey
+		if err := json.Unmarshal(blob, &k); err == nil {
+			km.keys[k.Key] = &k
+		}
+	}
+	return nil
+}
+
 // GenerateKey creates and stores a new API key for a developer application.
 // The key is prefixed with "aet_" followed by 64 hex-encoded random bytes.
+// When a store is configured, the key is persisted immediately.
 func (km *KeyManager) GenerateKey(name, email string, tier Tier) *APIKey {
 	km.mu.Lock()
 	defer km.mu.Unlock()
@@ -66,6 +105,11 @@ func (km *KeyManager) GenerateKey(name, email string, tier Tier) *APIKey {
 		Active:     true,
 	}
 	km.keys[keyStr] = key
+	if km.store != nil {
+		if data, err := json.Marshal(key); err == nil {
+			_ = km.store.PutAPIKey(keyStr, data)
+		}
+	}
 	return key
 }
 
@@ -94,7 +138,8 @@ func (km *KeyManager) GetKey(keyStr string) (*APIKey, bool) {
 }
 
 // Revoke deactivates an API key. Returns true if the key existed and was
-// deactivated, false if the key was not found.
+// deactivated, false if the key was not found. When a store is configured,
+// the updated key record is persisted.
 func (km *KeyManager) Revoke(keyStr string) bool {
 	km.mu.Lock()
 	defer km.mu.Unlock()
@@ -103,6 +148,11 @@ func (km *KeyManager) Revoke(keyStr string) bool {
 		return false
 	}
 	key.Active = false
+	if km.store != nil {
+		if data, err := json.Marshal(key); err == nil {
+			_ = km.store.PutAPIKey(keyStr, data)
+		}
+	}
 	return true
 }
 
