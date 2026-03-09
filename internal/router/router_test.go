@@ -15,6 +15,22 @@ import (
 // Test helpers
 // ---------------------------------------------------------------------------
 
+// taskManagerSource adapts *tasks.TaskManager to the TaskSource interface.
+// This adapter lives in the test file so the router package itself never
+// imports the tasks package.
+type taskManagerSource struct {
+	tm *tasks.TaskManager
+}
+
+func (s *taskManagerSource) OpenTasks() []RoutableTask {
+	open := s.tm.OpenTasks(0)
+	result := make([]RoutableTask, len(open))
+	for i, t := range open {
+		result[i] = t
+	}
+	return result
+}
+
 // newTestRouter returns a Router with a freshly seeded TaskManager and a
 // claim function that records claimed taskIDs into the provided map.
 func newTestRouter(claimed *sync.Map, repFn func(crypto.AgentID, string) (uint64, float64, float64, float64)) (*Router, *tasks.TaskManager) {
@@ -23,7 +39,7 @@ func newTestRouter(claimed *sync.Map, repFn func(crypto.AgentID, string) (uint64
 		claimed.Store(taskID, agentID)
 		return tm.ClaimTask(taskID, agentID)
 	}
-	r := New(tm, claimFn, repFn, 5*time.Second)
+	r := New(&taskManagerSource{tm: tm}, claimFn, repFn, 5*time.Second)
 	return r, tm
 }
 
@@ -467,7 +483,7 @@ func TestProgressiveBudget(t *testing.T) {
 
 	r, _ := newTestRouter(nil, repFn)
 	// claimFn is nil — we only test maxBudgetForAgent, not routing.
-	r2 := New(tasks.NewTaskManager(), func(string, crypto.AgentID) error { return nil }, repFn, time.Second)
+	r2 := New(&taskManagerSource{tm: tasks.NewTaskManager()}, func(string, crypto.AgentID) error { return nil }, repFn, time.Second)
 
 	cases := []struct {
 		agentID   crypto.AgentID

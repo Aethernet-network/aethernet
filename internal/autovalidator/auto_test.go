@@ -1,9 +1,10 @@
-package validator_test
+package autovalidator_test
 
 import (
 	"testing"
 	"time"
 
+	"github.com/Aethernet-network/aethernet/internal/autovalidator"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/event"
@@ -13,7 +14,6 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
-	"github.com/Aethernet-network/aethernet/internal/validator"
 )
 
 // TestAutoValidator_ProcessesPending verifies that AutoValidator polls the OCS
@@ -58,7 +58,7 @@ func TestAutoValidator_ProcessesPending(t *testing.T) {
 	// The auto-validator's ID must be different from alice and bob to pass the
 	// OCS anti-self-dealing guard.
 	validatorID := crypto.AgentID("testnet-validator")
-	av := validator.NewAutoValidator(eng, validatorID, 50*time.Millisecond)
+	av := autovalidator.NewAutoValidator(eng, validatorID, 50*time.Millisecond)
 	av.Start()
 	defer av.Stop()
 
@@ -130,7 +130,7 @@ func TestAutoValidator_FeeOnTaskSettlement(t *testing.T) {
 	}
 	defer eng.Stop()
 
-	av := validator.NewAutoValidator(eng, validatorID, 50*time.Millisecond)
+	av := autovalidator.NewAutoValidator(eng, validatorID, 50*time.Millisecond)
 	av.SetTaskManager(tm, esc)
 	av.SetFeeCollector(fc, treasuryID)
 	av.SetTaskStalenessThreshold(0) // process immediately, no 10s wait
@@ -187,7 +187,7 @@ func TestAutoValidator_StopIsIdempotent(t *testing.T) {
 	}
 	defer eng.Stop()
 
-	av := validator.NewAutoValidator(eng, "testnet-validator", time.Second)
+	av := autovalidator.NewAutoValidator(eng, "testnet-validator", time.Second)
 	av.Start()
 	av.Stop()
 	av.Stop() // must not panic
@@ -250,7 +250,7 @@ func TestAutoValidator_DisputeResolutionApprove(t *testing.T) {
 	}
 
 	eng := newEngineForTest(t, tl)
-	av := validator.NewAutoValidator(eng, validatorID, 50*time.Millisecond)
+	av := autovalidator.NewAutoValidator(eng, validatorID, 50*time.Millisecond)
 	av.SetTaskManager(tm, esc)
 	av.SetDisputeReviewTimeout(0) // resolve immediately in test
 	av.Start()
@@ -322,7 +322,7 @@ func TestAutoValidator_DisputeResolutionReject(t *testing.T) {
 	}
 
 	eng := newEngineForTest(t, tl)
-	av := validator.NewAutoValidator(eng, validatorID, 50*time.Millisecond)
+	av := autovalidator.NewAutoValidator(eng, validatorID, 50*time.Millisecond)
 	av.SetTaskManager(tm, esc)
 	av.SetReputationManager(rm)
 	av.SetDisputeReviewTimeout(0) // resolve immediately
@@ -387,7 +387,7 @@ func TestAutoValidator_ClaimTimeout(t *testing.T) {
 	}
 
 	eng := newEngineForTest(t, tl)
-	av := validator.NewAutoValidator(eng, validatorID, 50*time.Millisecond)
+	av := autovalidator.NewAutoValidator(eng, validatorID, 50*time.Millisecond)
 	av.SetTaskManager(tm, esc)
 	av.SetReputationManager(rm)
 	// Override claim timeout to 1ms so the task expires immediately in the test.
@@ -474,7 +474,7 @@ func TestAutoValidator_GenerationLedger(t *testing.T) {
 
 	tl2 := ledger.NewTransferLedger() // OCS engine doesn't need real funds
 	eng := newEngineForTest(t, tl2)
-	av := validator.NewAutoValidator(eng, validatorID, 50*time.Millisecond)
+	av := autovalidator.NewAutoValidator(eng, validatorID, 50*time.Millisecond)
 	av.SetTaskManager(tm, esc)
 	av.SetGenerationLedger(gl)
 	av.SetTaskStalenessThreshold(0)

@@ -1,4 +1,4 @@
-// Package validator provides automatic settlement for AetherNet testnet nodes.
+// Package autovalidator provides automatic settlement for AetherNet testnet nodes.
 //
 // On testnet, there are no external validator nodes, so transactions sit in
 // Optimistic state forever unless something approves them. AutoValidator fills
@@ -19,7 +19,10 @@
 //
 // This is TESTNET ONLY. On mainnet, real validator nodes earn fees by doing
 // genuine verification work; auto-approval would defeat the trust model.
-package validator
+//
+// This package is L3 (Application layer) — it drives the task marketplace
+// lifecycle and should not be embedded in the L2 validator infrastructure.
+package autovalidator
 
 import (
 	"log"

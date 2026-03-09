@@ -168,6 +168,14 @@ type Server struct {
 	mux        *http.ServeMux
 	srv        *http.Server
 	listenAddr string
+
+	// Layer configuration — controls which route groups are registered.
+	// enableL2 (default true): register L2 network routes (registry, discovery,
+	// router, reputation). enableL3 (default true): register L3 application
+	// routes (tasks, platform, explorer). L1 routes are always registered.
+	enableL2    bool
+	enableL3    bool
+	explorerDir string // path to serve the explorer UI from; "" disables it
 }
 
 // NewServer constructs an API Server backed by the provided node components.
@@ -185,25 +193,64 @@ func NewServer(
 	kp *crypto.KeyPair,
 ) *Server {
 	s := &Server{
-		dag:        d,
-		transfer:   tl,
-		generation: gl,
-		registry:   reg,
-		engine:     eng,
-		supply:     sm,
-		node:       node,
-		kp:         kp,
-		agentID:    kp.AgentID(),
-		listenAddr: listenAddr,
-		startTime:  time.Now(),
+		dag:         d,
+		transfer:    tl,
+		generation:  gl,
+		registry:    reg,
+		engine:      eng,
+		supply:      sm,
+		node:        node,
+		kp:          kp,
+		agentID:     kp.AgentID(),
+		listenAddr:  listenAddr,
+		startTime:   time.Now(),
+		enableL2:    true,
+		enableL3:    true,
+		explorerDir: explorerPath(),
 	}
 
+	s.rebuildMux()
+	s.srv = &http.Server{Addr: listenAddr, Handler: s}
+
+	return s
+}
+
+// SetLayerConfig controls which route groups are registered on this server.
+// enableL2=true registers L2 network routes (registry, discovery, router,
+// reputation). enableL3=true registers L3 application routes (tasks, platform,
+// explorer). L1 protocol routes are always registered regardless of flags.
+//
+// Call this before Start (or before httptest.NewServer in tests). The mux is
+// rebuilt immediately so subsequent requests reflect the new configuration.
+func (s *Server) SetLayerConfig(enableL2, enableL3 bool) {
+	s.enableL2 = enableL2
+	s.enableL3 = enableL3
+	s.rebuildMux()
+}
+
+// rebuildMux reconstructs the route multiplexer based on the current layer
+// configuration. Safe to call before the server starts serving; not safe to
+// call concurrently with active requests.
+func (s *Server) rebuildMux() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"name": "AetherNet Testnet", "version": "0.1.0", "docs": "https://github.com/Aethernet-network/aethernet", "endpoints": map[string]string{"status": "/v1/status", "agents": "/v1/agents", "economics": "/v1/economics", "explorer": "/explorer/"}})
 	})
+	s.registerL1Routes(mux)
+	if s.enableL2 {
+		s.registerL2Routes(mux)
+	}
+	if s.enableL3 {
+		s.registerL3Routes(mux)
+	}
+	s.mux = mux
+}
+
+// registerL1Routes registers protocol-level routes: identity, staking,
+// settlement, economics, DAG, and monitoring. These are always available
+// regardless of layer configuration.
+func (s *Server) registerL1Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/agents", s.handleRegisterAgent)
-	mux.HandleFunc("GET /v1/agents/leaderboard", s.handleLeaderboard)
 	mux.HandleFunc("GET /v1/agents", s.handleListAgents)
 	mux.HandleFunc("GET /v1/agents/{agent_id}/balance", s.handleGetBalance)
 	mux.HandleFunc("GET /v1/agents/{agent_id}/address", s.handleGetAgentAddress)
@@ -223,17 +270,49 @@ func NewServer(
 	mux.HandleFunc("POST /v1/stake", s.handleStake)
 	mux.HandleFunc("POST /v1/unstake", s.handleUnstake)
 	mux.HandleFunc("GET /v1/network/activity", s.handleNetworkActivity)
+	// Infrastructure
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
+	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.Handle("GET /v1/ws", s.wsHandler())
+}
+
+// registerL2Routes registers network coordination routes: service registry,
+// capability-aware discovery, reputation rankings, and autonomous task router.
+func (s *Server) registerL2Routes(mux *http.ServeMux) {
+	// Leaderboard uses both L1 (balance) and L2 (reputation) data.
+	mux.HandleFunc("GET /v1/agents/leaderboard", s.handleLeaderboard)
+	// Reputation profile — per-agent, per-category performance data.
+	mux.HandleFunc("GET /v1/agents/{id}/reputation", s.handleGetReputation)
+	mux.HandleFunc("GET /v1/reputation/rankings", s.handleGetReputationRankings)
+	// Service registry — agent capability listings.
 	mux.HandleFunc("POST /v1/registry", s.handlePostRegistry)
 	mux.HandleFunc("GET /v1/registry/search", s.handleSearchRegistry)
 	mux.HandleFunc("GET /v1/registry/categories", s.handleRegistryCategories)
 	mux.HandleFunc("DELETE /v1/registry/{agent_id}", s.handleDeleteRegistry)
 	mux.HandleFunc("GET /v1/registry/{agent_id}", s.handleGetRegistryListing)
+	// Capability-aware agent matching.
+	mux.HandleFunc("GET /v1/discover", s.handleDiscover)
+	// Autonomous task router.
+	mux.HandleFunc("POST /v1/router/register", s.handleRouterRegister)
+	mux.HandleFunc("DELETE /v1/router/register/{agent_id}", s.handleRouterUnregister)
+	mux.HandleFunc("PUT /v1/router/availability/{agent_id}", s.handleRouterAvailability)
+	mux.HandleFunc("GET /v1/router/agents", s.handleRouterAgents)
+	mux.HandleFunc("GET /v1/router/routes", s.handleRouterRoutes)
+	mux.HandleFunc("GET /v1/router/stats", s.handleRouterStats)
+}
 
+// registerL3Routes registers application-layer routes: task marketplace,
+// developer platform API keys, and the web explorer UI.
+func (s *Server) registerL3Routes(mux *http.ServeMux) {
 	// Task marketplace endpoints.
-	// Literal paths (/stats, /agent/{id}) beat wildcards in Go 1.22 routing.
+	// Literal paths (/stats, /agent/{id}, /subtasks/{id}) beat wildcards in
+	// Go 1.22 routing, so they must be registered before the {id} wildcard.
 	mux.HandleFunc("POST /v1/tasks", s.handlePostTask)
 	mux.HandleFunc("GET /v1/tasks/stats", s.handleTaskStats)
 	mux.HandleFunc("GET /v1/tasks/agent/{agent_id}", s.handleAgentTasks)
+	// GET /v1/tasks/subtasks/{id} avoids a routing conflict with
+	// GET /v1/tasks/agent/{agent_id} that would arise from {id}/subtasks.
+	mux.HandleFunc("GET /v1/tasks/subtasks/{id}", s.handleGetSubtasks)
 	mux.HandleFunc("GET /v1/tasks", s.handleListTasks)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.handleGetTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/claim", s.handleClaimTask)
@@ -242,48 +321,15 @@ func NewServer(
 	mux.HandleFunc("POST /v1/tasks/{id}/dispute", s.handleDisputeTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/cancel", s.handleCancelTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/subtask", s.handleCreateSubtask)
-	// GET /v1/tasks/subtasks/{id} avoids a routing conflict with
-	// GET /v1/tasks/agent/{agent_id} that would arise from {id}/subtasks.
-	mux.HandleFunc("GET /v1/tasks/subtasks/{id}", s.handleGetSubtasks)
-
-	// Discovery endpoint — capability-aware agent matching.
-	mux.HandleFunc("GET /v1/discover", s.handleDiscover)
-
-	// Reputation endpoints.
-	mux.HandleFunc("GET /v1/agents/{id}/reputation", s.handleGetReputation)
-	mux.HandleFunc("GET /v1/reputation/rankings", s.handleGetReputationRankings)
-
-	// Developer platform endpoints — API key management and usage stats.
+	// Developer platform API key management.
 	mux.HandleFunc("POST /v1/platform/keys", s.handleGenerateKey)
 	mux.HandleFunc("GET /v1/platform/keys/{key}", s.handleGetKey)
 	mux.HandleFunc("DELETE /v1/platform/keys/{key}", s.handleRevokeKey)
 	mux.HandleFunc("GET /v1/platform/stats", s.handlePlatformStats)
-
-	// Autonomous task router endpoints.
-	mux.HandleFunc("POST /v1/router/register", s.handleRouterRegister)
-	mux.HandleFunc("DELETE /v1/router/register/{agent_id}", s.handleRouterUnregister)
-	mux.HandleFunc("PUT /v1/router/availability/{agent_id}", s.handleRouterAvailability)
-	mux.HandleFunc("GET /v1/router/agents", s.handleRouterAgents)
-	mux.HandleFunc("GET /v1/router/routes", s.handleRouterRoutes)
-	mux.HandleFunc("GET /v1/router/stats", s.handleRouterStats)
-
-	// WebSocket endpoint for real-time event streaming.
-	mux.Handle("GET /v1/ws", s.wsHandler())
-
-	// Monitoring endpoints (no /v1 prefix — standard convention).
-	mux.HandleFunc("GET /metrics", s.handleMetrics)
-	mux.HandleFunc("GET /health", s.handleHealth)
-
-	// Serve the web explorer from ./explorer (dev) or the Docker install path.
-	explorerDir := explorerPath()
-	if explorerDir != "" {
-		mux.Handle("GET /explorer/", http.StripPrefix("/explorer/", http.FileServer(http.Dir(explorerDir))))
+	// Web explorer UI.
+	if s.explorerDir != "" {
+		mux.Handle("GET /explorer/", http.StripPrefix("/explorer/", http.FileServer(http.Dir(s.explorerDir))))
 	}
-
-	s.mux = mux
-	s.srv = &http.Server{Addr: listenAddr, Handler: s}
-
-	return s
 }
 
 // SetStore attaches a persistence backend for the onboarding counter. When set,

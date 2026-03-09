@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
-	"github.com/Aethernet-network/aethernet/internal/tasks"
 )
 
 // WebhookConfig holds the optional outbound webhook settings for an agent.
@@ -22,13 +21,26 @@ type WebhookConfig struct {
 	Secret string `json:"webhook_secret,omitempty"` // HMAC-SHA256 signing secret
 }
 
+// webhookTask is a minimal task snapshot included in webhook payloads.
+// Using a concrete struct (rather than the RoutableTask interface) ensures
+// the JSON output is stable and independent of the concrete task type.
+type webhookTask struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Category    string `json:"category"`
+	PosterID    string `json:"poster_id"`
+	Budget      uint64 `json:"budget"`
+	Status      string `json:"status"`
+}
+
 // webhookPayload is the JSON body sent to the agent's webhook endpoint.
 type webhookPayload struct {
-	Event    string     `json:"event"`    // "task_assigned"
-	TaskID   string     `json:"task_id"`
-	AgentID  string     `json:"agent_id"`
-	Task     *tasks.Task `json:"task"`
-	IssuedAt int64      `json:"issued_at"` // unix nano
+	Event    string       `json:"event"`    // "task_assigned"
+	TaskID   string       `json:"task_id"`
+	AgentID  string       `json:"agent_id"`
+	Task     *webhookTask `json:"task"`
+	IssuedAt int64        `json:"issued_at"` // unix nano
 }
 
 // NotifyAgent sends a signed webhook notification to agentID's registered
@@ -38,7 +50,7 @@ type webhookPayload struct {
 // A 5-second HTTP timeout is applied to each request.
 // The notification is best-effort: any error is returned but the router
 // continues regardless.
-func (r *Router) NotifyAgent(agentID crypto.AgentID, task *tasks.Task) error {
+func (r *Router) NotifyAgent(agentID crypto.AgentID, task RoutableTask) error {
 	r.mu.RLock()
 	cap, ok := r.capabilities[agentID]
 	if !ok || cap.Webhook == nil || cap.Webhook.URL == "" {
@@ -49,10 +61,18 @@ func (r *Router) NotifyAgent(agentID crypto.AgentID, task *tasks.Task) error {
 	r.mu.RUnlock()
 
 	payload := webhookPayload{
-		Event:    "task_assigned",
-		TaskID:   task.ID,
-		AgentID:  string(agentID),
-		Task:     task,
+		Event:   "task_assigned",
+		TaskID:  task.GetID(),
+		AgentID: string(agentID),
+		Task: &webhookTask{
+			ID:          task.GetID(),
+			Title:       task.GetTitle(),
+			Description: task.GetDescription(),
+			Category:    task.GetCategory(),
+			PosterID:    task.GetPosterID(),
+			Budget:      task.GetBudget(),
+			Status:      task.GetStatus(),
+		},
 		IssuedAt: time.Now().UnixNano(),
 	}
 

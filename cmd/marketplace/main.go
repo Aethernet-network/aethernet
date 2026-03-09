@@ -49,10 +49,24 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/router"
 	"github.com/Aethernet-network/aethernet/internal/staking"
+	"github.com/Aethernet-network/aethernet/internal/autovalidator"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
-	"github.com/Aethernet-network/aethernet/internal/validator"
 	"github.com/Aethernet-network/aethernet/pkg/sdk"
 )
+
+// marketplaceTaskSource adapts *tasks.TaskManager to the router.TaskSource interface.
+type marketplaceTaskSource struct {
+	tm *tasks.TaskManager
+}
+
+func (s *marketplaceTaskSource) OpenTasks() []router.RoutableTask {
+	open := s.tm.OpenTasks(0)
+	result := make([]router.RoutableTask, len(open))
+	for i, t := range open {
+		result[i] = t
+	}
+	return result
+}
 
 func main() {
 	nodeURL := flag.String("node", envOr("AETHERNET_NODE", "http://localhost:8338"), "Protocol node API URL")
@@ -130,7 +144,7 @@ func main() {
 		}
 		return cat.TasksCompleted, cat.AvgScore, cat.AvgDeliveryTime, cat.CompletionRate()
 	}
-	taskRouter := router.New(taskMgr, claimFn, repFn, 10*time.Second)
+	taskRouter := router.New(&marketplaceTaskSource{tm: taskMgr}, claimFn, repFn, 10*time.Second)
 
 	// Register seed agent capabilities for the testnet router.
 	seedRouterCapabilities(taskRouter)
@@ -162,7 +176,7 @@ func main() {
 	localKP, _ := crypto.GenerateKeyPair()
 	localAgentID := localKP.AgentID()
 
-	var autoVal *validator.AutoValidator
+	var autoVal *autovalidator.AutoValidator
 	var actGen *demo.ActivityGenerator
 
 	if *testnet {
@@ -173,7 +187,7 @@ func main() {
 		if err == nil {
 			_ = localReg.Register(tvFP)
 		}
-		autoVal = validator.NewAutoValidator(localEngine, testnetValidatorID, 5*time.Second)
+		autoVal = autovalidator.NewAutoValidator(localEngine, testnetValidatorID, 5*time.Second)
 		autoVal.SetTaskManager(taskMgr, escrowMgr)
 		autoVal.SetReputationManager(reputationMgr)
 		autoVal.Start()

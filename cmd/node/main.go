@@ -54,8 +54,8 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/router"
 	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/store"
+	"github.com/Aethernet-network/aethernet/internal/autovalidator"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
-	"github.com/Aethernet-network/aethernet/internal/validator"
 	"github.com/Aethernet-network/aethernet/internal/wallet"
 )
 
@@ -279,7 +279,7 @@ type nodeStack struct {
 	metricsReg   *metrics.Registry
 	nodeMetrics  *metrics.AetherNetMetrics
 	metricsStop  chan struct{} // closed to terminate the gauge-update goroutine
-	autoVal         *validator.AutoValidator
+	autoVal         *autovalidator.AutoValidator
 	taskMgr         *tasks.TaskManager
 	escrowMgr       *escrow.Escrow
 	reputationMgr   *reputation.ReputationManager
@@ -287,6 +287,22 @@ type nodeStack struct {
 	activityGen     *demo.ActivityGenerator
 	platformKeys    *platformpkg.KeyManager
 	taskRouter      *router.Router
+}
+
+// taskManagerSource adapts *tasks.TaskManager to the router.TaskSource interface,
+// converting []*tasks.Task slices into []router.RoutableTask without importing
+// the tasks package from the router (which would create an import cycle).
+type taskManagerSource struct {
+	tm *tasks.TaskManager
+}
+
+func (s *taskManagerSource) OpenTasks() []router.RoutableTask {
+	open := s.tm.OpenTasks(0)
+	result := make([]router.RoutableTask, len(open))
+	for i, t := range open {
+		result[i] = t
+	}
+	return result
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
@@ -425,7 +441,7 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 		}
 		return cat.TasksCompleted, cat.AvgScore, cat.AvgDeliveryTime, cat.CompletionRate()
 	}
-	taskRouter := router.New(taskMgr, claimFn, repFn, 5*time.Second)
+	taskRouter := router.New(&taskManagerSource{tm: taskMgr}, claimFn, repFn, 5*time.Second)
 
 	return &nodeStack{
 		dag:          d,
@@ -494,7 +510,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	if err == nil {
 		_ = stack.reg.Register(tvFP)
 	}
-	av := validator.NewAutoValidator(stack.engine, testnetValidatorID, 5*time.Second)
+	av := autovalidator.NewAutoValidator(stack.engine, testnetValidatorID, 5*time.Second)
 	av.SetFeeCollector(stack.feeCollector, crypto.AgentID(genesis.BucketTreasury))
 	av.SetGenerationLedger(stack.generation)
 	av.SetRegistry(stack.reg)
@@ -565,6 +581,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		CleanupAge: 2 * time.Hour,
 	}))
 	apiSrv.SetMetrics(metricsReg, nodeMetrics)
+	// Configure which route groups are active. L1 is always on; L2 network
+	// coordination is always on; L3 marketplace routes follow --marketplace.
+	apiSrv.SetLayerConfig(true, enableMarketplace)
 	if err := apiSrv.Start(); err != nil {
 		slog.Error("failed to start API server", "addr", apiListenAddr, "err", err)
 		node.Stop()

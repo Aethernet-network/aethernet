@@ -653,6 +653,38 @@ func (m *TaskManager) AllSubtasksComplete(taskID string) (bool, error) {
 	return true, nil
 }
 
+// ---------------------------------------------------------------------------
+// RoutableTask getter methods — implement the router.RoutableTask interface
+// without importing the router package.
+// ---------------------------------------------------------------------------
+
+// GetID returns the task ID.
+func (t *Task) GetID() string { return t.ID }
+
+// GetCategory returns the task category.
+func (t *Task) GetCategory() string { return t.Category }
+
+// GetBudget returns the task budget in micro-AET.
+func (t *Task) GetBudget() uint64 { return t.Budget }
+
+// GetStatus returns the task status as a string.
+func (t *Task) GetStatus() string { return string(t.Status) }
+
+// GetPosterID returns the agent ID of the task poster.
+func (t *Task) GetPosterID() string { return t.PosterID }
+
+// GetTags returns the task tags.
+func (t *Task) GetTags() []string { return t.Tags }
+
+// GetTitle returns the task title.
+func (t *Task) GetTitle() string { return t.Title }
+
+// GetDescription returns the task description.
+func (t *Task) GetDescription() string { return t.Description }
+
+// GetRoutedTo returns the agent ID the task has been routed to, if any.
+func (t *Task) GetRoutedTo() string { return t.RoutedTo }
+
 // generateID creates a unique ID for a subtask based on the parent task ID,
 // current nanosecond time, and the current task count. Returns 32 hex chars
 // (16 bytes of SHA-256).

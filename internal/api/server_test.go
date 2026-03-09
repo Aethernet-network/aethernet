@@ -21,8 +21,8 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/registry"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/staking"
+	"github.com/Aethernet-network/aethernet/internal/autovalidator"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
-	"github.com/Aethernet-network/aethernet/internal/validator"
 	"github.com/Aethernet-network/aethernet/internal/wallet"
 )
 
@@ -1802,7 +1802,7 @@ func TestE2EFullTaskFlow(t *testing.T) {
 
 	// Start the auto-validator with a fast tick and zero staleness so submitted
 	// tasks are picked up on the very next iteration.
-	av := validator.NewAutoValidator(setup.eng, "e2e-validator", 5*time.Millisecond)
+	av := autovalidator.NewAutoValidator(setup.eng, "e2e-validator", 5*time.Millisecond)
 	av.SetTaskStalenessThreshold(0)
 	av.SetTaskManager(setup.taskMgr, setup.escrowMgr)
 	av.SetFeeCollector(feeCollector, crypto.AgentID("genesis:treasury"))
@@ -1934,5 +1934,50 @@ func TestE2EFullTaskFlow(t *testing.T) {
 	rep := reputationMgr.GetReputation(crypto.AgentID(workerID))
 	if rep.TotalCompleted == 0 {
 		t.Error("worker reputation TotalCompleted = 0; want > 0 after task settlement")
+	}
+}
+
+// TestLayerConfig_L3Disabled verifies that calling SetLayerConfig(true, false)
+// removes L3 application routes (tasks, platform/keys) from the mux so that
+// task creation and platform key creation are not accessible.
+//
+// The server has a GET / catch-all handler (root info endpoint) so:
+//   - GET requests to disabled L3 paths fall through to GET / and return 200
+//   - POST requests to disabled L3 paths return 405 (path matched by GET /)
+//     or 404 (no match). Either way they are not processed as L3 requests.
+//
+// The test checks that POST to L3 task/platform paths returns a non-2xx status,
+// confirming those routes are not functionally active.
+func TestLayerConfig_L3Disabled(t *testing.T) {
+	setup := newTestSetup(t)
+
+	// Disable L3 routes — mux is rebuilt immediately.
+	setup.srv.SetLayerConfig(true, false)
+
+	// Use the existing httptest server (setup.ts) which delegates to setup.srv.
+	// Since setup.srv.mux was rebuilt by SetLayerConfig, new requests see the
+	// updated routing table.
+	cases := []struct {
+		method string
+		path   string
+	}{
+		{"POST", "/v1/tasks"},
+		{"POST", "/v1/platform/keys"},
+	}
+	for _, tc := range cases {
+		req, err := http.NewRequest(tc.method, setup.ts.URL+tc.path, bytes.NewReader([]byte("{}")))
+		if err != nil {
+			t.Fatalf("new request %s %s: %v", tc.method, tc.path, err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := setup.ts.Client().Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", tc.method, tc.path, err)
+		}
+		resp.Body.Close()
+		// 404 or 405 both indicate the route is not active (not a 2xx success).
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			t.Errorf("%s %s with L3 disabled: got %d (success), want 4xx", tc.method, tc.path, resp.StatusCode)
+		}
 	}
 }
