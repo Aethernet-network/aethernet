@@ -67,6 +67,10 @@ type AutoValidator struct {
 	// entry for every settled task so GET /v1/economics tracks total output.
 	generationLedger *ledger.GenerationLedger
 
+	// verifierRegistry routes tasks to the appropriate deterministic verifier by
+	// category. When nil, the default KeywordVerifier is used (backward-compatible).
+	verifierRegistry *evidence.VerifierRegistry
+
 	// taskStaleness is the minimum age a submitted task must reach before the
 	// auto-validator processes it. Defaults to 10 seconds so the task poster
 	// has a window to approve manually first. Set to 0 in tests.
@@ -153,6 +157,25 @@ func (av *AutoValidator) SetDisputeReviewTimeout(d time.Duration) {
 	av.disputeReviewTimeout = d
 }
 
+// SetVerifierRegistry wires a VerifierRegistry into the auto-validator so that
+// each task category is assessed by the appropriate deterministic verifier
+// (CodeVerifier, DataVerifier, ContentVerifier) rather than the default
+// keyword-overlap heuristic. When not called, backward-compatible behaviour is
+// preserved: all tasks use evidence.NewVerifier().
+func (av *AutoValidator) SetVerifierRegistry(r *evidence.VerifierRegistry) {
+	av.verifierRegistry = r
+}
+
+// verifyEvidence dispatches to the VerifierRegistry when wired, or falls back
+// to the default keyword verifier when not. This is the single call-site for
+// all evidence assessment in the auto-validator.
+func (av *AutoValidator) verifyEvidence(ev *evidence.Evidence, title, description string, budget uint64, category string) (*evidence.Score, bool) {
+	if av.verifierRegistry != nil {
+		return av.verifierRegistry.Verify(ev, title, description, budget, category)
+	}
+	return evidence.NewVerifier().Verify(ev, title, description, budget)
+}
+
 // Start launches the background approval goroutine. It is safe to call once.
 func (av *AutoValidator) Start() {
 	go func() {
@@ -187,7 +210,6 @@ func (av *AutoValidator) Stop() {
 func (av *AutoValidator) processSubmittedTasks() {
 	submitted := av.taskMgr.Search(tasks.TaskStatusSubmitted, "", 0)
 	cutoff := time.Now().UnixNano() - int64(av.taskStaleness)
-	verifier := evidence.NewVerifier()
 	for _, task := range submitted {
 		if task.SubmittedAt > cutoff {
 			continue // submitted too recently
@@ -199,7 +221,7 @@ func (av *AutoValidator) processSubmittedTasks() {
 			OutputSize: uint64(len(task.ResultNote)),
 			OutputURL:  task.ResultURI,
 		}
-		score, passed := verifier.Verify(ev, task.Title, task.Description, task.Budget)
+		score, passed := av.verifyEvidence(ev, task.Title, task.Description, task.Budget, task.Category)
 		_ = av.taskMgr.SetVerificationScore(task.ID, score)
 		if !passed {
 			log.Printf("auto-validator: HELD task %s (score: %.2f, below threshold %.2f)",
@@ -258,7 +280,6 @@ func (av *AutoValidator) processDisputedTasks() {
 	disputed := av.taskMgr.Search(tasks.TaskStatusDisputed, "", 0)
 	now := time.Now().UnixNano()
 	reviewCutoff := now - int64(av.disputeReviewTimeout)
-	verifier := evidence.NewVerifier()
 
 	for _, task := range disputed {
 		if task.DisputedAt > reviewCutoff {
@@ -277,7 +298,7 @@ func (av *AutoValidator) processDisputedTasks() {
 				OutputURL:  task.ResultURI,
 			}
 			var s *evidence.Score
-			s, _ = verifier.Verify(ev, task.Title, task.Description, task.Budget)
+			s, _ = av.verifyEvidence(ev, task.Title, task.Description, task.Budget, task.Category)
 			_ = av.taskMgr.SetVerificationScore(task.ID, s)
 			score = s
 		}

@@ -35,6 +35,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/api"
 	"github.com/Aethernet-network/aethernet/internal/autovalidator"
 	"github.com/Aethernet-network/aethernet/internal/consensus"
+	"github.com/Aethernet-network/aethernet/internal/evidence"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
 	"github.com/Aethernet-network/aethernet/internal/demo"
@@ -534,6 +535,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	av.SetFeeCollector(stack.feeCollector, crypto.AgentID(genesis.BucketTreasury))
 	av.SetGenerationLedger(stack.generation)
 	av.SetRegistry(stack.reg)
+	av.SetVerifierRegistry(evidence.NewVerifierRegistry())
 	// Task marketplace integration is conditional on --marketplace flag.
 	if enableMarketplace {
 		av.SetTaskManager(stack.taskMgr, stack.escrowMgr)
