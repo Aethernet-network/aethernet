@@ -527,10 +527,62 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		// Give the testnet validator non-zero reputation and stake so that its
 		// votes carry weight in the consensus round (weight = rep×stake/10000).
 		// Without weight the VotingRound supermajority check can never fire.
-		tvFP.ReputationScore = 5000  // 50 % reputation
-		tvFP.StakedAmount = 10000    // 10 000 micro-AET
+		tvFP.ReputationScore = 5000 // 50 % reputation
+		tvFP.StakedAmount = 10000   // 10 000 micro-AET (consensus metadata only)
 		_ = stack.reg.Register(tvFP)
 	}
+
+	// Fund and stake the testnet-validator from the network rewards allocation.
+	// Idempotent: skips funding when balance >= tvValidatorMinBalance and skips
+	// staking when already staked. This gives the validator real economic
+	// participation so its 80% fee share lands in a spendable balance and it
+	// can participate in transfers with collateral at risk.
+	const (
+		tvValidatorFundTarget = uint64(100_000_000) // 100 AET target balance
+		tvValidatorMinBalance = uint64(10_000_000)  // 10 AET top-up threshold
+		tvValidatorStakeAmt   = uint64(50_000_000)  // 50 AET stake
+	)
+	tvInitialBal, _ := stack.transfer.Balance(testnetValidatorID)
+	tvStakedBefore := stack.stakeManager.StakedAmount(testnetValidatorID)
+
+	tvTopUp := uint64(0)
+	if tvInitialBal < tvValidatorMinBalance {
+		tvTopUp = tvValidatorFundTarget - tvInitialBal
+		if err := stack.transfer.TransferFromBucket(
+			crypto.AgentID(genesis.BucketRewards), testnetValidatorID, tvTopUp,
+		); err != nil {
+			slog.Warn("startStack: failed to fund testnet-validator from rewards",
+				"err", err, "top_up", tvTopUp)
+			tvTopUp = 0
+		}
+	}
+
+	tvStaked := false
+	if tvStakedBefore == 0 {
+		if err := stack.stakeManager.Stake(testnetValidatorID, tvValidatorStakeAmt); err != nil {
+			slog.Warn("startStack: failed to stake testnet-validator", "err", err)
+		} else {
+			tvStaked = true
+		}
+	}
+
+	tvPostBal, _ := stack.transfer.Balance(testnetValidatorID)
+	tvStalePurged := 0
+	if tvPostBal < tvValidatorMinBalance {
+		tvStalePurged = stack.transfer.ResetOptimisticOutflows(testnetValidatorID)
+		tvPostBal, _ = stack.transfer.Balance(testnetValidatorID)
+		slog.Warn("startStack: purged stale optimistic outflows for testnet-validator",
+			"entries_removed", tvStalePurged, "balance_after", tvPostBal)
+	}
+	slog.Info("startStack: testnet-validator ready",
+		"balance_before", tvInitialBal,
+		"top_up", tvTopUp,
+		"staked_before", tvStakedBefore,
+		"newly_staked", tvStaked,
+		"stale_purged", tvStalePurged,
+		"balance_after", tvPostBal,
+	)
+
 	av := autovalidator.NewAutoValidator(stack.engine, testnetValidatorID, 5*time.Second)
 	av.SetFeeCollector(stack.feeCollector, crypto.AgentID(genesis.BucketTreasury))
 	av.SetGenerationLedger(stack.generation)
