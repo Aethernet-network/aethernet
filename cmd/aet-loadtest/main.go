@@ -43,9 +43,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -65,11 +67,11 @@ import (
 // ---------------------------------------------------------------------------
 
 type config struct {
-	Target   string
-	Agents   int
+	Target    string
+	Agents    int
 	Transfers int
-	Tasks    int
-	Duration time.Duration
+	Tasks     int
+	Duration  time.Duration
 }
 
 // ---------------------------------------------------------------------------
@@ -120,27 +122,27 @@ type agentsResult struct {
 }
 
 type transfersResult struct {
-	Submitted        int     `json:"submitted"`
-	Settled          int64   `json:"settled"`
-	Failed           int64   `json:"failed"`
-	TPSSubmitted     float64 `json:"tps_submitted"`
-	TPSSettled       float64 `json:"tps_settled"`
-	P50SettlementMS  int64   `json:"p50_settlement_ms"`
-	P95SettlementMS  int64   `json:"p95_settlement_ms"`
-	P99SettlementMS  int64   `json:"p99_settlement_ms"`
-	SupplyInvariant  bool    `json:"supply_invariant"`
+	Submitted       int     `json:"submitted"`
+	Settled         int64   `json:"settled"`
+	Failed          int64   `json:"failed"`
+	TPSSubmitted    float64 `json:"tps_submitted"`
+	TPSSettled      float64 `json:"tps_settled"`
+	P50SettlementMS int64   `json:"p50_settlement_ms"`
+	P95SettlementMS int64   `json:"p95_settlement_ms"`
+	P99SettlementMS int64   `json:"p99_settlement_ms"`
+	SupplyInvariant bool    `json:"supply_invariant"`
 }
 
 type tasksResult struct {
-	Posted            int     `json:"posted"`
-	Settled           int64   `json:"settled"`
-	Failed            int64   `json:"failed"`
-	LifecyclePerSec   float64 `json:"lifecycle_per_sec"`
-	P50LifecycleMS    int64   `json:"p50_lifecycle_ms"`
-	P95LifecycleMS    int64   `json:"p95_lifecycle_ms"`
-	P99LifecycleMS    int64   `json:"p99_lifecycle_ms"`
-	FeesCollected     uint64  `json:"fees_collected"`
-	GenerationEntries int64   `json:"generation_entries"`
+	Posted          int     `json:"posted"`
+	Settled         int64   `json:"settled"`
+	Failed          int64   `json:"failed"`
+	LifecyclePerSec float64 `json:"lifecycle_per_sec"`
+	P50LifecycleMS  int64   `json:"p50_lifecycle_ms"`
+	P95LifecycleMS  int64   `json:"p95_lifecycle_ms"`
+	P99LifecycleMS  int64   `json:"p99_lifecycle_ms"`
+	FeesCollected   uint64  `json:"fees_collected"`
+	GenerationEntries int64 `json:"generation_entries"`
 }
 
 type stressResult struct {
@@ -166,25 +168,81 @@ type report struct {
 // ---------------------------------------------------------------------------
 
 // settleTimeout is the maximum time to wait for a single event to settle.
-// The auto-validator runs every 50ms on testnet; allow 30s for reliable coverage.
-const settleTimeout = 30 * time.Second
+// The auto-validator runs every 50ms on testnet; 60s gives ample coverage even
+// under load.
+const settleTimeout = 60 * time.Second
+
+// shortID returns the first 12 characters of an event ID for compact logging.
+func shortID(id string) string {
+	if len(id) > 12 {
+		return id[:12] + "…"
+	}
+	return id
+}
+
+// debugPrintRawEvent GETs /v1/events/{id} and pretty-prints the raw JSON body.
+// Used to verify the exact field names and values returned by the node.
+func debugPrintRawEvent(c *sdk.Client, eventID string) {
+	url := c.BaseURL + "/v1/events/" + eventID
+	resp, err := c.HTTPClient.Get(url)
+	if err != nil {
+		fmt.Printf("  [debug] raw GET %s: %v\n", url, err)
+		return
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("  [debug] raw GET read error: %v\n", err)
+		return
+	}
+	var pretty bytes.Buffer
+	if jerr := json.Indent(&pretty, body, "    ", "  "); jerr != nil {
+		fmt.Printf("  [debug] raw GET /v1/events/%s → %s\n", shortID(eventID), string(body))
+		return
+	}
+	fmt.Printf("  [debug] raw GET /v1/events/%s →\n    %s\n", shortID(eventID), pretty.String())
+}
 
 // pollSettled polls GetEvent until the event reaches Settled or Adjusted state
-// or settleTimeout elapses. Returns true on settlement, false on timeout/error.
-func pollSettled(c *sdk.Client, eventID string, start time.Time, lat *safeLatencies) bool {
+// or settleTimeout elapses. Returns (finalState, true) on settlement or
+// (lastObservedState, false) on timeout.
+//
+// Settlement state constants from internal/event/event.go are capitalized:
+//
+//	"Optimistic" → initial state
+//	"Settled"    → OCS confirmed (poller returns true)
+//	"Adjusted"   → challenged and reversed (poller returns true)
+//
+// If verbose is true, each poll attempt is printed to stdout so the caller
+// can trace exactly what the node returns while the event is pending.
+func pollSettled(c *sdk.Client, eventID string, start time.Time, lat *safeLatencies, verbose bool) (string, bool) {
 	deadline := time.Now().Add(settleTimeout)
+	attempt := 0
+	lastState := "unknown"
 	for time.Now().Before(deadline) {
+		attempt++
 		ev, err := c.GetEvent(eventID)
-		if err == nil {
-			switch ev.SettlementState {
-			case "settled", "adjusted":
-				lat.record(time.Since(start))
-				return true
+		if err != nil {
+			if verbose {
+				fmt.Printf("  [poll] attempt %2d: %s → error: %v\n", attempt, shortID(eventID), err)
 			}
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		lastState = ev.SettlementState
+		if verbose {
+			fmt.Printf("  [poll] attempt %2d: %s → %s\n", attempt, shortID(eventID), lastState)
+		}
+		// NOTE: SettlementState values are capitalized ("Settled", "Adjusted"),
+		// not lowercase. The original bug was checking "settled"/"adjusted" here.
+		switch lastState {
+		case "Settled", "Adjusted":
+			lat.record(time.Since(start))
+			return lastState, true
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return false
+	return lastState, false
 }
 
 // ---------------------------------------------------------------------------
@@ -395,30 +453,58 @@ func runTransfers(c *sdk.Client, m int) transfersResult {
 	fmt.Printf("  Phase 2: %d submitted (%.1f/s), polling settlement...\n",
 		len(submitted), float64(len(submitted))/submitElapsed)
 
+	// Debug: print the raw HTTP response for the first submitted event so we
+	// can verify the exact settlement_state field name and value the node returns.
+	if len(submitted) > 0 {
+		fmt.Printf("  [debug] fetching raw event response for first transfer:\n")
+		debugPrintRawEvent(c, submitted[0].eventID)
+	}
+
 	// Poll for settlement with bounded concurrency.
+	// The first event is polled verbosely to trace the full state progression.
 	sem := make(chan struct{}, settlePollWorkers)
 	var (
-		settled    atomic.Int64
-		unsettled  atomic.Int64
+		settled   atomic.Int64
+		unsettled atomic.Int64
 		settleLats safeLatencies
 		settleWG   sync.WaitGroup
+		// stateMu guards stateCounts which tallies final observed states.
+		stateMu    sync.Mutex
+		stateCounts = map[string]int{}
+		firstDone  atomic.Bool // true once the first verbose poller has started
 	)
 	settleStart := time.Now()
 	for _, p := range submitted {
 		settleWG.Add(1)
 		sem <- struct{}{}
-		go func(p pending) {
+		verbose := firstDone.CompareAndSwap(false, true)
+		go func(p pending, verbose bool) {
 			defer settleWG.Done()
 			defer func() { <-sem }()
-			if pollSettled(c, p.eventID, p.start, &settleLats) {
+			finalState, ok := pollSettled(c, p.eventID, p.start, &settleLats, verbose)
+			stateMu.Lock()
+			stateCounts[finalState]++
+			stateMu.Unlock()
+			if ok {
 				settled.Add(1)
 			} else {
 				unsettled.Add(1)
 			}
-		}(p)
+		}(p, verbose)
 	}
 	settleWG.Wait()
 	settleElapsed := time.Since(settleStart).Seconds()
+
+	// Print state breakdown so the user can see how many events are in each state.
+	stateMu.Lock()
+	if len(stateCounts) > 0 {
+		fmt.Printf("  Phase 2 state breakdown:")
+		for state, count := range stateCounts {
+			fmt.Printf("  %s=%d", state, count)
+		}
+		fmt.Println()
+	}
+	stateMu.Unlock()
 
 	// Supply invariant check.
 	supplyOK := false
@@ -562,30 +648,55 @@ func runTasks(c *sdk.Client, t int) tasksResult {
 	fmt.Printf("  Phase 3: %d submitted (%.1f/s), polling settlement...\n",
 		len(submitted), float64(len(submitted))/submitElapsed)
 
+	// Debug: print the raw HTTP response for the first generation event.
+	if len(submitted) > 0 {
+		fmt.Printf("  [debug] fetching raw event response for first generation event:\n")
+		debugPrintRawEvent(c, submitted[0].eventID)
+	}
+
 	sem := make(chan struct{}, settlePollWorkers)
 	var (
 		settled       atomic.Int64
 		unsettled     atomic.Int64
 		lifecycleLats safeLatencies
 		settleWG      sync.WaitGroup
+		stateMu       sync.Mutex
+		stateCounts   = map[string]int{}
+		firstDone     atomic.Bool
 	)
 	lifecycleStart := time.Now()
 	for _, p := range submitted {
 		settleWG.Add(1)
 		sem <- struct{}{}
-		go func(p pending) {
+		verbose := firstDone.CompareAndSwap(false, true)
+		go func(p pending, verbose bool) {
 			defer settleWG.Done()
 			defer func() { <-sem }()
-			if pollSettled(c, p.eventID, p.start, &lifecycleLats) {
+			finalState, ok := pollSettled(c, p.eventID, p.start, &lifecycleLats, verbose)
+			stateMu.Lock()
+			stateCounts[finalState]++
+			stateMu.Unlock()
+			if ok {
 				settled.Add(1)
 			} else {
 				unsettled.Add(1)
 			}
-		}(p)
+		}(p, verbose)
 	}
 	settleWG.Wait()
 	// Total lifecycle elapsed covers both submission and settlement polling.
 	lifecycleElapsed := time.Since(lifecycleStart) + time.Duration(float64(submitElapsed)*float64(time.Second))
+
+	// Print state breakdown.
+	stateMu.Lock()
+	if len(stateCounts) > 0 {
+		fmt.Printf("  Phase 3 state breakdown:")
+		for state, count := range stateCounts {
+			fmt.Printf("  %s=%d", state, count)
+		}
+		fmt.Println()
+	}
+	stateMu.Unlock()
 
 	// Delta fees.
 	var feesCollected uint64
@@ -604,14 +715,14 @@ func runTasks(c *sdk.Client, t int) tasksResult {
 	posted := runTaskPosting(c, taskCount)
 
 	res := tasksResult{
-		Posted:            posted,
-		Settled:           settled.Load(),
-		Failed:            unsettled.Load() + submitErrors,
-		LifecyclePerSec:   round2(lps),
-		P50LifecycleMS:    pct(sorted, 0.50),
-		P95LifecycleMS:    pct(sorted, 0.95),
-		P99LifecycleMS:    pct(sorted, 0.99),
-		FeesCollected:     feesCollected,
+		Posted:          posted,
+		Settled:         settled.Load(),
+		Failed:          unsettled.Load() + submitErrors,
+		LifecyclePerSec: round2(lps),
+		P50LifecycleMS:  pct(sorted, 0.50),
+		P95LifecycleMS:  pct(sorted, 0.95),
+		P99LifecycleMS:  pct(sorted, 0.99),
+		FeesCollected:   feesCollected,
 		GenerationEntries: settled.Load(),
 	}
 	fmt.Printf("  Phase 3 done: gen_settled=%d posted=%d failed=%d lifecycle/s=%.1f p50=%dms fees_delta=%d\n",
@@ -800,7 +911,7 @@ func main() {
 	flag.Parse()
 
 	// Shared HTTP client with a generous timeout for load testing.
-	httpClient := &http.Client{Timeout: 30 * time.Second}
+	httpClient := &http.Client{Timeout: 60 * time.Second}
 	c := sdk.New(cfg.Target, httpClient)
 
 	// Preflight: verify the node is reachable.
