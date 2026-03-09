@@ -148,6 +148,46 @@ func (c *Collector) TrackFee(fee, burned, treasury uint64) {
 	c.mu.Unlock()
 }
 
+// CollectFeeFromRecipient deducts the settlement fee from recipientID's balance
+// and redistributes the splits to the validator and treasury via TransferFromBucket.
+// Unlike CollectFee, no new tokens are created — the fee is moved from the
+// transaction recipient's balance, preserving the total supply invariant.
+//
+// Returns the total fee deducted and the amount burned (always 0 — all fees
+// stay in circulation). Both are zero when the fee rounds to zero.
+func (c *Collector) CollectFeeFromRecipient(
+	recipientID crypto.AgentID,
+	amount uint64,
+	validatorID crypto.AgentID,
+	treasuryID crypto.AgentID,
+) (fee uint64, burned uint64) {
+	fee = CalculateFee(amount)
+	if fee == 0 {
+		return 0, 0
+	}
+
+	validatorAmount := fee * ValidatorShare / 100
+	treasuryAmount := fee * TreasuryShare / 100
+	burned = fee - validatorAmount - treasuryAmount
+
+	c.mu.Lock()
+	c.totalCollected += fee
+	c.totalBurned += burned
+	c.treasuryAccrued += treasuryAmount
+	c.persistStatsLocked()
+	c.mu.Unlock()
+
+	// Move tokens from recipient to each sink — no new tokens created.
+	// Best-effort: errors are ignored so fee distribution never blocks settlement.
+	if validatorAmount > 0 && validatorID != "" {
+		_ = c.transfer.TransferFromBucket(recipientID, validatorID, validatorAmount)
+	}
+	if treasuryAmount > 0 && treasuryID != "" {
+		_ = c.transfer.TransferFromBucket(recipientID, treasuryID, treasuryAmount)
+	}
+	return fee, burned
+}
+
 // Stats returns cumulative fee collection statistics as a point-in-time snapshot.
 func (c *Collector) Stats() (collected, burned, treasury uint64) {
 	c.mu.RLock()

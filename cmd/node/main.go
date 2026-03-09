@@ -601,9 +601,12 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	if enableMarketplace && stack.taskMgr.Stats().TotalTasks == 0 {
 		seedMarketplace(stack.transfer, stack.reg, stack.taskMgr, stack.escrowMgr, stack.stakeManager)
 	}
+	// Fix 4: activate background cleanup goroutine (evicts tasks > MaxCompletedAge).
+	stack.taskMgr.Start()
 
 	cfg := network.DefaultNodeConfig(agentID)
 	cfg.ListenAddr = p2pAddr
+	cfg.KeyPair = stack.kp // Fix 1: wire keypair so P2P votes are signed
 	node := network.NewNode(cfg, stack.dag)
 	if err := node.Start(); err != nil {
 		slog.Error("failed to start network listener", "addr", p2pAddr, "err", err)
@@ -750,6 +753,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 // stopStack tears down the API server, network node, OCS engine, and persistence
 // store in safe reverse-startup order.
 func stopStack(node *network.Node, stack *nodeStack) {
+	if stack.taskMgr != nil {
+		stack.taskMgr.Stop() // Fix 4: stop background cleanup goroutine
+	}
 	if stack.taskRouter != nil {
 		stack.taskRouter.Stop()
 	}

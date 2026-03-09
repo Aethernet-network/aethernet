@@ -672,8 +672,20 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 			e.nodeMetrics.TransactionVolume.Add(item.Amount)
 		}
 		// Collect settlement fee when economics are wired in.
+		// Transfer events: deduct from recipient's settled balance (supply-safe).
+		// Generation events: stats-only — no transfer-ledger balance to deduct from.
 		if e.feeCollector != nil && item.Amount > 0 {
-			fee, burned := e.feeCollector.CollectFee(item.Amount, result.VerifierID, e.treasuryID)
+			var fee, burned uint64
+			switch item.EventType {
+			case event.EventTypeTransfer:
+				fee, burned = e.feeCollector.CollectFeeFromRecipient(
+					item.RecipientID, item.Amount, result.VerifierID, e.treasuryID,
+				)
+			case event.EventTypeGeneration:
+				fee = fees.CalculateFee(item.Amount)
+				burned = fee - fee*fees.ValidatorShare/100 - fee*fees.TreasuryShare/100
+				e.feeCollector.TrackFee(fee, burned, fee*fees.TreasuryShare/100)
+			}
 			if e.nodeMetrics != nil && fee > 0 {
 				e.nodeMetrics.FeesCollected.Add(fee)
 				e.nodeMetrics.FeesBurned.Add(burned)
@@ -711,7 +723,8 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 				slashed = e.stakeManager.Slash(item.AgentID, 10)
 			}
 			if slashed > 0 && e.treasuryID != "" {
-				_ = e.transfer.FundAgent(e.treasuryID, slashed)
+				// Move from staking-pool to treasury — no new tokens created.
+				_ = e.transfer.TransferFromBucket(crypto.AgentID("staking-pool"), e.treasuryID, slashed)
 			}
 			if slashed > 0 {
 				if e.nodeMetrics != nil {
