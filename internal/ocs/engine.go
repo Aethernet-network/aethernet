@@ -32,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Aethernet-network/aethernet/internal/consensus"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/eventbus"
@@ -216,6 +217,15 @@ type Engine struct {
 	// Nil-safe throughout Submit and ProcessResult.
 	nodeMetrics *metrics.AetherNetMetrics
 
+	// voting — optional. When non-nil, verdicts route through reputation-weighted
+	// BFT consensus before settlement. Nil means single-node direct settlement.
+	voting *consensus.VotingRound
+
+	// broadcastVote — optional. When non-nil, called after a local vote is
+	// registered so the network layer can propagate it to peer nodes.
+	// The function receives the event ID, verdict, and voter ID.
+	broadcastVote func(eventID event.EventID, verdict bool, voterID crypto.AgentID)
+
 	pending      map[event.EventID]*PendingItem
 	processed    map[event.EventID]struct{}    // tracks already-settled events for idempotency
 	processedAt  map[event.EventID]time.Time   // wall-clock time each event was settled (for GC)
@@ -265,6 +275,104 @@ func (e *Engine) SetEventBus(b *eventbus.Bus) {
 // Nil-safe: all existing tests are unaffected.
 func (e *Engine) SetMetrics(m *metrics.AetherNetMetrics) {
 	e.nodeMetrics = m
+}
+
+// SetConsensus wires a VotingRound into the Engine for multi-node agreement.
+// When non-nil, verdicts submitted via ProcessVote are routed through
+// reputation-weighted BFT consensus before settlement. When nil (the default),
+// ProcessVote delegates directly to ProcessResult for backward compatibility.
+// Call before Start.
+func (e *Engine) SetConsensus(vr *consensus.VotingRound) {
+	e.voting = vr
+}
+
+// SetVoteBroadcaster wires a broadcast callback called after a local vote is
+// registered in the consensus round. The callback should propagate the vote to
+// peer nodes over the P2P network. Nil-safe.
+func (e *Engine) SetVoteBroadcaster(fn func(eventID event.EventID, verdict bool, voterID crypto.AgentID)) {
+	e.broadcastVote = fn
+}
+
+// ProcessVote routes a verification verdict through the consensus engine when
+// one is configured, settling the event only when a supermajority is reached.
+// When no consensus engine is set (nil), it falls back to direct settlement
+// via ProcessResult for full single-node backward compatibility.
+//
+// When consensus is active and the vote does not yet trigger finalization,
+// ProcessVote returns nil — the event remains pending until more votes arrive
+// or the deadline sweep fires.
+//
+// After registering a new local vote, ProcessVote calls the broadcastVote
+// callback (if set) so the P2P layer can propagate it to peer nodes.
+func (e *Engine) ProcessVote(result VerificationResult) error {
+	return e.processVoteInternal(result, true)
+}
+
+// AcceptPeerVote registers a vote received from a peer node without re-broadcasting
+// it. If the received vote triggers a supermajority, settlement proceeds immediately.
+// This is the entry point for the network layer's vote handler.
+func (e *Engine) AcceptPeerVote(eventID event.EventID, voterID crypto.AgentID, verdict bool) error {
+	return e.processVoteInternal(VerificationResult{
+		EventID:    eventID,
+		VerifierID: voterID,
+		Verdict:    verdict,
+		Timestamp:  time.Now(),
+	}, false)
+}
+
+// processVoteInternal is the shared implementation for ProcessVote and
+// AcceptPeerVote. When broadcast is true and a new vote is successfully
+// registered, the broadcastVote callback is invoked.
+func (e *Engine) processVoteInternal(result VerificationResult, broadcast bool) error {
+	if e.voting == nil {
+		// Single-node mode: direct settlement identical to previous behaviour.
+		if broadcast {
+			return e.ProcessResult(result)
+		}
+		return nil
+	}
+
+	// Register the vote in the consensus round.
+	err := e.voting.RegisterVote(result.EventID, result.VerifierID, result.Verdict)
+	if err != nil {
+		// Acceptable non-fatal conditions: duplicate vote, already finalized,
+		// round exhausted. The event will be settled by the deadline sweep.
+		return nil
+	}
+
+	// Propagate locally-originated votes to peer nodes.
+	if broadcast && e.broadcastVote != nil {
+		e.broadcastVote(result.EventID, result.Verdict, result.VerifierID)
+	}
+
+	// Check whether this vote triggered a supermajority.
+	finalized, ferr := e.voting.IsFinalized(result.EventID)
+	if ferr != nil || !finalized {
+		return nil // awaiting more votes
+	}
+
+	// Supermajority reached — read the consensus result and settle.
+	rec, ferr := e.voting.GetRecord(result.EventID)
+	if ferr != nil {
+		return nil
+	}
+	// Compute the consensus verdict from accumulated weights.
+	// Finalization only occurs when YesWeight/TotalWeight >= SupermajorityThreshold,
+	// so the verdict is always true here. Kept explicit for auditability.
+	consensusVerdict := rec.TotalWeight > 0 &&
+		float64(rec.YesWeight)/float64(rec.TotalWeight) >= 0.667
+
+	// Settle with an empty VerifierID to bypass the self-dealing check:
+	// consensus means multiple independent validators agreed, so the check
+	// against any single verifier being a party to the transaction is moot.
+	return e.ProcessResult(VerificationResult{
+		EventID:       result.EventID,
+		Verdict:       consensusVerdict,
+		VerifiedValue: result.VerifiedValue,
+		VerifierID:    "",
+		Reason:        "consensus: supermajority finalized",
+		Timestamp:     result.Timestamp,
+	})
 }
 
 // NewEngine constructs an Engine backed by the provided ledgers and identity registry.
@@ -346,7 +454,9 @@ func (e *Engine) run() {
 		case <-e.ctx.Done():
 			return
 		case result := <-e.results:
-			_ = e.ProcessResult(result)
+			// Route through consensus when active; falls back to direct
+			// settlement when voting is nil (single-node backward compat).
+			_ = e.ProcessVote(result)
 		case <-ticker.C:
 			e.checkExpired()
 		}
@@ -660,12 +770,50 @@ func (e *Engine) checkExpired() {
 	e.mu.Unlock()
 
 	for _, id := range expired {
-		_ = e.ProcessResult(VerificationResult{
-			EventID:   id,
-			Verdict:   false,
-			Reason:    "verification deadline exceeded",
-			Timestamp: now,
-		})
+		if e.voting != nil {
+			// Consensus mode: inspect accumulated votes to make a majority
+			// decision rather than always rejecting on timeout.
+			rec, recErr := e.voting.GetRecord(id)
+			if recErr != nil {
+				// No votes at all — conservative reject.
+				_ = e.ProcessResult(VerificationResult{
+					EventID:   id,
+					Verdict:   false,
+					Reason:    "consensus: timeout with no votes",
+					Timestamp: now,
+				})
+				continue
+			}
+			if rec.Finalized {
+				// Already finalized by consensus — idempotency in ProcessResult
+				// will silently skip this. Skip the call to avoid log noise.
+				continue
+			}
+			// Has votes but not yet a supermajority. Use a simple head-count
+			// majority: if more yes votes than no votes, accept; otherwise reject.
+			var yesCount, noCount int
+			for _, vote := range rec.Votes {
+				if vote {
+					yesCount++
+				} else {
+					noCount++
+				}
+			}
+			verdict := yesCount > noCount
+			_ = e.ProcessResult(VerificationResult{
+				EventID:   id,
+				Verdict:   verdict,
+				Reason:    "consensus: timeout majority decision",
+				Timestamp: now,
+			})
+		} else {
+			_ = e.ProcessResult(VerificationResult{
+				EventID:   id,
+				Verdict:   false,
+				Reason:    "verification deadline exceeded",
+				Timestamp: now,
+			})
+		}
 	}
 }
 

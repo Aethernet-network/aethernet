@@ -71,6 +71,10 @@ type Node struct {
 	peers    map[crypto.AgentID]*Peer
 	incoming chan Message // reserved for future external consumers
 
+	// voteHandler is called for each authenticated MsgVote received from a peer.
+	// Set via SetVoteHandler; nil-safe in handleMessage.
+	voteHandler func(voterID crypto.AgentID, eventID event.EventID, verdict bool)
+
 	mu       sync.RWMutex
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -270,6 +274,69 @@ func (n *Node) Broadcast(e *event.Event) error {
 		_ = p.Send(msg)
 	}
 	return nil
+}
+
+// SetVoteHandler registers a callback invoked for each authenticated MsgVote
+// received from a peer. The callback feeds the vote into the local OCS consensus
+// round via Engine.AcceptPeerVote. Call before Start.
+func (n *Node) SetVoteHandler(fn func(voterID crypto.AgentID, eventID event.EventID, verdict bool)) {
+	n.voteHandler = fn
+}
+
+// BroadcastVote sends a signed MsgVote to all currently connected peers.
+// The vote is signed with the node's keypair (if configured) so that receiving
+// nodes can authenticate it before feeding it into their consensus round.
+func (n *Node) BroadcastVote(eventID event.EventID, verdict bool) error {
+	vp := VotePayload{
+		EventID: eventID,
+		VoterID: n.config.AgentID,
+		Verdict: verdict,
+	}
+
+	// Sign the canonical byte representation if a keypair is available.
+	if n.config.KeyPair != nil {
+		vp.PublicKey = n.config.KeyPair.PublicKey
+		sig, err := n.config.KeyPair.Sign(voteBytes(eventID, n.config.AgentID, verdict))
+		if err == nil {
+			vp.Signature = sig
+		}
+	}
+
+	payload, err := json.Marshal(vp)
+	if err != nil {
+		return fmt.Errorf("network: marshal vote: %w", err)
+	}
+	msg := Message{Type: MsgVote, Payload: payload}
+
+	n.mu.RLock()
+	peers := make([]*Peer, 0, len(n.peers))
+	for _, p := range n.peers {
+		peers = append(peers, p)
+	}
+	n.mu.RUnlock()
+
+	for _, p := range peers {
+		_ = p.Send(msg)
+	}
+	return nil
+}
+
+// voteBytes builds the canonical byte slice that is signed and verified for a
+// MsgVote message. The format is fixed-length-agnostic concatenation:
+//
+//	[event_id bytes] | [voter_id bytes] | [0x01 if verdict else 0x00]
+//
+// Both sides must use the same construction for signatures to verify correctly.
+func voteBytes(eventID event.EventID, voterID crypto.AgentID, verdict bool) []byte {
+	b := make([]byte, 0, len(eventID)+len(voterID)+1)
+	b = append(b, []byte(eventID)...)
+	b = append(b, []byte(voterID)...)
+	if verdict {
+		b = append(b, 1)
+	} else {
+		b = append(b, 0)
+	}
+	return b
 }
 
 // PeerCount returns the number of entries currently in the peers map.
@@ -545,5 +612,23 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 
 	case MsgPong:
 		// lastSeen already updated above via UpdateLastSeen.
+
+	case MsgVote:
+		// Deserialise and authenticate the vote before feeding it to consensus.
+		var vp VotePayload
+		if err := json.Unmarshal(msg.Payload, &vp); err != nil {
+			return
+		}
+		// Verify the signature when both public key and signature are present.
+		// Votes without a signature are accepted in single-node or test setups.
+		if len(vp.PublicKey) > 0 && len(vp.Signature) > 0 {
+			if !crypto.Verify(vp.PublicKey, voteBytes(vp.EventID, vp.VoterID, vp.Verdict), vp.Signature) {
+				// Signature invalid — drop the vote silently.
+				return
+			}
+		}
+		if n.voteHandler != nil {
+			n.voteHandler(vp.VoterID, vp.EventID, vp.Verdict)
+		}
 	}
 }

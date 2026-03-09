@@ -59,7 +59,36 @@ const (
 	MsgPing MessageType = "ping"
 	// MsgPong is the reply to MsgPing; updates the sender's lastSeen timestamp.
 	MsgPong MessageType = "pong"
+	// MsgVote carries a single validator vote for use in the OCS consensus round.
+	MsgVote MessageType = "vote"
 )
+
+// VotePayload is the body of a MsgVote wire message. It carries the vote data
+// and an Ed25519 signature over the canonical fields so that receiving nodes
+// can authenticate the vote before feeding it into their local consensus round.
+//
+// The canonical signed byte sequence is:
+//
+//	[event_id bytes] | [voter_id bytes] | [0x01 if verdict=true else 0x00]
+type VotePayload struct {
+	// EventID identifies the event being voted on.
+	EventID event.EventID `json:"event_id"`
+
+	// VoterID is the AgentID of the node casting the vote.
+	VoterID crypto.AgentID `json:"voter_id"`
+
+	// Verdict is true for an accept vote, false for a reject vote.
+	Verdict bool `json:"verdict"`
+
+	// PublicKey is the sender's Ed25519 public key for signature verification.
+	// May be omitted when the receiver can look up the key by VoterID.
+	PublicKey []byte `json:"public_key,omitempty"`
+
+	// Signature is the Ed25519 signature over the canonical byte sequence.
+	// When empty, the receiving node accepts the vote without authentication
+	// (useful for testing and trusted local networks).
+	Signature []byte `json:"signature,omitempty"`
+}
 
 // Message is the envelope for all wire traffic between peers.
 // Type identifies the message kind; Payload carries the JSON-encoded body.

@@ -33,11 +33,12 @@ import (
 	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/api"
+	"github.com/Aethernet-network/aethernet/internal/autovalidator"
+	"github.com/Aethernet-network/aethernet/internal/consensus"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
 	"github.com/Aethernet-network/aethernet/internal/demo"
 	"github.com/Aethernet-network/aethernet/internal/discovery"
-	platformpkg "github.com/Aethernet-network/aethernet/internal/platform"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/eventbus"
@@ -48,13 +49,13 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/metrics"
 	"github.com/Aethernet-network/aethernet/internal/network"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
+	platformpkg "github.com/Aethernet-network/aethernet/internal/platform"
 	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 	"github.com/Aethernet-network/aethernet/internal/registry"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/router"
 	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/store"
-	"github.com/Aethernet-network/aethernet/internal/autovalidator"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/wallet"
 )
@@ -358,6 +359,20 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 		}
 	}
 
+	// Consensus: reputation-weighted BFT voting for multi-node agreement.
+	// MinParticipants=1 preserves single-node semantics: one validator with any
+	// positive weight reaches supermajority immediately, identical to the
+	// previous direct-settlement behaviour. Peer nodes raise effective
+	// participation counts automatically as they join and cast votes.
+	votingCfg := &consensus.ConsensusConfig{
+		SupermajorityThreshold: 0.667,
+		MaxRounds:              10,
+		RoundTimeout:           30 * time.Second,
+		MinParticipants:        1,
+	}
+	votingRound := consensus.NewVotingRound(votingCfg, reg)
+	eng.SetConsensus(votingRound)
+
 	// Economics: staking, fee collection, and deposit-address wallet.
 	// These are optional — engine and API server nil-check them — but the
 	// node should always wire them so that trust limits, fee distribution,
@@ -508,6 +523,11 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	testnetValidatorID := crypto.AgentID("testnet-validator")
 	tvFP, err := identity.NewFingerprint(testnetValidatorID, make([]byte, 32), nil)
 	if err == nil {
+		// Give the testnet validator non-zero reputation and stake so that its
+		// votes carry weight in the consensus round (weight = rep×stake/10000).
+		// Without weight the VotingRound supermajority check can never fire.
+		tvFP.ReputationScore = 5000  // 50 % reputation
+		tvFP.StakedAmount = 10000    // 10 000 micro-AET
 		_ = stack.reg.Register(tvFP)
 	}
 	av := autovalidator.NewAutoValidator(stack.engine, testnetValidatorID, 5*time.Second)
@@ -536,6 +556,15 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		stack.engine.Stop()
 		os.Exit(1)
 	}
+
+	// Wire consensus ↔ P2P: locally-originated votes are broadcast to peers;
+	// votes received from peers are fed into the local consensus round.
+	stack.engine.SetVoteBroadcaster(func(eventID event.EventID, verdict bool, voterID crypto.AgentID) {
+		_ = node.BroadcastVote(eventID, verdict)
+	})
+	node.SetVoteHandler(func(voterID crypto.AgentID, eventID event.EventID, verdict bool) {
+		_ = stack.engine.AcceptPeerVote(eventID, voterID, verdict)
+	})
 
 	apiSrv := api.NewServer(
 		apiListenAddr,
