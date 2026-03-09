@@ -960,8 +960,21 @@ func seedRouterCapabilities(r *router.Router) {
 // creates six tasks with escrow already held. This gives the explorer a live,
 // interactive economy from the moment the node starts.
 //
+// Funding and staking are idempotent: each agent is only funded when its
+// current liquid balance is below seedMinBalance, and only staked when it has
+// no existing stake. This prevents double-spending the genesis pool on
+// re-deploys where the ledger/staking store persists but task data is absent
+// (causing TotalTasks == 0 to trigger the seed path again).
+//
 // This is intentionally testnet-only: on mainnet, real agents post real tasks.
 func seedMarketplace(tl *ledger.TransferLedger, reg *identity.Registry, taskMgr *tasks.TaskManager, escrowMgr *escrow.Escrow, stakeMgr *staking.StakeManager) {
+	// seedFundTarget is the liquid balance each seed agent should have after
+	// seeding. seedMinBalance is the threshold below which a top-up is applied.
+	const (
+		seedFundTarget = uint64(50_000_000) // µAET — target balance
+		seedMinBalance = uint64(10_000_000) // µAET — top-up threshold
+	)
+
 	type poster struct {
 		id    string
 		funds uint64
@@ -987,12 +1000,36 @@ func seedMarketplace(tl *ledger.TransferLedger, reg *identity.Registry, taskMgr 
 		if err == nil {
 			_ = reg.Register(fp)
 		}
-		if err := tl.FundAgent(crypto.AgentID(p.id), p.funds); err != nil {
-			slog.Warn("seedMarketplace: failed to fund poster", "id", p.id, "err", err)
+
+		// Idempotent funding: only top up when the agent's current liquid
+		// balance is below the minimum threshold.  On re-deploys where the
+		// store persists ledger entries from a previous run, this prevents
+		// double-crediting the genesis pool.
+		currentBal, _ := tl.Balance(crypto.AgentID(p.id))
+		if currentBal < seedMinBalance {
+			topUp := seedFundTarget - currentBal
+			if err := tl.FundAgent(crypto.AgentID(p.id), topUp); err != nil {
+				slog.Warn("seedMarketplace: failed to fund agent", "id", p.id, "err", err)
+			} else {
+				slog.Info("seedMarketplace: funded agent", "id", p.id,
+					"top_up", topUp, "prev_balance", currentBal)
+			}
+		} else {
+			slog.Info("seedMarketplace: agent already funded, skipping", "id", p.id,
+				"balance", currentBal)
 		}
+
+		// Idempotent staking: only stake when no stake is already recorded.
+		// On re-deploy with persisted staking state, skipping prevents
+		// over-staking and avoids draining the freshly-topped-up balance.
 		if stakeMgr != nil {
-			if err := stakeMgr.Stake(crypto.AgentID(p.id), p.stake); err != nil {
-				slog.Warn("seedMarketplace: failed to stake poster", "id", p.id, "err", err)
+			if stakeMgr.StakedAmount(crypto.AgentID(p.id)) == 0 {
+				if err := stakeMgr.Stake(crypto.AgentID(p.id), p.stake); err != nil {
+					slog.Warn("seedMarketplace: failed to stake agent", "id", p.id, "err", err)
+				}
+			} else {
+				slog.Info("seedMarketplace: agent already staked, skipping", "id", p.id,
+					"staked", stakeMgr.StakedAmount(crypto.AgentID(p.id)))
 			}
 		}
 	}
