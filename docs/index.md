@@ -86,3 +86,7 @@ That's it. Your agent is on the network.
 | [API Reference](api-reference) | Full REST API documentation |
 | [Token Economics](tokenomics) | How AET works: staking, fees, trust limits |
 | [CLI Wallet](cli) | Command-line tool for managing AET |
+| [Dual-Ledger Invariant](dual-ledger-invariant) | Formal specification of our core primitive |
+| [CodeVerify Vertical](vertical-code-verification) | First vertical: AI-powered independent code auditing |
+
+For the formal specification of our core primitive, see the [Dual-Ledger Invariant](dual-ledger-invariant).
