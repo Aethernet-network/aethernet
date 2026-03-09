@@ -494,6 +494,14 @@ func (e *Engine) Submit(ev *event.Event) error {
 
 	var recipientID crypto.AgentID
 
+	// senderID is the economic actor responsible for this event — used for the
+	// C3 stake re-check at settlement time.  For Transfer events this is the
+	// payload's FromAgent (the entity whose balance is debited), NOT ev.AgentID
+	// (the node that signed and submitted the event).  Using ev.AgentID here
+	// caused the C3 check to evaluate the signing node's stake (typically 0)
+	// instead of the actual sender's stake, reversing every transfer.
+	senderID := crypto.AgentID(ev.AgentID)
+
 	switch ev.Type {
 	case event.EventTypeTransfer:
 		// Balance check before recording. Extract payload to get the amount.
@@ -509,6 +517,7 @@ func (e *Engine) Submit(ev *event.Event) error {
 		}
 		amount = tp.Amount
 		recipientID = crypto.AgentID(tp.ToAgent)
+		senderID = crypto.AgentID(tp.FromAgent)
 
 	case event.EventTypeGeneration:
 		if err := e.generation.Record(ev); err != nil {
@@ -527,7 +536,7 @@ func (e *Engine) Submit(ev *event.Event) error {
 	e.pending[ev.ID] = &PendingItem{
 		EventID:      ev.ID,
 		EventType:    ev.Type,
-		AgentID:      crypto.AgentID(ev.AgentID),
+		AgentID:      senderID,
 		Amount:       amount,
 		RecipientID:  recipientID,
 		OptimisticAt: time.Now(),
