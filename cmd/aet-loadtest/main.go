@@ -16,21 +16,30 @@
 //	--duration  Max stress-test duration                 (default: 120s)
 //
 // Phase 1: Agent Registration — concurrent Register() calls; measures HTTP
-//          throughput for the registration endpoint.
 //
-// Phase 2: Transfer Throughput — concurrent Transfer() submissions; tracks
-//          settlement latency via event polling; checks supply invariant.
+//	throughput for the registration endpoint. Responses that hit the
+//	server-side rate limit (HTTP 429) are counted separately as
+//	"rate_limited" and are not included in the error count.
 //
-// Phase 3: Generation / Task Lifecycle — concurrent Generate() submissions
-//          (proof-of-work proxy); tracks OCS settlement; reports generation
-//          entries created and fees collected. Also benchmarks PostTask().
-//          Note: full post→claim→submit lifecycle requires two distinct agent
-//          identities. Since the SDK operates as a single node identity,
-//          self-claim is blocked, so Generate() is the correct proxy for the
-//          "verified output that creates a ledger entry" lifecycle.
+// Phase 2: Transfer Throughput — calls ensureFunded() to obtain the node's
 //
-// Phase 4: Stress — runs Transfer and Generate concurrently for --duration;
-//          measures peak TPS, total ops, error rate, and memory growth.
+//	onboarding allocation, then submits concurrent Transfer events.
+//	The transfer count is capped to what the available balance can cover
+//	(amount + stake per transfer). Supply invariant is checked after.
+//
+// Phase 3: Generation / Task Lifecycle — calls ensureFunded() again, then
+//
+//	submits concurrent Generate() events (proof-of-work proxy) and
+//	concurrent PostTask() calls. Both counts are capped to available balance.
+//	Note: full post→claim→submit lifecycle requires two distinct agent
+//	identities. Since the SDK operates as a single node identity,
+//	self-claim is blocked, so Generate() is the correct proxy for the
+//	"verified output that creates a ledger entry" lifecycle.
+//
+// Phase 4: Stress — calls ensureFunded() for a pre-funded baseline, then
+//
+//	runs Transfer and Generate concurrently for --duration; measures peak
+//	TPS, total ops, error rate, and memory growth.
 package main
 
 import (
@@ -43,6 +52,7 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -101,6 +111,7 @@ func pct(sorted []int64, p float64) int64 {
 
 type agentsResult struct {
 	Registered  int     `json:"registered"`
+	RateLimited int64   `json:"rate_limited"`
 	RatePerSec  float64 `json:"rate_per_sec"`
 	P50MS       int64   `json:"p50_ms"`
 	P95MS       int64   `json:"p95_ms"`
@@ -155,6 +166,7 @@ type report struct {
 // ---------------------------------------------------------------------------
 
 // settleTimeout is the maximum time to wait for a single event to settle.
+// The auto-validator runs every 50ms on testnet; allow 30s for reliable coverage.
 const settleTimeout = 30 * time.Second
 
 // pollSettled polls GetEvent until the event reaches Settled or Adjusted state
@@ -176,6 +188,50 @@ func pollSettled(c *sdk.Client, eventID string, start time.Time, lat *safeLatenc
 }
 
 // ---------------------------------------------------------------------------
+// Agent funding helpers
+// ---------------------------------------------------------------------------
+
+// agentFunds holds a snapshot of the node agent's funding state after calling
+// Register() to claim any pending onboarding allocation.
+type agentFunds struct {
+	AgentID string
+	Balance uint64 // spendable µAET
+	Staked  uint64 // currently staked µAET
+}
+
+// ensureFunded registers the node's own agent (granting the onboarding
+// allocation on first call) and reads back its balance and stake. If Register
+// returns a 429 (rate-limited), the agent ID is resolved via Status instead
+// and we proceed with the existing balance. Returns nil only if the agent ID
+// cannot be determined at all.
+func ensureFunded(c *sdk.Client) *agentFunds {
+	agentID, err := c.Register(nil)
+	if err != nil {
+		if !strings.Contains(err.Error(), "429") {
+			fmt.Printf("  ensureFunded: Register: %v\n", err)
+		}
+		// Fall back to Status to resolve the node's agent ID.
+		st, serr := c.Status()
+		if serr != nil {
+			fmt.Printf("  ensureFunded: cannot resolve agent ID via Status: %v\n", serr)
+			return nil
+		}
+		agentID = st.AgentID
+	}
+
+	af := &agentFunds{AgentID: agentID}
+	if balResp, berr := c.Balance(agentID); berr == nil {
+		af.Balance = balResp.Balance
+	} else {
+		fmt.Printf("  ensureFunded: cannot read balance for %s: %v\n", agentID, berr)
+	}
+	if stakeResp, sterr := c.StakeInfo(agentID); sterr == nil {
+		af.Staked = stakeResp.StakedAmount
+	}
+	return af
+}
+
+// ---------------------------------------------------------------------------
 // Memory helpers
 // ---------------------------------------------------------------------------
 
@@ -193,9 +249,10 @@ func runRegistration(c *sdk.Client, n int) agentsResult {
 	fmt.Printf("  Phase 1: registering %d agents concurrently...\n", n)
 
 	var (
-		wg      sync.WaitGroup
-		errors  atomic.Int64
-		lats    safeLatencies
+		wg          sync.WaitGroup
+		errors      atomic.Int64
+		rateLimited atomic.Int64
+		lats        safeLatencies
 	)
 
 	start := time.Now()
@@ -206,7 +263,14 @@ func runRegistration(c *sdk.Client, n int) agentsResult {
 			t0 := time.Now()
 			_, err := c.Register(nil)
 			if err != nil {
-				errors.Add(1)
+				// HTTP 429 means the server-side rate limiter fired.
+				// Report these separately — they are expected behaviour,
+				// not protocol errors.
+				if strings.Contains(err.Error(), "429") {
+					rateLimited.Add(1)
+				} else {
+					errors.Add(1)
+				}
 				return
 			}
 			lats.record(time.Since(t0))
@@ -215,7 +279,9 @@ func runRegistration(c *sdk.Client, n int) agentsResult {
 	wg.Wait()
 	elapsed := time.Since(start).Seconds()
 
-	succeeded := n - int(errors.Load())
+	rl := rateLimited.Load()
+	errs := errors.Load()
+	succeeded := n - int(errs) - int(rl)
 	sorted := lats.sorted()
 	rate := 0.0
 	if elapsed > 0 {
@@ -223,15 +289,16 @@ func runRegistration(c *sdk.Client, n int) agentsResult {
 	}
 
 	res := agentsResult{
-		Registered: succeeded,
-		RatePerSec: round2(rate),
-		P50MS:      pct(sorted, 0.50),
-		P95MS:      pct(sorted, 0.95),
-		P99MS:      pct(sorted, 0.99),
-		Errors:     errors.Load(),
+		Registered:  succeeded,
+		RateLimited: rl,
+		RatePerSec:  round2(rate),
+		P50MS:       pct(sorted, 0.50),
+		P95MS:       pct(sorted, 0.95),
+		P99MS:       pct(sorted, 0.99),
+		Errors:      errs,
 	}
-	fmt.Printf("  Phase 1 done: %d registered, %.1f/s, p50=%dms p95=%dms p99=%dms errors=%d\n",
-		res.Registered, res.RatePerSec, res.P50MS, res.P95MS, res.P99MS, res.Errors)
+	fmt.Printf("  Phase 1 done: %d registered, %d rate_limited, %.1f/s, p50=%dms p95=%dms p99=%dms errors=%d\n",
+		res.Registered, res.RateLimited, res.RatePerSec, res.P50MS, res.P95MS, res.P99MS, res.Errors)
 	return res
 }
 
@@ -240,12 +307,33 @@ func runRegistration(c *sdk.Client, n int) agentsResult {
 // ---------------------------------------------------------------------------
 
 const (
-	transferAmount      = uint64(100)   // 100 µAET per transfer
-	transferStake       = uint64(1000)  // minimum stake required
-	settlePollWorkers   = 20            // max concurrent settlement pollers
+	transferAmount    = uint64(100)  // 100 µAET per transfer
+	transferStake     = uint64(1000) // OCS collateral per Transfer event
+	settlePollWorkers = 20           // max concurrent settlement pollers
 )
 
 func runTransfers(c *sdk.Client, m int) transfersResult {
+	// Ensure the node's agent is funded before attempting transfers.
+	// Register() grants the onboarding allocation on first call and auto-stakes it.
+	// Each transfer costs transferAmount (moved) + transferStake (OCS collateral).
+	fmt.Printf("  Phase 2: funding agent...\n")
+	funds := ensureFunded(c)
+	if funds != nil {
+		costPerTransfer := transferAmount + transferStake
+		fmt.Printf("  Agent %s: balance=%d µAET, staked=%d µAET\n",
+			funds.AgentID, funds.Balance, funds.Staked)
+		if needed := uint64(m) * costPerTransfer; funds.Balance < needed {
+			safeCount := int(funds.Balance / costPerTransfer)
+			fmt.Printf("  Warning: balance %d µAET < needed %d µAET; capping transfers %d→%d\n",
+				funds.Balance, needed, m, safeCount)
+			m = safeCount
+		}
+	}
+	if m == 0 {
+		fmt.Printf("  Phase 2 skipped: insufficient balance (register and fund the node agent first)\n")
+		return transfersResult{}
+	}
+
 	fmt.Printf("  Phase 2: submitting %d transfers concurrently...\n", m)
 
 	// Snapshot economics before transfers.
@@ -310,8 +398,8 @@ func runTransfers(c *sdk.Client, m int) transfersResult {
 	// Poll for settlement with bounded concurrency.
 	sem := make(chan struct{}, settlePollWorkers)
 	var (
-		settled  atomic.Int64
-		unsettled atomic.Int64
+		settled    atomic.Int64
+		unsettled  atomic.Int64
 		settleLats safeLatencies
 		settleWG   sync.WaitGroup
 	)
@@ -373,12 +461,48 @@ func runTransfers(c *sdk.Client, m int) transfersResult {
 // ---------------------------------------------------------------------------
 
 const (
-	genClaimedValue = uint64(10_000) // 10,000 µAET claimed value
-	genStake        = uint64(1000)   // minimum OCS stake
+	genClaimedValue = uint64(10_000)  // 10,000 µAET claimed value
+	genStake        = uint64(1000)    // OCS collateral per Generation event
 	taskBudget      = uint64(100_000) // 0.1 AET per task (escrowed from node balance)
 )
 
 func runTasks(c *sdk.Client, t int) tasksResult {
+	// Ensure the node's agent has funds before submitting generation events.
+	// Each generation event locks genStake µAET as OCS collateral (returned on success).
+	// Task posting escrows taskBudget µAET per task.
+	fmt.Printf("  Phase 3: funding agent...\n")
+	funds := ensureFunded(c)
+	taskCount := t // number of tasks to post; may be reduced by balance
+	if funds != nil {
+		fmt.Printf("  Agent %s: balance=%d µAET, staked=%d µAET\n",
+			funds.AgentID, funds.Balance, funds.Staked)
+
+		// Cap generation events to available balance.
+		if needed := uint64(t) * genStake; funds.Balance < needed {
+			t = int(funds.Balance / genStake)
+			fmt.Printf("  Warning: balance insufficient for %d generation events; capping to %d\n",
+				taskCount, t)
+		}
+
+		// Calculate how many tasks can be posted given remaining balance.
+		remainingAfterGen := funds.Balance - uint64(t)*genStake
+		if remainingAfterGen < taskBudget {
+			taskCount = 0
+			fmt.Printf("  Warning: balance insufficient for task posting after generation events; skipping task posts\n")
+		} else {
+			safeTaskCount := int(remainingAfterGen / taskBudget)
+			if safeTaskCount < taskCount {
+				fmt.Printf("  Warning: balance insufficient for %d task posts; capping to %d\n",
+					taskCount, safeTaskCount)
+				taskCount = safeTaskCount
+			}
+		}
+	}
+	if t == 0 {
+		fmt.Printf("  Phase 3 skipped: insufficient balance for generation events\n")
+		return tasksResult{}
+	}
+
 	fmt.Printf("  Phase 3: submitting %d generation events concurrently...\n", t)
 
 	// Snapshot fees before to calculate delta.
@@ -477,7 +601,7 @@ func runTasks(c *sdk.Client, t int) tasksResult {
 	}
 
 	// Also benchmark task posting (separate from generation lifecycle).
-	posted := runTaskPosting(c, t)
+	posted := runTaskPosting(c, taskCount)
 
 	res := tasksResult{
 		Posted:            posted,
@@ -500,11 +624,14 @@ func runTasks(c *sdk.Client, t int) tasksResult {
 // Returns the count of successfully posted tasks. Tasks are posted but not
 // claimed (self-claim is blocked since poster == node's agent ID).
 func runTaskPosting(c *sdk.Client, n int) int {
+	if n == 0 {
+		return 0
+	}
 	fmt.Printf("  Phase 3b: posting %d tasks concurrently...\n", n)
 	var (
-		wg      sync.WaitGroup
-		posted  atomic.Int64
-		errs    atomic.Int64
+		wg     sync.WaitGroup
+		posted atomic.Int64
+		errs   atomic.Int64
 	)
 	categories := []string{"research", "code", "data", "writing", "analysis"}
 	for i := 0; i < n; i++ {
@@ -539,13 +666,20 @@ func runTaskPosting(c *sdk.Client, n int) int {
 func runStress(c *sdk.Client, duration time.Duration) stressResult {
 	fmt.Printf("  Phase 4: stress test for %v...\n", duration)
 
+	// Ensure the agent is funded before the stress run and log the baseline.
+	funds := ensureFunded(c)
+	if funds != nil {
+		fmt.Printf("  Agent %s: balance=%d µAET, staked=%d µAET (stress baseline)\n",
+			funds.AgentID, funds.Balance, funds.Staked)
+	}
+
 	memStart := memMB()
 
 	var (
-		totalOps   atomic.Int64
-		totalErrs  atomic.Int64
-		peakTPS    float64
-		peakMu     sync.Mutex
+		totalOps  atomic.Int64
+		totalErrs atomic.Int64
+		peakTPS   float64
+		peakMu    sync.Mutex
 	)
 
 	deadline := time.Now().Add(duration)
