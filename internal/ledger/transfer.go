@@ -27,6 +27,7 @@ import (
 type transferPersistence interface {
 	PutTransfer(e *TransferEntry) error
 	AllTransfers() ([]*TransferEntry, error)
+	DeleteTransfer(id event.EventID) error
 }
 
 // Sentinel errors returned by TransferLedger methods.
@@ -358,6 +359,40 @@ func (l *TransferLedger) PendingOutgoing(agentID crypto.AgentID) (uint64, error)
 		}
 	}
 	return total, nil
+}
+
+// ResetOptimisticOutflows removes all Optimistic-state outflow entries for
+// agentID from both the in-memory map and the backing store. It returns the
+// number of entries removed.
+//
+// Optimistic outflows that survive a node restart are stale: the OCS session
+// that created them ended before they could be settled or adjusted, but the
+// ledger persisted them. Because the balance formula reserves both Settled and
+// Optimistic outflows, these stale entries permanently reduce the agent's
+// apparent spendable balance even though no real economic obligation remains.
+//
+// Removing them restores the agent's correct liquid balance (settled inflows
+// minus settled outflows only). Any OCS PendingItems referencing the same
+// events will expire via checkExpired and produce harmless "entry not found"
+// errors in the engine's settle path — those are one-time and non-critical.
+//
+// This method must only be called at node startup during seed or recovery
+// operations, never during normal runtime.
+func (l *TransferLedger) ResetOptimisticOutflows(agentID crypto.AgentID) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	var removed int
+	for id, e := range l.entries {
+		if e.FromAgent == agentID && e.Settlement == event.SettlementOptimistic {
+			delete(l.entries, id)
+			if l.store != nil {
+				_ = l.store.DeleteTransfer(id)
+			}
+			removed++
+		}
+	}
+	return removed
 }
 
 // History returns a page of TransferEntry records in which agentID appears as

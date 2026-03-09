@@ -1001,37 +1001,61 @@ func seedMarketplace(tl *ledger.TransferLedger, reg *identity.Registry, taskMgr 
 			_ = reg.Register(fp)
 		}
 
+		agentID := crypto.AgentID(p.id)
+		initialBal, _ := tl.Balance(agentID)
+		stakedBefore := uint64(0)
+		if stakeMgr != nil {
+			stakedBefore = stakeMgr.StakedAmount(agentID)
+		}
+
 		// Idempotent funding: only top up when the agent's current liquid
 		// balance is below the minimum threshold.  On re-deploys where the
 		// store persists ledger entries from a previous run, this prevents
 		// double-crediting the genesis pool.
-		currentBal, _ := tl.Balance(crypto.AgentID(p.id))
-		if currentBal < seedMinBalance {
-			topUp := seedFundTarget - currentBal
-			if err := tl.FundAgent(crypto.AgentID(p.id), topUp); err != nil {
+		topUp := uint64(0)
+		if initialBal < seedMinBalance {
+			topUp = seedFundTarget - initialBal
+			if err := tl.FundAgent(agentID, topUp); err != nil {
 				slog.Warn("seedMarketplace: failed to fund agent", "id", p.id, "err", err)
-			} else {
-				slog.Info("seedMarketplace: funded agent", "id", p.id,
-					"top_up", topUp, "prev_balance", currentBal)
+				topUp = 0
 			}
-		} else {
-			slog.Info("seedMarketplace: agent already funded, skipping", "id", p.id,
-				"balance", currentBal)
 		}
 
 		// Idempotent staking: only stake when no stake is already recorded.
 		// On re-deploy with persisted staking state, skipping prevents
 		// over-staking and avoids draining the freshly-topped-up balance.
-		if stakeMgr != nil {
-			if stakeMgr.StakedAmount(crypto.AgentID(p.id)) == 0 {
-				if err := stakeMgr.Stake(crypto.AgentID(p.id), p.stake); err != nil {
-					slog.Warn("seedMarketplace: failed to stake agent", "id", p.id, "err", err)
-				}
+		staked := false
+		if stakeMgr != nil && stakedBefore == 0 {
+			if err := stakeMgr.Stake(agentID, p.stake); err != nil {
+				slog.Warn("seedMarketplace: failed to stake agent", "id", p.id, "err", err)
 			} else {
-				slog.Info("seedMarketplace: agent already staked, skipping", "id", p.id,
-					"staked", stakeMgr.StakedAmount(crypto.AgentID(p.id)))
+				staked = true
 			}
 		}
+
+		// Verify balance after funding and staking.  If it is still below the
+		// minimum threshold, stale Optimistic outflow entries from a previous
+		// OCS session are consuming the balance.  These were never settled and
+		// represent no real economic obligation — remove them so the agent
+		// starts the session with its correct liquid balance.
+		postBal, _ := tl.Balance(agentID)
+		stalePurged := 0
+		if postBal < seedMinBalance {
+			stalePurged = tl.ResetOptimisticOutflows(agentID)
+			postBal, _ = tl.Balance(agentID)
+			slog.Warn("seedMarketplace: purged stale optimistic outflows",
+				"id", p.id, "entries_removed", stalePurged, "balance_after", postBal)
+		}
+
+		slog.Info("seedMarketplace: agent ready",
+			"id", p.id,
+			"balance_before", initialBal,
+			"top_up", topUp,
+			"staked_before", stakedBefore,
+			"newly_staked", staked,
+			"stale_purged", stalePurged,
+			"balance_after", postBal,
+		)
 	}
 
 	type task struct {

@@ -1048,3 +1048,79 @@ func TestTransferLedger_FundAgent_CreatesSettledEntry(t *testing.T) {
 		t.Errorf("Balance = %d, want 5000 after FundAgent", bal)
 	}
 }
+
+// TestResetOptimisticOutflows verifies that stale Optimistic outflow entries
+// are removed and the agent's balance is restored to its correct value.
+func TestResetOptimisticOutflows(t *testing.T) {
+	tl := ledger.NewTransferLedger()
+	alice := crypto.AgentID("alice")
+	bob := crypto.AgentID("bob")
+
+	// Fund alice with 50 000.
+	if err := tl.FundAgent(alice, 50_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
+	// Record a Transfer event from alice to bob — this lands in Optimistic
+	// state, which reserves alice's balance immediately.
+	ev := newTransferEvent(t, "alice", "bob", 30_000, nil, nil)
+	if err := tl.Record(ev); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	// Before reset: alice's balance should be 20 000 (50k funded − 30k reserved).
+	bal, _ := tl.Balance(alice)
+	if bal != 20_000 {
+		t.Fatalf("pre-reset balance = %d; want 20000", bal)
+	}
+
+	// Simulate a node restart scenario: the Optimistic outflow is stale (its
+	// OCS session ended without settling it). Reset it.
+	removed := tl.ResetOptimisticOutflows(alice)
+	if removed != 1 {
+		t.Errorf("ResetOptimisticOutflows removed %d; want 1", removed)
+	}
+
+	// After reset: alice's balance should be restored to 50 000.
+	bal, _ = tl.Balance(alice)
+	if bal != 50_000 {
+		t.Errorf("post-reset balance = %d; want 50000", bal)
+	}
+
+	// Bob's balance is unaffected (the inflow was Optimistic, so it wasn't
+	// counted as settled income for bob either — no change expected).
+	bobBal, _ := tl.Balance(bob)
+	if bobBal != 0 {
+		t.Errorf("bob balance = %d; want 0 (optimistic inflow was never settled)", bobBal)
+	}
+
+	// Settled outflows must NOT be touched.
+	if err := tl.FundAgent(alice, 10_000); err != nil {
+		t.Fatalf("FundAgent alice extra: %v", err)
+	}
+	if err := tl.FundAgent(bob, 100_000); err != nil {
+		t.Fatalf("FundAgent bob: %v", err)
+	}
+	// TransferFromBucket creates a Settled outflow from alice.
+	if err := tl.TransferFromBucket(alice, bob, 5_000); err != nil {
+		t.Fatalf("TransferFromBucket: %v", err)
+	}
+	aliceBefore, _ := tl.Balance(alice)
+	bobBefore, _ := tl.Balance(bob)
+
+	// ResetOptimisticOutflows on alice should remove 0 entries (no Optimistic outflows remain).
+	removed = tl.ResetOptimisticOutflows(alice)
+	if removed != 0 {
+		t.Errorf("second reset removed %d; want 0 (only settled outflows remain)", removed)
+	}
+
+	// Balances must be unchanged.
+	aliceAfter, _ := tl.Balance(alice)
+	bobAfter, _ := tl.Balance(bob)
+	if aliceAfter != aliceBefore {
+		t.Errorf("alice balance changed from %d to %d after reset of settled outflow", aliceBefore, aliceAfter)
+	}
+	if bobAfter != bobBefore {
+		t.Errorf("bob balance changed from %d to %d after reset of alice's settled outflow", bobBefore, bobAfter)
+	}
+}

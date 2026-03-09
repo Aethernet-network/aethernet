@@ -181,6 +181,14 @@ func (s *Store) GetTransfer(id event.EventID) (*ledger.TransferEntry, error) {
 	return &entry, nil
 }
 
+// DeleteTransfer removes the TransferEntry stored under "txf:<id>".
+// Used by TransferLedger.ResetOptimisticOutflows to purge stale entries.
+func (s *Store) DeleteTransfer(id event.EventID) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete([]byte(prefixTransfer + string(id)))
+	})
+}
+
 // AllTransfers returns every TransferEntry in the store in unspecified order.
 func (s *Store) AllTransfers() ([]*ledger.TransferEntry, error) {
 	var entries []*ledger.TransferEntry
