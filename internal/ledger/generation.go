@@ -31,6 +31,7 @@ import (
 type generationPersistence interface {
 	PutGeneration(e *GenerationEntry) error
 	AllGenerations() ([]*GenerationEntry, error)
+	GetGeneration(id event.EventID) (*GenerationEntry, error)
 }
 
 // ErrNotGeneration is returned when Record receives an event whose Type is not
@@ -79,9 +80,10 @@ type GenerationEntry struct {
 // GenerationLedger is a concurrent, in-memory record of all Generation events
 // recorded on this node. It is safe for simultaneous use by multiple goroutines.
 type GenerationLedger struct {
-	mu      sync.RWMutex
-	entries map[event.EventID]*GenerationEntry
-	store   generationPersistence
+	mu          sync.RWMutex
+	entries     map[event.EventID]*GenerationEntry
+	archiveDone chan struct{} // closed by Stop() to terminate the archival goroutine
+	store       generationPersistence
 }
 
 // SetStore attaches a persistence backend to the GenerationLedger. After this call

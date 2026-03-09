@@ -1124,3 +1124,292 @@ func TestResetOptimisticOutflows(t *testing.T) {
 		t.Errorf("bob balance changed from %d to %d after reset of alice's settled outflow", bobBefore, bobAfter)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Archival — in-memory mock stores
+// ---------------------------------------------------------------------------
+
+// memTransferStore is a minimal in-memory transferPersistence implementation
+// used to exercise ledger archival without BadgerDB.
+type memTransferStore struct {
+	mu      sync.Mutex
+	entries map[event.EventID]*ledger.TransferEntry
+}
+
+func newMemTransferStore() *memTransferStore {
+	return &memTransferStore{entries: make(map[event.EventID]*ledger.TransferEntry)}
+}
+
+func (s *memTransferStore) PutTransfer(e *ledger.TransferEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *e
+	s.entries[e.EventID] = &cp
+	return nil
+}
+
+func (s *memTransferStore) AllTransfers() ([]*ledger.TransferEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*ledger.TransferEntry, 0, len(s.entries))
+	for _, e := range s.entries {
+		cp := *e
+		out = append(out, &cp)
+	}
+	return out, nil
+}
+
+func (s *memTransferStore) DeleteTransfer(id event.EventID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.entries, id)
+	return nil
+}
+
+func (s *memTransferStore) GetTransfer(id event.EventID) (*ledger.TransferEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[id]
+	if !ok {
+		return nil, errors.New("not found")
+	}
+	cp := *e
+	return &cp, nil
+}
+
+// memGenerationStore is a minimal in-memory generationPersistence implementation
+// used to exercise ledger archival without BadgerDB.
+type memGenerationStore struct {
+	mu      sync.Mutex
+	entries map[event.EventID]*ledger.GenerationEntry
+}
+
+func newMemGenerationStore() *memGenerationStore {
+	return &memGenerationStore{entries: make(map[event.EventID]*ledger.GenerationEntry)}
+}
+
+func (s *memGenerationStore) PutGeneration(e *ledger.GenerationEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *e
+	s.entries[e.EventID] = &cp
+	return nil
+}
+
+func (s *memGenerationStore) AllGenerations() ([]*ledger.GenerationEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*ledger.GenerationEntry, 0, len(s.entries))
+	for _, e := range s.entries {
+		cp := *e
+		out = append(out, &cp)
+	}
+	return out, nil
+}
+
+func (s *memGenerationStore) GetGeneration(id event.EventID) (*ledger.GenerationEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[id]
+	if !ok {
+		return nil, errors.New("not found")
+	}
+	cp := *e
+	return &cp, nil
+}
+
+// ---------------------------------------------------------------------------
+// Archival — TransferLedger
+// ---------------------------------------------------------------------------
+
+// TestTransferLedger_Archival_BalanceCorrectAfterEviction verifies that:
+//   - EvictBefore removes Settled entries older than the cutoff
+//   - Balance() is correct after eviction (archivedNetSettled accounting)
+//   - Evicted entries can still be fetched via LoadTransferEntry (store fallback)
+//   - GetSettlement falls back to the store for evicted entries
+//   - Optimistic entries are never evicted
+func TestTransferLedger_Archival_BalanceCorrectAfterEviction(t *testing.T) {
+	tl := ledger.NewTransferLedger()
+	store := newMemTransferStore()
+	tl.SetStore(store)
+
+	alice := crypto.AgentID("alice")
+
+	// Genesis credit — Settled, NOT written to store (FundAgent behaviour).
+	const funded = uint64(1_000_000)
+	if err := tl.FundAgent(alice, funded); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
+	// Create 10 settled transfers, each to a distinct destination to ensure
+	// unique event content hashes (alice→bob-0, alice→bob-1, …, alice→bob-9).
+	const transferCount = 10
+	const amount = uint64(1_000)
+	var firstID event.EventID
+	for i := 0; i < transferCount; i++ {
+		dst := fmt.Sprintf("bob-%d", i)
+		e := newTransferEvent(t, "alice", dst, amount, nil, nil)
+		if i == 0 {
+			firstID = e.ID
+		}
+		if err := tl.Record(e); err != nil {
+			t.Fatalf("Record[%d]: %v", i, err)
+		}
+		if err := tl.Settle(e.ID, event.SettlementSettled); err != nil {
+			t.Fatalf("Settle[%d]: %v", i, err)
+		}
+	}
+
+	// Also record one Optimistic transfer that must survive eviction.
+	eOpt := newTransferEvent(t, "alice", "opt-sink", 500, nil, nil)
+	if err := tl.Record(eOpt); err != nil {
+		t.Fatalf("Record optimistic: %v", err)
+	}
+
+	// Pre-eviction balance sanity:
+	//   alice: funded 1_000_000 − 10×1_000 settled − 500 optimistic = 989_500
+	preAlice, _ := tl.Balance(alice)
+	wantAlicePre := funded - transferCount*amount - 500
+	if preAlice != wantAlicePre {
+		t.Fatalf("pre-eviction alice balance = %d, want %d", preAlice, wantAlicePre)
+	}
+
+	// Evict everything recorded before "now + 1s" — all entries qualify.
+	cutoff := time.Now().Add(time.Second)
+	evicted := tl.EvictBefore(cutoff)
+
+	// The genesis entry + 10 settled transfers = 11 evicted; the Optimistic
+	// transfer survives.
+	if evicted != transferCount+1 {
+		t.Errorf("EvictBefore removed %d entries, want %d", evicted, transferCount+1)
+	}
+
+	// Post-eviction alice balance must be identical to pre-eviction.
+	postAlice, _ := tl.Balance(alice)
+	if postAlice != wantAlicePre {
+		t.Errorf("post-eviction alice balance = %d, want %d", postAlice, wantAlicePre)
+	}
+	// Each bob-N received 1_000; verify one representative.
+	bob0 := crypto.AgentID("bob-0")
+	postBob0, _ := tl.Balance(bob0)
+	if postBob0 != amount {
+		t.Errorf("post-eviction bob-0 balance = %d, want %d", postBob0, amount)
+	}
+
+	// Evicted settled entries must be loadable from the store.
+	loaded, err := tl.LoadTransferEntry(firstID)
+	if err != nil {
+		t.Fatalf("LoadTransferEntry: %v", err)
+	}
+	if loaded.Settlement != event.SettlementSettled {
+		t.Errorf("loaded entry settlement = %q, want Settled", loaded.Settlement)
+	}
+	if loaded.Amount != amount {
+		t.Errorf("loaded entry amount = %d, want %d", loaded.Amount, amount)
+	}
+
+	// GetSettlement must also fall back to the store.
+	state, ok := tl.GetSettlement(firstID)
+	if !ok {
+		t.Error("GetSettlement: entry not found after eviction (store fallback failed)")
+	}
+	if state != event.SettlementSettled {
+		t.Errorf("GetSettlement state = %q, want Settled", state)
+	}
+
+	// The Optimistic entry must not have been evicted and must be findable in memory.
+	optLoaded, err := tl.LoadTransferEntry(eOpt.ID)
+	if err != nil {
+		t.Fatalf("LoadTransferEntry optimistic: %v", err)
+	}
+	if optLoaded.Settlement != event.SettlementOptimistic {
+		t.Errorf("optimistic entry settlement = %q, want Optimistic", optLoaded.Settlement)
+	}
+}
+
+// TestTransferLedger_Archival_StartStop verifies that the background goroutine
+// starts and stops without panicking and does not race on the ledger state.
+func TestTransferLedger_Archival_StartStop(t *testing.T) {
+	tl := ledger.NewTransferLedger()
+
+	// 1-nanosecond threshold so the goroutine evicts on every tick.
+	cfg := ledger.ArchiveConfig{
+		Threshold: time.Nanosecond,
+		Interval:  10 * time.Millisecond,
+	}
+	tl.Start(cfg)
+	// Idempotent second Start — must not panic or start a second goroutine.
+	tl.Start(cfg)
+
+	// Give the goroutine a chance to run.
+	time.Sleep(50 * time.Millisecond)
+	tl.Stop()
+	// Idempotent second Stop — must not panic.
+	tl.Stop()
+}
+
+// ---------------------------------------------------------------------------
+// Archival — GenerationLedger
+// ---------------------------------------------------------------------------
+
+// TestGenerationLedger_Archival_LoadFromStore verifies that:
+//   - EvictBefore removes Settled/Adjusted entries, leaves Optimistic ones
+//   - Evicted entries are loadable via LoadGenerationEntry (store fallback)
+//   - Optimistic entries remain accessible in memory after eviction
+func TestGenerationLedger_Archival_LoadFromStore(t *testing.T) {
+	gl := ledger.NewGenerationLedger()
+	store := newMemGenerationStore()
+	gl.SetStore(store)
+
+	const total = 100
+	const settledCount = 50
+
+	var settledIDs []event.EventID
+	var optimisticIDs []event.EventID
+
+	// Record 100 generation entries; settle the first 50.
+	for i := 0; i < total; i++ {
+		agentID := fmt.Sprintf("gen-agent-%03d", i)
+		e := newGenerationEvent(t, agentID, agentID, uint64((i+1)*1_000), nil, nil)
+		if err := gl.Record(e); err != nil {
+			t.Fatalf("Record[%d]: %v", i, err)
+		}
+		if i < settledCount {
+			if err := gl.Verify(e.ID, uint64((i+1)*1_000)); err != nil {
+				t.Fatalf("Verify[%d]: %v", i, err)
+			}
+			settledIDs = append(settledIDs, e.ID)
+		} else {
+			optimisticIDs = append(optimisticIDs, e.ID)
+		}
+	}
+
+	// Evict everything older than cutoff = now + 1s.
+	cutoff := time.Now().Add(time.Second)
+	evicted := gl.EvictBefore(cutoff)
+	if evicted != settledCount {
+		t.Errorf("EvictBefore removed %d entries, want %d (Settled only)", evicted, settledCount)
+	}
+
+	// Evicted Settled entries must be loadable from the store.
+	for _, id := range settledIDs {
+		entry, err := gl.LoadGenerationEntry(id)
+		if err != nil {
+			t.Fatalf("LoadGenerationEntry settled %s: %v", id, err)
+		}
+		if entry.Settlement != event.SettlementSettled {
+			t.Errorf("loaded entry settlement = %q, want Settled", entry.Settlement)
+		}
+	}
+
+	// Optimistic entries must still be in memory.
+	for _, id := range optimisticIDs {
+		entry, err := gl.LoadGenerationEntry(id)
+		if err != nil {
+			t.Fatalf("LoadGenerationEntry optimistic %s: %v", id, err)
+		}
+		if entry.Settlement != event.SettlementOptimistic {
+			t.Errorf("optimistic entry settlement = %q, want Optimistic", entry.Settlement)
+		}
+	}
+}

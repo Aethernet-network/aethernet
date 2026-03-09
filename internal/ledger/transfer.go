@@ -28,6 +28,7 @@ type transferPersistence interface {
 	PutTransfer(e *TransferEntry) error
 	AllTransfers() ([]*TransferEntry, error)
 	DeleteTransfer(id event.EventID) error
+	GetTransfer(id event.EventID) (*TransferEntry, error)
 }
 
 // Sentinel errors returned by TransferLedger methods.
@@ -97,9 +98,11 @@ type TransferEntry struct {
 // TransferLedger is a concurrent, in-memory record of all Transfer events recorded
 // on this node. It is safe for simultaneous use by multiple goroutines.
 type TransferLedger struct {
-	mu      sync.RWMutex
-	entries map[event.EventID]*TransferEntry
-	store   transferPersistence
+	mu                 sync.RWMutex
+	entries            map[event.EventID]*TransferEntry
+	archivedNetSettled map[crypto.AgentID]int64 // balance contribution of evicted Settled entries
+	archiveDone        chan struct{}             // closed by Stop() to terminate the archival goroutine
+	store              transferPersistence
 }
 
 // SetStore attaches a persistence backend to the TransferLedger. After this call
@@ -112,7 +115,8 @@ func (l *TransferLedger) SetStore(s transferPersistence) {
 // NewTransferLedger returns an empty, ready-to-use TransferLedger.
 func NewTransferLedger() *TransferLedger {
 	return &TransferLedger{
-		entries: make(map[event.EventID]*TransferEntry),
+		entries:            make(map[event.EventID]*TransferEntry),
+		archivedNetSettled: make(map[crypto.AgentID]int64),
 	}
 }
 
@@ -212,14 +216,22 @@ func (l *TransferLedger) Settle(eventID event.EventID, state event.SettlementSta
 
 // GetSettlement returns the OCS settlement state recorded for eventID.
 // Returns (SettlementOptimistic, false) when the event is not in the ledger.
+// If the entry has been evicted from memory by archival, the store is consulted
+// as a fallback so callers always see the correct settled state.
 func (l *TransferLedger) GetSettlement(eventID event.EventID) (event.SettlementState, bool) {
 	l.mu.RLock()
-	defer l.mu.RUnlock()
 	entry, ok := l.entries[eventID]
-	if !ok {
-		return event.SettlementOptimistic, false
+	l.mu.RUnlock()
+	if ok {
+		return entry.Settlement, true
 	}
-	return entry.Settlement, true
+	// Fall back to store for entries evicted by archival.
+	if l.store != nil {
+		if stored, err := l.store.GetTransfer(eventID); err == nil {
+			return stored.Settlement, true
+		}
+	}
+	return event.SettlementOptimistic, false
 }
 
 // Balance returns the spendable balance for agentID in all currencies combined
@@ -242,6 +254,16 @@ func (l *TransferLedger) Balance(agentID crypto.AgentID) (uint64, error) {
 // balanceLocked computes the spendable balance while the caller already holds
 // at least a read lock on l.mu. Extracted so Record can call it under the write
 // lock without double-locking.
+//
+// Balance formula (after archival):
+//
+//	net = archivedNetSettled[agent]          — contribution of evicted Settled entries
+//	    + sum(in-memory Settled inflows)     — not yet archived
+//	    - sum(in-memory Settled + Optimistic outflows)
+//
+// archivedNetSettled captures all evicted Settled inflows minus all evicted
+// Settled outflows, so the formula is equivalent to a full scan of every
+// Settled entry ever recorded.
 func (l *TransferLedger) balanceLocked(agentID crypto.AgentID) uint64 {
 	var inSettled, outReserved uint64
 	for _, e := range l.entries {
@@ -254,10 +276,12 @@ func (l *TransferLedger) balanceLocked(agentID crypto.AgentID) uint64 {
 		}
 	}
 
-	if outReserved >= inSettled {
+	archived := l.archivedNetSettled[agentID]
+	net := archived + int64(inSettled) - int64(outReserved)
+	if net <= 0 {
 		return 0
 	}
-	return inSettled - outReserved
+	return uint64(net)
 }
 
 // BalanceCheck returns an error if agentID does not have enough spendable
@@ -455,7 +479,7 @@ func LoadTransferLedgerFromStore(s transferPersistence) (*TransferLedger, error)
 	if err != nil {
 		return nil, fmt.Errorf("ledger: load transfers: %w", err)
 	}
-	tl := NewTransferLedger()
+	tl := NewTransferLedger() // initialises entries and archivedNetSettled maps
 	tl.store = s
 	for _, e := range entries {
 		tl.entries[e.EventID] = e

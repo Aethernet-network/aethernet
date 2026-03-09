@@ -601,6 +601,13 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	if enableMarketplace && stack.taskMgr.Stats().TotalTasks == 0 {
 		seedMarketplace(stack.transfer, stack.reg, stack.taskMgr, stack.escrowMgr, stack.stakeManager)
 	}
+	// Activate ledger archival: evict Settled/Adjusted entries older than 7 days
+	// from memory. Data is never deleted from the store — this prevents OOM on
+	// long-running nodes processing thousands of transactions per day.
+	archiveCfg := ledger.ArchiveConfig{Threshold: ledger.DefaultArchiveThreshold}
+	stack.transfer.Start(archiveCfg)
+	stack.generation.Start(archiveCfg)
+
 	// Fix 4: activate background cleanup goroutine (evicts tasks > MaxCompletedAge).
 	stack.taskMgr.Start()
 
@@ -753,6 +760,13 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 // stopStack tears down the API server, network node, OCS engine, and persistence
 // store in safe reverse-startup order.
 func stopStack(node *network.Node, stack *nodeStack) {
+	// Stop ledger archival goroutines before shutting down other components.
+	if stack.transfer != nil {
+		stack.transfer.Stop()
+	}
+	if stack.generation != nil {
+		stack.generation.Stop()
+	}
 	if stack.taskMgr != nil {
 		stack.taskMgr.Stop() // Fix 4: stop background cleanup goroutine
 	}
