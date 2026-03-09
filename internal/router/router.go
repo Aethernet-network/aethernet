@@ -120,6 +120,12 @@ type Router struct {
 	reputationFunc func(agentID crypto.AgentID, category string) (completed uint64, avgScore float64, avgDelivery float64, completionRate float64)
 	stop           chan struct{}
 	interval       time.Duration
+
+	// Configurable routing parameters — default to the package constants.
+	newcomerThreshold  uint64
+	newcomerAllocation float64
+	maxNewcomerBudget  uint64
+	webhookTimeout     time.Duration
 }
 
 // New creates a Router backed by the provided task source.
@@ -138,13 +144,38 @@ func New(
 	interval time.Duration,
 ) *Router {
 	return &Router{
-		capabilities:   make(map[crypto.AgentID]*AgentCapability),
-		taskSource:     ts,
-		claimFunc:      claimFn,
-		reputationFunc: repFn,
-		stop:           make(chan struct{}),
-		interval:       interval,
+		capabilities:       make(map[crypto.AgentID]*AgentCapability),
+		taskSource:         ts,
+		claimFunc:          claimFn,
+		reputationFunc:     repFn,
+		stop:               make(chan struct{}),
+		interval:           interval,
+		newcomerThreshold:  NewcomerThreshold,
+		newcomerAllocation: NewcomerAllocation,
+		maxNewcomerBudget:  MaxNewcomerBudget,
+		webhookTimeout:     5 * time.Second,
 	}
+}
+
+// SetNewcomerParams overrides the newcomer fairness parameters.
+// threshold is the per-category task count before graduation from the newcomer pool;
+// allocation is the target fraction of routes reserved for newcomers (0.0–1.0);
+// maxBudget is the maximum task budget (micro-AET) routable via the newcomer slot.
+// Call before Start.
+func (r *Router) SetNewcomerParams(threshold uint64, allocation float64, maxBudget uint64) {
+	r.mu.Lock()
+	r.newcomerThreshold = threshold
+	r.newcomerAllocation = allocation
+	r.maxNewcomerBudget = maxBudget
+	r.mu.Unlock()
+}
+
+// SetWebhookTimeout overrides the HTTP client timeout for webhook deliveries.
+// Call before Start.
+func (r *Router) SetWebhookTimeout(d time.Duration) {
+	r.mu.Lock()
+	r.webhookTimeout = d
+	r.mu.Unlock()
 }
 
 // RegisterCapability registers or updates an agent's routing profile.
@@ -251,14 +282,19 @@ func (r *Router) Stats() map[string]any {
 		pending = len(r.taskSource.OpenTasks())
 	}
 
+	r.mu.RLock()
+	threshold := r.newcomerThreshold
+	allocation := r.newcomerAllocation
+	r.mu.RUnlock()
+
 	return map[string]any{
 		"registered_agents":   registered,
 		"available_agents":    available,
 		"total_routed":        totalRouted,
 		"pending_tasks":       pending,
 		"newcomer_routes":     newcomerRoutes,
-		"newcomer_threshold":  NewcomerThreshold,
-		"newcomer_allocation": NewcomerAllocation,
+		"newcomer_threshold":  threshold,
+		"newcomer_allocation": allocation,
 	}
 }
 
@@ -308,10 +344,10 @@ func (r *Router) routePending() {
 		// Ratio controller: use the newcomer slot when the current newcomer
 		// fraction is below the target allocation.
 		newcomerRatio := float64(newcomerRoutes) / float64(routeCount)
-		useNewcomer := newcomerRatio < NewcomerAllocation
+		useNewcomer := newcomerRatio < r.newcomerAllocation
 
 		var match *matchCandidate
-		if useNewcomer && task.GetBudget() <= MaxNewcomerBudget {
+		if useNewcomer && task.GetBudget() <= r.maxNewcomerBudget {
 			match = r.findNewcomerMatchLocked(task)
 		}
 		// Fall through to the best overall match when no newcomer is available.
@@ -492,7 +528,7 @@ func (r *Router) isNewcomer(agentID crypto.AgentID, category string) bool {
 		return true
 	}
 	completed, _, _, _ := r.reputationFunc(agentID, category)
-	return completed < NewcomerThreshold
+	return completed < r.newcomerThreshold
 }
 
 // maxBudgetForAgent returns the maximum task budget (micro-AET) that agentID
@@ -507,7 +543,7 @@ func (r *Router) isNewcomer(agentID crypto.AgentID, category string) bool {
 //	100+ tasks, avgScore > 0.8: unlimited
 func (r *Router) maxBudgetForAgent(agentID crypto.AgentID, category string) uint64 {
 	if r.reputationFunc == nil {
-		return MaxNewcomerBudget
+		return r.maxNewcomerBudget
 	}
 	completed, avgScore, _, _ := r.reputationFunc(agentID, category)
 	switch {

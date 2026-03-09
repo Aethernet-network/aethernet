@@ -182,6 +182,10 @@ type Server struct {
 	enableL2    bool
 	enableL3    bool
 	explorerDir string // path to serve the explorer UI from; "" disables it
+
+	// minTaskBudget is the minimum budget (micro-AET) enforced in handlePostTask.
+	// Initialized from tasks.MinTaskBudget; overridable via SetMinTaskBudget.
+	minTaskBudget uint64
 }
 
 // NewServer constructs an API Server backed by the provided node components.
@@ -199,20 +203,21 @@ func NewServer(
 	kp *crypto.KeyPair,
 ) *Server {
 	s := &Server{
-		dag:         d,
-		transfer:    tl,
-		generation:  gl,
-		registry:    reg,
-		engine:      eng,
-		supply:      sm,
-		node:        node,
-		kp:          kp,
-		agentID:     kp.AgentID(),
-		listenAddr:  listenAddr,
-		startTime:   time.Now(),
-		enableL2:    true,
-		enableL3:    true,
-		explorerDir: explorerPath(),
+		dag:           d,
+		transfer:      tl,
+		generation:    gl,
+		registry:      reg,
+		engine:        eng,
+		supply:        sm,
+		node:          node,
+		kp:            kp,
+		agentID:       kp.AgentID(),
+		listenAddr:    listenAddr,
+		startTime:     time.Now(),
+		enableL2:      true,
+		enableL3:      true,
+		explorerDir:   explorerPath(),
+		minTaskBudget: tasks.MinTaskBudget,
 	}
 
 	s.rebuildMux()
@@ -368,6 +373,12 @@ func (s *Server) SetEconomics(w *wallet.Wallet, sm *staking.StakeManager, fc *fe
 // Call before Start. When nil, the /v1/registry endpoints return 501.
 func (s *Server) SetServiceRegistry(r *svcregistry.Registry) {
 	s.svcRegistry = r
+}
+
+// SetMinTaskBudget overrides the minimum task budget enforced by handlePostTask.
+// The default is tasks.MinTaskBudget (100,000 µAET). Call before Start.
+func (s *Server) SetMinTaskBudget(budget uint64) {
+	s.minTaskBudget = budget
 }
 
 // SetTaskManager wires the task marketplace manager and escrow system into the
@@ -847,9 +858,9 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		posterID = string(s.agentID)
 	}
 
-	// I4: Enforce minimum task budget (0.1 AET = 100,000 µAET).
-	if req.Budget < tasks.MinTaskBudget {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("budget must be at least %d µAET (0.1 AET)", tasks.MinTaskBudget))
+	// I4: Enforce minimum task budget.
+	if req.Budget < s.minTaskBudget {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("budget must be at least %d µAET (0.1 AET)", s.minTaskBudget))
 		return
 	}
 

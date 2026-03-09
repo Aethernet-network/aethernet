@@ -40,6 +40,28 @@ const (
 	DecayTasksPerPeriod uint64 = 25
 )
 
+// activeDecayDays and activeDecayTasksPerPeriod are the live decay parameters,
+// initialised from the package constants and overridable via SetDecayParams.
+// Protected by decayMu.
+var (
+	decayMu                  sync.RWMutex
+	activeDecayDays          = DecayDays
+	activeDecayTasksPerPeriod = DecayTasksPerPeriod
+)
+
+// SetDecayParams overrides the active decay parameters for all subsequent
+// calls to EffectiveTasks. Call once at node startup before serving requests.
+// days must be positive; tasksPerPeriod may be zero (disables decay).
+func SetDecayParams(days int, tasksPerPeriod uint64) {
+	if days <= 0 {
+		days = DecayDays
+	}
+	decayMu.Lock()
+	activeDecayDays = days
+	activeDecayTasksPerPeriod = tasksPerPeriod
+	decayMu.Unlock()
+}
+
 // TrustLevel represents a single trust tier with its dual requirements.
 type TrustLevel struct {
 	Multiplier    uint64
@@ -69,12 +91,17 @@ func EffectiveTasks(tasksCompleted uint64, lastActivityUnix int64, now int64) ui
 	if lastActivityUnix <= 0 || now <= lastActivityUnix {
 		return tasksCompleted
 	}
+	decayMu.RLock()
+	days := uint64(activeDecayDays)
+	penalty := activeDecayTasksPerPeriod
+	decayMu.RUnlock()
+
 	inactiveDays := uint64((now - lastActivityUnix) / 86400)
-	decayPeriods := inactiveDays / DecayDays
+	decayPeriods := inactiveDays / days
 	if decayPeriods == 0 {
 		return tasksCompleted
 	}
-	reduction := decayPeriods * DecayTasksPerPeriod
+	reduction := decayPeriods * penalty
 	if reduction >= tasksCompleted {
 		return 0
 	}

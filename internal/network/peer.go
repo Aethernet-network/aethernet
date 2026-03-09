@@ -168,13 +168,23 @@ type Peer struct {
 // malicious peer from exhausting memory by sending an oversized message
 // (MEDIUM-9.1).
 func NewPeer(agentID crypto.AgentID, address string, conn net.Conn) *Peer {
+	return newPeerWithLimit(agentID, address, conn, maxMsgBytes)
+}
+
+// newPeerWithLimit is like NewPeer but uses a custom per-message read limit
+// instead of the package-level maxMsgBytes constant. Values ≤ 0 fall back
+// to maxMsgBytes.
+func newPeerWithLimit(agentID crypto.AgentID, address string, conn net.Conn, limitBytes int64) *Peer {
+	if limitBytes <= 0 {
+		limitBytes = maxMsgBytes
+	}
 	return &Peer{
 		AgentID:  agentID,
 		Address:  address,
 		State:    PeerConnecting,
 		conn:     conn,
 		enc:      json.NewEncoder(conn),
-		dec:      json.NewDecoder(io.LimitReader(conn, maxMsgBytes)),
+		dec:      json.NewDecoder(io.LimitReader(conn, limitBytes)),
 		send:     make(chan Message, sendBufSize),
 		lastSeen: time.Now(),
 	}

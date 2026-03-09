@@ -94,7 +94,13 @@ func (r *Router) NotifyAgent(agentID crypto.AgentID, task RoutableTask) error {
 		req.Header.Set("X-AetherNet-Signature", hex.EncodeToString(mac.Sum(nil)))
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	r.mu.RLock()
+	timeout := r.webhookTimeout
+	r.mu.RUnlock()
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("router: webhook delivery: %w", err)

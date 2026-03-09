@@ -51,11 +51,45 @@ type Collector struct {
 	treasuryAccrued uint64
 	transfer        *ledger.TransferLedger
 	store           feeStore // optional; when set, stats are persisted across restarts
+
+	// Configurable fee parameters — default to the package constants.
+	feeBPS       uint64 // basis points (default: FeeBasisPoints = 10)
+	validatorPct uint64 // validator share percentage (default: ValidatorShare = 80)
+	treasuryPct  uint64 // treasury share percentage (default: TreasuryShare = 20)
 }
 
 // NewCollector returns a Collector backed by tl for validator and treasury credits.
 func NewCollector(tl *ledger.TransferLedger) *Collector {
-	return &Collector{transfer: tl}
+	return &Collector{
+		transfer:     tl,
+		feeBPS:       FeeBasisPoints,
+		validatorPct: ValidatorShare,
+		treasuryPct:  TreasuryShare,
+	}
+}
+
+// SetFeeParams overrides the fee distribution parameters. All three values are
+// applied atomically. bps is in basis points; validatorPct and treasuryPct are
+// percentages that should sum to ≤ 100 (any remainder is burned).
+// Call before the node starts processing transactions.
+func (c *Collector) SetFeeParams(bps, validatorPct, treasuryPct uint64) {
+	c.mu.Lock()
+	c.feeBPS = bps
+	c.validatorPct = validatorPct
+	c.treasuryPct = treasuryPct
+	c.mu.Unlock()
+}
+
+// calculateFee returns the fee for a transaction of the given amount using the
+// instance-level basis-point setting. The result is rounded down.
+func (c *Collector) calculateFee(amount uint64) uint64 {
+	c.mu.RLock()
+	bps := c.feeBPS
+	c.mu.RUnlock()
+	if bps == 0 {
+		return 0
+	}
+	return amount * bps / 10_000
 }
 
 // SetStore attaches a persistence backend. When set, cumulative fee statistics
@@ -104,13 +138,18 @@ func (c *Collector) CollectFee(
 	validatorID crypto.AgentID,
 	treasuryID crypto.AgentID,
 ) (fee uint64, burned uint64) {
-	fee = CalculateFee(amount)
+	fee = c.calculateFee(amount)
 	if fee == 0 {
 		return 0, 0
 	}
 
-	validatorAmount := fee * ValidatorShare / 100
-	treasuryAmount := fee * TreasuryShare / 100
+	c.mu.RLock()
+	vPct := c.validatorPct
+	tPct := c.treasuryPct
+	c.mu.RUnlock()
+
+	validatorAmount := fee * vPct / 100
+	treasuryAmount := fee * tPct / 100
 	// Assign remainder to burn to avoid rounding loss.
 	burned = fee - validatorAmount - treasuryAmount
 
@@ -161,13 +200,18 @@ func (c *Collector) CollectFeeFromRecipient(
 	validatorID crypto.AgentID,
 	treasuryID crypto.AgentID,
 ) (fee uint64, burned uint64) {
-	fee = CalculateFee(amount)
+	fee = c.calculateFee(amount)
 	if fee == 0 {
 		return 0, 0
 	}
 
-	validatorAmount := fee * ValidatorShare / 100
-	treasuryAmount := fee * TreasuryShare / 100
+	c.mu.RLock()
+	vPct := c.validatorPct
+	tPct := c.treasuryPct
+	c.mu.RUnlock()
+
+	validatorAmount := fee * vPct / 100
+	treasuryAmount := fee * tPct / 100
 	burned = fee - validatorAmount - treasuryAmount
 
 	c.mu.Lock()

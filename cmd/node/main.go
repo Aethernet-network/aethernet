@@ -34,6 +34,7 @@ import (
 
 	"github.com/Aethernet-network/aethernet/internal/api"
 	"github.com/Aethernet-network/aethernet/internal/autovalidator"
+	"github.com/Aethernet-network/aethernet/internal/config"
 	"github.com/Aethernet-network/aethernet/internal/consensus"
 	"github.com/Aethernet-network/aethernet/internal/evidence"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
@@ -309,7 +310,11 @@ func (s *taskManagerSource) OpenTasks() []router.RoutableTask {
 
 // buildStack wires all internal packages together and returns a ready-to-start
 // nodeStack. When s is non-nil, state is restored from the store.
-func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
+// cfg controls all tunable protocol parameters; nil falls back to defaults.
+func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) *nodeStack {
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
 	var (
 		d   *dag.DAG
 		tl  *ledger.TransferLedger
@@ -351,7 +356,12 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 	}
 
 	sm := ledger.NewSupplyManager(tl, gl)
-	eng := ocs.NewEngine(ocs.DefaultConfig(), tl, gl, reg)
+	ocsCfg := ocs.DefaultConfig()
+	ocsCfg.MaxPendingItems = cfg.OCS.MaxPendingItems
+	ocsCfg.MinStakeRequired = cfg.OCS.MinStakeRequired
+	ocsCfg.VerificationTimeout = cfg.OCS.SettlementTimeout.Duration
+	ocsCfg.CheckInterval = cfg.OCS.CheckInterval.Duration
+	eng := ocs.NewEngine(ocsCfg, tl, gl, reg)
 	if s != nil {
 		eng.SetStore(s)
 		if err := eng.LoadPendingFromStore(s); err != nil {
@@ -457,7 +467,19 @@ func buildStack(s *store.Store, kp *crypto.KeyPair) *nodeStack {
 		}
 		return cat.TasksCompleted, cat.AvgScore, cat.AvgDeliveryTime, cat.CompletionRate()
 	}
-	taskRouter := router.New(&taskManagerSource{tm: taskMgr}, claimFn, repFn, 5*time.Second)
+	taskRouter := router.New(&taskManagerSource{tm: taskMgr}, claimFn, repFn, cfg.Router.RoutingInterval.Duration)
+	taskRouter.SetNewcomerParams(cfg.Router.NewcomerThreshold, cfg.Router.NewcomerAllocation, cfg.Router.MaxNewcomerBudget)
+	taskRouter.SetWebhookTimeout(cfg.Router.WebhookTimeout.Duration)
+
+	// Apply configurable task lifecycle params.
+	taskMgr.SetClaimDeadline(cfg.Tasks.DefaultClaimDeadline.Duration)
+	taskMgr.SetMaxCompletedAge(cfg.Tasks.MaxCompletedAge.Duration)
+
+	// Apply staking decay configuration.
+	staking.SetDecayParams(cfg.Staking.DecayPeriodDays, cfg.Staking.DecayTasksPenalty)
+
+	// Apply fee distribution configuration.
+	feeCollector.SetFeeParams(cfg.Fees.FeeBasisPoints, cfg.Fees.FeeValidatorShare, cfg.Fees.FeeTreasuryShare)
 
 	return &nodeStack{
 		dag:          d,
@@ -500,7 +522,11 @@ func printStatus(agentID crypto.AgentID, d *dag.DAG, n *network.Node, eng *ocs.E
 // p2pAddr and apiListenAddr override the defaults and may come from flags or
 // environment variables. enableMarketplace controls whether task marketplace
 // components (task routing, auto-settlement, discovery) are started.
-func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr string, enableMarketplace bool) *network.Node {
+// cfg controls all tunable protocol parameters; nil falls back to defaults.
+func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr string, enableMarketplace bool, cfg *config.ProtocolConfig) *network.Node {
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
 	// Create the metrics registry and wire it to the OCS engine.
 	metricsReg := metrics.NewRegistry()
 	nodeMetrics := metrics.NewAetherNetMetrics(metricsReg)
@@ -587,7 +613,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	av.SetFeeCollector(stack.feeCollector, crypto.AgentID(genesis.BucketTreasury))
 	av.SetGenerationLedger(stack.generation)
 	av.SetRegistry(stack.reg)
-	av.SetVerifierRegistry(evidence.NewVerifierRegistry())
+	vr := evidence.NewVerifierRegistry()
+	vr.SetPassThresholds(cfg.Evidence.CodePassThreshold, cfg.Evidence.DataPassThreshold, cfg.Evidence.ContentPassThreshold)
+	av.SetVerifierRegistry(vr)
 	// Task marketplace integration is conditional on --marketplace flag.
 	if enableMarketplace {
 		av.SetTaskManager(stack.taskMgr, stack.escrowMgr)
@@ -601,20 +629,28 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	if enableMarketplace && stack.taskMgr.Stats().TotalTasks == 0 {
 		seedMarketplace(stack.transfer, stack.reg, stack.taskMgr, stack.escrowMgr, stack.stakeManager)
 	}
-	// Activate ledger archival: evict Settled/Adjusted entries older than 7 days
-	// from memory. Data is never deleted from the store — this prevents OOM on
-	// long-running nodes processing thousands of transactions per day.
-	archiveCfg := ledger.ArchiveConfig{Threshold: ledger.DefaultArchiveThreshold}
+	// Activate ledger archival: evict Settled/Adjusted entries older than the
+	// configured threshold from memory. Data is never deleted from the store —
+	// this prevents OOM on long-running nodes processing thousands of transactions.
+	archiveCfg := ledger.ArchiveConfig{
+		Threshold: cfg.Archival.ArchiveThreshold.Duration,
+		Interval:  cfg.Archival.ArchiveInterval.Duration,
+	}
 	stack.transfer.Start(archiveCfg)
 	stack.generation.Start(archiveCfg)
 
 	// Fix 4: activate background cleanup goroutine (evicts tasks > MaxCompletedAge).
 	stack.taskMgr.Start()
 
-	cfg := network.DefaultNodeConfig(agentID)
-	cfg.ListenAddr = p2pAddr
-	cfg.KeyPair = stack.kp // Fix 1: wire keypair so P2P votes are signed
-	node := network.NewNode(cfg, stack.dag)
+	nodeCfg := network.DefaultNodeConfig(agentID)
+	nodeCfg.ListenAddr = p2pAddr
+	nodeCfg.KeyPair = stack.kp // Fix 1: wire keypair so P2P votes are signed
+	nodeCfg.MaxPeers = cfg.Network.MaxPeers
+	nodeCfg.SyncInterval = cfg.Network.SyncInterval.Duration
+	nodeCfg.HandshakeTimeout = cfg.Network.HandshakeTimeout.Duration
+	nodeCfg.VoteMaxAge = cfg.Network.VoteMaxAge
+	nodeCfg.MaxMessageBytes = cfg.Network.P2PMaxMessageBytes
+	node := network.NewNode(nodeCfg, stack.dag)
 	if err := node.Start(); err != nil {
 		slog.Error("failed to start network listener", "addr", p2pAddr, "err", err)
 		stack.engine.Stop()
@@ -657,20 +693,20 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		}
 	}
 	apiSrv.SetEconomics(stack.walletMgr, stack.stakeManager, stack.feeCollector)
+	apiSrv.SetMinTaskBudget(cfg.Tasks.MinTaskBudget)
 	apiSrv.SetEventBus(bus)
 	if stack.platformKeys != nil {
 		apiSrv.SetPlatformKeys(stack.platformKeys)
 	}
 	apiSrv.SetRateLimiters(
-		ratelimit.New(ratelimit.DefaultConfig()),
-		ratelimit.New(ratelimit.ReadOnlyConfig()),
+		ratelimit.New(ratelimit.Config{Rate: cfg.RateLimit.WriteRatePerSec, Burst: cfg.RateLimit.WriteBurst, CleanupAge: 5 * time.Minute}),
+		ratelimit.New(ratelimit.Config{Rate: cfg.RateLimit.ReadRatePerSec, Burst: cfg.RateLimit.ReadBurst, CleanupAge: 5 * time.Minute}),
 	)
-	// Sybil resistance: limit registrations to 5 per hour per IP.
-	// Rate = 5/3600 tokens/second ≈ 0.00139; burst = 5 allows a small burst
-	// for legitimate simultaneous registrations (e.g. onboarding a small team).
+	// Sybil resistance: limit registrations per hour per IP.
+	regRate := float64(cfg.RateLimit.RegistrationPerHour) / 3600
 	apiSrv.SetRegistrationLimiter(ratelimit.New(ratelimit.Config{
-		Rate:       float64(5) / 3600, // 5 registrations per hour
-		Burst:      5,
+		Rate:       regRate,
+		Burst:      cfg.RateLimit.RegistrationPerHour,
 		CleanupAge: 2 * time.Hour,
 	}))
 	apiSrv.SetMetrics(metricsReg, nodeMetrics)
@@ -865,6 +901,7 @@ func cmdStart() {
 	apiListenAddr := fs.String("api", envOr("AETHERNET_API", ":8338"), "TCP address for the REST API")
 	peerAddr := fs.String("peer", envOr("AETHERNET_PEER", ""), "comma-separated peer addresses to auto-connect on startup (host:port[,host:port...])")
 	enableMarketplace := fs.Bool("marketplace", false, "Enable built-in marketplace (task routing, escrow, explorer) in the combined single-binary deployment")
+	configPath := fs.String("config", envOr("AETHERNET_CONFIG", ""), "path to protocol config JSON file (default: built-in defaults)")
 	_ = fs.Parse(os.Args[2:])
 
 	// The --marketplace flag controls whether marketplace components (tasks,
@@ -877,6 +914,15 @@ func cmdStart() {
 	// when explicitly requested (protocol-only deployments skip them).
 	_ = enableMarketplace // used by startStack below
 
+	// Load protocol configuration. LoadFromFile returns DefaultConfig when path
+	// is empty. LoadFromEnv applies AETHERNET_* overrides on top.
+	cfg, err := config.LoadFromFile(*configPath)
+	if err != nil {
+		slog.Error("failed to load config", "path", *configPath, "err", err)
+		os.Exit(1)
+	}
+	config.LoadFromEnv(cfg)
+
 	kp := loadKeyPair()
 	agentID := kp.AgentID()
 
@@ -884,7 +930,7 @@ func cmdStart() {
 
 	s := openStoreWithRecovery(storePath())
 
-	stack := buildStack(s, kp)
+	stack := buildStack(s, kp, cfg)
 
 	// Auto-genesis: on first Docker start, seed the initial token supply when
 	// the founders bucket is empty. Only runs in non-interactive mode
@@ -900,7 +946,7 @@ func cmdStart() {
 		}
 	}
 
-	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, *enableMarketplace)
+	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, *enableMarketplace, cfg)
 
 	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\nAPI      : %s\n\n",
 		VERSION, agentID, node.ListenAddr(), *apiListenAddr)
@@ -940,12 +986,20 @@ func cmdConnect() {
 	peerAddr := fs.String("peer", "", "address of the peer to connect to (host:port)")
 	p2pAddr := fs.String("listen", envOr("AETHERNET_LISTEN", "0.0.0.0:8337"), "TCP address for p2p connections")
 	apiListenAddr := fs.String("api", envOr("AETHERNET_API", ":8338"), "TCP address for the REST API")
+	configPath := fs.String("config", envOr("AETHERNET_CONFIG", ""), "path to protocol config JSON file (default: built-in defaults)")
 	_ = fs.Parse(os.Args[2:])
 
 	if *peerAddr == "" {
 		fmt.Fprintln(os.Stderr, "usage: aethernet connect --peer <host:port>")
 		os.Exit(1)
 	}
+
+	cfg, err := config.LoadFromFile(*configPath)
+	if err != nil {
+		slog.Error("failed to load config", "path", *configPath, "err", err)
+		os.Exit(1)
+	}
+	config.LoadFromEnv(cfg)
 
 	kp := loadKeyPair()
 	agentID := kp.AgentID()
@@ -954,10 +1008,10 @@ func cmdConnect() {
 
 	s := openStoreWithRecovery(storePath())
 
-	stack := buildStack(s, kp)
+	stack := buildStack(s, kp, cfg)
 	// cmdConnect is the legacy subcommand; marketplace is disabled by default.
 	// Use 'aethernet start --marketplace' for the combined deployment.
-	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, false)
+	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, false, cfg)
 
 	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\nAPI      : %s\n\n",
 		VERSION, agentID, node.ListenAddr(), *apiListenAddr)

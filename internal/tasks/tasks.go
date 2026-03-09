@@ -129,11 +129,35 @@ type TaskManager struct {
 	store  taskStore
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// Configurable lifecycle parameters — default to the package constants.
+	claimDeadline  time.Duration // default: DefaultClaimDeadline (10 min)
+	maxCompletedAge time.Duration // default: MaxCompletedAge (7 days)
 }
 
 // NewTaskManager returns a new empty TaskManager.
 func NewTaskManager() *TaskManager {
-	return &TaskManager{tasks: make(map[string]*Task)}
+	return &TaskManager{
+		tasks:           make(map[string]*Task),
+		claimDeadline:   DefaultClaimDeadline,
+		maxCompletedAge: MaxCompletedAge,
+	}
+}
+
+// SetClaimDeadline overrides the window a claimer has to submit work.
+// Must be called before Start (i.e., before concurrent requests arrive).
+func (m *TaskManager) SetClaimDeadline(d time.Duration) {
+	m.mu.Lock()
+	m.claimDeadline = d
+	m.mu.Unlock()
+}
+
+// SetMaxCompletedAge overrides how long completed/cancelled tasks stay in memory
+// before being archived. Must be called before Start.
+func (m *TaskManager) SetMaxCompletedAge(d time.Duration) {
+	m.mu.Lock()
+	m.maxCompletedAge = d
+	m.mu.Unlock()
 }
 
 // SetStore attaches a persistence backend. After this call mutations
@@ -190,7 +214,10 @@ func (m *TaskManager) cleanupLoop(ctx context.Context) {
 // they can be recovered on the next restart via LoadFromStore.
 // Must be called without m.mu held (acquires write lock internally).
 func (m *TaskManager) archiveCompleted() {
-	cutoff := time.Now().Add(-MaxCompletedAge)
+	m.mu.RLock()
+	maxAge := m.maxCompletedAge
+	m.mu.RUnlock()
+	cutoff := time.Now().Add(-maxAge)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for id, task := range m.tasks {
@@ -286,7 +313,7 @@ func (m *TaskManager) ClaimTask(taskID string, claimerID crypto.AgentID) error {
 	task.Status = TaskStatusClaimed
 	now := time.Now()
 	task.ClaimedAt = now.UnixNano()
-	task.ClaimDeadline = now.Add(DefaultClaimDeadline).UnixNano()
+	task.ClaimDeadline = now.Add(m.claimDeadline).UnixNano()
 	m.persist(task)
 	return nil
 }

@@ -47,17 +47,50 @@ type NodeConfig struct {
 	// authentication during the handshake. Both sides sign the other's challenge
 	// with their private key to prove identity.
 	KeyPair *crypto.KeyPair
+
+	// HandshakeTimeout is the deadline applied to the entire peer handshake
+	// exchange. Peers that do not complete in time are disconnected.
+	// Zero falls back to 30 seconds.
+	HandshakeTimeout time.Duration
+
+	// VoteMaxAge is the maximum age (seconds) of a P2P vote before it is
+	// rejected as a potential replay (MEDIUM-3.3). Zero falls back to 60.
+	VoteMaxAge int64
+
+	// MaxMessageBytes is the per-connection read limit applied to the P2P
+	// decoder. Messages exceeding this bound cause the decoder to error and
+	// close the connection (MEDIUM-9.1). Zero falls back to 4 MiB.
+	MaxMessageBytes int64
 }
 
 // DefaultNodeConfig returns a NodeConfig with production-ready defaults.
 func DefaultNodeConfig(agentID crypto.AgentID) *NodeConfig {
 	return &NodeConfig{
-		ListenAddr:   "0.0.0.0:8337",
-		AgentID:      agentID,
-		MaxPeers:     50,
-		SyncInterval: 10 * time.Second,
-		Version:      "0.1.0",
+		ListenAddr:       "0.0.0.0:8337",
+		AgentID:          agentID,
+		MaxPeers:         50,
+		SyncInterval:     10 * time.Second,
+		Version:          "0.1.0",
+		HandshakeTimeout: 30 * time.Second,
+		VoteMaxAge:       60,
+		MaxMessageBytes:  4 * 1024 * 1024,
 	}
+}
+
+// handshakeTimeout returns the configured deadline or the 30-second default.
+func (c *NodeConfig) handshakeTimeout() time.Duration {
+	if c.HandshakeTimeout <= 0 {
+		return 30 * time.Second
+	}
+	return c.HandshakeTimeout
+}
+
+// voteMaxAge returns the configured vote age limit or the 60-second default.
+func (c *NodeConfig) voteMaxAge() int64 {
+	if c.VoteMaxAge <= 0 {
+		return 60
+	}
+	return c.VoteMaxAge
 }
 
 // voteSeenTTL is how long a vote signature is kept in seenVotes for dedup.
@@ -103,6 +136,12 @@ func NewNode(config *NodeConfig, d *dag.DAG) *Node {
 		incoming:  make(chan Message, 256),
 		seenVotes: make(map[string]time.Time),
 	}
+}
+
+// makePeer constructs a Peer using the node's configured MaxMessageBytes limit.
+// Falls back to the package-level maxMsgBytes when the limit is zero or negative.
+func (n *Node) makePeer(agentID crypto.AgentID, address string, conn net.Conn) *Peer {
+	return newPeerWithLimit(agentID, address, conn, n.config.MaxMessageBytes)
 }
 
 // Start opens the TCP listener on config.ListenAddr, then launches the
@@ -173,15 +212,15 @@ func (n *Node) Connect(address string) (*Peer, error) {
 		return nil, fmt.Errorf("network: dial %s: %w", address, err)
 	}
 
-	// Impose a 30-second deadline on the entire handshake to prevent goroutine
+	// Impose a configurable deadline on the entire handshake to prevent goroutine
 	// exhaustion from peers that connect but never complete the exchange
 	// (HIGH-7.1). The deadline is cleared after a successful handshake.
-	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(n.config.handshakeTimeout())); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("network: set handshake deadline: %w", err)
 	}
 
-	peer := NewPeer("", address, conn)
+	peer := n.makePeer("", address, conn)
 
 	// Generate a challenge for the remote side to sign.
 	myChallenge := make([]byte, 32)
@@ -481,13 +520,13 @@ func (n *Node) acceptLoop() {
 // handleIncomingConn performs the acceptor side of the challenge-response
 // handshake and, on success, registers the peer and starts its loops.
 func (n *Node) handleIncomingConn(conn net.Conn) error {
-	// Impose a 30-second handshake deadline to prevent goroutine exhaustion
+	// Impose a configurable handshake deadline to prevent goroutine exhaustion
 	// from peers that connect but never complete the exchange (HIGH-7.1).
-	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(n.config.handshakeTimeout())); err != nil {
 		return fmt.Errorf("network: set handshake deadline: %w", err)
 	}
 
-	peer := NewPeer("", conn.RemoteAddr().String(), conn)
+	peer := n.makePeer("", conn.RemoteAddr().String(), conn)
 
 	// Read the connector's handshake (contains their challenge for us).
 	var msg Message
@@ -687,7 +726,7 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		// Reject stale votes to prevent replay attacks (MEDIUM-3.3).
 		// Allow a small negative skew (-5 s) for clock drift.
 		now := time.Now()
-		if age := now.Unix() - vp.Timestamp; age > 60 || age < -5 {
+		if age := now.Unix() - vp.Timestamp; age > n.config.voteMaxAge() || age < -5 {
 			log.Printf("network: dropping stale vote (age=%ds) from peer %s", age, peer.AgentID)
 			return
 		}

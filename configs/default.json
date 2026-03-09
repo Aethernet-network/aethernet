@@ -1,0 +1,53 @@
+{
+  "fees": {
+    "fee_basis_points": 10,
+    "fee_validator_share": 80,
+    "fee_treasury_share": 20
+  },
+  "staking": {
+    "decay_period_days": 30,
+    "decay_tasks_penalty": 25
+  },
+  "tasks": {
+    "min_task_budget": 100000,
+    "default_claim_deadline": "10m",
+    "max_completed_age": "168h"
+  },
+  "evidence": {
+    "pass_threshold": 0.6,
+    "code_pass_threshold": 0.5,
+    "data_pass_threshold": 0.5,
+    "content_pass_threshold": 0.5
+  },
+  "router": {
+    "newcomer_threshold": 10,
+    "newcomer_allocation": 0.2,
+    "max_newcomer_budget": 5000000,
+    "webhook_timeout": "5s",
+    "routing_interval": "5s"
+  },
+  "ocs": {
+    "max_pending_items": 10000,
+    "min_stake_required": 1000,
+    "settlement_timeout": "30s",
+    "check_interval": "5s"
+  },
+  "rate_limit": {
+    "write_rate_per_sec": 10,
+    "write_burst": 50,
+    "read_rate_per_sec": 30,
+    "read_burst": 100,
+    "registration_per_hour": 5
+  },
+  "network": {
+    "max_peers": 50,
+    "p2p_max_message_bytes": 4194304,
+    "handshake_timeout": "30s",
+    "sync_interval": "10s",
+    "vote_max_age": 60
+  },
+  "archival": {
+    "archive_threshold": "168h",
+    "archive_interval": "1h"
+  }
+}
