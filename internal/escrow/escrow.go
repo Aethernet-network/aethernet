@@ -54,10 +54,8 @@ func bucketID(taskID string) crypto.AgentID {
 // Returns an error wrapping ledger.ErrInsufficientBalance when the poster
 // has insufficient funds.
 func (e *Escrow) Hold(taskID string, posterID crypto.AgentID, amount uint64) error {
-	if err := e.ledger.TransferFromBucket(posterID, bucketID(taskID), amount); err != nil {
-		return fmt.Errorf("escrow: hold for task %s: %w", taskID, err)
-	}
-
+	// Record the entry before the ledger transfer so a panic between the two
+	// operations cannot strand funds in the bucket with no entry to find them.
 	e.mu.Lock()
 	e.entries[taskID] = &EscrowEntry{
 		TaskID:   taskID,
@@ -65,6 +63,13 @@ func (e *Escrow) Hold(taskID string, posterID crypto.AgentID, amount uint64) err
 		Amount:   amount,
 	}
 	e.mu.Unlock()
+
+	if err := e.ledger.TransferFromBucket(posterID, bucketID(taskID), amount); err != nil {
+		e.mu.Lock()
+		delete(e.entries, taskID)
+		e.mu.Unlock()
+		return fmt.Errorf("escrow: hold for task %s: %w", taskID, err)
+	}
 	return nil
 }
 
