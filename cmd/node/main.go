@@ -958,11 +958,16 @@ func seedMarketplace(tl *ledger.TransferLedger, reg *identity.Registry, taskMgr 
 		funds uint64
 		stake uint64
 	}
+	// Half-stake model: each seed agent starts with 50 AET (50 000 000 µAET)
+	// total — 25 AET funded into the spendable bucket then 25 AET staked
+	// (Stake debits the bucket), leaving exactly 25 AET liquid and 25 AET
+	// locked as collateral. This gives the activity generator a long runway
+	// before any agent's balance reaches zero.
 	posters := []poster{
-		{"alpha-researcher", 500_000, 100_000},
-		{"data-scientist", 800_000, 150_000},
-		{"code-auditor", 1_000_000, 200_000},
-		{"doc-writer", 400_000, 75_000},
+		{"alpha-researcher", 50_000_000, 25_000_000},
+		{"data-scientist", 50_000_000, 25_000_000},
+		{"code-auditor", 50_000_000, 25_000_000},
+		{"doc-writer", 50_000_000, 25_000_000},
 	}
 
 	// Register each poster agent in the identity registry so it shows up in
