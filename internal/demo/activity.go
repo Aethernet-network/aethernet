@@ -121,6 +121,6 @@ func (g *ActivityGenerator) generateActivity(r *rand.Rand) {
 	amount := uint64(1_000 + r.Intn(24_000))
 	memo := g.memos[r.Intn(len(g.memos))]
 	if err := g.transferFunc(from, to, amount, memo); err != nil {
-		slog.Debug("activity generator: transfer skipped", "from", from, "to", to, "err", err)
+		slog.Warn("activity generator: transfer skipped", "from", from, "to", to, "err", err)
 	}
 }

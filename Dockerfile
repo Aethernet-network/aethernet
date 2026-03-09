@@ -30,5 +30,6 @@ COPY explorer/ /usr/local/share/aethernet/explorer/
 EXPOSE 8337 8338 8340
 VOLUME /data
 ENV AETHERNET_DATA=/data
+ENV AETHERNET_TESTNET=true
 ENTRYPOINT ["aethernet"]
 CMD ["start", "--marketplace"]
