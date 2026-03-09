@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"sort"
 	"sync"
@@ -161,6 +162,14 @@ func (n *Node) Connect(address string) (*Peer, error) {
 		return nil, fmt.Errorf("network: dial %s: %w", address, err)
 	}
 
+	// Impose a 30-second deadline on the entire handshake to prevent goroutine
+	// exhaustion from peers that connect but never complete the exchange
+	// (HIGH-7.1). The deadline is cleared after a successful handshake.
+	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("network: set handshake deadline: %w", err)
+	}
+
 	peer := NewPeer("", address, conn)
 
 	// Generate a challenge for the remote side to sign.
@@ -208,8 +217,15 @@ func (n *Node) Connect(address string) (*Peer, error) {
 		return nil, fmt.Errorf("network: decode handshake response: %w", err)
 	}
 
-	// Verify the acceptor's response to our challenge.
-	if n.config.KeyPair != nil && len(theirHS.PublicKey) > 0 {
+	// When the local node has a keypair, require the remote peer to authenticate.
+	// A peer omitting its public key could claim any AgentID and inject votes
+	// (HIGH-3.2).
+	if n.config.KeyPair != nil {
+		if len(theirHS.PublicKey) == 0 {
+			conn.Close()
+			return nil, errors.New("network: unauthenticated peer rejected; local node requires keypair authentication")
+		}
+		// Verify the acceptor's challenge response.
 		if !crypto.Verify(theirHS.PublicKey, myChallenge, theirHS.ChallengeResponse) {
 			conn.Close()
 			return nil, errors.New("network: peer failed challenge-response verification")
@@ -234,6 +250,9 @@ func (n *Node) Connect(address string) (*Peer, error) {
 			return nil, fmt.Errorf("network: send challenge response: %w", err)
 		}
 	}
+
+	// Handshake complete — clear the deadline so normal operation is not time-limited.
+	_ = conn.SetDeadline(time.Time{})
 
 	n.mu.Lock()
 	if len(n.peers) >= n.config.MaxPeers {
@@ -286,17 +305,21 @@ func (n *Node) SetVoteHandler(fn func(voterID crypto.AgentID, eventID event.Even
 // BroadcastVote sends a signed MsgVote to all currently connected peers.
 // The vote is signed with the node's keypair (if configured) so that receiving
 // nodes can authenticate it before feeding it into their consensus round.
+// A current Unix timestamp is included in the signed payload to prevent replay
+// attacks (MEDIUM-3.3).
 func (n *Node) BroadcastVote(eventID event.EventID, verdict bool) error {
+	ts := time.Now().Unix()
 	vp := VotePayload{
-		EventID: eventID,
-		VoterID: n.config.AgentID,
-		Verdict: verdict,
+		EventID:   eventID,
+		VoterID:   n.config.AgentID,
+		Verdict:   verdict,
+		Timestamp: ts,
 	}
 
 	// Sign the canonical byte representation if a keypair is available.
 	if n.config.KeyPair != nil {
 		vp.PublicKey = n.config.KeyPair.PublicKey
-		sig, err := n.config.KeyPair.Sign(voteBytes(eventID, n.config.AgentID, verdict))
+		sig, err := n.config.KeyPair.Sign(voteBytes(eventID, n.config.AgentID, verdict, ts))
 		if err == nil {
 			vp.Signature = sig
 		}
@@ -322,13 +345,14 @@ func (n *Node) BroadcastVote(eventID event.EventID, verdict bool) error {
 }
 
 // voteBytes builds the canonical byte slice that is signed and verified for a
-// MsgVote message. The format is fixed-length-agnostic concatenation:
+// MsgVote message. The format is:
 //
-//	[event_id bytes] | [voter_id bytes] | [0x01 if verdict else 0x00]
+//	[event_id bytes] | [voter_id bytes] | [0x01 if verdict else 0x00] | [timestamp big-endian int64]
 //
+// The timestamp is included to prevent vote replay attacks (MEDIUM-3.3).
 // Both sides must use the same construction for signatures to verify correctly.
-func voteBytes(eventID event.EventID, voterID crypto.AgentID, verdict bool) []byte {
-	b := make([]byte, 0, len(eventID)+len(voterID)+1)
+func voteBytes(eventID event.EventID, voterID crypto.AgentID, verdict bool, timestamp int64) []byte {
+	b := make([]byte, 0, len(eventID)+len(voterID)+9) // 1 verdict byte + 8 timestamp bytes
 	b = append(b, []byte(eventID)...)
 	b = append(b, []byte(voterID)...)
 	if verdict {
@@ -336,6 +360,11 @@ func voteBytes(eventID event.EventID, voterID crypto.AgentID, verdict bool) []by
 	} else {
 		b = append(b, 0)
 	}
+	// Big-endian int64 timestamp.
+	b = append(b,
+		byte(timestamp>>56), byte(timestamp>>48), byte(timestamp>>40), byte(timestamp>>32),
+		byte(timestamp>>24), byte(timestamp>>16), byte(timestamp>>8), byte(timestamp),
+	)
 	return b
 }
 
@@ -441,6 +470,12 @@ func (n *Node) acceptLoop() {
 // handleIncomingConn performs the acceptor side of the challenge-response
 // handshake and, on success, registers the peer and starts its loops.
 func (n *Node) handleIncomingConn(conn net.Conn) error {
+	// Impose a 30-second handshake deadline to prevent goroutine exhaustion
+	// from peers that connect but never complete the exchange (HIGH-7.1).
+	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		return fmt.Errorf("network: set handshake deadline: %w", err)
+	}
+
 	peer := NewPeer("", conn.RemoteAddr().String(), conn)
 
 	// Read the connector's handshake (contains their challenge for us).
@@ -454,6 +489,13 @@ func (n *Node) handleIncomingConn(conn net.Conn) error {
 	var theirHS HandshakePayload
 	if err := json.Unmarshal(msg.Payload, &theirHS); err != nil {
 		return fmt.Errorf("network: decode handshake: %w", err)
+	}
+
+	// When the local node has a keypair, require the connecting peer to authenticate.
+	// A peer omitting its public key could claim any AgentID and inject votes
+	// (HIGH-3.2).
+	if n.config.KeyPair != nil && len(theirHS.PublicKey) == 0 {
+		return errors.New("network: unauthenticated peer rejected; local node requires keypair authentication")
 	}
 
 	// Check capacity before committing to this peer.
@@ -499,7 +541,7 @@ func (n *Node) handleIncomingConn(conn net.Conn) error {
 		return fmt.Errorf("network: send handshake: %w", err)
 	}
 
-	// Read the connector's challenge response.
+	// Read the connector's challenge response and verify their signature.
 	if n.config.KeyPair != nil && len(myChallenge) > 0 {
 		var crMsg Message
 		if err := peer.dec.Decode(&crMsg); err != nil {
@@ -512,13 +554,14 @@ func (n *Node) handleIncomingConn(conn net.Conn) error {
 		if err := json.Unmarshal(crMsg.Payload, &crHS); err != nil {
 			return fmt.Errorf("network: decode challenge response: %w", err)
 		}
-		// Verify the connector signed our challenge with a valid key.
-		if len(theirHS.PublicKey) > 0 {
-			if !crypto.Verify(theirHS.PublicKey, myChallenge, crHS.ChallengeResponse) {
-				return errors.New("network: peer failed challenge-response verification")
-			}
+		// theirHS.PublicKey is guaranteed non-empty (checked above).
+		if !crypto.Verify(theirHS.PublicKey, myChallenge, crHS.ChallengeResponse) {
+			return errors.New("network: peer failed challenge-response verification")
 		}
 	}
+
+	// Handshake complete — clear the deadline so normal operation is not time-limited.
+	_ = conn.SetDeadline(time.Time{})
 
 	peer.mu.Lock()
 	peer.AgentID = theirHS.AgentID
@@ -619,13 +662,22 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		if err := json.Unmarshal(msg.Payload, &vp); err != nil {
 			return
 		}
-		// Verify the signature when both public key and signature are present.
-		// Votes without a signature are accepted in single-node or test setups.
-		if len(vp.PublicKey) > 0 && len(vp.Signature) > 0 {
-			if !crypto.Verify(vp.PublicKey, voteBytes(vp.EventID, vp.VoterID, vp.Verdict), vp.Signature) {
-				// Signature invalid — drop the vote silently.
-				return
-			}
+		// Require an authenticated signature from all remote peers (HIGH-3.1).
+		// Accepting unsigned votes would allow any peer to inject votes using a
+		// self-reported VoterID, poisoning consensus without accountability.
+		if len(vp.PublicKey) == 0 || len(vp.Signature) == 0 {
+			log.Printf("network: dropping unsigned vote from peer %s", peer.AgentID)
+			return
+		}
+		if !crypto.Verify(vp.PublicKey, voteBytes(vp.EventID, vp.VoterID, vp.Verdict, vp.Timestamp), vp.Signature) {
+			log.Printf("network: dropping vote with invalid signature from peer %s", peer.AgentID)
+			return
+		}
+		// Reject stale votes to prevent replay attacks (MEDIUM-3.3).
+		// Allow a small negative skew (-5 s) for clock drift.
+		if age := time.Now().Unix() - vp.Timestamp; age > 60 || age < -5 {
+			log.Printf("network: dropping stale vote (age=%ds) from peer %s", age, peer.AgentID)
+			return
 		}
 		if n.voteHandler != nil {
 			n.voteHandler(vp.VoterID, vp.EventID, vp.Verdict)

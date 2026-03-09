@@ -150,6 +150,12 @@ type Server struct {
 	// are rejected with 401. Keyless requests are still accepted (backward compat).
 	platformKeys *platform.KeyManager
 
+	// requireAuth enables mandatory X-API-Key authentication for write operations
+	// (POST/PUT/DELETE/PATCH) when platformKeys is wired in (CRITICAL-2.1).
+	// Defaults to false for testnet backward compatibility.
+	// Enable on mainnet deployments via SetRequireAuth(true).
+	requireAuth bool
+
 	// Metrics — optional; set via SetMetrics after construction.
 	// When nil, no metrics are recorded (safe for tests).
 	metricsReg  *metrics.Registry
@@ -422,6 +428,28 @@ func (s *Server) SetPlatformKeys(km *platform.KeyManager) {
 	s.platformKeys = km
 }
 
+// SetRequireAuth enables or disables mandatory API-key authentication for write
+// operations (POST/PUT/DELETE/PATCH). When true and platformKeys is wired in,
+// every mutating request must carry a valid X-API-Key header (CRITICAL-2.1).
+// Default false (testnet: open access). Set true for mainnet deployments.
+func (s *Server) SetRequireAuth(v bool) {
+	s.requireAuth = v
+}
+
+// isAuthenticated reports whether r carries a valid X-API-Key credential.
+// Returns false when platformKeys is not configured.
+func (s *Server) isAuthenticated(r *http.Request) bool {
+	if s.platformKeys == nil {
+		return false
+	}
+	key := r.Header.Get("X-API-Key")
+	if key == "" {
+		return false
+	}
+	_, ok := s.platformKeys.Validate(key)
+	return ok
+}
+
 // SetMetrics wires a metrics registry and metric set into the server.
 // Call before Start. When not called (e.g. in tests), metrics are nil and no
 // instrumentation is applied. The /metrics endpoint returns an empty response
@@ -444,13 +472,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// API key validation — backward-compatible: keyless requests are accepted.
-	// If an X-API-Key header is present and the key manager is wired in, the
-	// key must be known and active; invalid keys are rejected with 401.
-	if apiKey := r.Header.Get("X-API-Key"); apiKey != "" && s.platformKeys != nil {
-		if _, ok := s.platformKeys.Validate(apiKey); !ok {
-			writeCodedError(w, http.StatusUnauthorized, "invalid_api_key",
-				"invalid or revoked API key", "")
+	// API key validation (CRITICAL-2.1):
+	// • A present X-API-Key is always validated; an invalid key is rejected (401).
+	// • When requireAuth is true and platformKeys is wired in, write operations
+	//   (POST/PUT/DELETE/PATCH) without an API key are also rejected (401).
+	// • When requireAuth is false (default/testnet), keyless requests are accepted
+	//   for backward compatibility with the SDK and existing integrations.
+	if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
+		if s.platformKeys != nil {
+			if _, ok := s.platformKeys.Validate(apiKey); !ok {
+				writeCodedError(w, http.StatusUnauthorized, "invalid_api_key",
+					"invalid or revoked API key", "")
+				return
+			}
+		}
+	} else if s.requireAuth && s.platformKeys != nil {
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
+			writeCodedError(w, http.StatusUnauthorized, "auth_required",
+				"X-API-Key header required for write operations", "")
 			return
 		}
 	}
@@ -785,13 +825,25 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req postTaskRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	posterID := req.PosterID
 	if posterID == "" {
+		posterID = string(s.agentID)
+	} else if s.requireAuth && crypto.AgentID(posterID) != s.agentID && !s.isAuthenticated(r) {
+		// When requireAuth is enabled (mainnet): poster_id must match the node's
+		// own identity without a valid API key, preventing escrow spoofing
+		// (HIGH-1.3). On testnet (requireAuth=false), SDK-set poster_id is
+		// accepted for backward compatibility.
 		posterID = string(s.agentID)
 	}
 
@@ -902,6 +954,7 @@ func (s *Server) handleClaimTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req claimTaskRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	// Prefer agent_id (the canonical field); fall back to claimer_id (legacy), then the node's own identity.
@@ -1566,9 +1619,12 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 			resp.OnboardingAllocation = allocation
 			if s.stakeManager != nil {
 				stakeAmount := allocation / 2
-				s.stakeManager.Stake(regAgentID, stakeAmount)
-				since := s.stakeManager.StakedSince(regAgentID)
-				resp.TrustLimit = staking.TrustLimit(stakeAmount, 0, since, time.Now().Unix())
+				// The agent was just funded so the stake should succeed; ignore
+				// the error here since onboarding has already committed.
+				if err := s.stakeManager.Stake(regAgentID, stakeAmount); err == nil {
+					since := s.stakeManager.StakedSince(regAgentID)
+					resp.TrustLimit = staking.TrustLimit(stakeAmount, 0, since, time.Now().Unix())
+				}
 			}
 		}
 	} else {
@@ -1674,14 +1730,11 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
 		req.Currency = "AET"
 	}
 
-	// Resolve the economic sender identity.
-	// fromAgentID is used for balance/trust lookups and as TransferPayload.FromAgent.
-	// The DAG event itself is still signed by the node's keypair (s.agentID / s.kp),
-	// which is required by crypto.SignEvent.
+	// The economic sender is always the node's own keypair identity (CRITICAL-1.1).
+	// Accepting a from_agent override from the request body would allow attackers
+	// to set from_agent=victim and debit a victim's balance (token theft).
+	// Per-agent transfers require authenticated SDK clients (requireAuth + API key).
 	fromAgentID := s.agentID
-	if req.FromAgent != "" {
-		fromAgentID = crypto.AgentID(req.FromAgent)
-	}
 
 	// Trust limit enforcement: amount must not exceed the sender's trust limit.
 	if s.stakeManager != nil {
@@ -2033,7 +2086,20 @@ func (s *Server) handleStake(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agentID := crypto.AgentID(req.AgentID)
-	s.stakeManager.Stake(agentID, req.Amount)
+
+	// Authentication gate (HIGH-4.1): only the node's own identity may stake
+	// without platform credentials. Authenticated platform clients may stake for
+	// any registered agent.
+	if agentID != s.agentID && !s.isAuthenticated(r) {
+		writeCodedError(w, http.StatusForbidden, "forbidden",
+			"authenticated API key required to stake for another agent", "")
+		return
+	}
+
+	if err := s.stakeManager.Stake(agentID, req.Amount); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	var tasksCompleted uint64
 	if fp, err := s.registry.Get(agentID); err == nil {
@@ -2446,6 +2512,16 @@ func (s *Server) handleUnstake(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agentID := crypto.AgentID(req.AgentID)
+
+	// Authentication gate (HIGH-4.1): only the node's own identity may unstake
+	// without platform credentials. Allowing unauthenticated unstake of another
+	// agent could force an OCS C3 slash on the victim.
+	if agentID != s.agentID && !s.isAuthenticated(r) {
+		writeCodedError(w, http.StatusForbidden, "forbidden",
+			"authenticated API key required to unstake for another agent", "")
+		return
+	}
+
 	ok := s.stakeManager.Unstake(agentID, req.Amount)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "insufficient staked balance")

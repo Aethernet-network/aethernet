@@ -217,7 +217,9 @@ func TestStakeUnstake(t *testing.T) {
 	sm := staking.NewStakeManager()
 	id := crypto.AgentID("agent-a")
 
-	sm.Stake(id, 100)
+	if err := sm.Stake(id, 100); err != nil {
+		t.Fatalf("Stake(100): %v", err)
+	}
 	if got := sm.StakedAmount(id); got != 100 {
 		t.Fatalf("after Stake(100): got %d, want 100", got)
 	}
@@ -236,7 +238,7 @@ func TestUnstake_Insufficient(t *testing.T) {
 	sm := staking.NewStakeManager()
 	id := crypto.AgentID("agent-b")
 
-	sm.Stake(id, 10)
+	_ = sm.Stake(id, 10)
 	if ok := sm.Unstake(id, 100); ok {
 		t.Error("Unstake(100) with only 10 staked returned true, want false")
 	}
@@ -255,14 +257,14 @@ func TestStakeManager_StakedSince(t *testing.T) {
 		t.Fatalf("StakedSince before Stake: want 0, got %d", ts)
 	}
 
-	sm.Stake(id, 100)
+	_ = sm.Stake(id, 100)
 	ts1 := sm.StakedSince(id)
 	if ts1 == 0 {
 		t.Fatal("StakedSince after first Stake: want non-zero, got 0")
 	}
 
 	// Second Stake must not overwrite the timestamp.
-	sm.Stake(id, 50)
+	_ = sm.Stake(id, 50)
 	ts2 := sm.StakedSince(id)
 	if ts1 != ts2 {
 		t.Errorf("StakedSince changed after second Stake: got %d, want %d", ts2, ts1)
@@ -279,7 +281,7 @@ func TestSlash(t *testing.T) {
 	sm := staking.NewStakeManager()
 	id := crypto.AgentID("agent-c")
 
-	sm.Stake(id, 10_000)
+	_ = sm.Stake(id, 10_000)
 	slashed := sm.Slash(id, 10) // 10% of 10 000 = 1 000
 	if slashed != 1_000 {
 		t.Errorf("Slash(10%%) returned %d, want 1000", slashed)
@@ -294,7 +296,7 @@ func TestSlash_Capped(t *testing.T) {
 	sm := staking.NewStakeManager()
 	id := crypto.AgentID("agent-d")
 
-	sm.Stake(id, 5_000)
+	_ = sm.Stake(id, 5_000)
 	slashed := sm.Slash(id, 150) // capped to 100%
 	if slashed != 5_000 {
 		t.Errorf("Slash(150%%) returned %d, want 5000 (full slash)", slashed)
@@ -314,7 +316,7 @@ func TestSlashDefault_FullAmount(t *testing.T) {
 	sm := staking.NewStakeManager()
 	id := crypto.AgentID("agent-e")
 
-	sm.Stake(id, 10_000)
+	_ = sm.Stake(id, 10_000)
 	slashed := sm.SlashDefault(id)
 	if slashed != 10_000 {
 		t.Errorf("SlashDefault returned %d, want 10000", slashed)
@@ -330,7 +332,7 @@ func TestSlashDefault_ResetsStakedSince(t *testing.T) {
 	sm := staking.NewStakeManager()
 	id := crypto.AgentID("agent-f")
 
-	sm.Stake(id, 1_000)
+	_ = sm.Stake(id, 1_000)
 	if ts := sm.StakedSince(id); ts == 0 {
 		t.Fatal("StakedSince should be non-zero after Stake")
 	}
@@ -347,7 +349,7 @@ func TestSlashDefault_MustRestake(t *testing.T) {
 	sm := staking.NewStakeManager()
 	id := crypto.AgentID("agent-g")
 
-	sm.Stake(id, 10_000)
+	_ = sm.Stake(id, 10_000)
 	sm.SlashDefault(id)
 
 	staked := sm.StakedAmount(id)

@@ -20,6 +20,7 @@
 package staking
 
 import (
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -201,23 +202,26 @@ func (sm *StakeManager) LoadFromStore(s stakeStore) error {
 // Records the first-stake Unix timestamp on the initial call.
 // When a TransferLedger is set (via SetTransferLedger), the staked amount is
 // debited from the agent's balance into the staking-pool bucket. If the debit
-// fails (insufficient balance), a warning is logged but staking proceeds.
-func (sm *StakeManager) Stake(agentID crypto.AgentID, amount uint64) {
+// fails (insufficient balance), an error is returned and no stake is recorded
+// (CRITICAL-1.2: recording stake without a real debit creates phantom collateral).
+func (sm *StakeManager) Stake(agentID crypto.AgentID, amount uint64) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	if _, exists := sm.stakedSince[agentID]; !exists {
 		sm.stakedSince[agentID] = time.Now().Unix()
 	}
 	// Debit the agent's balance into the staking-pool when a ledger is wired.
+	// Abort on failure: a failed debit must not silently produce collateral.
 	if sm.transfer != nil && amount > 0 {
 		if err := sm.transfer.TransferFromBucket(agentID, "staking-pool", amount); err != nil {
-			log.Printf("staking: balance debit failed for %s (amount: %d): %v — staking recorded anyway", agentID, amount, err)
+			return fmt.Errorf("staking: insufficient balance: %w", err)
 		}
 	}
 	sm.stakes[agentID] += amount
 	if sm.store != nil {
 		_ = sm.store.PutStakeMeta(agentID, sm.stakedSince[agentID], sm.lastActivity[agentID], sm.stakes[agentID])
 	}
+	return nil
 }
 
 // Unstake removes amount from agentID's staked balance. Returns false if the

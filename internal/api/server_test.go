@@ -393,56 +393,50 @@ func TestHandleTransfer_InsufficientFunds(t *testing.T) {
 	resp.Body.Close()
 }
 
-// TestHandleTransfer_FromAgentTrustLimit verifies that the transfer handler uses
-// the from_agent field (not the node's own identity) for trust-limit and balance
-// checks. Previously, handleTransfer always looked up s.agentID in the stake
-// manager, so agents registered with human-readable IDs always got trust_limit=0
-// and every transfer was rejected with "trust_limit_exceeded".
-func TestHandleTransfer_FromAgentTrustLimit(t *testing.T) {
+// TestHandleTransfer_NodeIdentityTrustLimit verifies that the transfer handler
+// correctly enforces the trust limit for the node's own keypair identity.
+// After CRITICAL-1.1, from_agent overrides are removed — the sender is always
+// the node's own identity; therefore trust-limit enforcement must use s.agentID.
+func TestHandleTransfer_NodeIdentityTrustLimit(t *testing.T) {
 	setup := newTestSetup(t)
 
-	// Wire staking so onboarding auto-stakes and trust limits are enforced.
+	// Wire staking so trust limits are enforced.
 	stakeMgr := staking.NewStakeManager()
 	feeCollector := fees.NewCollector(setup.tl)
 	walletMgr := wallet.New()
 	setup.srv.SetEconomics(walletMgr, stakeMgr, feeCollector)
 
-	// Generate keypairs for sender and receiver.
-	kpSender, err := crypto.GenerateKeyPair()
-	if err != nil {
-		t.Fatalf("generate sender keypair: %v", err)
-	}
 	kpReceiver, err := crypto.GenerateKeyPair()
 	if err != nil {
 		t.Fatalf("generate receiver keypair: %v", err)
 	}
-
-	senderPubB64 := base64.StdEncoding.EncodeToString(kpSender.PublicKey)
 	receiverPubB64 := base64.StdEncoding.EncodeToString(kpReceiver.PublicKey)
 
-	// Register the sender — receives 50 M onboarding AET, auto-staked.
+	// Register the node's own agent to receive onboarding allocation + auto-stake.
+	nodePubB64 := base64.StdEncoding.EncodeToString(setup.kp.PublicKey)
+	nodeAgentID := string(setup.kp.AgentID())
 	r := post(t, setup.ts, "/v1/agents", map[string]any{
-		"agent_id":       "research-agent-alpha",
-		"public_key_b64": senderPubB64,
+		"agent_id":       nodeAgentID,
+		"public_key_b64": nodePubB64,
 	})
 	if r.StatusCode != http.StatusCreated {
-		t.Fatalf("sender registration: want 201, got %d", r.StatusCode)
+		t.Fatalf("node registration: want 201, got %d", r.StatusCode)
 	}
 	var regResp struct {
 		OnboardingAllocation uint64 `json:"onboarding_allocation"`
 	}
 	decodeJSON(t, r, &regResp)
 	if regResp.OnboardingAllocation == 0 {
-		t.Fatal("sender must have non-zero onboarding allocation")
+		t.Fatal("node agent must have non-zero onboarding allocation")
 	}
 
-	// Verify the stake manager holds the stake under the human-readable ID.
-	senderStaked := stakeMgr.StakedAmount(crypto.AgentID("research-agent-alpha"))
-	if senderStaked == 0 {
-		t.Fatal("research-agent-alpha must have non-zero staked amount")
+	// Verify the stake manager holds the stake for the node's own identity.
+	nodeStaked := stakeMgr.StakedAmount(setup.kp.AgentID())
+	if nodeStaked == 0 {
+		t.Fatal("node identity must have non-zero staked amount after registration")
 	}
 
-	// Register the receiver (just needs to exist as a valid destination).
+	// Register a receiver.
 	r2 := post(t, setup.ts, "/v1/agents", map[string]any{
 		"agent_id":       "writer-agent-pro",
 		"public_key_b64": receiverPubB64,
@@ -452,10 +446,9 @@ func TestHandleTransfer_FromAgentTrustLimit(t *testing.T) {
 	}
 	r2.Body.Close()
 
-	// Transfer 1_000_000 from research-agent-alpha to writer-agent-pro.
-	// This must succeed: sender has 50 M balance and ≥50 M trust limit.
+	// Transfer 1_000_000 from the node's own identity (sender always = s.agentID).
+	// This must succeed: the node has onboarding funds and a sufficient trust limit.
 	txResp := post(t, setup.ts, "/v1/transfer", map[string]any{
-		"from_agent":   "research-agent-alpha",
 		"to_agent":     "writer-agent-pro",
 		"amount":       1_000_000,
 		"currency":     "AET",
@@ -478,6 +471,7 @@ func TestHandleTransfer_FromAgentTrustLimit(t *testing.T) {
 // TestHandleTransfer_DefaultStake verifies that omitting stake_amount from the
 // request body does not cause OCS to reject the event with ErrInsufficientStake.
 // The server must auto-fill stake_amount with the engine's MinEventStake.
+// After CRITICAL-1.1 the sender is always the node's own keypair identity.
 func TestHandleTransfer_DefaultStake(t *testing.T) {
 	setup := newTestSetup(t)
 
@@ -486,22 +480,18 @@ func TestHandleTransfer_DefaultStake(t *testing.T) {
 	walletMgr := wallet.New()
 	setup.srv.SetEconomics(walletMgr, stakeMgr, feeCollector)
 
-	kpSender, err := crypto.GenerateKeyPair()
-	if err != nil {
-		t.Fatalf("generate keypair: %v", err)
-	}
 	kpReceiver, err := crypto.GenerateKeyPair()
 	if err != nil {
 		t.Fatalf("generate receiver keypair: %v", err)
 	}
 
-	// Register sender — receives onboarding AET and is auto-staked.
+	// Register the node's own agent — receives onboarding AET and is auto-staked.
 	r := post(t, setup.ts, "/v1/agents", map[string]any{
-		"agent_id":       "sender-no-stake-field",
-		"public_key_b64": base64.StdEncoding.EncodeToString(kpSender.PublicKey),
+		"agent_id":       string(setup.kp.AgentID()),
+		"public_key_b64": base64.StdEncoding.EncodeToString(setup.kp.PublicKey),
 	})
 	if r.StatusCode != http.StatusCreated {
-		t.Fatalf("register sender: want 201, got %d", r.StatusCode)
+		t.Fatalf("register node agent: want 201, got %d", r.StatusCode)
 	}
 	r.Body.Close()
 
@@ -516,12 +506,12 @@ func TestHandleTransfer_DefaultStake(t *testing.T) {
 	r2.Body.Close()
 
 	// Transfer without stake_amount — server must default it to MinEventStake.
+	// Sender is always the node's own identity (CRITICAL-1.1).
 	txResp := post(t, setup.ts, "/v1/transfer", map[string]any{
-		"from_agent": "sender-no-stake-field",
-		"to_agent":   "receiver-no-stake-field",
-		"amount":     500_000,
-		"currency":   "AET",
-		// stake_amount intentionally omitted
+		"to_agent": "receiver-no-stake-field",
+		"amount":   500_000,
+		"currency": "AET",
+		// stake_amount intentionally omitted — must default to MinEventStake.
 	})
 	if txResp.StatusCode != http.StatusCreated {
 		var errBody map[string]any

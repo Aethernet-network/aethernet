@@ -87,15 +87,37 @@ func TestMiddleware_RetryAfter(t *testing.T) {
 }
 
 // TestExtractIP_XForwardedFor verifies that ExtractIP returns the first (leftmost)
-// IP from a multi-value X-Forwarded-For header.
+// IP from X-Forwarded-For when the direct peer (RemoteAddr) is a trusted private
+// network proxy (MEDIUM-7.4: XFF is only honoured from private CIDRs).
 func TestExtractIP_XForwardedFor(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	// RemoteAddr must be a private IP to trust the XFF header.
+	req.RemoteAddr = "10.0.0.1:8080"
 	req.Header.Set("X-Forwarded-For", "1.2.3.4, 10.0.0.1, 172.16.0.1")
 
 	got := ratelimit.ExtractIP(req)
 	want := "1.2.3.4"
 	if got != want {
-		t.Fatalf("ExtractIP = %q, want %q", got, want)
+		t.Fatalf("ExtractIP (trusted proxy) = %q, want %q", got, want)
+	}
+}
+
+// TestExtractIP_XForwardedFor_UntrustedProxy verifies that ExtractIP ignores
+// X-Forwarded-For when the direct peer is a public (untrusted) IP.
+// A public-IP client could inject any XFF value to bypass rate limiting.
+func TestExtractIP_XForwardedFor_UntrustedProxy(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	// httptest.NewRequest defaults RemoteAddr to "192.0.2.1:1234" (TEST-NET-1,
+	// a public address). XFF from this peer must not be trusted.
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 10.0.0.1")
+
+	got := ratelimit.ExtractIP(req)
+	// Must return the RemoteAddr host, not the spoofed XFF value.
+	if got == "1.2.3.4" {
+		t.Fatal("ExtractIP trusted XFF from an untrusted public-IP peer; SECURITY: MEDIUM-7.4")
+	}
+	if got != "192.0.2.1" {
+		t.Fatalf("ExtractIP = %q, want RemoteAddr host 192.0.2.1", got)
 	}
 }
 

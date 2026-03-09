@@ -977,7 +977,9 @@ func seedMarketplace(tl *ledger.TransferLedger, reg *identity.Registry, taskMgr 
 			slog.Warn("seedMarketplace: failed to fund poster", "id", p.id, "err", err)
 		}
 		if stakeMgr != nil {
-			stakeMgr.Stake(crypto.AgentID(p.id), p.stake)
+			if err := stakeMgr.Stake(crypto.AgentID(p.id), p.stake); err != nil {
+				slog.Warn("seedMarketplace: failed to stake poster", "id", p.id, "err", err)
+			}
 		}
 	}
 

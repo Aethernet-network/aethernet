@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -63,13 +64,18 @@ const (
 	MsgVote MessageType = "vote"
 )
 
+// maxMsgBytes is the per-connection read limit applied to the P2P decoder.
+// Messages exceeding this bound cause the decoder to return an error, closing
+// the connection (MEDIUM-9.1: prevent memory exhaustion from oversized messages).
+const maxMsgBytes = 4 * 1024 * 1024 // 4 MiB
+
 // VotePayload is the body of a MsgVote wire message. It carries the vote data
 // and an Ed25519 signature over the canonical fields so that receiving nodes
 // can authenticate the vote before feeding it into their local consensus round.
 //
 // The canonical signed byte sequence is:
 //
-//	[event_id bytes] | [voter_id bytes] | [0x01 if verdict=true else 0x00]
+//	[event_id bytes] | [voter_id bytes] | [0x01 if verdict=true else 0x00] | [timestamp big-endian int64]
 type VotePayload struct {
 	// EventID identifies the event being voted on.
 	EventID event.EventID `json:"event_id"`
@@ -79,6 +85,11 @@ type VotePayload struct {
 
 	// Verdict is true for an accept vote, false for a reject vote.
 	Verdict bool `json:"verdict"`
+
+	// Timestamp is the Unix second at which the vote was created.
+	// Included in the signed byte sequence to prevent vote replay attacks
+	// (MEDIUM-3.3). Receivers reject votes older than 60 seconds.
+	Timestamp int64 `json:"timestamp,omitempty"`
 
 	// PublicKey is the sender's Ed25519 public key for signature verification.
 	// May be omitted when the receiver can look up the key by VoterID.
@@ -152,6 +163,10 @@ type Peer struct {
 // NewPeer constructs a Peer for the given connection. agentID may be empty
 // if the remote identity is not yet known (pre-handshake); it is filled in
 // after the handshake completes. The Peer starts in PeerConnecting state.
+//
+// The decoder is wrapped with io.LimitReader(maxMsgBytes) to prevent a
+// malicious peer from exhausting memory by sending an oversized message
+// (MEDIUM-9.1).
 func NewPeer(agentID crypto.AgentID, address string, conn net.Conn) *Peer {
 	return &Peer{
 		AgentID:  agentID,
@@ -159,7 +174,7 @@ func NewPeer(agentID crypto.AgentID, address string, conn net.Conn) *Peer {
 		State:    PeerConnecting,
 		conn:     conn,
 		enc:      json.NewEncoder(conn),
-		dec:      json.NewDecoder(conn),
+		dec:      json.NewDecoder(io.LimitReader(conn, maxMsgBytes)),
 		send:     make(chan Message, sendBufSize),
 		lastSeen: time.Now(),
 	}
