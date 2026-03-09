@@ -651,6 +651,15 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	if os.Getenv("AETHERNET_TESTNET") == "true" {
 		activityAgents := []string{"alpha-researcher", "data-scientist", "code-auditor", "doc-writer"}
 		transferFn := func(from, to string, amount uint64, memo string) error {
+			// Pre-check sender balance before building the event.  The OCS
+			// engine's BalanceCheck (using tp.FromAgent) is the authoritative
+			// gate, but checking here avoids the unnecessary event creation,
+			// signing overhead, and WARN log when an agent's liquid balance is
+			// temporarily below the transfer amount.  Agents self-recover as
+			// they receive settled incoming transfers from other ticks.
+			if bal, _ := stack.transfer.Balance(crypto.AgentID(from)); bal < amount {
+				return nil
+			}
 			tips := stack.dag.Tips()
 			priorTS := make(map[event.EventID]uint64, len(tips))
 			for _, ref := range tips {
