@@ -60,6 +60,11 @@ func DefaultNodeConfig(agentID crypto.AgentID) *NodeConfig {
 	}
 }
 
+// voteSeenTTL is how long a vote signature is kept in seenVotes for dedup.
+// Slightly larger than the 60s stale-vote window so that any relay of an already-
+// expired vote is still recognised and dropped before forwarding.
+const voteSeenTTL = 90 * time.Second
+
 // Node is a running AetherNet participant. It manages peer connections, drives
 // the DAG sync protocol, and routes incoming messages to the local DAG.
 //
@@ -76,6 +81,11 @@ type Node struct {
 	// Set via SetVoteHandler; nil-safe in handleMessage.
 	voteHandler func(voterID crypto.AgentID, eventID event.EventID, verdict bool)
 
+	// seenVotes tracks the signature of every MsgVote already processed, keyed
+	// by string(signature). Entries expire after voteSeenTTL. Protected by mu.
+	// Used to deduplicate relayed votes so the gossip does not loop.
+	seenVotes map[string]time.Time
+
 	mu       sync.RWMutex
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -87,10 +97,11 @@ type Node struct {
 // accepting connections. config must not be nil.
 func NewNode(config *NodeConfig, d *dag.DAG) *Node {
 	return &Node{
-		config:   config,
-		dag:      d,
-		peers:    make(map[crypto.AgentID]*Peer),
-		incoming: make(chan Message, 256),
+		config:    config,
+		dag:       d,
+		peers:     make(map[crypto.AgentID]*Peer),
+		incoming:  make(chan Message, 256),
+		seenVotes: make(map[string]time.Time),
 	}
 }
 
@@ -675,10 +686,52 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		}
 		// Reject stale votes to prevent replay attacks (MEDIUM-3.3).
 		// Allow a small negative skew (-5 s) for clock drift.
-		if age := time.Now().Unix() - vp.Timestamp; age > 60 || age < -5 {
+		now := time.Now()
+		if age := now.Unix() - vp.Timestamp; age > 60 || age < -5 {
 			log.Printf("network: dropping stale vote (age=%ds) from peer %s", age, peer.AgentID)
 			return
 		}
+
+		// Deduplication + relay: use the Ed25519 signature as the unique key.
+		// We hold n.mu for the check-and-set and peer snapshot so both happen
+		// atomically — preventing two concurrent goroutines from both relaying
+		// the same vote.
+		sig := string(vp.Signature)
+		n.mu.Lock()
+		// Opportunistic GC: evict expired seen-vote entries while we hold the lock.
+		for k, ts := range n.seenVotes {
+			if now.Sub(ts) > voteSeenTTL {
+				delete(n.seenVotes, k)
+			}
+		}
+		_, alreadySeen := n.seenVotes[sig]
+		var relayPeers []*Peer
+		if !alreadySeen {
+			n.seenVotes[sig] = now
+			// Snapshot peers to relay to, excluding the sender.
+			relayPeers = make([]*Peer, 0, len(n.peers))
+			for _, p := range n.peers {
+				if p.AgentID != peer.AgentID {
+					relayPeers = append(relayPeers, p)
+				}
+			}
+		}
+		n.mu.Unlock()
+
+		if alreadySeen {
+			return // already processed and relayed; drop to prevent gossip loops
+		}
+
+		// Relay the original signed message to all non-sender peers. This
+		// ensures votes propagate through non-full-mesh topologies (e.g. a
+		// chain 1↔2↔3 where 1 and 3 are not directly connected). The original
+		// signature is forwarded verbatim so recipients can verify it without
+		// trusting the relaying node.
+		for _, p := range relayPeers {
+			_ = p.Send(msg)
+		}
+
+		// Feed the verified vote into the local consensus engine.
 		if n.voteHandler != nil {
 			n.voteHandler(vp.VoterID, vp.EventID, vp.Verdict)
 		}

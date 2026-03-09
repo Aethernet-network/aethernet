@@ -15,7 +15,7 @@
 //	AETHERNET_DATA    base directory for key file and BadgerDB store (default: ".")
 //	AETHERNET_LISTEN  p2p TCP listen address  (default: "0.0.0.0:8337")
 //	AETHERNET_API     REST API listen address (default: ":8338")
-//	AETHERNET_PEER    peer to auto-connect on startup (default: "")
+//	AETHERNET_PEER    comma-separated peer addresses to auto-connect on startup (default: "")
 //	AETHERNET_RESET   set to "true" to wipe the database on startup (testnet recovery)
 package main
 
@@ -185,7 +185,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  AETHERNET_DATA    data directory (default: current directory)\n")
 	fmt.Fprintf(os.Stderr, "  AETHERNET_LISTEN  p2p listen address (default: 0.0.0.0:8337)\n")
 	fmt.Fprintf(os.Stderr, "  AETHERNET_API     API listen address (default: :8338)\n")
-	fmt.Fprintf(os.Stderr, "  AETHERNET_PEER    peer to connect on startup\n")
+	fmt.Fprintf(os.Stderr, "  AETHERNET_PEER    comma-separated peer addresses to connect on startup\n")
 	fmt.Fprintf(os.Stderr, "  AETHERNET_RESET   set to \"true\" to wipe the database on startup\n")
 }
 
@@ -849,7 +849,7 @@ func cmdStart() {
 	fs := flag.NewFlagSet("start", flag.ExitOnError)
 	p2pAddr := fs.String("listen", envOr("AETHERNET_LISTEN", "0.0.0.0:8337"), "TCP address for p2p connections")
 	apiListenAddr := fs.String("api", envOr("AETHERNET_API", ":8338"), "TCP address for the REST API")
-	peerAddr := fs.String("peer", envOr("AETHERNET_PEER", ""), "peer to auto-connect on startup (host:port)")
+	peerAddr := fs.String("peer", envOr("AETHERNET_PEER", ""), "comma-separated peer addresses to auto-connect on startup (host:port[,host:port...])")
 	enableMarketplace := fs.Bool("marketplace", false, "Enable built-in marketplace (task routing, escrow, explorer) in the combined single-binary deployment")
 	_ = fs.Parse(os.Args[2:])
 
@@ -891,17 +891,27 @@ func cmdStart() {
 	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\nAPI      : %s\n\n",
 		VERSION, agentID, node.ListenAddr(), *apiListenAddr)
 
+	// Connect to one or more bootstrap peers. AETHERNET_PEER (and --peer) accepts
+	// comma-separated addresses so multi-node deployments can be wired from env.
+	// Failures are non-fatal: in Docker the peer container may not be ready yet;
+	// the operator can retry or rely on the periodic sync interval to catch up.
 	if *peerAddr != "" {
-		fmt.Printf("Connecting to %s...\n", *peerAddr)
-		peer, err := node.Connect(*peerAddr)
-		if err != nil {
-			// Non-fatal: log and continue. In Docker, the peer container may not
-			// be ready yet; the operator can retry or rely on sync interval.
-			slog.Warn("failed to auto-connect to peer", "addr", *peerAddr, "err", err)
-			fmt.Printf("Warning: could not connect to %s: %v\n\n", *peerAddr, err)
-		} else {
-			fmt.Printf("Connected  : %s  (%s)\n\n", peer.AgentID, *peerAddr)
+		for _, addr := range strings.Split(*peerAddr, ",") {
+			addr = strings.TrimSpace(addr)
+			if addr == "" {
+				continue
+			}
+			fmt.Printf("Connecting to %s...\n", addr)
+			p, err := node.Connect(addr)
+			if err != nil {
+				slog.Warn("failed to auto-connect to peer", "addr", addr, "err", err)
+				fmt.Printf("Warning: could not connect to %s: %v\n", addr, err)
+			} else {
+				slog.Info("connected to peer", "addr", addr, "agent_id", p.AgentID)
+				fmt.Printf("Connected  : %s  (%s)\n", p.AgentID, addr)
+			}
 		}
+		fmt.Println()
 	}
 
 	runLoop(agentID, stack.dag, node, stack.engine, stack.supply, stack.bus)

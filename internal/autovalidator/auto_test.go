@@ -84,8 +84,8 @@ func TestAutoValidator_ProcessesPending(t *testing.T) {
 // Budget: 1_000_000 micro-AET → fee = 1_000 (0.1%) → worker receives 999_000.
 func TestAutoValidator_FeeOnTaskSettlement(t *testing.T) {
 	const budget = 1_000_000
-	expectedFee := fees.CalculateFee(budget)   // 100
-	expectedNet := budget - expectedFee         // 999_900
+	expectedFee := fees.CalculateFee(budget) // 1_000 (0.1% of 1_000_000)
+	expectedNet := budget - expectedFee      // 999_000
 
 	posterID := crypto.AgentID("poster")
 	claimerID := crypto.AgentID("worker")
@@ -137,16 +137,20 @@ func TestAutoValidator_FeeOnTaskSettlement(t *testing.T) {
 	av.Start()
 	defer av.Stop()
 
-	// Wait for the auto-validator to process the submitted task.
+	// Poll on the worker's balance rather than task status. ApproveTask marks
+	// the task Completed at the top of settleTask, before ReleaseNet and
+	// TrackFee run. Polling on status would create a race where the test reads
+	// the ledger before escrow has been released.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		tk, _ := tm.Get(task.ID)
-		if tk != nil && tk.Status == tasks.TaskStatusCompleted {
+		bal, _ := tl.Balance(claimerID)
+		if bal == expectedNet {
 			break
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
 
+	// Task status should also be Completed at this point.
 	tk, err := tm.Get(task.ID)
 	if err != nil {
 		t.Fatalf("Get task after settlement: %v", err)
