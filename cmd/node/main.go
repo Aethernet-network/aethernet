@@ -956,6 +956,25 @@ func cmdStart() {
 
 	stack := buildStack(s, kp, cfg)
 
+	// Genesis consistency check: if the stored bucket totals don't match the
+	// current TotalSupply constant the binary was built with different allocation
+	// constants than the store was seeded with (stale data). On testnet we wipe
+	// and re-seed automatically; on mainnet we log an error and continue.
+	if !checkGenesisConsistency(stack.transfer) {
+		if os.Getenv("AETHERNET_TESTNET") == "true" {
+			slog.Warn("genesis consistency check failed on testnet: wiping store and re-seeding")
+			stack.store.Close()
+			if err := wipePath(storePath()); err != nil {
+				slog.Error("genesis reset: failed to wipe store", "err", err)
+				os.Exit(1)
+			}
+			s = openStoreWithRecovery(storePath())
+			stack = buildStack(s, kp, cfg)
+		} else {
+			slog.Error("genesis consistency check failed: store was seeded with different allocation constants; manual intervention required")
+		}
+	}
+
 	// Auto-genesis: on first Docker start, seed the initial token supply when
 	// any genesis bucket is empty. Checks both founders and ecosystem so that
 	// a partial-wipe scenario (e.g. EFS loses ledger entries but keeps the
@@ -1321,6 +1340,60 @@ func seedMarketplace(tl *ledger.TransferLedger, reg *identity.Registry, taskMgr 
 		}
 	}
 	slog.Info("seedMarketplace: seeded task marketplace", "tasks", len(seedTasks))
+}
+
+// checkGenesisConsistency compares the sum of all six genesis bucket balances
+// against genesis.TotalSupply. A mismatch means the store was seeded by a
+// different binary version (different allocation constants) and the data is
+// stale.
+//
+// It returns true when the store is consistent (sum == TotalSupply or no
+// genesis data at all — zero balances will be caught by the auto-genesis
+// block). It returns false and logs details when a mismatch is found.
+//
+// Note: individual bucket balances may be lower than their allocation once
+// tokens are transferred out (e.g. onboarding draining the ecosystem bucket).
+// The total across all six buckets is still invariant: supply is conserved,
+// so any total != TotalSupply indicates stale constants.
+func checkGenesisConsistency(tl *ledger.TransferLedger) bool {
+	buckets := []struct {
+		name string
+	}{
+		{genesis.BucketFounders},
+		{genesis.BucketInvestors},
+		{genesis.BucketEcosystem},
+		{genesis.BucketRewards},
+		{genesis.BucketTreasury},
+		{genesis.BucketPublic},
+	}
+
+	var total uint64
+	for _, b := range buckets {
+		bal, _ := tl.Balance(crypto.AgentID(b.name))
+		total += bal
+	}
+
+	// Zero total means genesis hasn't run yet; the auto-genesis block handles this.
+	if total == 0 {
+		return true
+	}
+
+	if total == genesis.TotalSupply {
+		return true
+	}
+
+	// Total doesn't match — log each bucket for diagnosis.
+	slog.Warn("genesis consistency check failed: bucket total does not match TotalSupply",
+		"bucket_total", total,
+		"expected", genesis.TotalSupply,
+		genesis.BucketFounders, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketFounders)); return b }(),
+		genesis.BucketInvestors, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketInvestors)); return b }(),
+		genesis.BucketEcosystem, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketEcosystem)); return b }(),
+		genesis.BucketRewards, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketRewards)); return b }(),
+		genesis.BucketTreasury, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketTreasury)); return b }(),
+		genesis.BucketPublic, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketPublic)); return b }(),
+	)
+	return false
 }
 
 // genesisStore is the subset of store.Store used by genesis idempotency checks.
