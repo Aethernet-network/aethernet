@@ -960,7 +960,7 @@ func cmdStart() {
 	// current TotalSupply constant the binary was built with different allocation
 	// constants than the store was seeded with (stale data). On testnet we wipe
 	// and re-seed automatically; on mainnet we log an error and continue.
-	if !checkGenesisConsistency(stack.transfer) {
+	if !checkGenesisConsistency(stack.transfer, stack.reg) {
 		if os.Getenv("AETHERNET_TESTNET") == "true" {
 			slog.Warn("genesis consistency check failed on testnet: wiping store and re-seeding")
 			stack.store.Close()
@@ -1342,20 +1342,22 @@ func seedMarketplace(tl *ledger.TransferLedger, reg *identity.Registry, taskMgr 
 	slog.Info("seedMarketplace: seeded task marketplace", "tasks", len(seedTasks))
 }
 
-// checkGenesisConsistency compares the sum of all six genesis bucket balances
-// against genesis.TotalSupply. A mismatch means the store was seeded by a
-// different binary version (different allocation constants) and the data is
-// stale.
+// checkGenesisConsistency runs two checks against the loaded store:
 //
-// It returns true when the store is consistent (sum == TotalSupply or no
-// genesis data at all — zero balances will be caught by the auto-genesis
-// block). It returns false and logs details when a mismatch is found.
+//  1. Bucket sum check: the sum of all six genesis bucket balances must equal
+//     genesis.TotalSupply. A mismatch means the store was seeded by a different
+//     binary (different allocation constants).
 //
-// Note: individual bucket balances may be lower than their allocation once
-// tokens are transferred out (e.g. onboarding draining the ecosystem bucket).
-// The total across all six buckets is still invariant: supply is conserved,
-// so any total != TotalSupply indicates stale constants.
-func checkGenesisConsistency(tl *ledger.TransferLedger) bool {
+//  2. Zombie-agent check: if the identity registry has registered agents but the
+//     ecosystem bucket balance equals exactly genesis.EcosystemAllocation (i.e.
+//     no onboarding transfer has ever drawn from it), those agents were registered
+//     before the TransferFromBucket onboarding fix and hold zero balance. The
+//     store is stale and must be wiped so they re-register and receive funds.
+//
+// Returns true when the store is consistent, false when either check fails.
+// A zero bucket total means genesis hasn't run yet; the auto-genesis block
+// handles that case, so we return true here.
+func checkGenesisConsistency(tl *ledger.TransferLedger, reg *identity.Registry) bool {
 	buckets := []struct {
 		name string
 	}{
@@ -1373,27 +1375,40 @@ func checkGenesisConsistency(tl *ledger.TransferLedger) bool {
 		total += bal
 	}
 
-	// Zero total means genesis hasn't run yet; the auto-genesis block handles this.
+	// Zero total means genesis hasn't run yet; auto-genesis handles this.
 	if total == 0 {
 		return true
 	}
 
-	if total == genesis.TotalSupply {
-		return true
+	if total != genesis.TotalSupply {
+		// Total doesn't match — log each bucket for diagnosis.
+		slog.Warn("genesis consistency check failed: bucket total does not match TotalSupply",
+			"bucket_total", total,
+			"expected", genesis.TotalSupply,
+			genesis.BucketFounders, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketFounders)); return b }(),
+			genesis.BucketInvestors, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketInvestors)); return b }(),
+			genesis.BucketEcosystem, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketEcosystem)); return b }(),
+			genesis.BucketRewards, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketRewards)); return b }(),
+			genesis.BucketTreasury, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketTreasury)); return b }(),
+			genesis.BucketPublic, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketPublic)); return b }(),
+		)
+		return false
 	}
 
-	// Total doesn't match — log each bucket for diagnosis.
-	slog.Warn("genesis consistency check failed: bucket total does not match TotalSupply",
-		"bucket_total", total,
-		"expected", genesis.TotalSupply,
-		genesis.BucketFounders, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketFounders)); return b }(),
-		genesis.BucketInvestors, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketInvestors)); return b }(),
-		genesis.BucketEcosystem, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketEcosystem)); return b }(),
-		genesis.BucketRewards, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketRewards)); return b }(),
-		genesis.BucketTreasury, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketTreasury)); return b }(),
-		genesis.BucketPublic, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketPublic)); return b }(),
-	)
-	return false
+	// Zombie-agent check: agents registered before the TransferFromBucket
+	// onboarding fix received no allocation (ecosystem balance was never drawn
+	// down). Detect this by checking whether any agents are registered while the
+	// ecosystem bucket still holds its full genesis allocation.
+	ecosystemBal, _ := tl.Balance(crypto.AgentID(genesis.BucketEcosystem))
+	if ecosystemBal == genesis.EcosystemAllocation && len(reg.All(1, 0)) > 0 {
+		slog.Warn("genesis consistency check failed: agents registered but ecosystem bucket is untouched (zombie agents from pre-onboarding-fix binary)",
+			"registered_agents", len(reg.All(0, 0)),
+			"ecosystem_balance", ecosystemBal,
+		)
+		return false
+	}
+
+	return true
 }
 
 // genesisStore is the subset of store.Store used by genesis idempotency checks.
