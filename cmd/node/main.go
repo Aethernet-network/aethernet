@@ -12,11 +12,12 @@
 //
 // Environment variables (all optional):
 //
-//	AETHERNET_DATA    base directory for key file and BadgerDB store (default: ".")
-//	AETHERNET_LISTEN  p2p TCP listen address  (default: "0.0.0.0:8337")
-//	AETHERNET_API     REST API listen address (default: ":8338")
-//	AETHERNET_PEER    comma-separated peer addresses to auto-connect on startup (default: "")
-//	AETHERNET_RESET   set to "true" to wipe the database on startup (testnet recovery)
+//	AETHERNET_DATA      base directory for key file and BadgerDB store (default: ".")
+//	AETHERNET_LISTEN    p2p TCP listen address  (default: "0.0.0.0:8337")
+//	AETHERNET_API       REST API listen address (default: ":8338")
+//	AETHERNET_PEER      comma-separated peer addresses to auto-connect on startup (default: "")
+//	AETHERNET_RESET     set to "true" to wipe the database on startup (testnet recovery)
+//	AETHERNET_DISCOVER  DNS name resolved periodically for automatic peer discovery (default: "")
 package main
 
 import (
@@ -25,6 +26,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -186,8 +188,9 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  AETHERNET_DATA    data directory (default: current directory)\n")
 	fmt.Fprintf(os.Stderr, "  AETHERNET_LISTEN  p2p listen address (default: 0.0.0.0:8337)\n")
 	fmt.Fprintf(os.Stderr, "  AETHERNET_API     API listen address (default: :8338)\n")
-	fmt.Fprintf(os.Stderr, "  AETHERNET_PEER    comma-separated peer addresses to connect on startup\n")
-	fmt.Fprintf(os.Stderr, "  AETHERNET_RESET   set to \"true\" to wipe the database on startup\n")
+	fmt.Fprintf(os.Stderr, "  AETHERNET_PEER      comma-separated peer addresses to connect on startup\n")
+	fmt.Fprintf(os.Stderr, "  AETHERNET_RESET     set to \"true\" to wipe the database on startup\n")
+	fmt.Fprintf(os.Stderr, "  AETHERNET_DISCOVER  DNS name for automatic peer discovery (e.g. nodes.aethernet.local)\n")
 }
 
 // readPassphrase prints prompt and reads one line from stdin, stripping the
@@ -290,6 +293,7 @@ type nodeStack struct {
 	activityGen     *demo.ActivityGenerator
 	platformKeys    *platformpkg.KeyManager
 	taskRouter      *router.Router
+	peerDiscovery   *network.PeerDiscovery
 }
 
 // taskManagerSource adapts *tasks.TaskManager to the router.TaskSource interface,
@@ -811,6 +815,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 // stopStack tears down the API server, network node, OCS engine, and persistence
 // store in safe reverse-startup order.
 func stopStack(node *network.Node, stack *nodeStack) {
+	if stack.peerDiscovery != nil {
+		stack.peerDiscovery.Stop()
+	}
 	// Stop ledger archival goroutines before shutting down other components.
 	if stack.transfer != nil {
 		stack.transfer.Stop()
@@ -915,6 +922,7 @@ func cmdStart() {
 	p2pAddr := fs.String("listen", envOr("AETHERNET_LISTEN", "0.0.0.0:8337"), "TCP address for p2p connections")
 	apiListenAddr := fs.String("api", envOr("AETHERNET_API", ":8338"), "TCP address for the REST API")
 	peerAddr := fs.String("peer", envOr("AETHERNET_PEER", ""), "comma-separated peer addresses to auto-connect on startup (host:port[,host:port...])")
+	discoverAddr := fs.String("discover", envOr("AETHERNET_DISCOVER", ""), "DNS name resolved periodically for automatic peer discovery (e.g. nodes.aethernet.local)")
 	enableMarketplace := fs.Bool("marketplace", false, "Enable built-in marketplace (task routing, escrow, explorer) in the combined single-binary deployment")
 	configPath := fs.String("config", envOr("AETHERNET_CONFIG", ""), "path to protocol config JSON file (default: built-in defaults)")
 	noAuth := fs.Bool("no-auth", false, "Disable API authentication (testnet/development only — NOT safe for production)")
@@ -963,6 +971,21 @@ func cmdStart() {
 	}
 
 	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, *enableMarketplace, cfg, *noAuth)
+
+	// DNS-based peer discovery: periodically resolve a DNS name and connect to
+	// any new IP addresses it returns. Designed for AWS Cloud Map or any other
+	// service-discovery system that publishes peer addresses as DNS A records.
+	// Additive: --peer static connections are still applied below.
+	if *discoverAddr != "" {
+		_, portStr, err := net.SplitHostPort(*p2pAddr)
+		if err != nil {
+			portStr = "8337"
+		}
+		pd := network.NewPeerDiscovery(*discoverAddr, portStr, node, 30*time.Second)
+		pd.Start()
+		stack.peerDiscovery = pd
+		slog.Info("peer discovery started", "dns", *discoverAddr, "port", portStr, "interval", "30s")
+	}
 
 	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\nAPI      : %s\n\n",
 		VERSION, agentID, node.ListenAddr(), *apiListenAddr)

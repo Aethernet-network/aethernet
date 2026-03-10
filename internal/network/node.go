@@ -126,6 +126,10 @@ type Node struct {
 	// Used to deduplicate relayed votes so the gossip does not loop.
 	seenVotes map[string]time.Time
 
+	// disconnectHandler is called when a peer's read loop exits (disconnect).
+	// Set via SetDisconnectHandler; nil-safe. Protected by mu.
+	disconnectHandler func(address string)
+
 	mu       sync.RWMutex
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -369,6 +373,16 @@ func (n *Node) SetIdentityLookup(fn func(crypto.AgentID) []byte) {
 	n.identityLookup = fn
 }
 
+// SetDisconnectHandler registers a callback invoked when a peer disconnects.
+// The callback receives the TCP address (host:port) of the peer that left.
+// Used by PeerDiscovery to clear stale entries so the address is re-tried on
+// the next DNS resolution cycle. Call before or after Start.
+func (n *Node) SetDisconnectHandler(fn func(address string)) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.disconnectHandler = fn
+}
+
 // BroadcastVote sends a signed MsgVote to all currently connected peers.
 // The vote is signed with the node's keypair (if configured) so that receiving
 // nodes can authenticate it before feeding it into their consensus round.
@@ -481,7 +495,11 @@ func (n *Node) startPeerLoops(peer *Peer) {
 		peer.Close() // idempotent; ensures conn is closed if not already
 		n.mu.Lock()
 		delete(n.peers, peer.AgentID)
+		handler := n.disconnectHandler
 		n.mu.Unlock()
+		if handler != nil {
+			handler(peer.Address)
+		}
 	}()
 
 	n.wg.Add(1)
