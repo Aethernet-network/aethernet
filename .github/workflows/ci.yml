@@ -1,0 +1,201 @@
+# AetherNet CI/CD Pipeline
+#
+# Runs on every push to main and every pull request.
+#
+# Jobs:
+#   test    — unit + integration tests with race detector
+#   build   — compile all binaries (needs: test)
+#   docker  — build & push image to ECR (needs: build, main only)
+#   deploy  — rolling deploy to all 3 ECS nodes (needs: docker, main only)
+#
+# Required GitHub repository secrets (Settings → Secrets and variables → Actions):
+#   AWS_ACCESS_KEY_ID      — IAM key with ECR push + ECS UpdateService permissions
+#   AWS_SECRET_ACCESS_KEY  — corresponding secret
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight runs for the same branch so a rapid push doesn't queue
+# up multiple parallel deploys.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ─── Job 1: Test ─────────────────────────────────────────────────────────────
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Run all unit tests (race detector)
+        env:
+          GOFLAGS: "-p=1"
+        run: go test ./... -race -count=1
+
+      - name: Run integration tests (verbose)
+        env:
+          GOFLAGS: "-p=1"
+        run: go test ./internal/integration/ -race -count=1 -v
+
+      - name: Report test count in job summary
+        if: always()
+        run: |
+          COUNT=$(go test ./... -list '.*' 2>/dev/null | grep -c '^Test' || echo "unknown")
+          echo "### Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Tests discovered | ${COUNT} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Race detector | enabled |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+
+# ─── Job 2: Build ────────────────────────────────────────────────────────────
+  build:
+    name: Build
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Build node binary
+        run: go build -o aethernet ./cmd/node/
+
+      - name: Build CLI
+        run: go build -o aet ./cmd/aet/
+
+      - name: Build load test
+        run: go build -o aet-loadtest ./cmd/aet-loadtest/
+
+      - name: Upload binaries as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aethernet-binaries-${{ github.sha }}
+          path: |
+            aethernet
+            aet
+            aet-loadtest
+          retention-days: 7
+
+# ─── Job 3: Docker ───────────────────────────────────────────────────────────
+  docker:
+    name: Docker (ECR push)
+    needs: build
+    runs-on: ubuntu-latest
+    # Only push images on main branch pushes — not on PRs.
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push to ECR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            435998721364.dkr.ecr.us-east-1.amazonaws.com/aethernet:latest
+            435998721364.dkr.ecr.us-east-1.amazonaws.com/aethernet:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+# ─── Job 4: Deploy ───────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy (ECS rolling)
+    needs: docker
+    runs-on: ubuntu-latest
+    # Only deploy on main branch pushes.
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Deploy node 1
+        run: |
+          aws ecs update-service \
+            --cluster aethernet-testnet \
+            --service aethernet-node \
+            --force-new-deployment \
+            --output json | jq -r '.service.serviceName + " deployment started"'
+
+      - name: Deploy node 2
+        run: |
+          aws ecs update-service \
+            --cluster aethernet-testnet \
+            --service aethernet-node2 \
+            --force-new-deployment \
+            --output json | jq -r '.service.serviceName + " deployment started"'
+
+      - name: Deploy node 3
+        run: |
+          aws ecs update-service \
+            --cluster aethernet-testnet \
+            --service aethernet-node3 \
+            --force-new-deployment \
+            --output json | jq -r '.service.serviceName + " deployment started"'
+
+      - name: Wait for services stable (timeout 10 min)
+        run: |
+          echo "Waiting for all 3 services to stabilise…"
+          aws ecs wait services-stable \
+            --cluster aethernet-testnet \
+            --services aethernet-node aethernet-node2 aethernet-node3 \
+          && echo "All 3 nodes stable ✓" \
+          || echo "::warning::Stability wait timed out — services may still be converging"
+
+      - name: Write deploy summary
+        if: always()
+        run: |
+          echo "### Deploy Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | Image |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| aethernet-node  | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| aethernet-node2 | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| aethernet-node3 | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY

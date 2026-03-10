@@ -1,0 +1,134 @@
+# AetherNet Pull Request Checks
+#
+# Runs on every pull request targeting main.
+# Mirrors the test + build jobs from ci.yml but adds:
+#   - go vet (catches format-string bugs, unused vars, shadowed errors)
+#   - swallowed store-write error detection (CLAUDE.md: NEVER use _ = for store writes)
+#
+# No Docker push or deploy — that only happens on merged commits via ci.yml.
+#
+# Required GitHub repository secrets: none (read-only checks only)
+
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: pr-${{ github.head_ref }}
+  cancel-in-progress: true
+
+# ─── Job 1: Lint + vet ───────────────────────────────────────────────────────
+jobs:
+  lint:
+    name: Lint & Vet
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Check for swallowed store-write errors
+        # CLAUDE.md: "NEVER use _ = for store writes."
+        # This catches patterns like _ = tl.PutTransfer(...) or _ = s.store.Put(...)
+        # that silently discard persistence failures.
+        run: |
+          if grep -rn \
+               --include="*.go" \
+               -E '_ = [a-zA-Z_][a-zA-Z0-9_]*\.(Put[A-Z]|store\.[A-Za-z])' \
+               internal/ ; then
+            echo "FAIL: swallowed store errors found (see matches above)"
+            echo "Every Put* and store.* call must have its error checked."
+            echo "See CLAUDE.md § Error Handling."
+            exit 1
+          else
+            echo "OK: no swallowed store errors"
+          fi
+
+# ─── Job 2: Test ─────────────────────────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Run all unit tests (race detector)
+        env:
+          GOFLAGS: "-p=1"
+        run: go test ./... -race -count=1
+
+      - name: Run integration tests (verbose)
+        env:
+          GOFLAGS: "-p=1"
+        run: go test ./internal/integration/ -race -count=1 -v
+
+      - name: Report test count in job summary
+        if: always()
+        run: |
+          COUNT=$(go test ./... -list '.*' 2>/dev/null | grep -c '^Test' || echo "unknown")
+          echo "### PR Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Tests discovered | ${COUNT} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Race detector | enabled |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | \`${{ github.head_ref }}\` |" >> $GITHUB_STEP_SUMMARY
+
+# ─── Job 3: Build ────────────────────────────────────────────────────────────
+  build:
+    name: Build
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Build node binary
+        run: go build -o aethernet ./cmd/node/
+
+      - name: Build CLI
+        run: go build -o aet ./cmd/aet/
+
+      - name: Build load test
+        run: go build -o aet-loadtest ./cmd/aet-loadtest/
+
+      - name: Upload binaries as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-binaries-${{ github.sha }}
+          path: |
+            aethernet
+            aet
+            aet-loadtest
+          retention-days: 3
