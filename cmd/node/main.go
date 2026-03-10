@@ -957,13 +957,16 @@ func cmdStart() {
 	stack := buildStack(s, kp, cfg)
 
 	// Auto-genesis: on first Docker start, seed the initial token supply when
-	// the founders bucket is empty. Only runs in non-interactive mode
-	// (AETHERNET_DATA is set) to preserve the manual genesis workflow in
-	// interactive / development environments. Pass the store so seedGenesis
-	// writes an idempotency marker preventing double-runs.
+	// any genesis bucket is empty. Checks both founders and ecosystem so that
+	// a partial-wipe scenario (e.g. EFS loses ledger entries but keeps the
+	// meta:genesis_complete marker) still triggers a re-seed. Only runs in
+	// non-interactive mode (AETHERNET_DATA is set) to preserve the manual
+	// genesis workflow in interactive / development environments. Pass the
+	// store so seedGenesis writes an idempotency marker preventing double-runs.
 	if os.Getenv("AETHERNET_DATA") != "" {
 		foundersBalance, _ := stack.transfer.Balance(crypto.AgentID(genesis.BucketFounders))
-		if foundersBalance == 0 {
+		ecosystemBalance, _ := stack.transfer.Balance(crypto.AgentID(genesis.BucketEcosystem))
+		if foundersBalance == 0 || ecosystemBalance == 0 {
 			slog.Info("auto-genesis: seeding initial token supply")
 			seedGenesis(stack.transfer, stack.store)
 			fmt.Println("Auto-genesis: initial token supply seeded.")
@@ -1340,14 +1343,17 @@ func seedGenesis(tl *ledger.TransferLedger, s genesisStore) {
 	if s != nil {
 		data, _ := s.GetMeta(genesisMarkerKey)
 		if len(data) > 0 {
-			// Verify the treasury was actually funded. If the ledger was wiped but the
-			// marker survived (partial store state), re-seed rather than leave all
-			// balances at zero.
-			if bal, _ := tl.Balance(crypto.AgentID(genesis.BucketTreasury)); bal > 0 {
+			// Verify the treasury AND ecosystem buckets were actually funded. Either
+			// bucket being zero indicates a partial-wipe (ledger entries lost but the
+			// marker key survived), so we re-seed rather than leave balances at zero.
+			treasuryBal, _ := tl.Balance(crypto.AgentID(genesis.BucketTreasury))
+			ecosystemBal, _ := tl.Balance(crypto.AgentID(genesis.BucketEcosystem))
+			if treasuryBal > 0 && ecosystemBal > 0 {
 				slog.Info("auto-genesis: genesis already complete, skipping")
 				return
 			}
-			slog.Warn("auto-genesis: genesis marker present but treasury balance is zero; re-seeding")
+			slog.Warn("auto-genesis: genesis marker present but balances incomplete; re-seeding",
+				"treasury", treasuryBal, "ecosystem", ecosystemBal)
 		}
 	}
 
