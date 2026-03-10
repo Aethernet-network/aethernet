@@ -1049,6 +1049,61 @@ func TestTransferLedger_FundAgent_CreatesSettledEntry(t *testing.T) {
 	}
 }
 
+// TestTransferLedger_MintCap verifies the protocol-level supply invariant:
+//   - FundAgent succeeds while totalMinted ≤ mintCap
+//   - FundAgent returns ErrMintCapExceeded when the cap would be exceeded
+//   - totalMinted does not change after a failed mint
+//   - A zero cap means unlimited (backward compatibility)
+func TestTransferLedger_MintCap(t *testing.T) {
+	tl := ledger.NewTransferLedger()
+
+	const cap = 1_000_000
+
+	// Set cap before any minting.
+	tl.SetMintCap(cap)
+
+	// Minting up to the cap must succeed.
+	if err := tl.FundAgent("alice", 600_000); err != nil {
+		t.Fatalf("FundAgent alice (600k): %v", err)
+	}
+	if err := tl.FundAgent("bob", 400_000); err != nil {
+		t.Fatalf("FundAgent bob (400k, reaches cap): %v", err)
+	}
+
+	// TotalMinted must equal the cap exactly.
+	if got := tl.TotalMinted(); got != cap {
+		t.Errorf("TotalMinted = %d, want %d", got, cap)
+	}
+
+	// Minting even 1 more micro-AET must fail with ErrMintCapExceeded.
+	err := tl.FundAgent("charlie", 1)
+	if err == nil {
+		t.Fatal("FundAgent beyond cap should have returned an error")
+	}
+	if !errors.Is(err, ledger.ErrMintCapExceeded) {
+		t.Errorf("want ErrMintCapExceeded, got: %v", err)
+	}
+
+	// totalMinted must be unchanged after a failed mint.
+	if got := tl.TotalMinted(); got != cap {
+		t.Errorf("TotalMinted after failed mint = %d, want %d (cap must not change on error)", got, cap)
+	}
+
+	// Charlie's balance must be zero — the failed mint must not have taken effect.
+	if bal, _ := tl.Balance("charlie"); bal != 0 {
+		t.Errorf("charlie balance = %d after failed mint, want 0", bal)
+	}
+
+	// SetMintCap(0) re-enables unlimited minting.
+	tl.SetMintCap(0)
+	if err := tl.FundAgent("charlie", 1); err != nil {
+		t.Fatalf("FundAgent charlie after SetMintCap(0): %v", err)
+	}
+	if got := tl.TotalMinted(); got != cap+1 {
+		t.Errorf("TotalMinted after re-enable = %d, want %d", got, cap+1)
+	}
+}
+
 // TestResetOptimisticOutflows verifies that stale Optimistic outflow entries
 // are removed and the agent's balance is restored to its correct value.
 func TestResetOptimisticOutflows(t *testing.T) {
@@ -1134,10 +1189,14 @@ func TestResetOptimisticOutflows(t *testing.T) {
 type memTransferStore struct {
 	mu      sync.Mutex
 	entries map[event.EventID]*ledger.TransferEntry
+	meta    map[string][]byte
 }
 
 func newMemTransferStore() *memTransferStore {
-	return &memTransferStore{entries: make(map[event.EventID]*ledger.TransferEntry)}
+	return &memTransferStore{
+		entries: make(map[event.EventID]*ledger.TransferEntry),
+		meta:    make(map[string][]byte),
+	}
 }
 
 func (s *memTransferStore) PutTransfer(e *ledger.TransferEntry) error {
@@ -1175,6 +1234,27 @@ func (s *memTransferStore) GetTransfer(id event.EventID) (*ledger.TransferEntry,
 	}
 	cp := *e
 	return &cp, nil
+}
+
+func (s *memTransferStore) PutMeta(key string, value []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make([]byte, len(value))
+	copy(cp, value)
+	s.meta[key] = cp
+	return nil
+}
+
+func (s *memTransferStore) GetMeta(key string) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.meta[key]
+	if !ok {
+		return nil, nil
+	}
+	cp := make([]byte, len(v))
+	copy(cp, v)
+	return cp, nil
 }
 
 // memGenerationStore is a minimal in-memory generationPersistence implementation

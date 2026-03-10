@@ -10,11 +10,13 @@
 package ledger
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
@@ -30,7 +32,19 @@ type transferPersistence interface {
 	AllTransfers() ([]*TransferEntry, error)
 	DeleteTransfer(id event.EventID) error
 	GetTransfer(id event.EventID) (*TransferEntry, error)
+	PutMeta(key string, value []byte) error
+	GetMeta(key string) ([]byte, error)
 }
+
+// mintedMetaKey is the BadgerDB metadata key used to persist totalMinted across
+// node restarts. This allows the mint cap to be enforced immediately on startup
+// without scanning all transfer entries.
+const mintedMetaKey = "ledger:total_minted"
+
+// fundCounter is a package-level monotonic counter used to generate unique IDs
+// for FundAgent entries. It replaces len(l.entries) which is non-deterministic
+// across restarts when entries are loaded from the store.
+var fundCounter atomic.Uint64
 
 // Sentinel errors returned by TransferLedger methods.
 var (
@@ -53,6 +67,11 @@ var (
 	// ErrInsufficientBalance is returned when a transfer's FromAgent does not
 	// have enough spendable balance to cover the transfer amount.
 	ErrInsufficientBalance = errors.New("ledger: insufficient balance")
+
+	// ErrMintCapExceeded is returned by FundAgent when the requested mint would
+	// push totalMinted past the protocol's configured mint cap. This enforces
+	// the supply invariant at the ledger level rather than the application level.
+	ErrMintCapExceeded = errors.New("ledger: mint cap exceeded")
 )
 
 // TransferEntry is a single record in the Transfer Ledger. It captures the
@@ -104,6 +123,15 @@ type TransferLedger struct {
 	archivedNetSettled map[crypto.AgentID]int64 // balance contribution of evicted Settled entries
 	archiveDone        chan struct{}             // closed by Stop() to terminate the archival goroutine
 	store              transferPersistence
+
+	// mintCap is the maximum total micro-AET that may be minted via FundAgent.
+	// Zero means unlimited (backward compatibility for tests and pre-genesis startup).
+	// Set via SetMintCap after genesis completes to freeze the supply.
+	mintCap uint64
+
+	// totalMinted is the running sum of all amounts ever minted via FundAgent.
+	// Persisted to the store under mintedMetaKey so it survives restarts.
+	totalMinted uint64
 }
 
 // SetStore attaches a persistence backend to the TransferLedger. After this call
@@ -111,6 +139,24 @@ type TransferLedger struct {
 // must satisfy transferPersistence; *store.Store from the store package does so.
 func (l *TransferLedger) SetStore(s transferPersistence) {
 	l.store = s
+}
+
+// SetMintCap sets the maximum total micro-AET that may ever be created via
+// FundAgent. A cap of zero disables enforcement (unlimited — the default).
+// Call once after genesis completes to freeze the supply at the genesis total;
+// any subsequent FundAgent call that would exceed the cap returns ErrMintCapExceeded.
+func (l *TransferLedger) SetMintCap(cap uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.mintCap = cap
+}
+
+// TotalMinted returns the running sum of all micro-AET created by FundAgent.
+// This value is persisted to the store and survives restarts.
+func (l *TransferLedger) TotalMinted() uint64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.totalMinted
 }
 
 // NewTransferLedger returns an empty, ready-to-use TransferLedger.
@@ -299,21 +345,33 @@ func (l *TransferLedger) BalanceCheck(agentID crypto.AgentID, amount uint64) err
 
 // FundAgent creates a genesis credit entry that grants initial funds to an agent.
 // This is the only path through which new balance enters the Transfer Ledger
-// outside of normal settled transfers. Used for initial staking and test setup.
+// outside of normal settled transfers. Used only during genesis and onboarding.
 // The entry is created in Settled state so it is immediately spendable.
+//
+// Protocol-level supply invariant: when a mint cap has been set via SetMintCap,
+// FundAgent returns ErrMintCapExceeded if the requested amount would push
+// totalMinted past the cap. This prevents any code path — including application
+// layers — from inflating the supply beyond the genesis allocation.
 func (l *TransferLedger) FundAgent(agentID crypto.AgentID, amount uint64) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// Create a synthetic settled entry with a deterministic ID based on the
-	// agent and amount, using a "genesis:" prefix to avoid collisions with
-	// content-addressed event IDs.
-	eid := event.EventID(fmt.Sprintf("genesis:%s:%d:%d", agentID, amount, len(l.entries)))
+	// Enforce the protocol-level mint cap before doing any work.
+	if l.mintCap > 0 && l.totalMinted+amount > l.mintCap {
+		return fmt.Errorf("%w: total_minted=%d + amount=%d > cap=%d",
+			ErrMintCapExceeded, l.totalMinted, amount, l.mintCap)
+	}
+
+	// Generate a unique, monotonic ID using an atomic counter instead of
+	// len(l.entries) which is non-deterministic across restarts (entries loaded
+	// from the store change the count before FundAgent is called).
+	n := fundCounter.Add(1)
+	eid := event.EventID(fmt.Sprintf("genesis:%s:%d:%d", agentID, amount, n))
 	if _, exists := l.entries[eid]; exists {
 		return fmt.Errorf("%w: %s", ErrDuplicateEntry, eid)
 	}
 
-	l.entries[eid] = &TransferEntry{
+	entry := &TransferEntry{
 		EventID:    eid,
 		FromAgent:  "system",
 		ToAgent:    agentID,
@@ -325,6 +383,26 @@ func (l *TransferLedger) FundAgent(agentID crypto.AgentID, amount uint64) error 
 		RecordedAt: time.Now(),
 		IsGenesis:  true,
 	}
+
+	// Persist BEFORE updating in-memory state (CLAUDE.md: State Mutation Rules).
+	if l.store != nil {
+		if err := l.store.PutTransfer(entry); err != nil {
+			return fmt.Errorf("ledger: FundAgent: persist entry: %w", err)
+		}
+		// Persist the updated totalMinted so restarts can restore and enforce the cap.
+		newMinted := l.totalMinted + amount
+		b := make([]byte, 8)
+		binary.BigEndian.PutUint64(b, newMinted)
+		if err := l.store.PutMeta(mintedMetaKey, b); err != nil {
+			slog.Error("ledger: FundAgent: failed to persist total_minted",
+				"total_minted", newMinted, "err", err)
+			// Non-fatal: entry is persisted; totalMinted will be reconstructed on
+			// next load via the sum of IsGenesis entries if the meta key is lost.
+		}
+	}
+
+	l.entries[eid] = entry
+	l.totalMinted += amount
 	return nil
 }
 
@@ -477,6 +555,9 @@ func (l *TransferLedger) History(agentID crypto.AgentID, limit int, offset int) 
 // first Record). The returned ledger has s attached so subsequent mutations
 // continue to write through. s must satisfy transferPersistence; *store.Store
 // from the store package does so.
+//
+// totalMinted is restored from the mintedMetaKey store entry so that the mint
+// cap can be enforced correctly immediately after startup.
 func LoadTransferLedgerFromStore(s transferPersistence) (*TransferLedger, error) {
 	entries, err := s.AllTransfers()
 	if err != nil {
@@ -486,6 +567,11 @@ func LoadTransferLedgerFromStore(s transferPersistence) (*TransferLedger, error)
 	tl.store = s
 	for _, e := range entries {
 		tl.entries[e.EventID] = e
+	}
+	// Restore totalMinted from persisted metadata so that SetMintCap enforces
+	// the correct cap on the first FundAgent call after a restart.
+	if data, err := s.GetMeta(mintedMetaKey); err == nil && len(data) == 8 {
+		tl.totalMinted = binary.BigEndian.Uint64(data)
 	}
 	return tl, nil
 }

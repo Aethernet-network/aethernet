@@ -970,6 +970,17 @@ func cmdStart() {
 		}
 	}
 
+	// Enforce the protocol-level mint cap immediately after genesis completes.
+	// When totalMinted > 0 the genesis allocation is on record; any subsequent
+	// FundAgent call that would push totalMinted past this cap is rejected at
+	// the ledger level rather than relying solely on application-level guards.
+	// A zero totalMinted means genesis has not yet run (interactive / manual
+	// flow) — leave cap unlimited so the operator can run it separately.
+	if minted := stack.transfer.TotalMinted(); minted > 0 {
+		stack.transfer.SetMintCap(minted)
+		slog.Info("ledger: mint cap enforced", "cap_micro_aet", minted)
+	}
+
 	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, *enableMarketplace, cfg, *noAuth)
 
 	// DNS-based peer discovery: periodically resolve a DNS name and connect to
@@ -1049,6 +1060,11 @@ func cmdConnect() {
 	s := openStoreWithRecovery(storePath())
 
 	stack := buildStack(s, kp, cfg)
+	// Enforce mint cap if genesis has already been run on this store.
+	if minted := stack.transfer.TotalMinted(); minted > 0 {
+		stack.transfer.SetMintCap(minted)
+		slog.Info("ledger: mint cap enforced", "cap_micro_aet", minted)
+	}
 	// cmdConnect is the legacy subcommand; marketplace is disabled by default.
 	// Use 'aethernet start --marketplace' for the combined deployment.
 	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, false, cfg, *noAuth)
