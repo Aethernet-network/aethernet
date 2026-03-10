@@ -13,7 +13,6 @@ bin/
 # Go
 *.test
 *.out
-go.sum
 
 # OS
 .DS_Store
