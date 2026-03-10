@@ -63,10 +63,12 @@ def main():
 
     client = AetherNetClient(TESTNET, agent_id=AGENT_ID)
 
-    # Register agent identity
+    # Register with a persistent per-agent keypair so each worker gets its own
+    # onboarding allocation and economic identity, independent of the node's keypair.
     try:
-        info = client.quick_start(agent_name=AGENT_ID)
-        log.info(f"Registered. Balance: {info.get('balance', 0)}")
+        info = client.register_with_keypair(AGENT_ID)
+        alloc = info.get("onboarding_allocation", 0)
+        log.info(f"Registered. Onboarding allocation: {alloc / 1_000_000:.1f} AET")
     except Exception as e:
         log.info(f"Already registered or error: {e}")
 

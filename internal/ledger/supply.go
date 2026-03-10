@@ -21,11 +21,11 @@ import (
 const (
 	// BaseSupply is the minimum circulating supply, present from genesis,
 	// denominated in micro-AET (1 AET = 1,000,000 micro-AET).
-	BaseSupply uint64 = 1_000_000_000_000
+	BaseSupply uint64 = 1_000_000_000_000_000
 
 	// MaxSupplyMultiplier caps how far verified generation can expand the supply
 	// relative to BaseSupply. A multiplier of 10 means the total supply can
-	// reach at most 10 trillion micro-AET (10,000 AET) before the cap applies.
+	// reach at most 10 quadrillion micro-AET (10 billion AET) before the cap applies.
 	MaxSupplyMultiplier uint64 = 10
 
 	// MeasurementWindow is the trailing duration over which TotalVerifiedValue

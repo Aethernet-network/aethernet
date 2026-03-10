@@ -103,7 +103,7 @@ func (st *supplyTracker) check(t *testing.T, label string) {
 
 // initGenesis funds all six standard genesis buckets and returns the tracker.
 // Uses the canonical AetherNet allocations. After this call, genesis total ==
-// 1_000_000_000_000 µAET.
+// 1_000_000_000_000_000 µAET.
 func initGenesis(t *testing.T, tl *ledger.TransferLedger) *supplyTracker {
 	t.Helper()
 	st := newSupplyTracker(tl)
@@ -234,8 +234,8 @@ func TestE2E_FullSettlementLifecycle(t *testing.T) {
 
 	st.check(t, "after staking")
 
-	// Verify each agent has 25 M staked and 25 M spendable.
-	const alloc uint64 = 50_000_000
+	// Verify each agent has half staked and half spendable.
+	const alloc uint64 = 50_000_000_000
 	for _, id := range []crypto.AgentID{posterID, workerID, validatorID} {
 		if got := sm.StakedAmount(id); got != stakeAmt {
 			t.Errorf("staked(%s) = %d; want %d", id, got, stakeAmt)

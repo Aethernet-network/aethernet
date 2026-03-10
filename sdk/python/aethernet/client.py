@@ -181,6 +181,97 @@ class AetherNetClient:
             agent_id = secrets.token_hex(32)
             return {"agent_id": agent_id}
 
+    def generate_keypair(self, agent_name: str) -> str:
+        """Get or create a persistent Ed25519 keypair for *agent_name*.
+
+        The keypair is stored as a JSON file at
+        ``~/.aethernet/keys/{agent_name}.key`` with permissions 0o600.
+        On subsequent calls with the same *agent_name* the existing key is
+        loaded so the agent retains its identity across restarts.
+
+        Requires ``pip install aethernet-sdk[crypto]`` (``cryptography`` package).
+
+        Args:
+            agent_name: Logical agent name, used as the file stem.
+
+        Returns:
+            Standard-base64-encoded Ed25519 public key (no newlines), suitable
+            for passing as ``public_key_b64`` to ``POST /v1/agents``.
+
+        Raises:
+            ImportError: If the ``cryptography`` package is not installed.
+        """
+        import base64
+        import binascii
+        import json
+        import os
+
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding,
+            NoEncryption,
+            PrivateFormat,
+            PublicFormat,
+        )
+
+        keys_dir = os.path.join(os.path.expanduser("~"), ".aethernet", "keys")
+        os.makedirs(keys_dir, mode=0o700, exist_ok=True)
+        key_path = os.path.join(keys_dir, f"{agent_name}.key")
+
+        if os.path.exists(key_path):
+            with open(key_path) as f:
+                saved = json.load(f)
+            pub_bytes = binascii.unhexlify(saved["public_key"])
+        else:
+            private_key = Ed25519PrivateKey.generate()
+            public_key = private_key.public_key()
+            pub_bytes = public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)
+            priv_bytes = private_key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+            saved = {
+                "agent_name": agent_name,
+                "public_key": binascii.hexlify(pub_bytes).decode(),
+                "private_key": binascii.hexlify(priv_bytes).decode(),
+            }
+            fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(saved, f, indent=2)
+
+        return base64.b64encode(pub_bytes).decode()
+
+    def register_with_keypair(
+        self,
+        agent_name: str,
+        capabilities: Optional[List[Dict]] = None,
+    ) -> Dict[str, Any]:
+        """Register *agent_name* as an independent economic actor with its own keypair.
+
+        On first call, generates a persistent Ed25519 keypair (stored at
+        ``~/.aethernet/keys/{agent_name}.key``). On subsequent calls the same
+        key is reloaded so the agent retains its identity across restarts.
+
+        Because each unique ``public_key_b64`` is a distinct identity, each
+        agent receives its own onboarding allocation from the ecosystem bucket
+        rather than sharing the node's allocation.
+
+        Sets ``self.agent_id`` to *agent_name* on success.
+
+        Args:
+            agent_name:   Human-readable agent ID (e.g. "research-worker-01").
+            capabilities: Optional list of capability dicts.
+
+        Returns:
+            Registration dict: ``agent_id``, ``fingerprint_hash``,
+            ``onboarding_allocation`` (µAET), ``deposit_address``.
+        """
+        pub_b64 = self.generate_keypair(agent_name)
+        result = self._post("/v1/agents", {
+            "agent_id": agent_name,
+            "public_key_b64": pub_b64,
+            "capabilities": capabilities or [],
+        })
+        self.agent_id = result.get("agent_id", agent_name)
+        return result
+
     def profile(self, agent_id: str = "") -> Dict[str, Any]:
         """Return the capability fingerprint for *agent_id*.
 

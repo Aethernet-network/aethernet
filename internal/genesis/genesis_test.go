@@ -28,14 +28,14 @@ func TestOnboardingAllocation_Curve(t *testing.T) {
 		want       uint64
 		label      string
 	}{
-		{0, 50_000_000, "first agent (tier 1)"},
-		{999, 50_000_000, "last of tier 1"},
-		{1_000, 10_000_000, "first of tier 2"},
-		{9_999, 10_000_000, "last of tier 2"},
-		{10_000, 1_000_000, "first of tier 3"},
-		{99_999, 1_000_000, "last of tier 3"},
-		{100_000, 100_000, "first of tier 4"},
-		{799_999, 100_000, "last of tier 4"},
+		{0, 50_000_000_000, "first agent (tier 1)"},
+		{999, 50_000_000_000, "last of tier 1"},
+		{1_000, 10_000_000_000, "first of tier 2"},
+		{9_999, 10_000_000_000, "last of tier 2"},
+		{10_000, 1_000_000_000, "first of tier 3"},
+		{99_999, 1_000_000_000, "last of tier 3"},
+		{100_000, 100_000_000, "first of tier 4"},
+		{799_999, 100_000_000, "last of tier 4"},
 		{800_000, 0, "at cap: onboarding closed"},
 		{5_000_000, 0, "well beyond cap"},
 	}

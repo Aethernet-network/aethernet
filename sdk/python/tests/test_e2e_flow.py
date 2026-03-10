@@ -10,7 +10,11 @@ Run against the live testnet:
 Or as a pytest suite (skips automatically when testnet is unreachable):
     pytest tests/test_e2e_flow.py -v
 """
+import base64
 import hashlib
+import os
+import stat
+import tempfile
 import time
 
 import pytest
@@ -25,6 +29,96 @@ except ImportError:
     from aethernet import AetherNetClient
 
 TESTNET = "https://testnet.aethernet.network"
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for generate_keypair — no network required
+# ---------------------------------------------------------------------------
+
+def test_generate_keypair_creates_key_file():
+    """generate_keypair creates a key file with correct permissions."""
+    pytest.importorskip("cryptography", reason="cryptography package not installed")
+    try:
+        from aethernet import AetherNetClient
+    except ImportError:
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from aethernet import AetherNetClient
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # Patch the home directory so we don't pollute ~/.aethernet/keys.
+        orig_home = os.environ.get("HOME")
+        os.environ["HOME"] = tmp
+        try:
+            client = AetherNetClient("http://localhost:9999")
+            pub_b64 = client.generate_keypair("test-agent-unit")
+
+            # Key file must exist.
+            key_path = os.path.join(tmp, ".aethernet", "keys", "test-agent-unit.key")
+            assert os.path.exists(key_path), f"key file not found at {key_path}"
+
+            # Permissions must be 0o600 (owner read/write only).
+            mode = stat.S_IMODE(os.stat(key_path).st_mode)
+            assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+
+            # Return value must be valid standard base64 of a 32-byte Ed25519 key.
+            pub_bytes = base64.b64decode(pub_b64)
+            assert len(pub_bytes) == 32, f"expected 32-byte pubkey, got {len(pub_bytes)}"
+        finally:
+            if orig_home is None:
+                del os.environ["HOME"]
+            else:
+                os.environ["HOME"] = orig_home
+
+
+def test_generate_keypair_idempotent():
+    """generate_keypair returns the same public key on repeated calls."""
+    pytest.importorskip("cryptography", reason="cryptography package not installed")
+    try:
+        from aethernet import AetherNetClient
+    except ImportError:
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from aethernet import AetherNetClient
+
+    with tempfile.TemporaryDirectory() as tmp:
+        orig_home = os.environ.get("HOME")
+        os.environ["HOME"] = tmp
+        try:
+            client = AetherNetClient("http://localhost:9999")
+            pub1 = client.generate_keypair("idempotent-agent")
+            pub2 = client.generate_keypair("idempotent-agent")
+            assert pub1 == pub2, "second call must return the same public key"
+        finally:
+            if orig_home is None:
+                del os.environ["HOME"]
+            else:
+                os.environ["HOME"] = orig_home
+
+
+def test_generate_keypair_distinct_per_name():
+    """Different agent names produce different keypairs."""
+    pytest.importorskip("cryptography", reason="cryptography package not installed")
+    try:
+        from aethernet import AetherNetClient
+    except ImportError:
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from aethernet import AetherNetClient
+
+    with tempfile.TemporaryDirectory() as tmp:
+        orig_home = os.environ.get("HOME")
+        os.environ["HOME"] = tmp
+        try:
+            client = AetherNetClient("http://localhost:9999")
+            pub_a = client.generate_keypair("agent-alpha")
+            pub_b = client.generate_keypair("agent-beta")
+            assert pub_a != pub_b, "distinct agent names must produce distinct keypairs"
+        finally:
+            if orig_home is None:
+                del os.environ["HOME"]
+            else:
+                os.environ["HOME"] = orig_home
 
 
 def _is_testnet_reachable() -> bool:
@@ -47,17 +141,17 @@ def test_full_flow(testnet_available):  # noqa: F811
     """Full developer-experience flow: register → post task → claim → submit → settle."""
     ts = str(int(time.time()))
 
-    # Step 1: Developer creates a client and registers an agent.
-    poster = AetherNetClient(TESTNET, agent_id=f"e2e-poster-{ts}")
-    poster_info = poster.quick_start(agent_name=f"e2e-poster-{ts}")
-    assert poster_info.get("balance", 0) > 0, "Poster should be funded on registration"
-    print(f"1. Poster registered: {poster.agent_id}, balance: {poster_info['balance']}")
+    # Step 1: Developer creates a client and registers an agent with its own keypair.
+    poster = AetherNetClient(TESTNET)
+    poster_info = poster.register_with_keypair(f"e2e-poster-{ts}")
+    assert poster_info.get("onboarding_allocation", 0) > 0, "Poster should receive onboarding allocation"
+    print(f"1. Poster registered: {poster.agent_id}, onboarding: {poster_info['onboarding_allocation']}")
 
-    # Step 2: Register a worker agent.
-    worker = AetherNetClient(TESTNET, agent_id=f"e2e-worker-{ts}")
-    worker_info = worker.quick_start(agent_name=f"e2e-worker-{ts}")
-    assert worker_info.get("balance", 0) > 0, "Worker should be funded on registration"
-    print(f"2. Worker registered: {worker.agent_id}, balance: {worker_info['balance']}")
+    # Step 2: Register a worker agent with its own independent keypair.
+    worker = AetherNetClient(TESTNET)
+    worker_info = worker.register_with_keypair(f"e2e-worker-{ts}")
+    assert worker_info.get("onboarding_allocation", 0) > 0, "Worker should receive onboarding allocation"
+    print(f"2. Worker registered: {worker.agent_id}, onboarding: {worker_info['onboarding_allocation']}")
 
     # Step 3: Poster posts a task (escrows from poster's balance).
     task = poster.post_task(
