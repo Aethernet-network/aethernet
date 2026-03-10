@@ -1766,6 +1766,10 @@ func TestTaskStats_API(t *testing.T) {
 //     generation ledger has an entry, worker reputation updated.
 func TestE2EFullTaskFlow(t *testing.T) {
 	setup := newTestSetup(t)
+	// This test exercises a testnet/SDK workflow where any agent can post tasks.
+	// Production uses --no-auth; the API server defaults to requireAuth=true now,
+	// so we disable auth here to match the testnet Dockerfile configuration.
+	setup.srv.SetRequireAuth(false)
 
 	// Wire economics: staking, fee collection, wallet.
 	stakeMgr := staking.NewStakeManager()

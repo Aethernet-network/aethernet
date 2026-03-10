@@ -20,10 +20,16 @@ import (
 )
 
 // EscrowEntry records the poster and amount held for a task.
+// WorkerPaid, ValidatorPaid, and TreasuryPaid track which ReleaseNet
+// disbursements have succeeded, enabling idempotent retry: if ReleaseNet
+// fails mid-way, a second call skips already-completed transfers (CRITICAL-3).
 type EscrowEntry struct {
-	TaskID   string
-	PosterID crypto.AgentID
-	Amount   uint64
+	TaskID        string
+	PosterID      crypto.AgentID
+	Amount        uint64
+	WorkerPaid    bool // true once the worker's net share has been transferred
+	ValidatorPaid bool // true once the validator's share has been transferred
+	TreasuryPaid  bool // true once the treasury's share has been transferred
 }
 
 // ErrEscrowNotFound is returned when an operation references an unknown taskID.
@@ -113,34 +119,50 @@ func (e *Escrow) ReleaseNet(
 	validatorID crypto.AgentID, validatorAmount uint64,
 	treasuryID crypto.AgentID, treasuryAmount uint64,
 ) error {
-	e.mu.RLock()
-	_, ok := e.entries[taskID]
-	e.mu.RUnlock()
+	e.mu.Lock()
+	entry, ok := e.entries[taskID]
+	e.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("%w: task %s", ErrEscrowNotFound, taskID)
 	}
 
 	bucket := bucketID(taskID)
 
-	// Transfer the worker's net share first.
-	if err := e.ledger.TransferFromBucket(bucket, claimerID, netAmount); err != nil {
-		return fmt.Errorf("escrow: release-net worker for task %s: %w", taskID, err)
+	// Each disbursement is guarded by a paid flag. If a previous ReleaseNet call
+	// partially succeeded and returned an error, a retry will skip the already-
+	// completed transfers, preventing double payment (CRITICAL-3: idempotency).
+
+	// Transfer the worker's net share (skip if already paid on a prior attempt).
+	if !entry.WorkerPaid {
+		if err := e.ledger.TransferFromBucket(bucket, claimerID, netAmount); err != nil {
+			return fmt.Errorf("escrow: release-net worker for task %s: %w", taskID, err)
+		}
+		e.mu.Lock()
+		entry.WorkerPaid = true
+		e.mu.Unlock()
 	}
 
 	// Distribute validator share from the remaining escrow balance.
-	if validatorAmount > 0 {
+	if validatorAmount > 0 && !entry.ValidatorPaid {
 		if err := e.ledger.TransferFromBucket(bucket, validatorID, validatorAmount); err != nil {
 			return fmt.Errorf("escrow: release-net validator for task %s: %w", taskID, err)
 		}
+		e.mu.Lock()
+		entry.ValidatorPaid = true
+		e.mu.Unlock()
 	}
 
 	// Distribute treasury share from the remaining escrow balance.
-	if treasuryAmount > 0 {
+	if treasuryAmount > 0 && !entry.TreasuryPaid {
 		if err := e.ledger.TransferFromBucket(bucket, treasuryID, treasuryAmount); err != nil {
 			return fmt.Errorf("escrow: release-net treasury for task %s: %w", taskID, err)
 		}
+		e.mu.Lock()
+		entry.TreasuryPaid = true
+		e.mu.Unlock()
 	}
 
+	// All three disbursements complete — remove the entry.
 	e.mu.Lock()
 	delete(e.entries, taskID)
 	e.mu.Unlock()

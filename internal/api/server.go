@@ -152,8 +152,9 @@ type Server struct {
 
 	// requireAuth enables mandatory X-API-Key authentication for write operations
 	// (POST/PUT/DELETE/PATCH) when platformKeys is wired in (CRITICAL-2.1).
-	// Defaults to false for testnet backward compatibility.
-	// Enable on mainnet deployments via SetRequireAuth(true).
+	// Defaults to true (secure by default). Use --no-auth flag to disable for
+	// testnet/development deployments. Auth only takes effect when platformKeys
+	// is also configured — tests that don't set platformKeys are unaffected.
 	requireAuth bool
 
 	// Metrics — optional; set via SetMetrics after construction.
@@ -218,6 +219,7 @@ func NewServer(
 		enableL3:      true,
 		explorerDir:   explorerPath(),
 		minTaskBudget: tasks.MinTaskBudget,
+		requireAuth:   true, // secure by default; disable with --no-auth
 	}
 
 	s.rebuildMux()
@@ -442,7 +444,7 @@ func (s *Server) SetPlatformKeys(km *platform.KeyManager) {
 // SetRequireAuth enables or disables mandatory API-key authentication for write
 // operations (POST/PUT/DELETE/PATCH). When true and platformKeys is wired in,
 // every mutating request must carry a valid X-API-Key header (CRITICAL-2.1).
-// Default false (testnet: open access). Set true for mainnet deployments.
+// Default true (secure by default). Use --no-auth on testnet/development nodes.
 func (s *Server) SetRequireAuth(v bool) {
 	s.requireAuth = v
 }

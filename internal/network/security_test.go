@@ -6,9 +6,11 @@ package network
 //   - HIGH-3.1: Unsigned P2P votes are dropped.
 //   - HIGH-3.2: Peers without a public key are rejected when local node has a keypair.
 //   - MEDIUM-3.3: Votes with a stale timestamp are dropped.
+//   - CRITICAL-4: resetLimitReader resets per-message so connections survive 10 MB+ of traffic.
+//   - CRITICAL-5: SetIdentityLookup drops votes where peer's claimed key ≠ registry key.
 //
 // Tests are in the internal `network` package (not `network_test`) so they can
-// access unexported methods (handleMessage, handleIncomingConn).
+// access unexported methods (handleMessage, handleIncomingConn, resetLimitReader).
 
 import (
 	"encoding/json"
@@ -191,5 +193,180 @@ func TestHandshake_PeerWithoutPubkeyRejected(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Error("timeout: handleIncomingConn did not reject the unauthenticated peer within 5s")
+	}
+}
+
+// TestResetLimitReader_SustainedTraffic verifies that the resetLimitReader
+// allows many messages to flow through a long-lived connection without hitting
+// a cumulative byte cap (CRITICAL-4).
+//
+// An io.LimitReader with a 512-byte limit would die after the first message;
+// resetLimitReader resets after each decode so 100 messages of 128 bytes each
+// (12 800 bytes total — 25× the per-message limit) all succeed.
+func TestResetLimitReader_SustainedTraffic(t *testing.T) {
+	const perMsgLimit = 512  // per-message cap
+	const msgCount = 100     // total messages to send
+	const msgPayload = "aaa" // 3 bytes; well within cap
+
+	// net.Pipe gives a synchronous in-memory connection — no real TCP needed.
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	// Sender goroutine: write msgCount JSON messages to clientConn.
+	sendDone := make(chan struct{})
+	go func() {
+		defer close(sendDone)
+		enc := json.NewEncoder(clientConn)
+		for i := 0; i < msgCount; i++ {
+			msg := Message{Type: MsgPing, Payload: []byte(`"` + msgPayload + `"`)}
+			if err := enc.Encode(msg); err != nil {
+				// clientConn may close before all sends complete if the test fails.
+				return
+			}
+		}
+	}()
+
+	// Receiver: wrap serverConn with a resetLimitReader (512-byte per-msg cap).
+	rl := &resetLimitReader{r: serverConn, limit: perMsgLimit}
+	dec := json.NewDecoder(rl)
+
+	received := 0
+	for received < msgCount {
+		var msg Message
+		if err := dec.Decode(&msg); err != nil {
+			t.Fatalf("decode failed after %d messages (total bytes far exceed per-msg limit × msgCount): %v", received, err)
+		}
+		// Reset so next message gets a fresh per-message budget.
+		rl.Reset()
+		received++
+	}
+
+	<-sendDone
+
+	if received != msgCount {
+		t.Errorf("received %d/%d messages; resetLimitReader should survive sustained traffic (CRITICAL-4)", received, msgCount)
+	}
+}
+
+// TestHandleMessage_VoteIdentityMismatch verifies that when SetIdentityLookup
+// is configured, a vote whose claimed public key does not match the registry
+// entry for the stated VoterID is silently dropped (CRITICAL-5).
+//
+// Attack scenario: an authenticated peer passes the handshake with their real
+// key, but then sends a MsgVote claiming to be a different high-reputation
+// voter, substituting a freshly-generated self-owned keypair. Without registry
+// verification the vote signature is valid (it verifies against the supplied
+// key), but the VoterID's reputation/stake belongs to the impersonated agent.
+func TestHandleMessage_VoteIdentityMismatch(t *testing.T) {
+	n := newTestNode(t, false)
+
+	handlerCalled := false
+	n.SetVoteHandler(func(_ crypto.AgentID, _ event.EventID, _ bool) {
+		handlerCalled = true
+	})
+
+	// attacker generates their own keypair — valid for signing but NOT registered
+	// under the victim's VoterID.
+	attackerKP, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair (attacker): %v", err)
+	}
+
+	// victim is a legitimately registered agent with a different keypair.
+	victimKP, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair (victim): %v", err)
+	}
+	victimID := victimKP.AgentID()
+
+	// Wire up identity lookup: only victimID is registered, with victimKP.PublicKey.
+	n.SetIdentityLookup(func(id crypto.AgentID) []byte {
+		if id == victimID {
+			return victimKP.PublicKey
+		}
+		return nil
+	})
+
+	// Build a fresh, validly signed vote claiming to be victimID but signed by
+	// the attacker's key.
+	evID := event.EventID("ev-impersonation")
+	verdict := true
+	ts := time.Now().Unix()
+
+	// Sign with attacker's key — signature is internally consistent but
+	// the key is NOT the one registered for victimID.
+	sig, err := attackerKP.Sign(voteBytes(evID, victimID, verdict, ts))
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	vp := VotePayload{
+		EventID:   evID,
+		VoterID:   victimID,        // claims to be the victim
+		Verdict:   verdict,
+		Timestamp: ts,
+		PublicKey: attackerKP.PublicKey, // but supplies attacker's key
+		Signature: sig,
+	}
+	payload, _ := json.Marshal(vp)
+	peer := &Peer{AgentID: "attacker-peer"}
+
+	n.handleMessage(peer, Message{Type: MsgVote, Payload: payload})
+
+	if handlerCalled {
+		t.Error("voteHandler was called despite key mismatch; SECURITY: votes with wrong registry key must be dropped (CRITICAL-5)")
+	}
+}
+
+// TestHandleMessage_VoteIdentityMatch verifies that a vote whose public key
+// matches the registry entry IS forwarded to the voteHandler (regression guard
+// for the CRITICAL-5 fix — legitimate voters must not be rejected).
+func TestHandleMessage_VoteIdentityMatch(t *testing.T) {
+	n := newTestNode(t, false)
+
+	handlerCalled := false
+	n.SetVoteHandler(func(_ crypto.AgentID, _ event.EventID, _ bool) {
+		handlerCalled = true
+	})
+
+	voterKP, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+	voterID := voterKP.AgentID()
+
+	// Registry returns the voter's real public key — legitimate case.
+	n.SetIdentityLookup(func(id crypto.AgentID) []byte {
+		if id == voterID {
+			return voterKP.PublicKey
+		}
+		return nil
+	})
+
+	evID := event.EventID("ev-legit")
+	verdict := true
+	ts := time.Now().Unix()
+
+	sig, err := voterKP.Sign(voteBytes(evID, voterID, verdict, ts))
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	vp := VotePayload{
+		EventID:   evID,
+		VoterID:   voterID,
+		Verdict:   verdict,
+		Timestamp: ts,
+		PublicKey: voterKP.PublicKey,
+		Signature: sig,
+	}
+	payload, _ := json.Marshal(vp)
+	peer := &Peer{AgentID: "legitimate-peer"}
+
+	n.handleMessage(peer, Message{Type: MsgVote, Payload: payload})
+
+	if !handlerCalled {
+		t.Error("voteHandler was NOT called for a legitimate voter; regression — valid votes with matching registry key must be accepted (CRITICAL-5)")
 	}
 }

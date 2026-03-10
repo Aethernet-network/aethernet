@@ -523,7 +523,7 @@ func printStatus(agentID crypto.AgentID, d *dag.DAG, n *network.Node, eng *ocs.E
 // environment variables. enableMarketplace controls whether task marketplace
 // components (task routing, auto-settlement, discovery) are started.
 // cfg controls all tunable protocol parameters; nil falls back to defaults.
-func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr string, enableMarketplace bool, cfg *config.ProtocolConfig) *network.Node {
+func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr string, enableMarketplace bool, cfg *config.ProtocolConfig, noAuth bool) *network.Node {
 	if cfg == nil {
 		cfg = config.DefaultConfig()
 	}
@@ -698,6 +698,21 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	if stack.platformKeys != nil {
 		apiSrv.SetPlatformKeys(stack.platformKeys)
 	}
+	// CRITICAL-1: auth defaults to true in NewServer. Disable only when --no-auth
+	// is explicitly requested (testnet/development). A warning is emitted below.
+	if noAuth {
+		apiSrv.SetRequireAuth(false)
+		slog.Warn("⚠️  API authentication is DISABLED — all write endpoints are open to unauthenticated callers. Do NOT use in production.")
+	}
+	// CRITICAL-5: wire identity registry lookup so P2P votes are verified against
+	// the registered public key, preventing voter impersonation.
+	node.SetIdentityLookup(func(id crypto.AgentID) []byte {
+		fp, err := stack.reg.Get(id)
+		if err != nil {
+			return nil
+		}
+		return fp.PublicKey
+	})
 	apiSrv.SetRateLimiters(
 		ratelimit.New(ratelimit.Config{Rate: cfg.RateLimit.WriteRatePerSec, Burst: cfg.RateLimit.WriteBurst, CleanupAge: 5 * time.Minute}),
 		ratelimit.New(ratelimit.Config{Rate: cfg.RateLimit.ReadRatePerSec, Burst: cfg.RateLimit.ReadBurst, CleanupAge: 5 * time.Minute}),
@@ -902,6 +917,7 @@ func cmdStart() {
 	peerAddr := fs.String("peer", envOr("AETHERNET_PEER", ""), "comma-separated peer addresses to auto-connect on startup (host:port[,host:port...])")
 	enableMarketplace := fs.Bool("marketplace", false, "Enable built-in marketplace (task routing, escrow, explorer) in the combined single-binary deployment")
 	configPath := fs.String("config", envOr("AETHERNET_CONFIG", ""), "path to protocol config JSON file (default: built-in defaults)")
+	noAuth := fs.Bool("no-auth", false, "Disable API authentication (testnet/development only — NOT safe for production)")
 	_ = fs.Parse(os.Args[2:])
 
 	// The --marketplace flag controls whether marketplace components (tasks,
@@ -946,7 +962,7 @@ func cmdStart() {
 		}
 	}
 
-	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, *enableMarketplace, cfg)
+	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, *enableMarketplace, cfg, *noAuth)
 
 	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\nAPI      : %s\n\n",
 		VERSION, agentID, node.ListenAddr(), *apiListenAddr)
@@ -987,6 +1003,7 @@ func cmdConnect() {
 	p2pAddr := fs.String("listen", envOr("AETHERNET_LISTEN", "0.0.0.0:8337"), "TCP address for p2p connections")
 	apiListenAddr := fs.String("api", envOr("AETHERNET_API", ":8338"), "TCP address for the REST API")
 	configPath := fs.String("config", envOr("AETHERNET_CONFIG", ""), "path to protocol config JSON file (default: built-in defaults)")
+	noAuth := fs.Bool("no-auth", false, "Disable API authentication (testnet/development only — NOT safe for production)")
 	_ = fs.Parse(os.Args[2:])
 
 	if *peerAddr == "" {
@@ -1011,7 +1028,7 @@ func cmdConnect() {
 	stack := buildStack(s, kp, cfg)
 	// cmdConnect is the legacy subcommand; marketplace is disabled by default.
 	// Use 'aethernet start --marketplace' for the combined deployment.
-	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, false, cfg)
+	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, false, cfg, *noAuth)
 
 	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\nAPI      : %s\n\n",
 		VERSION, agentID, node.ListenAddr(), *apiListenAddr)

@@ -12,6 +12,7 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -362,7 +363,9 @@ func (l *TransferLedger) TransferFromBucket(fromID crypto.AgentID, toID crypto.A
 		IsGenesis:  true,
 	}
 	if l.store != nil {
-		_ = l.store.PutTransfer(l.entries[eid])
+		if err := l.store.PutTransfer(l.entries[eid]); err != nil {
+			slog.Error("ledger: failed to persist transfer", "event_id", eid, "from", fromID, "to", toID, "err", err)
+		}
 	}
 	return nil
 }

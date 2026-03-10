@@ -14,8 +14,10 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/Aethernet-network/aethernet/internal/consensus"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/identity"
@@ -727,4 +729,124 @@ func (s *Store) AllListings() (map[string][]byte, error) {
 		return nil
 	})
 	return result, err
+}
+
+// ---------------------------------------------------------------------------
+// Atomic multi-step operations (Fix 7: BadgerDB transactions)
+// ---------------------------------------------------------------------------
+
+// RunInTransaction executes fn within a single BadgerDB read-write transaction.
+// If fn returns an error, the transaction is rolled back. Use this for
+// multi-step operations that must be atomic (e.g. escrow release + entry delete).
+func (s *Store) RunInTransaction(fn func(txn *badger.Txn) error) error {
+	return s.db.Update(fn)
+}
+
+// ---------------------------------------------------------------------------
+// Consensus vote persistence (Fix 6: VotingRound state survives restart)
+// ---------------------------------------------------------------------------
+
+// Key format: "vot:<eventID>/<voterID>" → JSON-encoded consensus.PersistedVote.
+const prefixVote = "vot:"
+
+func voteKey(eventID, voterID string) []byte {
+	return []byte(prefixVote + eventID + "/" + voterID)
+}
+
+// PutVote stores a single vote in the persistence layer.
+// Key: "vot:<eventID>/<voterID>".
+func (s *Store) PutVote(eventID, voterID string, verdict bool) error {
+	data, err := json.Marshal(consensus.PersistedVote{EventID: eventID, VoterID: voterID, Verdict: verdict})
+	if err != nil {
+		return fmt.Errorf("store: marshal vote: %w", err)
+	}
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(voteKey(eventID, voterID), data)
+	})
+}
+
+// GetVotes returns all votes for eventID.
+func (s *Store) GetVotes(eventID string) ([]consensus.PersistedVote, error) {
+	var votes []consensus.PersistedVote
+	prefix := []byte(prefixVote + eventID + "/")
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			var v consensus.PersistedVote
+			if err := item.Value(func(val []byte) error {
+				return json.Unmarshal(val, &v)
+			}); err != nil {
+				return err
+			}
+			votes = append(votes, v)
+		}
+		return nil
+	})
+	return votes, err
+}
+
+// DeleteVotes removes all persisted votes for eventID (called after finalization).
+func (s *Store) DeleteVotes(eventID string) error {
+	prefix := []byte(prefixVote + eventID + "/")
+	// Collect keys first (cannot delete inside View).
+	var keys [][]byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		opts.PrefetchValues = false // keys only
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			k := it.Item().KeyCopy(nil)
+			keys = append(keys, k)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return s.db.Update(func(txn *badger.Txn) error {
+		for _, k := range keys {
+			if err := txn.Delete(k); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// AllVoteEventIDs returns the unique event IDs for which votes are stored.
+func (s *Store) AllVoteEventIDs() ([]string, error) {
+	seen := make(map[string]struct{})
+	prefixBytes := []byte(prefixVote)
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefixBytes
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		prefixLen := len(prefixVote)
+		for it.Rewind(); it.Valid(); it.Next() {
+			key := string(it.Item().Key()[prefixLen:])
+			// key format: "<eventID>/<voterID>" — extract eventID
+			if idx := strings.Index(key, "/"); idx >= 0 {
+				seen[key[:idx]] = struct{}{}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	return ids, nil
 }

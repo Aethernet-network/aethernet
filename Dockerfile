@@ -32,4 +32,4 @@ VOLUME /data
 ENV AETHERNET_DATA=/data
 ENV AETHERNET_TESTNET=true
 ENTRYPOINT ["aethernet"]
-CMD ["start", "--marketplace"]
+CMD ["start", "--marketplace", "--no-auth"]

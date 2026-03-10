@@ -1,6 +1,7 @@
 package network
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -113,6 +114,12 @@ type Node struct {
 	// voteHandler is called for each authenticated MsgVote received from a peer.
 	// Set via SetVoteHandler; nil-safe in handleMessage.
 	voteHandler func(voterID crypto.AgentID, eventID event.EventID, verdict bool)
+
+	// identityLookup returns the registered Ed25519 public key for an agent.
+	// When set, received vote public keys are checked against the registry to
+	// prevent a peer from impersonating a different voter (CRITICAL-5).
+	// Returns nil if the agent is not registered.
+	identityLookup func(crypto.AgentID) []byte
 
 	// seenVotes tracks the signature of every MsgVote already processed, keyed
 	// by string(signature). Entries expire after voteSeenTTL. Protected by mu.
@@ -350,6 +357,16 @@ func (n *Node) Broadcast(e *event.Event) error {
 // round via Engine.AcceptPeerVote. Call before Start.
 func (n *Node) SetVoteHandler(fn func(voterID crypto.AgentID, eventID event.EventID, verdict bool)) {
 	n.voteHandler = fn
+}
+
+// SetIdentityLookup registers a function that returns the registered Ed25519
+// public key for a given AgentID, or nil if the agent is not known.
+// When set, received vote payloads are checked against the registry: if the
+// voter's claimed public key does not match the registry entry, the vote is
+// dropped to prevent voter impersonation (CRITICAL-5).
+// Call before Start.
+func (n *Node) SetIdentityLookup(fn func(crypto.AgentID) []byte) {
+	n.identityLookup = fn
 }
 
 // BroadcastVote sends a signed MsgVote to all currently connected peers.
@@ -722,6 +739,22 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		if !crypto.Verify(vp.PublicKey, voteBytes(vp.EventID, vp.VoterID, vp.Verdict, vp.Timestamp), vp.Signature) {
 			log.Printf("network: dropping vote with invalid signature from peer %s", peer.AgentID)
 			return
+		}
+		// Verify the voter's claimed public key against the identity registry
+		// (CRITICAL-5). A malicious peer could otherwise provide any VoterID and
+		// a matching self-generated keypair to impersonate an arbitrary agent.
+		// When the registry is wired, the voter must be registered and their
+		// public key must match the one on file.
+		if n.identityLookup != nil {
+			registeredKey := n.identityLookup(vp.VoterID)
+			if len(registeredKey) == 0 {
+				log.Printf("network: dropping vote from unregistered voter %s (peer %s)", vp.VoterID, peer.AgentID)
+				return
+			}
+			if !bytes.Equal(registeredKey, vp.PublicKey) {
+				log.Printf("network: dropping vote from %s: public key mismatch — possible impersonation by peer %s", vp.VoterID, peer.AgentID)
+				return
+			}
 		}
 		// Reject stale votes to prevent replay attacks (MEDIUM-3.3).
 		// Allow a small negative skew (-5 s) for clock drift.

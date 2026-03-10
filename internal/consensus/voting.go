@@ -52,6 +52,27 @@ import (
 // as a *big.Int so it is not re-created on every computeWeight call.
 var bigDivisor = big.NewInt(10000)
 
+// PersistedVote is the minimal vote record written to and read from the
+// persistence layer. Simple scalar fields avoid importing the store package
+// from consensus (which would create a cycle). *store.Store satisfies
+// VotePersistence by implementing these methods.
+type PersistedVote struct {
+	EventID string
+	VoterID string
+	Verdict bool
+}
+
+// VotePersistence is the interface that a durable store must implement to
+// survive VotingRound state across node restarts. After each RegisterVote,
+// the vote is written to the store. After finalization, votes are deleted.
+// On startup, LoadPersistedVotes reloads pending votes from the store.
+type VotePersistence interface {
+	PutVote(eventID, voterID string, verdict bool) error
+	GetVotes(eventID string) ([]PersistedVote, error)
+	DeleteVotes(eventID string) error
+	AllVoteEventIDs() ([]string, error)
+}
+
 // Sentinel errors for programmatic handling by callers.
 var (
 	// ErrEventNotFound is returned by GetRecord, IsFinalized, FinalOrder, and
@@ -171,8 +192,9 @@ func DefaultConsensusConfig() *ConsensusConfig {
 // supermajority are assigned the next sequence number, establishing a total
 // order over finalized events within this round instance.
 type VotingRound struct {
-	config   *ConsensusConfig
-	registry *identity.Registry
+	config      *ConsensusConfig
+	registry    *identity.Registry
+	persistence VotePersistence // optional; when set, votes are written through
 
 	records  map[event.EventID]*VoteRecord
 	orderSeq uint64 // monotonically increasing; assigned to each finalized event
@@ -191,6 +213,43 @@ func NewVotingRound(config *ConsensusConfig, registry *identity.Registry) *Votin
 		registry: registry,
 		records:  make(map[event.EventID]*VoteRecord),
 	}
+}
+
+// SetPersistence wires a durable store into the VotingRound. When set, every
+// RegisterVote call writes through to the store, and finalization deletes the
+// corresponding records so they are not reloaded on restart (HIGH-6).
+// Call before any votes are registered.
+func (vr *VotingRound) SetPersistence(p VotePersistence) {
+	vr.mu.Lock()
+	vr.persistence = p
+	vr.mu.Unlock()
+}
+
+// LoadPersistedVotes reloads pending vote state from p on node restart, so
+// that in-progress consensus rounds survive restarts (HIGH-6). It iterates
+// all event IDs in the persistence layer, loads their votes, and calls
+// RegisterVote for each to reconstruct the in-memory VoteRecord.
+//
+// Call after SetPersistence and before Start — during the boot sequence,
+// before the node begins accepting new votes.
+func (vr *VotingRound) LoadPersistedVotes(p VotePersistence) error {
+	eventIDs, err := p.AllVoteEventIDs()
+	if err != nil {
+		return fmt.Errorf("consensus: load persisted votes: %w", err)
+	}
+	for _, eid := range eventIDs {
+		votes, err := p.GetVotes(eid)
+		if err != nil {
+			return fmt.Errorf("consensus: load votes for %s: %w", eid, err)
+		}
+		for _, v := range votes {
+			// RegisterVote will attempt to look up the voter in the registry.
+			// Voters that are no longer registered are silently skipped
+			// (consistent with tallyVotesLocked's missing-voter handling).
+			_ = vr.RegisterVote(event.EventID(eid), crypto.AgentID(v.VoterID), v.Verdict)
+		}
+	}
+	return nil
 }
 
 // ComputeWeight returns the voting weight for agentID derived from the current
@@ -273,6 +332,18 @@ func (vr *VotingRound) RegisterVote(eventID event.EventID, voterID crypto.AgentI
 	}
 
 	record.Votes[voterID] = vote
+
+	// Write-through persistence: persist this vote before tallying so a crash
+	// after write but before finalization can be recovered on restart (HIGH-6).
+	if vr.persistence != nil {
+		if err := vr.persistence.PutVote(string(eventID), string(voterID), vote); err != nil {
+			// Non-fatal: consensus continues in-memory; log at warn level.
+			// A restarted node may miss this vote but will still converge
+			// once the other peers re-broadcast their votes.
+			_ = err // caller can check vr.tallyVotesLocked outcome
+		}
+	}
+
 	return vr.tallyVotesLocked(record)
 }
 
@@ -339,6 +410,11 @@ func (vr *VotingRound) tallyVotesLocked(record *VoteRecord) error {
 			record.Finalized = true
 			vr.orderSeq++
 			record.FinalOrder = vr.orderSeq
+			// Delete persisted votes now that the event is finalized — they
+			// must not be reloaded on restart since the event is already settled.
+			if vr.persistence != nil {
+				_ = vr.persistence.DeleteVotes(string(record.EventID))
+			}
 			return nil
 		}
 	}

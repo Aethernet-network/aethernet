@@ -12,6 +12,12 @@
 //     accessed concurrently: enc is owned exclusively by writeLoop and the
 //     handshake, dec is owned exclusively by readLoop and the handshake.
 //     The send channel is the boundary between goroutines.
+//
+//  3. Per-message size limiting — the resetLimitReader wraps the connection
+//     with a per-message byte cap that resets after each successful JSON decode.
+//     Unlike io.LimitReader (which caps cumulative lifetime bytes and kills
+//     long-lived connections after 4 MiB of legitimate traffic), this approach
+//     limits each individual message independently (CRITICAL-4).
 package network
 
 import (
@@ -64,10 +70,41 @@ const (
 	MsgVote MessageType = "vote"
 )
 
-// maxMsgBytes is the per-connection read limit applied to the P2P decoder.
-// Messages exceeding this bound cause the decoder to return an error, closing
-// the connection (MEDIUM-9.1: prevent memory exhaustion from oversized messages).
+// maxMsgBytes is the per-message read limit applied to the P2P decoder.
+// Messages exceeding this bound cause the decoder to return io.EOF for that
+// message, which terminates the connection (CRITICAL-4: prevent memory
+// exhaustion from oversized messages). Unlike the old io.LimitReader approach,
+// resetLimitReader resets after each decode so the limit is per-message, not
+// cumulative over the connection lifetime.
 const maxMsgBytes = 4 * 1024 * 1024 // 4 MiB
+
+// resetLimitReader wraps an io.Reader with a per-message byte limit. After each
+// successful json.Decode, the caller calls Reset() to give the next message a
+// fresh budget. This prevents both oversized-message DoS (limit is enforced per
+// message) and the connection-kill bug of io.LimitReader (cumulative limit).
+type resetLimitReader struct {
+	r     io.Reader
+	limit int64
+	n     int64 // bytes consumed since last Reset
+}
+
+func (rl *resetLimitReader) Read(p []byte) (int, error) {
+	if rl.n >= rl.limit {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > rl.limit-rl.n {
+		p = p[:rl.limit-rl.n]
+	}
+	n, err := rl.r.Read(p)
+	rl.n += int64(n)
+	return n, err
+}
+
+// Reset clears the byte counter so the next message starts with a fresh budget.
+// Call after each successful json.Decode to enforce per-message limits.
+func (rl *resetLimitReader) Reset() {
+	rl.n = 0
+}
 
 // VotePayload is the body of a MsgVote wire message. It carries the vote data
 // and an Ed25519 signature over the canonical fields so that receiving nodes
@@ -152,8 +189,9 @@ type Peer struct {
 	State PeerState
 
 	conn net.Conn
-	enc  *json.Encoder // owned by writeLoop after handshake
-	dec  *json.Decoder // owned by readLoop after handshake
+	enc  *json.Encoder    // owned by writeLoop after handshake
+	dec  *json.Decoder    // owned by readLoop after handshake
+	rl   *resetLimitReader // per-message size limiter; Reset() called after each decode
 
 	send     chan Message
 	lastSeen time.Time
@@ -174,17 +212,24 @@ func NewPeer(agentID crypto.AgentID, address string, conn net.Conn) *Peer {
 // newPeerWithLimit is like NewPeer but uses a custom per-message read limit
 // instead of the package-level maxMsgBytes constant. Values ≤ 0 fall back
 // to maxMsgBytes.
+//
+// The connection is wrapped with a resetLimitReader rather than io.LimitReader.
+// io.LimitReader caps TOTAL lifetime bytes across the connection and kills it
+// after 4 MiB of legitimate traffic; resetLimitReader applies the cap per-message
+// and resets after each decode, so long-lived connections work correctly (CRITICAL-4).
 func newPeerWithLimit(agentID crypto.AgentID, address string, conn net.Conn, limitBytes int64) *Peer {
 	if limitBytes <= 0 {
 		limitBytes = maxMsgBytes
 	}
+	rl := &resetLimitReader{r: conn, limit: limitBytes}
 	return &Peer{
 		AgentID:  agentID,
 		Address:  address,
 		State:    PeerConnecting,
 		conn:     conn,
 		enc:      json.NewEncoder(conn),
-		dec:      json.NewDecoder(io.LimitReader(conn, limitBytes)),
+		dec:      json.NewDecoder(rl),
+		rl:       rl,
 		send:     make(chan Message, sendBufSize),
 		lastSeen: time.Now(),
 	}
@@ -272,6 +317,9 @@ func (p *Peer) writeLoop(ctx context.Context) {
 // them to incoming. It exits on any decode error (including EOF when the remote
 // side closes the connection) or when ctx is cancelled. The caller is expected
 // to close the connection to unblock Decode when ctx fires.
+//
+// After each successful decode, p.rl.Reset() is called to give the next message
+// a fresh per-message byte budget (CRITICAL-4: per-message size limiting).
 func (p *Peer) readLoop(ctx context.Context, incoming chan<- Message) {
 	for {
 		var msg Message
@@ -279,6 +327,8 @@ func (p *Peer) readLoop(ctx context.Context, incoming chan<- Message) {
 			// EOF, connection reset, or peer closed — exit cleanly.
 			return
 		}
+		// Reset per-message byte counter so the next message gets a fresh limit.
+		p.rl.Reset()
 		select {
 		case incoming <- msg:
 		case <-ctx.Done():

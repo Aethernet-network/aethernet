@@ -485,11 +485,20 @@ func TestAutoValidator_GenerationLedger(t *testing.T) {
 	av.Start()
 	defer av.Stop()
 
+	// Wait for both task completion AND generation ledger recording. These happen
+	// sequentially in settleTask (ApproveTask first, then RecordTaskGeneration),
+	// so we must not stop at TaskStatusCompleted alone — the ledger write may not
+	// have run yet.
+	var totalGen uint64
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		tk, _ := tm.Get(task.ID)
 		if tk != nil && tk.Status == tasks.TaskStatusCompleted {
-			break
+			v, _ := gl.TotalVerifiedValue(24 * time.Hour)
+			if v > 0 {
+				totalGen = v
+				break
+			}
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
@@ -503,10 +512,6 @@ func TestAutoValidator_GenerationLedger(t *testing.T) {
 	}
 
 	// Generation ledger should have a Settled entry for the completed task.
-	totalGen, err := gl.TotalVerifiedValue(24 * time.Hour)
-	if err != nil {
-		t.Fatalf("TotalVerifiedValue: %v", err)
-	}
 	if totalGen == 0 {
 		t.Error("TotalVerifiedValue = 0; expected > 0 after task completion recorded in generation ledger")
 	}

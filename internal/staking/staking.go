@@ -21,7 +21,7 @@ package staking
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -246,34 +246,42 @@ func (sm *StakeManager) Stake(agentID crypto.AgentID, amount uint64) error {
 	}
 	sm.stakes[agentID] += amount
 	if sm.store != nil {
-		_ = sm.store.PutStakeMeta(agentID, sm.stakedSince[agentID], sm.lastActivity[agentID], sm.stakes[agentID])
+		if err := sm.store.PutStakeMeta(agentID, sm.stakedSince[agentID], sm.lastActivity[agentID], sm.stakes[agentID]); err != nil {
+			slog.Error("staking: failed to persist stake", "agent", agentID, "err", err)
+		}
 	}
 	return nil
 }
 
 // Unstake removes amount from agentID's staked balance. Returns false if the
 // agent has insufficient stake (no state change occurs in that case).
-// When a TransferLedger is set, the unstaked amount is credited back from the
-// staking-pool bucket to the agent's balance.
+// When a TransferLedger is set, the ledger credit is performed FIRST — before
+// any in-memory state change — so that a failed credit leaves the recorded
+// stake accurate and no funds are lost (CRITICAL-2: atomicity fix).
 func (sm *StakeManager) Unstake(agentID crypto.AgentID, amount uint64) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	current := sm.stakes[agentID]
-	if current < amount {
+	if amount > current {
 		return false
 	}
-	sm.stakes[agentID] = current - amount
-	// Credit funds back to agent from staking-pool.
+	// Credit the ledger FIRST. If this fails, abort with no in-memory state
+	// change so the agent's recorded stake remains consistent with reality.
 	if sm.transfer != nil && amount > 0 {
 		if err := sm.transfer.TransferFromBucket("staking-pool", agentID, amount); err != nil {
-			log.Printf("staking: balance credit failed for %s (amount: %d): %v", agentID, amount, err)
+			slog.Error("staking: ledger credit failed — unstake aborted", "agent", agentID, "amount", amount, "err", err)
+			return false
 		}
 	}
+	// Ledger credit succeeded (or no ledger). Now update in-memory state.
+	sm.stakes[agentID] = current - amount
 	if sm.stakes[agentID] == 0 {
 		delete(sm.stakes, agentID)
 	}
 	if sm.store != nil {
-		_ = sm.store.PutStakeMeta(agentID, sm.stakedSince[agentID], sm.lastActivity[agentID], sm.stakes[agentID])
+		if err := sm.store.PutStakeMeta(agentID, sm.stakedSince[agentID], sm.lastActivity[agentID], sm.stakes[agentID]); err != nil {
+			slog.Error("staking: failed to persist stake after unstake", "agent", agentID, "err", err)
+		}
 	}
 	return true
 }
@@ -309,7 +317,9 @@ func (sm *StakeManager) RecordActivity(agentID crypto.AgentID) {
 	defer sm.mu.Unlock()
 	sm.lastActivity[agentID] = time.Now().Unix()
 	if sm.store != nil {
-		_ = sm.store.PutStakeMeta(agentID, sm.stakedSince[agentID], sm.lastActivity[agentID], sm.stakes[agentID])
+		if err := sm.store.PutStakeMeta(agentID, sm.stakedSince[agentID], sm.lastActivity[agentID], sm.stakes[agentID]); err != nil {
+			slog.Error("staking: failed to persist activity", "agent", agentID, "err", err)
+		}
 	}
 }
 

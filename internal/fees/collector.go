@@ -13,6 +13,7 @@ package fees
 
 import (
 	"encoding/binary"
+	"log/slog"
 	"sync"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
@@ -117,7 +118,9 @@ func (c *Collector) persistStatsLocked() {
 	binary.LittleEndian.PutUint64(buf[0:8], c.totalCollected)
 	binary.LittleEndian.PutUint64(buf[8:16], c.totalBurned)
 	binary.LittleEndian.PutUint64(buf[16:24], c.treasuryAccrued)
-	_ = c.store.PutMeta(feeStatsKey, buf[:])
+	if err := c.store.PutMeta(feeStatsKey, buf[:]); err != nil {
+		slog.Error("fees: failed to persist fee stats", "err", err)
+	}
 }
 
 // CalculateFee returns the fee for a transaction of the given amount.
