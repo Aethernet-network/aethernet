@@ -6,11 +6,13 @@ package genesis
 // The curve declines in four tiers, rewarding early network participants more
 // generously and closing automatically once OnboardingMaxAgents is reached:
 //
-//	agents 1 – 1 000       50 000 000 micro-AET  ( 50 AET each)
-//	agents 1 001 – 10 000  10 000 000 micro-AET  ( 10 AET each)
-//	agents 10 001 – 100 000 1 000 000 micro-AET  (  1 AET each)
-//	agents 100 001 – 1 M      100 000 micro-AET  (0.1 AET each)
-//	agents > 1 M                    0            (onboarding closed)
+//	agents 1 – 1 000           50 000 000 micro-AET  ( 50 AET each)   =  50B total
+//	agents 1 001 – 10 000      10 000 000 micro-AET  ( 10 AET each)   =  90B total
+//	agents 10 001 – 100 000     1 000 000 micro-AET  (  1 AET each)   =  90B total
+//	agents 100 001 – 800 000      100 000 micro-AET  (0.1 AET each)   =  70B total
+//	agents > 800 000                      0          (onboarding closed)
+//
+// Grand total: 300B µAET = EcosystemAllocation, drawn from the ecosystem bucket.
 func OnboardingAllocation(agentCount uint64) uint64 {
 	switch {
 	case agentCount < 1_000:

@@ -43,10 +43,11 @@ const (
 // Onboarding constants.
 const (
 	// OnboardingPoolTotal is the maximum total micro-AET distributed to new agents
-	// across all four onboarding tiers: 1k×50M + 9k×10M + 90k×1M + 900k×100K.
-	// Funded from the EcosystemAllocation bucket.
-	OnboardingPoolTotal uint64 = 320_000_000_000
+	// across all four onboarding tiers: 1k×50M + 9k×10M + 90k×1M + 700k×100K = 300B.
+	// Funded from the EcosystemAllocation bucket; must not exceed EcosystemAllocation.
+	OnboardingPoolTotal uint64 = 300_000_000_000
 
 	// OnboardingMaxAgents is the hard cap on the number of agents eligible for grants.
-	OnboardingMaxAgents uint64 = 1_000_000
+	// Tier 4 covers agents 100 000 – 799 999, so total pool = 300B = EcosystemAllocation.
+	OnboardingMaxAgents uint64 = 800_000
 )

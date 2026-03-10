@@ -35,8 +35,8 @@ func TestOnboardingAllocation_Curve(t *testing.T) {
 		{10_000, 1_000_000, "first of tier 3"},
 		{99_999, 1_000_000, "last of tier 3"},
 		{100_000, 100_000, "first of tier 4"},
-		{999_999, 100_000, "last of tier 4"},
-		{1_000_000, 0, "at cap: onboarding closed"},
+		{799_999, 100_000, "last of tier 4"},
+		{800_000, 0, "at cap: onboarding closed"},
 		{5_000_000, 0, "well beyond cap"},
 	}
 	for _, tc := range cases {

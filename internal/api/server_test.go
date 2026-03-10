@@ -12,6 +12,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/api"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
+	"github.com/Aethernet-network/aethernet/internal/genesis"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/fees"
 	"github.com/Aethernet-network/aethernet/internal/identity"
@@ -51,6 +52,10 @@ func newTestSetup(t *testing.T) *testSetup {
 
 	d := dag.New()
 	tl := ledger.NewTransferLedger()
+	// Seed the ecosystem bucket so onboarding TransferFromBucket succeeds.
+	if err := tl.FundAgent(crypto.AgentID(genesis.BucketEcosystem), genesis.EcosystemAllocation); err != nil {
+		t.Fatalf("seed ecosystem bucket: %v", err)
+	}
 	gl := ledger.NewGenerationLedger()
 	reg := identity.NewRegistry()
 	eng := ocs.NewEngine(ocs.DefaultConfig(), tl, gl, reg)
@@ -1149,6 +1154,11 @@ func TestHandleRegisterAgent_OnboardingFunded(t *testing.T) {
 	t.Cleanup(eng.Stop)
 	sm := ledger.NewSupplyManager(tl, gl)
 
+	// Seed the ecosystem bucket so TransferFromBucket succeeds during onboarding.
+	if err := tl.FundAgent(crypto.AgentID(genesis.BucketEcosystem), genesis.EcosystemAllocation); err != nil {
+		t.Fatalf("seed ecosystem bucket: %v", err)
+	}
+
 	srv := api.NewServer("", d, tl, gl, reg, eng, sm, nil, kp)
 	srv.SetServiceRegistry(registry.New())
 
@@ -1161,7 +1171,7 @@ func TestHandleRegisterAgent_OnboardingFunded(t *testing.T) {
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
-	// Register the agent — no prior genesis seeding required.
+	// Register the agent — ecosystem bucket is pre-funded so onboarding transfer succeeds.
 	r := post(t, ts, "/v1/agents", map[string]any{})
 	if r.StatusCode != http.StatusCreated {
 		t.Fatalf("want 201, got %d", r.StatusCode)

@@ -1610,10 +1610,10 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		resp.DepositAddress = string(addr)
 	}
 
-	// Onboarding allocation: grant initial AET and auto-stake.
-	// FundAgent mints from the protocol reserve so this always succeeds regardless
-	// of whether genesis has been run. The declining-curve cap (OnboardingPoolTotal)
-	// prevents unbounded minting across the full agent lifecycle.
+	// Onboarding allocation: transfer initial AET from the ecosystem bucket
+	// and auto-stake half. The declining-curve cap (OnboardingPoolTotal) ensures
+	// the ecosystem bucket is never overdrawn — total pool = EcosystemAllocation.
+	// TransferFromBucket is a zero-sum move; total supply stays fixed at genesis.
 	s.onboardingMu.Lock()
 	allocation := genesis.OnboardingAllocation(agentCountBefore)
 	if allocation > 0 && s.onboardingAllocated+allocation <= genesis.OnboardingPoolTotal {
@@ -1628,7 +1628,7 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 			_ = s.store.PutMeta("onboarding_allocated", buf)
 		}
 
-		if err := s.transfer.FundAgent(regAgentID, allocation); err == nil {
+		if err := s.transfer.TransferFromBucket(crypto.AgentID(genesis.BucketEcosystem), regAgentID, allocation); err == nil {
 			resp.OnboardingAllocation = allocation
 			if s.stakeManager != nil {
 				stakeAmount := allocation / 2
@@ -1639,6 +1639,9 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 					resp.TrustLimit = staking.TrustLimit(stakeAmount, 0, since, time.Now().Unix())
 				}
 			}
+		} else {
+			slog.Warn("onboarding: transfer from ecosystem failed",
+				"agent_id", regAgentID, "allocation", allocation, "err", err)
 		}
 	} else {
 		s.onboardingMu.Unlock()
