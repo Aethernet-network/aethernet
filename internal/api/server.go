@@ -1858,12 +1858,26 @@ func (s *Server) handleGeneration(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetEvent returns the event stored at event_id in the local DAG.
+// The settlement state is overlaid from the appropriate ledger because DAG
+// events are immutable and never reflect post-insert OCS transitions.
 func (s *Server) handleGetEvent(w http.ResponseWriter, r *http.Request) {
 	eventID := r.PathValue("event_id")
 	e, err := s.dag.Get(event.EventID(eventID))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "event not found")
 		return
+	}
+	// Overlay live settlement state — DAG events are immutable and always show
+	// the state at insertion time (Optimistic). The ledgers track transitions.
+	switch e.Type {
+	case event.EventTypeTransfer:
+		if state, ok := s.transfer.GetSettlement(e.ID); ok {
+			e.SettlementState = state
+		}
+	case event.EventTypeGeneration:
+		if state, ok := s.generation.GetSettlement(e.ID); ok {
+			e.SettlementState = state
+		}
 	}
 	writeJSON(w, http.StatusOK, e)
 }
@@ -2177,6 +2191,10 @@ func (s *Server) handleRecentEvents(w http.ResponseWriter, r *http.Request) {
 		// than the immutable DAG event field which stays Optimistic forever.
 		if e.Type == event.EventTypeTransfer {
 			if state, ok := s.transfer.GetSettlement(e.ID); ok {
+				item.SettlementState = string(state)
+			}
+		} else if e.Type == event.EventTypeGeneration {
+			if state, ok := s.generation.GetSettlement(e.ID); ok {
 				item.SettlementState = string(state)
 			}
 		} else if !s.engine.IsPending(e.ID) && e.SettlementState == event.SettlementOptimistic {

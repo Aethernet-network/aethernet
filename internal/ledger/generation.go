@@ -343,6 +343,26 @@ func (l *GenerationLedger) RecordTaskGeneration(agentID crypto.AgentID, evidence
 	return nil
 }
 
+// GetSettlement returns the OCS settlement state recorded for eventID.
+// Returns (SettlementOptimistic, false) when the event is not in the ledger.
+// If the entry has been evicted from memory by archival, the store is consulted
+// as a fallback so callers always see the correct settled state.
+func (l *GenerationLedger) GetSettlement(eventID event.EventID) (event.SettlementState, bool) {
+	l.mu.RLock()
+	entry, ok := l.entries[eventID]
+	l.mu.RUnlock()
+	if ok {
+		return entry.Settlement, true
+	}
+	// Fall back to store for entries evicted by archival.
+	if l.store != nil {
+		if stored, err := l.store.GetGeneration(eventID); err == nil {
+			return stored.Settlement, true
+		}
+	}
+	return event.SettlementOptimistic, false
+}
+
 // LoadGenerationLedgerFromStore reconstructs a GenerationLedger from a persisted
 // store, bypassing event validation (all entries were already validated on first
 // Record). The returned ledger has s attached so subsequent mutations write through.

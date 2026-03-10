@@ -1975,3 +1975,132 @@ func TestLayerConfig_L3Disabled(t *testing.T) {
 		}
 	}
 }
+
+// TestGetEvent_SettlementStateOverlay verifies that GET /v1/events/{id} returns
+// the live settlement state from the ledger, not the immutable Optimistic state
+// stamped on the DAG event at insertion time.
+func TestGetEvent_SettlementStateOverlay(t *testing.T) {
+	t.Run("transfer", func(t *testing.T) {
+		setup := newTestSetup(t)
+		// Fund the submitter so the transfer reservation succeeds.
+		if err := setup.tl.FundAgent(setup.kp.AgentID(), 1_000_000); err != nil {
+			t.Fatalf("fund agent: %v", err)
+		}
+		// Submit a transfer event.
+		resp := post(t, setup.ts, "/v1/transfer", map[string]any{
+			"to_agent":     string(setup.kp.AgentID()),
+			"amount":       500,
+			"currency":     "AET",
+			"stake_amount": 1000,
+		})
+		if resp.StatusCode != http.StatusCreated {
+			var e map[string]string
+			decodeJSON(t, resp, &e)
+			t.Fatalf("transfer: want 201, got %d: %v", resp.StatusCode, e)
+		}
+		var created struct {
+			EventID string `json:"event_id"`
+		}
+		decodeJSON(t, resp, &created)
+
+		// Before verification: settlement_state must be Optimistic.
+		evResp := get(t, setup.ts, "/v1/events/"+created.EventID)
+		if evResp.StatusCode != http.StatusOK {
+			t.Fatalf("get event: want 200, got %d", evResp.StatusCode)
+		}
+		var ev struct {
+			SettlementState string `json:"settlement_state"`
+		}
+		decodeJSON(t, evResp, &ev)
+		if ev.SettlementState != "Optimistic" {
+			t.Errorf("before verify: want Optimistic, got %q", ev.SettlementState)
+		}
+
+		// Verify via an independent validator (anti-self-dealing rule).
+		verifier := newVerifierServer(t, setup)
+		vResp := post(t, verifier, "/v1/verify", map[string]any{
+			"event_id":       created.EventID,
+			"verdict":        true,
+			"verified_value": 500,
+		})
+		if vResp.StatusCode != http.StatusOK {
+			var e map[string]string
+			decodeJSON(t, vResp, &e)
+			t.Fatalf("verify: want 200, got %d: %v", vResp.StatusCode, e)
+		}
+		vResp.Body.Close()
+
+		// After verification: settlement_state must be Settled.
+		evResp2 := get(t, setup.ts, "/v1/events/"+created.EventID)
+		if evResp2.StatusCode != http.StatusOK {
+			t.Fatalf("get event after verify: want 200, got %d", evResp2.StatusCode)
+		}
+		var ev2 struct {
+			SettlementState string `json:"settlement_state"`
+		}
+		decodeJSON(t, evResp2, &ev2)
+		if ev2.SettlementState != "Settled" {
+			t.Errorf("after verify: want Settled, got %q", ev2.SettlementState)
+		}
+	})
+
+	t.Run("generation", func(t *testing.T) {
+		setup := newTestSetup(t)
+		// Submit a generation event.
+		resp := post(t, setup.ts, "/v1/generation", map[string]any{
+			"claimed_value":    5000,
+			"evidence_hash":    "sha256:overlay-test",
+			"task_description": "settlement overlay test",
+			"stake_amount":     1000,
+		})
+		if resp.StatusCode != http.StatusCreated {
+			var e map[string]string
+			decodeJSON(t, resp, &e)
+			t.Fatalf("generation: want 201, got %d: %v", resp.StatusCode, e)
+		}
+		var created struct {
+			EventID string `json:"event_id"`
+		}
+		decodeJSON(t, resp, &created)
+
+		// Before verification: settlement_state must be Optimistic.
+		evResp := get(t, setup.ts, "/v1/events/"+created.EventID)
+		if evResp.StatusCode != http.StatusOK {
+			t.Fatalf("get event: want 200, got %d", evResp.StatusCode)
+		}
+		var ev struct {
+			SettlementState string `json:"settlement_state"`
+		}
+		decodeJSON(t, evResp, &ev)
+		if ev.SettlementState != "Optimistic" {
+			t.Errorf("before verify: want Optimistic, got %q", ev.SettlementState)
+		}
+
+		// Verify via an independent validator (anti-self-dealing rule).
+		verifier := newVerifierServer(t, setup)
+		vResp := post(t, verifier, "/v1/verify", map[string]any{
+			"event_id":       created.EventID,
+			"verdict":        true,
+			"verified_value": 5000,
+		})
+		if vResp.StatusCode != http.StatusOK {
+			var e map[string]string
+			decodeJSON(t, vResp, &e)
+			t.Fatalf("verify: want 200, got %d: %v", vResp.StatusCode, e)
+		}
+		vResp.Body.Close()
+
+		// After verification: settlement_state must be Settled.
+		evResp2 := get(t, setup.ts, "/v1/events/"+created.EventID)
+		if evResp2.StatusCode != http.StatusOK {
+			t.Fatalf("get event after verify: want 200, got %d", evResp2.StatusCode)
+		}
+		var ev2 struct {
+			SettlementState string `json:"settlement_state"`
+		}
+		decodeJSON(t, evResp2, &ev2)
+		if ev2.SettlementState != "Settled" {
+			t.Errorf("after verify: want Settled, got %q", ev2.SettlementState)
+		}
+	})
+}

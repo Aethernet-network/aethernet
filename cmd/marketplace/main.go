@@ -28,7 +28,6 @@ package main
 
 import (
 	"flag"
-	"log"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -74,18 +73,16 @@ func main() {
 	testnet := flag.Bool("testnet", os.Getenv("AETHERNET_TESTNET") == "true", "Enable testnet features (activity generator, auto-validator)")
 	flag.Parse()
 
-	log.Printf("AetherNet Marketplace")
-	log.Printf("  Protocol node : %s", *nodeURL)
-	log.Printf("  Marketplace   : %s", *listenAddr)
+	slog.Info("AetherNet Marketplace starting", "node", *nodeURL, "listen", *listenAddr)
 
 	// Verify protocol node connectivity via SDK.
 	client := sdk.New(*nodeURL, nil)
 	status, err := client.Status()
 	if err != nil {
-		log.Fatalf("Cannot connect to protocol node at %s: %v\n"+
-			"Start the protocol node first with: aethernet start", *nodeURL, err)
+		slog.Error("cannot connect to protocol node", "url", *nodeURL, "err", err)
+		os.Exit(1)
 	}
-	log.Printf("  Connected     : protocol node v%s (DAG size: %d)", status.Version, status.DAGSize)
+	slog.Info("marketplace: connected to protocol node", "version", status.Version, "dag_size", status.DAGSize)
 
 	// ---------------------------------------------------------------------------
 	// Build marketplace component stack.
@@ -166,7 +163,8 @@ func main() {
 	localReg := identity.NewRegistry()
 	localEngine := ocs.NewEngine(ocs.DefaultConfig(), localLedger, localGL, localReg)
 	if err := localEngine.Start(); err != nil {
-		log.Fatalf("Failed to start local OCS engine: %v", err)
+		slog.Error("failed to start local OCS engine", "err", err)
+		os.Exit(1)
 	}
 
 	stakeMgr := staking.NewStakeManager()
@@ -180,7 +178,7 @@ func main() {
 	var actGen *demo.ActivityGenerator
 
 	if *testnet {
-		log.Printf("  Testnet mode  : enabled (auto-validator + activity generator)")
+		slog.Info("marketplace: testnet mode enabled")
 
 		testnetValidatorID := crypto.AgentID("testnet-validator-marketplace")
 		tvFP, err := identity.NewFingerprint(testnetValidatorID, make([]byte, 32), nil)
@@ -238,15 +236,15 @@ func main() {
 	srv.SetTaskRouter(taskRouter)
 	if explorerDir != "" {
 		srv.SetExplorerDir(explorerDir)
-		log.Printf("  Explorer      : %s/explorer/", *listenAddr)
+		slog.Info("marketplace: explorer enabled", "url", *listenAddr+"/explorer/")
 	}
 
 	if err := srv.Start(); err != nil {
-		log.Fatalf("Failed to start marketplace server: %v", err)
+		slog.Error("failed to start marketplace server", "err", err)
+		os.Exit(1)
 	}
 
-	log.Printf("Marketplace ready at http://localhost%s", *listenAddr)
-	log.Printf("Protocol node API at %s", *nodeURL)
+	slog.Info("marketplace: ready", "addr", "http://localhost"+*listenAddr, "node", *nodeURL)
 
 	// ---------------------------------------------------------------------------
 	// Wait for shutdown signal.
