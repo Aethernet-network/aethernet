@@ -25,7 +25,7 @@
 package autovalidator
 
 import (
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -195,7 +195,7 @@ func (av *AutoValidator) Start() {
 			}
 		}
 	}()
-	log.Printf("auto-validator started (interval: %v, validator_id: %s)", av.interval, av.validatorID)
+	slog.Info("auto-validator started", "interval", av.interval, "validator_id", av.validatorID)
 }
 
 // Stop shuts down the background goroutine. Safe to call multiple times.
@@ -224,8 +224,8 @@ func (av *AutoValidator) processSubmittedTasks() {
 		score, passed := av.verifyEvidence(ev, task.Title, task.Description, task.Budget, task.Category)
 		_ = av.taskMgr.SetVerificationScore(task.ID, score)
 		if !passed {
-			log.Printf("auto-validator: HELD task %s (score: %.2f, below threshold %.2f)",
-				task.ID, score.Overall, evidence.PassThreshold)
+			slog.Info("auto-validator: task held below threshold",
+				"task_id", task.ID, "score", score.Overall, "threshold", evidence.PassThreshold)
 			continue
 		}
 		av.settleTask(task, score)
@@ -255,15 +255,15 @@ func (av *AutoValidator) processExpiredClaims() {
 
 		formerClaimer, err := av.taskMgr.ReleaseTask(task.ID)
 		if err != nil {
-			log.Printf("auto-validator: could not release expired claim for task %s: %v", task.ID, err)
+			slog.Warn("auto-validator: could not release expired claim", "task_id", task.ID, "err", err)
 			continue
 		}
-		log.Printf("auto-validator: claim EXPIRED for task %s (claimer: %s)", task.ID, formerClaimer)
+		slog.Info("auto-validator: claim expired", "task_id", task.ID, "claimer", formerClaimer)
 
 		// Penalise the claimer's reputation for abandoning the task.
 		if av.reputationMgr != nil && formerClaimer != "" {
 			av.reputationMgr.RecordFailure(crypto.AgentID(formerClaimer), task.Category)
-			log.Printf("auto-validator: recorded failure for claimer %s (task: %s)", formerClaimer, task.ID)
+			slog.Debug("auto-validator: recorded failure for claimer", "claimer", formerClaimer, "task_id", task.ID)
 		}
 	}
 }
@@ -305,12 +305,12 @@ func (av *AutoValidator) processDisputedTasks() {
 
 		if score != nil && score.Overall >= evidence.PassThreshold {
 			// Work was adequate: approve and release to worker.
-			log.Printf("auto-validator: DISPUTE RESOLVED (approve) task %s (score: %.2f)", task.ID, score.Overall)
+			slog.Info("auto-validator: dispute resolved (approve)", "task_id", task.ID, "score", score.Overall)
 			// Change task status to Completed before calling settleTask (which
 			// calls ApproveTask that requires Submitted status — bypassed here
 			// via ResolveDispute which accepts Disputed state).
 			if err := av.taskMgr.ResolveDispute(task.ID, av.validatorID, true); err != nil {
-				log.Printf("auto-validator: could not resolve dispute (approve) for task %s: %v", task.ID, err)
+				slog.Warn("auto-validator: could not resolve dispute (approve)", "task_id", task.ID, "err", err)
 				continue
 			}
 			// Release escrow and distribute fee from the escrow bucket (C1/C2 fix).
@@ -326,7 +326,7 @@ func (av *AutoValidator) processDisputedTasks() {
 					av.validatorID, validatorAmount,
 					av.treasuryID, treasuryAmount,
 				); err != nil {
-					log.Printf("auto-validator: could not release escrow (dispute approve) for task %s: %v", task.ID, err)
+					slog.Error("auto-validator: could not release escrow (dispute approve)", "task_id", task.ID, "err", err)
 				} else if av.feeCollector != nil && fee > 0 {
 					av.feeCollector.TrackFee(fee, burned, treasuryAmount)
 				}
@@ -355,15 +355,15 @@ func (av *AutoValidator) processDisputedTasks() {
 			if score != nil {
 				overall = score.Overall
 			}
-			log.Printf("auto-validator: DISPUTE RESOLVED (reject) task %s (score: %.2f)", task.ID, overall)
+			slog.Info("auto-validator: dispute resolved (reject)", "task_id", task.ID, "score", overall)
 
 			if err := av.taskMgr.ResolveDispute(task.ID, av.validatorID, false); err != nil {
-				log.Printf("auto-validator: could not resolve dispute (reject) for task %s: %v", task.ID, err)
+				slog.Warn("auto-validator: could not resolve dispute (reject)", "task_id", task.ID, "err", err)
 				continue
 			}
 			if av.escrowMgr != nil {
 				if err := av.escrowMgr.Refund(task.ID); err != nil {
-					log.Printf("auto-validator: could not refund escrow for task %s: %v", task.ID, err)
+					slog.Error("auto-validator: could not refund escrow", "task_id", task.ID, "err", err)
 				}
 			}
 			if av.reputationMgr != nil && task.ClaimerID != "" {
@@ -383,7 +383,7 @@ func (av *AutoValidator) processDisputedTasks() {
 func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score) {
 	approvedAt := time.Now().UnixNano()
 	if err := av.taskMgr.ApproveTask(task.ID, av.validatorID); err != nil {
-		log.Printf("auto-validator: could not approve task %s: %v", task.ID, err)
+		slog.Warn("auto-validator: could not approve task", "task_id", task.ID, "err", err)
 		return
 	}
 	if av.escrowMgr != nil && task.ClaimerID != "" {
@@ -399,11 +399,10 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score) {
 			av.validatorID, validatorAmount,
 			av.treasuryID, treasuryAmount,
 		); err != nil {
-			log.Printf("auto-validator: could not release escrow for task %s: %v", task.ID, err)
+			slog.Error("auto-validator: could not release escrow for task", "task_id", task.ID, "err", err)
 		} else if av.feeCollector != nil && fee > 0 {
 			av.feeCollector.TrackFee(fee, burned, treasuryAmount)
-			log.Printf("auto-validator: collected fee %d for task %s (net to worker: %d)",
-				fee, task.ID, netAmount)
+			slog.Info("auto-validator: collected fee", "fee", fee, "task_id", task.ID, "net_to_worker", netAmount)
 		}
 	}
 
@@ -417,7 +416,7 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score) {
 			verifiedValue,
 			task.ID,
 		); err != nil {
-			log.Printf("auto-validator: generation ledger record failed for task %s: %v", task.ID, err)
+			slog.Error("auto-validator: generation ledger record failed", "task_id", task.ID, "err", err)
 		}
 	}
 
@@ -439,8 +438,7 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score) {
 			task.Category,
 		)
 	}
-	log.Printf("auto-validator: APPROVED task %s (score: %.2f, claimer: %s)",
-		task.ID, score.Overall, task.ClaimerID)
+	slog.Info("auto-validator: task approved", "task_id", task.ID, "score", score.Overall, "claimer", task.ClaimerID)
 }
 
 // processPending fetches all pending OCS items and submits a positive verdict
@@ -457,9 +455,9 @@ func (av *AutoValidator) processPending() {
 			Timestamp:     time.Now(),
 		})
 		if err != nil {
-			log.Printf("auto-validator: could not settle %s: %v", item.EventID, err)
+			slog.Warn("auto-validator: could not settle", "event_id", item.EventID, "err", err)
 			continue
 		}
-		log.Printf("auto-validator: settled %s (value: %d)", item.EventID, item.Amount)
+		slog.Debug("auto-validator: settled", "event_id", item.EventID, "value", item.Amount)
 	}
 }

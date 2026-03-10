@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"sort"
 	"sync"
@@ -751,11 +751,11 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		// Accepting unsigned votes would allow any peer to inject votes using a
 		// self-reported VoterID, poisoning consensus without accountability.
 		if len(vp.PublicKey) == 0 || len(vp.Signature) == 0 {
-			log.Printf("network: dropping unsigned vote from peer %s", peer.AgentID)
+			slog.Warn("network: dropping unsigned vote", "peer", peer.AgentID)
 			return
 		}
 		if !crypto.Verify(vp.PublicKey, voteBytes(vp.EventID, vp.VoterID, vp.Verdict, vp.Timestamp), vp.Signature) {
-			log.Printf("network: dropping vote with invalid signature from peer %s", peer.AgentID)
+			slog.Warn("network: dropping vote with invalid signature", "peer", peer.AgentID)
 			return
 		}
 		// Verify the voter's claimed public key against the identity registry
@@ -766,11 +766,11 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		if n.identityLookup != nil {
 			registeredKey := n.identityLookup(vp.VoterID)
 			if len(registeredKey) == 0 {
-				log.Printf("network: dropping vote from unregistered voter %s (peer %s)", vp.VoterID, peer.AgentID)
+				slog.Warn("network: dropping vote from unregistered voter", "voter", vp.VoterID, "peer", peer.AgentID)
 				return
 			}
 			if !bytes.Equal(registeredKey, vp.PublicKey) {
-				log.Printf("network: dropping vote from %s: public key mismatch — possible impersonation by peer %s", vp.VoterID, peer.AgentID)
+				slog.Warn("network: dropping vote: public key mismatch", "voter", vp.VoterID, "peer", peer.AgentID)
 				return
 			}
 		}
@@ -778,7 +778,7 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		// Allow a small negative skew (-5 s) for clock drift.
 		now := time.Now()
 		if age := now.Unix() - vp.Timestamp; age > n.config.voteMaxAge() || age < -5 {
-			log.Printf("network: dropping stale vote (age=%ds) from peer %s", age, peer.AgentID)
+			slog.Warn("network: dropping stale vote", "age_secs", age, "peer", peer.AgentID)
 			return
 		}
 
