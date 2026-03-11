@@ -13,14 +13,16 @@ setup(
     url="https://github.com/Aethernet-network/aethernet",
     packages=find_packages(),
     python_requires=">=3.8",
-    install_requires=["requests>=2.20.0"],
+    install_requires=[
+        "requests>=2.20.0",
+        "cryptography>=41.0.0",
+        "anthropic>=0.25.0",
+    ],
     extras_require={
-        "crypto": ["cryptography>=41.0.0"],
         "langchain": ["langchain-core>=0.1.0"],
         "crewai": ["crewai>=0.1.0"],
         "openai": ["openai-agents>=0.1.0"],
         "all": [
-            "cryptography>=41.0.0",
             "langchain-core>=0.1.0",
             "crewai>=0.1.0",
             "openai-agents>=0.1.0",
