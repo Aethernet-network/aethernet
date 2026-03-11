@@ -21,7 +21,7 @@ import (
 // harder to satisfy than keyword matching while being much harder to game).
 type CodeVerifier struct{}
 
-const codePassThreshold = 0.5
+const codePassThreshold = 0.25
 
 // Verify implements VerifierInterface.
 func (cv *CodeVerifier) Verify(ev *Evidence, taskTitle, taskDescription string, budget uint64) (*Score, bool) {

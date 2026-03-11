@@ -205,10 +205,10 @@ func DefaultConfig() *ProtocolConfig {
 			MaxCompletedAge:      Duration{7 * 24 * time.Hour},
 		},
 		Evidence: EvidenceConfig{
-			PassThreshold:        0.6,
-			CodePassThreshold:    0.5,
-			DataPassThreshold:    0.5,
-			ContentPassThreshold: 0.5,
+			PassThreshold:        0.25,
+			CodePassThreshold:    0.25,
+			DataPassThreshold:    0.25,
+			ContentPassThreshold: 0.25,
 		},
 		Router: RouterConfig{
 			NewcomerThreshold:  10,

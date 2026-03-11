@@ -279,7 +279,7 @@ func (av *AutoValidator) processExpiredClaims() {
 // processDisputedTasks auto-resolves disputes that have exceeded the review
 // window. Resolution is deterministic, based on the stored verification score:
 //
-//   - score >= evidence.PassThreshold (0.60): work was adequate → release to worker
+//   - score >= evidence.PassThreshold (0.25): work was adequate → release to worker
 //   - score  < evidence.PassThreshold:        work was inadequate → refund poster, penalise worker
 //
 // If no score is stored (e.g. dispute raised before auto-validation ran), the

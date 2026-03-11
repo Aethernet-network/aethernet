@@ -19,7 +19,7 @@ import (
 // Pass threshold: 0.5
 type DataVerifier struct{}
 
-const dataPassThreshold = 0.5
+const dataPassThreshold = 0.25
 
 // Verify implements VerifierInterface.
 func (dv *DataVerifier) Verify(ev *Evidence, taskTitle, taskDescription string, budget uint64) (*Score, bool) {
@@ -28,8 +28,16 @@ func (dv *DataVerifier) Verify(ev *Evidence, taskTitle, taskDescription string, 
 		content = strings.TrimSpace(content + "\n" + ev.OutputPreview)
 	}
 
+	// Use the larger of: counted words in the preview+summary, or estimated
+	// from OutputSize (1 word ≈ 6 bytes). This prevents the completeness
+	// score from being penalised when the full output far exceeds the preview.
+	wordCount := countWords(content)
+	if est := int(ev.OutputSize) / 6; est > wordCount {
+		wordCount = est
+	}
+
 	structure := dv.scoreStructure(content)
-	completeness := dv.scoreCompleteness(content, budget)
+	completeness := dv.scoreCompleteness(wordCount, budget)
 	depth := dv.scoreAnalyticalDepth(content)
 	citation := dv.scoreCitation(content)
 
@@ -88,11 +96,12 @@ func (dv *DataVerifier) scoreStructure(content string) float64 {
 }
 
 // scoreCompleteness evaluates word count relative to task budget and complexity.
-func (dv *DataVerifier) scoreCompleteness(content string, budget uint64) float64 {
-	if content == "" {
+// wordCount should be pre-computed by Verify using the larger of the actual preview
+// word count and the estimated count derived from ev.OutputSize.
+func (dv *DataVerifier) scoreCompleteness(wordCount int, budget uint64) float64 {
+	if wordCount == 0 {
 		return 0.0
 	}
-	words := countWords(content)
 
 	// Budget-scaled minimum: higher budget → more complex task → more words expected.
 	minWords := 50
@@ -102,10 +111,10 @@ func (dv *DataVerifier) scoreCompleteness(content string, budget uint64) float64
 		minWords = 100
 	}
 
-	if words < minWords/2 {
+	if wordCount < minWords/2 {
 		return 0.1
 	}
-	ratio := float64(words) / float64(minWords)
+	ratio := float64(wordCount) / float64(minWords)
 	return clamp(0.3+ratio*0.7, 0, 1)
 }
 

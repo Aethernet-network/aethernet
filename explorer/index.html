@@ -1055,6 +1055,7 @@ function App() {
   const [stats,     setStats]     = useState(null);
   const [agents,    setAgents]    = useState([]);
   const [econ,      setEcon]      = useState(null);
+  const [taskStats, setTaskStats] = useState(null);
   const [sortField, setSortField] = useState('reputation');
   const [loading,   setLoading]   = useState(true);
   const [error,     setError]     = useState(null);
@@ -1084,6 +1085,10 @@ function App() {
       setAgents(lb);
       setEcon(ec);
       setError(null);
+      // Task stats are fetched separately — the endpoint returns 501 when the
+      // marketplace is not enabled, and we don't want that to break the rest
+      // of the dashboard.
+      apiFetch('/v1/tasks/stats').then(setTaskStats).catch(() => {});
     } catch (e) {
       setError(e.message);
     } finally {
@@ -1119,10 +1124,10 @@ function App() {
           <main className="flex-1 px-6 py-5 space-y-5">
         {/* Top stat cards */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          <StatCard label="DAG Events"    value={stats  ? fmtNum(stats.total_events) : null} />
-          <StatCard label="Active Agents" value={stats  ? fmtNum(agents.length)      : null} />
-          <StatCard label="OCS Pending"   value={status ? status.ocs_pending         : null} />
-          <StatCard label="Supply Ratio"  value={status ? `${status.supply_ratio?.toFixed(2)}×` : null} />
+          <StatCard label="Open Tasks"    value={taskStats ? fmtNum(taskStats.open_tasks)      : null} />
+          <StatCard label="Active Agents" value={status    ? fmtNum(agents.length)             : null} />
+          <StatCard label="Completed"     value={taskStats ? fmtNum(taskStats.completed_tasks) : null} />
+          <StatCard label="Supply Ratio"  value={status    ? `${status.supply_ratio?.toFixed(2)}×` : null} />
         </div>
 
         {/* Main panels */}

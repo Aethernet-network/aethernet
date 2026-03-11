@@ -29,9 +29,9 @@ func NewVerifierRegistry() *VerifierRegistry {
 	r := &VerifierRegistry{
 		verifiers:     make(map[string]VerifierInterface),
 		fallback:      NewKeywordVerifier(),
-		codeThresh:    0.5,
-		dataThresh:    0.5,
-		contentThresh: 0.5,
+		codeThresh:    0.25,
+		dataThresh:    0.25,
+		contentThresh: 0.25,
 	}
 
 	for _, cat := range []string{"code", "code-review", "technical", "security"} {

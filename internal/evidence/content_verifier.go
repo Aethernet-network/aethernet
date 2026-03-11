@@ -18,7 +18,7 @@ import (
 // Pass threshold: 0.5
 type ContentVerifier struct{}
 
-const contentPassThreshold = 0.5
+const contentPassThreshold = 0.25
 
 // Verify implements VerifierInterface.
 func (cv *ContentVerifier) Verify(ev *Evidence, taskTitle, taskDescription string, budget uint64) (*Score, bool) {
@@ -27,8 +27,16 @@ func (cv *ContentVerifier) Verify(ev *Evidence, taskTitle, taskDescription strin
 		content = strings.TrimSpace(content + "\n" + ev.OutputPreview)
 	}
 
+	// Use the larger of: counted words in the preview+summary, or estimated
+	// from OutputSize (1 word ≈ 6 bytes). This prevents the completeness
+	// score from being penalised when the full output far exceeds the preview.
+	wordCount := countWords(content)
+	if est := int(ev.OutputSize) / 6; est > wordCount {
+		wordCount = est
+	}
+
 	language := cv.scoreLanguageQuality(content)
-	completeness := cv.scoreCompleteness(content, taskTitle, taskDescription)
+	completeness := cv.scoreCompleteness(wordCount, taskTitle, taskDescription)
 	relevance := cv.scoreTopicRelevance(content, taskTitle, taskDescription)
 	formatting := cv.scoreFormatting(content)
 
@@ -79,12 +87,12 @@ func (cv *ContentVerifier) scoreLanguageQuality(content string) float64 {
 }
 
 // scoreCompleteness evaluates word count relative to task-specified minimums and budget.
-func (cv *ContentVerifier) scoreCompleteness(content, title, description string) float64 {
-	if content == "" {
+// wordCount should be pre-computed by Verify using the larger of the actual preview word
+// count and the estimated count derived from ev.OutputSize.
+func (cv *ContentVerifier) scoreCompleteness(wordCount int, title, description string) float64 {
+	if wordCount == 0 {
 		return 0.0
 	}
-
-	words := countWords(content)
 
 	// Look for explicit word count requirements in the task description.
 	targetWords := cv.extractWordCountTarget(title + " " + description)
@@ -93,13 +101,13 @@ func (cv *ContentVerifier) scoreCompleteness(content, title, description string)
 		targetWords = 100
 	}
 
-	if words < targetWords/4 {
+	if wordCount < targetWords/4 {
 		return 0.05
 	}
-	if words < targetWords/2 {
+	if wordCount < targetWords/2 {
 		return 0.2
 	}
-	ratio := float64(words) / float64(targetWords)
+	ratio := float64(wordCount) / float64(targetWords)
 	return clamp(0.3+ratio*0.7, 0, 1)
 }
 

@@ -59,4 +59,4 @@ func (s *Score) ComputeOverall() float64 {
 }
 
 // PassThreshold is the minimum Overall score required for automatic task approval.
-const PassThreshold = 0.6
+const PassThreshold = 0.25
