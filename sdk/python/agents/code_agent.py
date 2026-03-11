@@ -85,11 +85,29 @@ def main():
     except Exception as e:
         log.warning(f"Could not register for routing: {e}")
 
-    # Main loop: poll for tasks assigned to this agent by the router
+    # Main loop: poll for tasks routed to this agent, claim them, then work.
+    # The routing engine calls SetRoutedTo(taskID, agentID) which marks a task
+    # with routed_to=AGENT_ID while leaving status="open".  The agent must then
+    # call ClaimTask to transition status to "claimed" before submitting work.
     while True:
         try:
             my_tasks = client.my_tasks()
 
+            # Phase 1: Claim any tasks the router has assigned to us.
+            for task in my_tasks:
+                if task.get("routed_to") != AGENT_ID:
+                    continue
+                if task.get("status") != "open":
+                    continue
+                task_id = task["id"]
+                title = task.get("title", "Unknown")
+                try:
+                    client.claim_task(task_id)
+                    log.info(f"Claimed routed task: {title} ({task_id})")
+                except Exception as e:
+                    log.warning(f"Could not claim task {task_id}: {e}")
+
+            # Phase 2: Do work on tasks we have claimed.
             for task in my_tasks:
                 if task.get("status") != "claimed":
                     continue
@@ -102,9 +120,7 @@ def main():
                 cat = task.get("category", "")
                 budget = task.get("budget", 0)
 
-                log.info(f"Routed task received: {title} ({cat}, {budget / 1_000_000:.2f} AET)")
-
-                log.info(f"Working on: {title}...")
+                log.info(f"Working on: {title} ({cat}, {budget / 1_000_000:.2f} AET)")
                 try:
                     output = do_work(title, description, cat)
                     log.info(f"Work complete: {len(output)} chars")

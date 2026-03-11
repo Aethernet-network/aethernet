@@ -121,6 +121,46 @@ def test_generate_keypair_distinct_per_name():
                 os.environ["HOME"] = orig_home
 
 
+def test_my_tasks_includes_routed_tasks():
+    """my_tasks() merges open tasks where routed_to == agent_id."""
+    from unittest.mock import MagicMock, patch
+
+    try:
+        from aethernet import AetherNetClient
+    except ImportError:
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from aethernet import AetherNetClient
+
+    client = AetherNetClient("http://localhost:9999", agent_id="worker-01")
+
+    # Simulate server responses: agent_tasks returns poster/claimer tasks;
+    # open tasks list contains one task routed to our agent.
+    agent_tasks = [{"id": "t1", "status": "claimed", "claimer_id": "worker-01"}]
+    open_tasks = [
+        {"id": "t2", "status": "open", "routed_to": "worker-01"},  # ours
+        {"id": "t3", "status": "open", "routed_to": "other-agent"},  # not ours
+        {"id": "t1", "status": "open", "routed_to": ""},             # already in agent_tasks
+    ]
+
+    def fake_get(path):
+        if "/tasks/agent/" in path:
+            return list(agent_tasks)
+        if "status=open" in path:
+            return list(open_tasks)
+        raise AssertionError(f"unexpected GET {path}")
+
+    client._get = fake_get
+
+    result = client.my_tasks()
+
+    ids = [t["id"] for t in result]
+    assert "t1" in ids, "claimed task must be included"
+    assert "t2" in ids, "routed-open task must be included"
+    assert ids.count("t1") == 1, "t1 must not be duplicated"
+    assert all(t["id"] != "t3" for t in result), "tasks routed to other agents must be excluded"
+
+
 def _is_testnet_reachable() -> bool:
     """Return True when the testnet responds to a status request."""
     try:

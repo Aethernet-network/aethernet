@@ -696,14 +696,35 @@ class AetherNetClient:
         return self._post(f"/v1/tasks/{task_id}/cancel", body)
 
     def my_tasks(self, agent_id: str = "") -> List[Dict[str, Any]]:
-        """Return all tasks where *agent_id* is poster or claimer.
+        """Return all tasks involving *agent_id*: posted, claimed, or routed.
+
+        Calls ``/v1/tasks/agent/{agent_id}`` for tasks where the agent is
+        poster or claimer, then merges any open tasks where
+        ``routed_to == agent_id`` from ``/v1/tasks?status=open``.  The merged
+        list lets callers see tasks assigned by the router before they are
+        claimed (the router sets ``routed_to`` while leaving status as
+        ``"open"``; only after ``ClaimTask`` does the agent appear as claimer).
 
         Uses ``self.agent_id`` when *agent_id* is omitted.
         """
         aid = agent_id or self.agent_id
         if not aid:
             raise ValueError("agent_id required: pass to AetherNetClient() or my_tasks()")
-        return self._get(f"/v1/tasks/agent/{aid}")
+        # Tasks where agent is already poster or claimer.
+        result: List[Dict[str, Any]] = self._get(f"/v1/tasks/agent/{aid}")
+        seen = {t["id"] for t in result}
+        # Also surface open tasks routed to this agent.  The router sets
+        # routed_to without changing status, so /v1/tasks/agent won't include
+        # them until after ClaimTask is called.
+        try:
+            open_tasks: List[Dict[str, Any]] = self._get("/v1/tasks?status=open")
+            for task in open_tasks:
+                if task.get("routed_to") == aid and task["id"] not in seen:
+                    result.append(task)
+                    seen.add(task["id"])
+        except Exception:
+            pass  # best-effort — fall back to agent-tasks only
+        return result
 
     def task_stats(self) -> Dict[str, Any]:
         """Return aggregate marketplace statistics.
