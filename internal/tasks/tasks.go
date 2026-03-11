@@ -712,6 +712,29 @@ func (t *Task) GetDescription() string { return t.Description }
 // GetRoutedTo returns the agent ID the task has been routed to, if any.
 func (t *Task) GetRoutedTo() string { return t.RoutedTo }
 
+// GetRoutedAt returns the nanosecond timestamp when the routing was set, or 0.
+func (t *Task) GetRoutedAt() int64 { return t.RoutedAt }
+
+// ClearRoutedTo resets the routing assignment on an Open task so the router
+// may reassign it on the next cycle. Returns ErrTaskNotFound or ErrTaskNotOpen
+// when the task is absent or not in Open state.
+func (m *TaskManager) ClearRoutedTo(taskID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
+	}
+	if task.Status != TaskStatusOpen {
+		return fmt.Errorf("%w: %s (status: %s)", ErrTaskNotOpen, taskID, task.Status)
+	}
+	task.RoutedTo = ""
+	task.RoutedAt = 0
+	m.persist(task)
+	return nil
+}
+
 // generateID creates a unique ID for a subtask based on the parent task ID,
 // current nanosecond time, and the current task count. Returns 32 hex chars
 // (16 bytes of SHA-256).

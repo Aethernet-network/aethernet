@@ -474,6 +474,9 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 	taskRouter := router.New(&taskManagerSource{tm: taskMgr}, claimFn, repFn, cfg.Router.RoutingInterval.Duration)
 	taskRouter.SetNewcomerParams(cfg.Router.NewcomerThreshold, cfg.Router.NewcomerAllocation, cfg.Router.MaxNewcomerBudget)
 	taskRouter.SetWebhookTimeout(cfg.Router.WebhookTimeout.Duration)
+	taskRouter.SetClearRoutedToFunc(func(taskID string) error {
+		return taskMgr.ClearRoutedTo(taskID)
+	})
 
 	// Apply configurable task lifecycle params.
 	taskMgr.SetClaimDeadline(cfg.Tasks.DefaultClaimDeadline.Duration)
@@ -691,7 +694,6 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			apiSrv.SetDiscoveryEngine(stack.discoveryEngine)
 		}
 		if stack.taskRouter != nil {
-			seedRouterCapabilities(stack.taskRouter)
 			stack.taskRouter.Start()
 			apiSrv.SetTaskRouter(stack.taskRouter)
 		}
@@ -1108,65 +1110,6 @@ func cmdConnect() {
 	slog.Info("node stopped cleanly")
 }
 
-// seedRouterCapabilities registers the four testnet seed agents in the
-// autonomous task router so they can receive auto-routed tasks from the moment
-// the node starts.
-func seedRouterCapabilities(r *router.Router) {
-	type seedAgent struct {
-		id           string
-		categories   []string
-		tags         []string
-		description  string
-		pricePerTask uint64 // micro-AET
-		maxConcurrent int
-	}
-	seeds := []seedAgent{
-		{
-			id:            "alpha-researcher",
-			categories:    []string{"research", "writing"},
-			tags:          []string{"papers", "nlp", "summarisation", "translation"},
-			description:   "Research and writing specialist — arxiv papers, summaries, translations",
-			pricePerTask:  20_000,
-			maxConcurrent: 3,
-		},
-		{
-			id:            "data-scientist",
-			categories:    []string{"data", "ml"},
-			tags:          []string{"csv", "classification", "sql", "analytics", "sentiment"},
-			description:   "Data science and ML workloads — classification, analytics, SQL generation",
-			pricePerTask:  30_000,
-			maxConcurrent: 2,
-		},
-		{
-			id:            "code-auditor",
-			categories:    []string{"code", "security"},
-			tags:          []string{"solidity", "audit", "reentrancy", "smart-contracts"},
-			description:   "Code review and security auditing — Solidity, reentrancy, access control",
-			pricePerTask:  50_000,
-			maxConcurrent: 2,
-		},
-		{
-			id:            "doc-writer",
-			categories:    []string{"writing", "documentation"},
-			tags:          []string{"openapi", "yaml", "docs", "technical-writing"},
-			description:   "Technical documentation — OpenAPI specs, quickstarts, API docs",
-			pricePerTask:  15_000,
-			maxConcurrent: 4,
-		},
-	}
-	for _, s := range seeds {
-		r.RegisterCapability(router.AgentCapability{
-			AgentID:       crypto.AgentID(s.id),
-			Categories:    s.categories,
-			Tags:          s.tags,
-			Description:   s.description,
-			PricePerTask:  s.pricePerTask,
-			MaxConcurrent: s.maxConcurrent,
-			Available:     true,
-		})
-	}
-	slog.Info("seedRouterCapabilities: registered seed agents", "count", len(seeds))
-}
 
 // seedMarketplace pre-populates the task marketplace with realistic starter
 // tasks on the very first node run (when TotalTasks == 0). It registers four

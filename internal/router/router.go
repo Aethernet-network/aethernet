@@ -26,6 +26,7 @@ package router
 
 import (
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -35,6 +36,10 @@ import (
 )
 
 const (
+	// RoutingTimeout is the maximum time the router waits for a routed agent
+	// to claim a task before clearing the assignment so it can be re-routed.
+	RoutingTimeout = 60 * time.Second
+
 	// NewcomerThreshold is the number of category-specific task completions
 	// required before an agent graduates from the newcomer pool.
 	NewcomerThreshold = uint64(10)
@@ -61,6 +66,7 @@ type RoutableTask interface {
 	GetTitle() string
 	GetDescription() string
 	GetRoutedTo() string
+	GetRoutedAt() int64
 }
 
 // TaskSource provides open tasks to the router without coupling to a specific
@@ -117,6 +123,7 @@ type Router struct {
 	routeHistory   []*RouteResult
 	taskSource     TaskSource
 	claimFunc      func(taskID string, agentID crypto.AgentID) error
+	clearRoutedTo  func(taskID string) error
 	reputationFunc func(agentID crypto.AgentID, category string) (completed uint64, avgScore float64, avgDelivery float64, completionRate float64)
 	stop           chan struct{}
 	interval       time.Duration
@@ -175,6 +182,16 @@ func (r *Router) SetNewcomerParams(threshold uint64, allocation float64, maxBudg
 func (r *Router) SetWebhookTimeout(d time.Duration) {
 	r.mu.Lock()
 	r.webhookTimeout = d
+	r.mu.Unlock()
+}
+
+// SetClearRoutedToFunc registers the callback the router calls to expire a
+// stale routing assignment. When a task has been routed but not claimed within
+// RoutingTimeout, the router calls fn(taskID) to clear routed_to so the task
+// can be re-routed on the next cycle. Call before Start.
+func (r *Router) SetClearRoutedToFunc(fn func(taskID string) error) {
+	r.mu.Lock()
+	r.clearRoutedTo = fn
 	r.mu.Unlock()
 }
 
@@ -333,10 +350,30 @@ func (r *Router) routePending() {
 	newcomerRoutes := 0
 
 	for _, task := range open {
-		// Skip tasks already routed to an agent — they are waiting for that
-		// agent to claim them and should not be re-routed to someone else.
+		// If this task is already routed, check whether the assignment has
+		// expired. If the routed agent hasn't claimed within RoutingTimeout,
+		// clear the assignment so we can re-route it below. If the assignment
+		// is still fresh, skip the task entirely.
 		if task.GetRoutedTo() != "" {
-			continue
+			routedAt := task.GetRoutedAt()
+			if routedAt == 0 || time.Since(time.Unix(0, routedAt)) < RoutingTimeout {
+				continue // still within the claim window
+			}
+			// Assignment expired — clear it and fall through to re-route.
+			if r.clearRoutedTo != nil {
+				if err := r.clearRoutedTo(task.GetID()); err != nil {
+					slog.Debug("router: could not clear expired route",
+						"task_id", task.GetID(),
+						"was_routed_to", task.GetRoutedTo(),
+						"err", err)
+					continue
+				}
+				slog.Info("router: routing assignment expired, re-routing",
+					"task_id", task.GetID(),
+					"was_routed_to", task.GetRoutedTo())
+			} else {
+				continue // no clear func configured — leave as-is
+			}
 		}
 
 		routeCount++
