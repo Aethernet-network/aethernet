@@ -214,12 +214,20 @@ func (av *AutoValidator) processSubmittedTasks() {
 		if task.SubmittedAt > cutoff {
 			continue // submitted too recently
 		}
-		ev := &evidence.Evidence{
-			Hash:       task.ResultHash,
-			Summary:    task.ResultNote,
-			OutputType: "text",
-			OutputSize: uint64(len(task.ResultNote)),
-			OutputURL:  task.ResultURI,
+		// Use the structured evidence stored at submission time when available —
+		// it carries OutputPreview, Metrics, and the correct OutputType/OutputSize
+		// that the auto-validator's verifiers rely on for quality scoring.
+		// Fall back to the individual stored fields for tasks submitted before
+		// this feature was added (SubmittedEvidence == nil).
+		ev := task.SubmittedEvidence
+		if ev == nil {
+			ev = &evidence.Evidence{
+				Hash:       task.ResultHash,
+				Summary:    task.ResultNote,
+				OutputType: "text",
+				OutputSize: uint64(len(task.ResultNote)),
+				OutputURL:  task.ResultURI,
+			}
 		}
 		score, passed := av.verifyEvidence(ev, task.Title, task.Description, task.Budget, task.Category)
 		_ = av.taskMgr.SetVerificationScore(task.ID, score)

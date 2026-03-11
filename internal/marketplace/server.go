@@ -387,7 +387,7 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := s.taskMgr.SubmitResult(id, crypto.AgentID(req.ClaimerID), resultHash, resultNote, resultURI); err != nil {
+	if err := s.taskMgr.SubmitResult(id, crypto.AgentID(req.ClaimerID), resultHash, resultNote, resultURI, req.Evidence); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

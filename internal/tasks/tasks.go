@@ -98,6 +98,11 @@ type Task struct {
 	// router assignment times out (60 seconds after posting).
 	RoutedTo string `json:"routed_to,omitempty"`
 	RoutedAt int64  `json:"routed_at,omitempty"`
+	// SubmittedEvidence is the structured evidence attached by the worker when
+	// submitting results. Populated by the API server when the agent provides
+	// an evidence block (output_preview, metrics, output_type, etc.).
+	// The auto-validator uses this for full-fidelity quality scoring.
+	SubmittedEvidence *evidence.Evidence `json:"submitted_evidence,omitempty"`
 }
 
 // taskStore is the subset of store.Store used by TaskManager.
@@ -345,9 +350,11 @@ func (m *TaskManager) SetRoutedTo(taskID, agentID string) error {
 
 // SubmitResult records the worker's result for a claimed task.
 // resultNote is a human-readable summary of the work; resultURI is an optional
-// URI pointing to the full output. Returns ErrTaskNotFound, ErrTaskNotClaimed,
-// or ErrWrongClaimer.
-func (m *TaskManager) SubmitResult(taskID string, claimerID crypto.AgentID, resultHash, resultNote, resultURI string) error {
+// URI pointing to the full output. An optional *evidence.Evidence may be passed
+// as the last argument; when provided it is stored in SubmittedEvidence so the
+// auto-validator can use full-fidelity scoring (OutputPreview, Metrics, etc.).
+// Returns ErrTaskNotFound, ErrTaskNotClaimed, or ErrWrongClaimer.
+func (m *TaskManager) SubmitResult(taskID string, claimerID crypto.AgentID, resultHash, resultNote, resultURI string, ev ...*evidence.Evidence) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -365,6 +372,9 @@ func (m *TaskManager) SubmitResult(taskID string, claimerID crypto.AgentID, resu
 	task.ResultHash = resultHash
 	task.ResultNote = resultNote
 	task.ResultURI = resultURI
+	if len(ev) > 0 && ev[0] != nil {
+		task.SubmittedEvidence = ev[0]
+	}
 	task.Status = TaskStatusSubmitted
 	task.SubmittedAt = time.Now().UnixNano()
 	m.persist(task)
