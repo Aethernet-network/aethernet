@@ -53,7 +53,7 @@ func TestPeerDiscovery_ConnectsToResolvedPeer(t *testing.T) {
 	pd.Start()
 	defer pd.Stop()
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if discoverer.PeerCount() >= 1 {
 			break
@@ -61,7 +61,7 @@ func TestPeerDiscovery_ConnectsToResolvedPeer(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	if discoverer.PeerCount() < 1 {
-		t.Fatal("PeerDiscovery did not connect to the target peer within 2 s")
+		t.Fatal("PeerDiscovery did not connect to the target peer within 5 s")
 	}
 }
 
@@ -82,8 +82,16 @@ func TestPeerDiscovery_SkipsKnownPeers(t *testing.T) {
 	pd.Start()
 	defer pd.Stop()
 
-	// Let at least 3 resolution cycles pass.
-	time.Sleep(120 * time.Millisecond)
+	// Wait for the first connection (up to 2 s under load) then let a few more
+	// cycles pass to confirm no duplicates accumulate.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if discoverer.PeerCount() >= 1 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	time.Sleep(60 * time.Millisecond) // a few extra cycles
 
 	if discoverer.PeerCount() < 1 {
 		t.Fatal("expected at least one peer connection")
@@ -110,7 +118,7 @@ func TestPeerDiscovery_ReconnectsAfterDisconnect(t *testing.T) {
 	defer pd.Stop()
 
 	// Wait for initial connection.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if discoverer.PeerCount() >= 1 {
 			break
@@ -118,14 +126,15 @@ func TestPeerDiscovery_ReconnectsAfterDisconnect(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	if discoverer.PeerCount() < 1 {
-		t.Fatal("initial connection did not establish within 2 s")
+		t.Fatal("initial connection did not establish within 5 s")
 	}
 
 	// Stop the target node to simulate a peer disconnect.
 	target.Stop()
 
-	// Wait for the peer count to drop to zero.
-	deadline = time.Now().Add(2 * time.Second)
+	// Wait for the peer count to drop to zero. Under CPU load (full suite) the
+	// goroutine detecting the TCP EOF may not be scheduled for several seconds.
+	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if discoverer.PeerCount() == 0 {
 			break
@@ -171,8 +180,9 @@ func TestPeerDiscovery_SkipsSelf(t *testing.T) {
 	pd.Start()
 	defer pd.Stop()
 
-	// Run several resolution cycles.
-	time.Sleep(120 * time.Millisecond)
+	// Run several resolution cycles. 300 ms gives at least 10 cycles at 30 ms
+	// even under CPU load, while staying well within the default test timeout.
+	time.Sleep(300 * time.Millisecond)
 
 	if self.PeerCount() != 0 {
 		t.Errorf("self-connection was established: want 0 peers, got %d", self.PeerCount())

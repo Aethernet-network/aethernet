@@ -11,6 +11,7 @@ import os
 import random
 import sys
 import time
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from aethernet.client import AetherNetClient
@@ -98,6 +99,45 @@ TASKS = [
 ]
 
 
+def cancel_stale_tasks(client: AetherNetClient, agent_id: str, max_age_seconds: int = 300) -> int:
+    """Cancel open tasks posted by agent_id that are older than max_age_seconds.
+
+    Returns the number of tasks cancelled.  Stale tasks from prior runs keep
+    their budget locked in escrow until cancelled; calling this before posting
+    new tasks ensures the poster's balance is fully available.
+    """
+    try:
+        tasks = client.my_tasks(agent_id)
+    except Exception as e:
+        log.warning(f"cancel_stale_tasks: could not fetch tasks: {e}")
+        return 0
+
+    now_ns = time.time_ns()
+    cutoff_ns = now_ns - max_age_seconds * 1_000_000_000
+    cancelled = 0
+
+    for task in tasks:
+        if task.get("status") != "open":
+            continue
+        if task.get("poster_id") != agent_id and task.get("poster") != agent_id:
+            continue
+        posted_at = task.get("posted_at", 0)
+        if posted_at == 0 or posted_at > cutoff_ns:
+            continue
+        task_id = task.get("id", "")
+        if not task_id:
+            continue
+        try:
+            client.cancel_task(task_id, poster_id=agent_id)
+            age_min = (now_ns - posted_at) / 1_000_000_000 / 60
+            log.info(f"Cancelled stale task {task_id} (age={age_min:.1f} min): {task.get('title', '')[:60]}")
+            cancelled += 1
+        except Exception as e:
+            log.warning(f"cancel_stale_tasks: could not cancel {task_id}: {e}")
+
+    return cancelled
+
+
 def retrieve_result(client: AetherNetClient, task_id: str) -> None:
     """Fetch and print the result for a completed task.
 
@@ -145,6 +185,13 @@ def main():
         log.info(f"Registered: {POSTER_ID}  onboarding={alloc / 1_000_000:.1f} AET")
     except Exception as e:
         log.info(f"Already registered or error: {e}")
+
+    # Cancel any stale open tasks from prior runs to reclaim escrowed budgets.
+    # The store wipes on redeploy but the keypair persists, so prior-run tasks
+    # may appear open indefinitely with no way to be claimed or completed.
+    stale = cancel_stale_tasks(client, POSTER_ID)
+    if stale:
+        log.info(f"Cancelled {stale} stale task(s) — budget refunded to poster.")
 
     # Post tasks in random order — use public delivery for testnet.
     shuffled = list(TASKS)
