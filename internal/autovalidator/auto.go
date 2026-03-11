@@ -25,12 +25,15 @@
 package autovalidator
 
 import (
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/dag"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
+	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/evidence"
 	"github.com/Aethernet-network/aethernet/internal/fees"
 	"github.com/Aethernet-network/aethernet/internal/identity"
@@ -70,6 +73,12 @@ type AutoValidator struct {
 	// verifierRegistry routes tasks to the appropriate deterministic verifier by
 	// category. When nil, the default KeywordVerifier is used (backward-compatible).
 	verifierRegistry *evidence.VerifierRegistry
+
+	// dag and kp are optional. When both are set, settleTask creates a Transfer
+	// DAG event recording the worker payment so the activity feed reflects task
+	// payouts alongside regular peer transfers.
+	dag *dag.DAG
+	kp  *crypto.KeyPair
 
 	// taskStaleness is the minimum age a submitted task must reach before the
 	// auto-validator processes it. Defaults to 10 seconds so the task poster
@@ -164,6 +173,21 @@ func (av *AutoValidator) SetDisputeReviewTimeout(d time.Duration) {
 // preserved: all tasks use evidence.NewVerifier().
 func (av *AutoValidator) SetVerifierRegistry(r *evidence.VerifierRegistry) {
 	av.verifierRegistry = r
+}
+
+// SetDAG wires the causal DAG so that settled task payments are recorded as
+// Transfer events in the DAG, making them visible in the activity feed and
+// network statistics. Optional; settlement proceeds without DAG recording if
+// not called.
+func (av *AutoValidator) SetDAG(d *dag.DAG) {
+	av.dag = d
+}
+
+// SetKeyPair sets the signing key used to author DAG events created by the
+// auto-validator. Optional; unsigned events are still added to the DAG when
+// not set, but they will fail signature verification by strict validators.
+func (av *AutoValidator) SetKeyPair(kp *crypto.KeyPair) {
+	av.kp = kp
 }
 
 // verifyEvidence dispatches to the VerifierRegistry when wired, or falls back
@@ -408,9 +432,42 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score) {
 			av.treasuryID, treasuryAmount,
 		); err != nil {
 			slog.Error("auto-validator: could not release escrow for task", "task_id", task.ID, "err", err)
-		} else if av.feeCollector != nil && fee > 0 {
-			av.feeCollector.TrackFee(fee, burned, treasuryAmount)
-			slog.Info("auto-validator: collected fee", "fee", fee, "task_id", task.ID, "net_to_worker", netAmount)
+		} else {
+			if av.feeCollector != nil && fee > 0 {
+				av.feeCollector.TrackFee(fee, burned, treasuryAmount)
+				slog.Info("auto-validator: collected fee", "fee", fee, "task_id", task.ID, "net_to_worker", netAmount)
+			}
+			// Record the payout as a Transfer event in the DAG so the activity
+			// feed shows task settlements alongside peer-to-peer transfers.
+			if av.dag != nil {
+				tips := av.dag.Tips()
+				priorTS := make(map[event.EventID]uint64, len(tips))
+				for _, ref := range tips {
+					if ev, err := av.dag.Get(ref); err == nil {
+						priorTS[ref] = ev.CausalTimestamp
+					}
+				}
+				e, err := event.New(
+					event.EventTypeTransfer,
+					tips,
+					event.TransferPayload{
+						FromAgent: "escrow:" + task.ID,
+						ToAgent:   string(task.ClaimerID),
+						Amount:    netAmount,
+						Currency:  "AET",
+						Memo:      fmt.Sprintf("task-settlement:%s", task.ID),
+					},
+					string(av.validatorID),
+					priorTS,
+					0,
+				)
+				if err == nil {
+					if av.kp != nil {
+						_ = crypto.SignEvent(e, av.kp)
+					}
+					_ = av.dag.Add(e)
+				}
+			}
 		}
 	}
 

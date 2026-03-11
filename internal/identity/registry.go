@@ -15,6 +15,7 @@ import (
 type identityPersistence interface {
 	PutIdentity(fp *CapabilityFingerprint) error
 	AllIdentities() ([]*CapabilityFingerprint, error)
+	DeleteIdentity(id crypto.AgentID) error
 }
 
 // Sentinel errors for programmatic handling by callers.
@@ -357,6 +358,25 @@ func (r *Registry) All(limit, offset int) []*CapabilityFingerprint {
 		result = result[:limit]
 	}
 	return result
+}
+
+// Remove deletes the agent's fingerprint from the registry and the backing store.
+// Returns nil when the agent does not exist (idempotent). Use only for
+// testnet ghost-agent cleanup; on mainnet identity removal is not supported.
+func (r *Registry) Remove(agentID crypto.AgentID) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, ok := r.agents[agentID]; !ok {
+		return nil // already absent — idempotent
+	}
+	delete(r.agents, agentID)
+	if r.store != nil {
+		if err := r.store.DeleteIdentity(agentID); err != nil {
+			return fmt.Errorf("identity: remove %s from store: %w", agentID, err)
+		}
+	}
+	return nil
 }
 
 // getRaw returns the raw stored pointer for agentID without cloning.

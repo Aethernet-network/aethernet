@@ -36,6 +36,7 @@ import (
 
 	"github.com/Aethernet-network/aethernet/internal/api"
 	"github.com/Aethernet-network/aethernet/internal/autovalidator"
+	"github.com/Aethernet-network/aethernet/internal/cloudmap"
 	"github.com/Aethernet-network/aethernet/internal/config"
 	"github.com/Aethernet-network/aethernet/internal/consensus"
 	"github.com/Aethernet-network/aethernet/internal/evidence"
@@ -294,6 +295,7 @@ type nodeStack struct {
 	platformKeys    *platformpkg.KeyManager
 	taskRouter      *router.Router
 	peerDiscovery   *network.PeerDiscovery
+	cloudmapReg     *cloudmap.Registrar
 }
 
 // taskManagerSource adapts *tasks.TaskManager to the router.TaskSource interface,
@@ -571,9 +573,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	// participation so its 80% fee share lands in a spendable balance and it
 	// can participate in transfers with collateral at risk.
 	const (
-		tvValidatorFundTarget = uint64(100_000_000) // 100 AET target balance
-		tvValidatorMinBalance = uint64(10_000_000)  // 10 AET top-up threshold
-		tvValidatorStakeAmt   = uint64(50_000_000)  // 50 AET stake
+		tvValidatorFundTarget = uint64(200_000_000_000) // 200,000 AET target balance
+		tvValidatorMinBalance = uint64(10_000_000_000)  // 10,000 AET top-up threshold
+		tvValidatorStakeAmt   = uint64(50_000_000_000)  // 50,000 AET stake
 	)
 	tvInitialBal, _ := stack.transfer.Balance(testnetValidatorID)
 	tvStakedBefore := stack.stakeManager.StakedAmount(testnetValidatorID)
@@ -620,6 +622,8 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	av.SetFeeCollector(stack.feeCollector, crypto.AgentID(genesis.BucketTreasury))
 	av.SetGenerationLedger(stack.generation)
 	av.SetRegistry(stack.reg)
+	av.SetDAG(stack.dag)
+	av.SetKeyPair(stack.kp)
 	vr := evidence.NewVerifierRegistry()
 	vr.SetPassThresholds(cfg.Evidence.CodePassThreshold, cfg.Evidence.DataPassThreshold, cfg.Evidence.ContentPassThreshold)
 	av.SetVerifierRegistry(vr)
@@ -817,6 +821,10 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 // stopStack tears down the API server, network node, OCS engine, and persistence
 // store in safe reverse-startup order.
 func stopStack(node *network.Node, stack *nodeStack) {
+	// Deregister from Cloud Map before stopping everything else so the DNS
+	// entry is removed while the node is still partially functional.
+	stack.cloudmapReg.Stop()
+
 	if stack.peerDiscovery != nil {
 		stack.peerDiscovery.Stop()
 	}
@@ -1006,6 +1014,42 @@ func cmdStart() {
 	}
 
 	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, *enableMarketplace, cfg, *noAuth)
+
+	// AWS Cloud Map registration — auto-registers this node's private IP so other
+	// ECS tasks can discover peers via DNS. No-op when
+	// AETHERNET_CLOUDMAP_SERVICE_ID is not set (non-ECS deployments).
+	_, p2pPortStr, _ := net.SplitHostPort(*p2pAddr)
+	_, apiPortStr, _ := net.SplitHostPort(*apiListenAddr)
+	reg := cloudmap.NewRegistrar(p2pPortStr, apiPortStr)
+	reg.Start()
+	stack.cloudmapReg = reg
+
+	// One-time cleanup: remove ghost agents (0 balance, 0 stake, 0 tasks) that
+	// were registered by an older binary before the TransferFromBucket onboarding
+	// fix. Gated to AETHERNET_TESTNET=true and idempotent via a store meta key.
+	if os.Getenv("AETHERNET_TESTNET") == "true" && stack.store != nil {
+		const ghostCleanKey = "seed_agents_cleaned"
+		if _, err := stack.store.GetMeta(ghostCleanKey); err != nil {
+			cleaned := 0
+			for _, fp := range stack.reg.All(0, 0) {
+				if fp.TasksCompleted > 0 || fp.TasksFailed > 0 {
+					continue
+				}
+				bal, _ := stack.transfer.Balance(fp.AgentID)
+				staked := uint64(0)
+				if stack.stakeManager != nil {
+					staked = stack.stakeManager.StakedAmount(fp.AgentID)
+				}
+				if bal == 0 && staked == 0 {
+					if err := stack.reg.Remove(fp.AgentID); err == nil {
+						cleaned++
+					}
+				}
+			}
+			_ = stack.store.PutMeta(ghostCleanKey, []byte("1"))
+			slog.Info("testnet: ghost agent cleanup complete", "removed", cleaned)
+		}
+	}
 
 	// DNS-based peer discovery: periodically resolve a DNS name and connect to
 	// any new IP addresses it returns. Designed for AWS Cloud Map or any other

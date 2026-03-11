@@ -13,6 +13,7 @@ package store
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -349,6 +350,18 @@ func (s *Store) GetIdentity(id crypto.AgentID) (*identity.CapabilityFingerprint,
 		return nil, fmt.Errorf("store: get identity %s: %w", id, err)
 	}
 	return &fp, nil
+}
+
+// DeleteIdentity removes the CapabilityFingerprint for the given agentID from
+// the store. Returns nil when the key does not exist (idempotent delete).
+func (s *Store) DeleteIdentity(id crypto.AgentID) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		err := txn.Delete([]byte(prefixIdentity + string(id)))
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil
+		}
+		return err
+	})
 }
 
 // AllIdentities returns every CapabilityFingerprint in the store in unspecified order.

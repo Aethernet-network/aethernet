@@ -2307,14 +2307,29 @@ func (s *Server) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
 			lastAct := s.stakeManager.LastActivity(fp.AgentID)
 			trustLimit = staking.TrustLimitFull(staked, fp.TasksCompleted, since, lastAct, now)
 		}
-		// Use live reputation score from the reputation manager when available;
-		// fall back to the identity fingerprint's cached score otherwise.
+		// Use live reputation score from the reputation manager when available.
+		// Compute a quality-weighted score: for each category, weight the
+		// average verification score by completion rate and task volume, then
+		// normalise across all categories. This rewards quality over raw volume.
+		// Falls back to identity fingerprint cached score when no manager is wired.
 		repScore := fp.ReputationScore
 		tasksCompleted := fp.TasksCompleted
 		if s.reputationMgr != nil {
 			rep := s.reputationMgr.GetReputation(fp.AgentID)
-			repScore = uint64(rep.OverallScore)
 			tasksCompleted = rep.TotalCompleted
+			if len(rep.Categories) > 0 {
+				var scoreSum, weightSum float64
+				for _, cat := range rep.Categories {
+					w := float64(cat.TasksCompleted)
+					scoreSum += cat.AvgScore * cat.CompletionRate() * w
+					weightSum += w
+				}
+				if weightSum > 0 {
+					repScore = uint64(scoreSum / weightSum * 100)
+				}
+			} else {
+				repScore = uint64(rep.OverallScore)
+			}
 		}
 		entries = append(entries, leaderboardEntry{
 			AgentID:         string(fp.AgentID),
