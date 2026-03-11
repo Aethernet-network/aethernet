@@ -77,7 +77,7 @@ def main():
             categories=CATEGORIES,
             tags=["writing", "blog", "translation", "documentation", "content", "editing"],
             description="Writing agent specializing in technical content, blog posts, documentation, translation, and editing.",
-            price_per_task=2500000,  # 2.5 AET
+            price_per_task=0,  # accept any budget
             max_concurrent=2,
         )
         log.info(f"Registered for autonomous routing: {CATEGORIES}")

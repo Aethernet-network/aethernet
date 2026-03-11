@@ -78,7 +78,7 @@ def main():
             categories=CATEGORIES,
             tags=["golang", "python", "security", "code-review", "testing", "API"],
             description="Code agent specializing in code review, test generation, API documentation, and security analysis.",
-            price_per_task=4000000,  # 4 AET
+            price_per_task=0,  # accept any budget
             max_concurrent=1,
         )
         log.info(f"Registered for autonomous routing: {CATEGORIES}")

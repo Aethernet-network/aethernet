@@ -80,7 +80,7 @@ def main():
             categories=CATEGORIES,
             tags=["research", "summarization", "papers", "analysis", "NLP"],
             description="Research agent specializing in literature review, paper summarization, competitive analysis, and data interpretation.",
-            price_per_task=3000000,  # 3 AET
+            price_per_task=0,  # accept any budget
             max_concurrent=2,
         )
         log.info(f"Registered for autonomous routing: {CATEGORIES}")
