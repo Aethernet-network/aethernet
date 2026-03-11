@@ -98,6 +98,37 @@ TASKS = [
 ]
 
 
+def retrieve_result(client: AetherNetClient, task_id: str) -> None:
+    """Fetch and print the result for a completed task.
+
+    For public tasks the full output is printed directly.
+    For encrypted tasks the ciphertext is decrypted using the poster's
+    local keypair before printing.
+    """
+    try:
+        r = client.get_task_result(task_id)
+    except Exception as e:
+        log.error(f"Could not fetch result for {task_id}: {e}")
+        return
+
+    status = r.get("status", "unknown")
+    method = r.get("delivery_method", "public")
+    content = r.get("result_content", "")
+
+    if not content:
+        log.info(f"  Task {task_id}: status={status}, no result content yet")
+        return
+
+    if r.get("result_encrypted"):
+        try:
+            content = client.decrypt_from_agent(content)
+            log.info(f"  Task {task_id} [{method}] (decrypted): {content[:200]}")
+        except Exception as e:
+            log.warning(f"  Task {task_id}: decryption failed: {e}")
+    else:
+        log.info(f"  Task {task_id} [{method}]: {content[:200]}")
+
+
 def main():
     log.info("AetherNet Task Poster")
     log.info(f"Testnet: {TESTNET}")
@@ -115,19 +146,22 @@ def main():
     except Exception as e:
         log.info(f"Already registered or error: {e}")
 
-    # Post tasks in random order
+    # Post tasks in random order — use public delivery for testnet.
     shuffled = list(TASKS)
     random.shuffle(shuffled)
 
     posted = 0
+    posted_ids = []
     for task in shuffled:
         try:
-            client.post_task(
+            result = client.post_task(
                 title=task["title"],
                 description=task["description"],
                 category=task["category"],
                 budget=task["budget"],
+                delivery_method="public",
             )
+            posted_ids.append(result.get("id", ""))
             log.info(f"Posted: {task['title']} ({task['budget'] / 1_000_000:.1f} AET)")
             posted += 1
         except Exception as e:
@@ -136,6 +170,7 @@ def main():
         time.sleep(2)  # don't flood
 
     log.info(f"Posted {posted}/{len(shuffled)} tasks. Done.")
+    log.info("Run again with --results flag (or call retrieve_result) to fetch completed outputs.")
 
 
 if __name__ == "__main__":

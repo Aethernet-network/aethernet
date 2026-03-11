@@ -276,3 +276,80 @@ func TestStats(t *testing.T) {
 
 	_ = t1 // suppress unused warning
 }
+
+// ---------------------------------------------------------------------------
+// TestPostTask_DeliveryMethod
+// ---------------------------------------------------------------------------
+
+func TestPostTask_DeliveryMethod_Default(t *testing.T) {
+	m := tasks.NewTaskManager()
+	task, err := m.PostTask("alice", "Write a report", "", "writing", 1_000)
+	if err != nil {
+		t.Fatalf("PostTask: %v", err)
+	}
+	if task.DeliveryMethod != "public" {
+		t.Errorf("DeliveryMethod = %q; want %q", task.DeliveryMethod, "public")
+	}
+}
+
+func TestPostTask_DeliveryMethod_Encrypted(t *testing.T) {
+	m := tasks.NewTaskManager()
+	task, err := m.PostTask("alice", "Generate secret", "", "code", 1_000, "encrypted")
+	if err != nil {
+		t.Fatalf("PostTask: %v", err)
+	}
+	if task.DeliveryMethod != "encrypted" {
+		t.Errorf("DeliveryMethod = %q; want %q", task.DeliveryMethod, "encrypted")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestSetResultContent
+// ---------------------------------------------------------------------------
+
+func TestSetResultContent(t *testing.T) {
+	m := tasks.NewTaskManager()
+	task, _ := m.PostTask("alice", "Analyze data", "", "data", 2_000)
+	_ = m.ClaimTask(task.ID, "bob")
+	_ = m.SubmitResult(task.ID, "bob", "sha256:xyz", "summary", "")
+
+	if err := m.SetResultContent(task.ID, "full output text here", false); err != nil {
+		t.Fatalf("SetResultContent: %v", err)
+	}
+
+	got, _ := m.Get(task.ID)
+	if got.ResultContent != "full output text here" {
+		t.Errorf("ResultContent = %q; want %q", got.ResultContent, "full output text here")
+	}
+	if got.ResultEncrypted {
+		t.Error("ResultEncrypted should be false")
+	}
+}
+
+func TestSetResultContent_Encrypted(t *testing.T) {
+	m := tasks.NewTaskManager()
+	task, _ := m.PostTask("alice", "Secure task", "", "code", 1_500)
+	_ = m.ClaimTask(task.ID, "bob")
+	_ = m.SubmitResult(task.ID, "bob", "sha256:abc", "summary", "")
+
+	cipher := "base64ciphertext=="
+	if err := m.SetResultContent(task.ID, cipher, true); err != nil {
+		t.Fatalf("SetResultContent: %v", err)
+	}
+
+	got, _ := m.Get(task.ID)
+	if got.ResultContent != cipher {
+		t.Errorf("ResultContent = %q; want %q", got.ResultContent, cipher)
+	}
+	if !got.ResultEncrypted {
+		t.Error("ResultEncrypted should be true")
+	}
+}
+
+func TestSetResultContent_NotFound(t *testing.T) {
+	m := tasks.NewTaskManager()
+	err := m.SetResultContent("nonexistent", "content", false)
+	if !errors.Is(err, tasks.ErrTaskNotFound) {
+		t.Errorf("expected ErrTaskNotFound; got %v", err)
+	}
+}

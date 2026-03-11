@@ -138,11 +138,26 @@ def main():
                     },
                 )
 
+                # Deliver full output — encrypt when the poster requested it.
+                delivery_method = task.get("delivery_method", "public")
+                result_content = output
+                result_encrypted = False
+                if delivery_method == "encrypted":
+                    poster_id = task.get("poster_id", "")
+                    try:
+                        result_content = client.encrypt_for_agent(poster_id, output)
+                        result_encrypted = True
+                        log.info(f"Encrypted result for poster: {poster_id}")
+                    except Exception as e:
+                        log.warning(f"Encryption failed, delivering public: {e}")
+
                 try:
                     client.submit_task_result(
                         task_id=task_id,
                         evidence=evidence,
                         claimer_id=AGENT_ID,
+                        result_content=result_content,
+                        result_encrypted=result_encrypted,
                     )
                     log.info(f"Submitted result for: {title}")
                 except Exception as e:

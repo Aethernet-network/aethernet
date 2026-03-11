@@ -2114,3 +2114,139 @@ func TestGetEvent_SettlementStateOverlay(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// TestTaskResultDelivery — delivery_method + GET /v1/tasks/{id}/result
+// ---------------------------------------------------------------------------
+
+func TestTaskResultDelivery_Public(t *testing.T) {
+	setup := newTestSetup(t)
+	agentID := setup.kp.AgentID()
+	if err := setup.tl.FundAgent(agentID, 200_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
+	// Post a task with explicit public delivery_method.
+	postResp := postJSON(t, setup.ts, "/v1/tasks", map[string]any{
+		"title":           "Write report",
+		"budget":          uint64(100_000),
+		"delivery_method": "public",
+	})
+	if postResp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /v1/tasks: got %d; want 201", postResp.StatusCode)
+	}
+	var taskBody struct {
+		ID             string `json:"id"`
+		DeliveryMethod string `json:"delivery_method"`
+	}
+	decodeJSON(t, postResp, &taskBody)
+	if taskBody.DeliveryMethod != "public" {
+		t.Errorf("DeliveryMethod = %q; want %q", taskBody.DeliveryMethod, "public")
+	}
+
+	// Claim and submit with result_content.
+	postJSON(t, setup.ts, "/v1/tasks/"+taskBody.ID+"/claim", map[string]any{
+		"claimer_id": "worker-01",
+	})
+	submitResp := postJSON(t, setup.ts, "/v1/tasks/"+taskBody.ID+"/submit", map[string]any{
+		"claimer_id":     "worker-01",
+		"result_hash":    "sha256:abc",
+		"result_content": "This is the full report output.",
+	})
+	if submitResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST .../submit: got %d; want 200", submitResp.StatusCode)
+	}
+
+	// GET /v1/tasks/result/{id} must return the stored content.
+	resultResp := get(t, setup.ts, "/v1/tasks/result/"+taskBody.ID)
+	if resultResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET .../result: got %d; want 200", resultResp.StatusCode)
+	}
+	var result struct {
+		TaskID          string `json:"task_id"`
+		Status          string `json:"status"`
+		DeliveryMethod  string `json:"delivery_method"`
+		ResultContent   string `json:"result_content"`
+		ResultEncrypted bool   `json:"result_encrypted"`
+	}
+	decodeJSON(t, resultResp, &result)
+	if result.ResultContent != "This is the full report output." {
+		t.Errorf("ResultContent = %q; want full report", result.ResultContent)
+	}
+	if result.ResultEncrypted {
+		t.Error("ResultEncrypted should be false for public delivery")
+	}
+	if result.DeliveryMethod != "public" {
+		t.Errorf("DeliveryMethod = %q; want %q", result.DeliveryMethod, "public")
+	}
+}
+
+func TestTaskResultDelivery_Encrypted(t *testing.T) {
+	setup := newTestSetup(t)
+	agentID := setup.kp.AgentID()
+	if err := setup.tl.FundAgent(agentID, 200_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
+	// Post task requesting encrypted delivery.
+	postResp := postJSON(t, setup.ts, "/v1/tasks", map[string]any{
+		"title":           "Secret analysis",
+		"budget":          uint64(100_000),
+		"delivery_method": "encrypted",
+	})
+	if postResp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /v1/tasks: got %d; want 201", postResp.StatusCode)
+	}
+	var taskBody struct {
+		ID             string `json:"id"`
+		DeliveryMethod string `json:"delivery_method"`
+	}
+	decodeJSON(t, postResp, &taskBody)
+	if taskBody.DeliveryMethod != "encrypted" {
+		t.Errorf("DeliveryMethod = %q; want %q", taskBody.DeliveryMethod, "encrypted")
+	}
+
+	// Claim and submit with simulated ciphertext (base64 blob in tests).
+	postJSON(t, setup.ts, "/v1/tasks/"+taskBody.ID+"/claim", map[string]any{
+		"claimer_id": "crypto-worker",
+	})
+	fakeCipher := "c2ltdWxhdGVkY2lwaGVydGV4dA=="
+	submitResp := postJSON(t, setup.ts, "/v1/tasks/"+taskBody.ID+"/submit", map[string]any{
+		"claimer_id":       "crypto-worker",
+		"result_hash":      "sha256:def",
+		"result_content":   fakeCipher,
+		"result_encrypted": true,
+	})
+	if submitResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST .../submit: got %d; want 200", submitResp.StatusCode)
+	}
+
+	// GET /v1/tasks/result/{id} must surface the ciphertext with encrypted=true.
+	resultResp := get(t, setup.ts, "/v1/tasks/result/"+taskBody.ID)
+	if resultResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET .../result: got %d; want 200", resultResp.StatusCode)
+	}
+	var result struct {
+		ResultContent   string `json:"result_content"`
+		ResultEncrypted bool   `json:"result_encrypted"`
+		DeliveryMethod  string `json:"delivery_method"`
+	}
+	decodeJSON(t, resultResp, &result)
+	if result.ResultContent != fakeCipher {
+		t.Errorf("ResultContent = %q; want %q", result.ResultContent, fakeCipher)
+	}
+	if !result.ResultEncrypted {
+		t.Error("ResultEncrypted should be true")
+	}
+	if result.DeliveryMethod != "encrypted" {
+		t.Errorf("DeliveryMethod = %q; want %q", result.DeliveryMethod, "encrypted")
+	}
+}
+
+func TestTaskResultDelivery_NotFound(t *testing.T) {
+	setup := newTestSetup(t)
+	resp := get(t, setup.ts, "/v1/tasks/result/nonexistent-id")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET .../result for missing task: got %d; want 404", resp.StatusCode)
+	}
+}

@@ -19,6 +19,40 @@ from typing import Any, Dict, List, Optional, Union
 import requests
 
 
+# ---------------------------------------------------------------------------
+# Ed25519 ↔ X25519 key conversion helpers
+# ---------------------------------------------------------------------------
+
+def _ed25519_pub_to_x25519(pub_bytes: bytes) -> bytes:
+    """Convert a 32-byte Ed25519 public key to a 32-byte X25519 public key.
+
+    Both key types live on Curve25519 but use different coordinate systems.
+    This applies the standard Edwards-y → Montgomery-u mapping:
+        u = (1 + y) / (1 − y)  mod p    where  p = 2²⁵⁵ − 19
+    """
+    p = 2**255 - 19
+    # Ed25519 public key is the little-endian encoding of the Edwards y
+    # coordinate with the sign bit of x packed into the high bit of byte 31.
+    y = int.from_bytes(pub_bytes, "little") & ~(1 << 255)
+    u = (1 + y) * pow(1 - y, p - 2, p) % p
+    return u.to_bytes(32, "little")
+
+
+def _ed25519_seed_to_x25519(seed: bytes) -> bytes:
+    """Derive a 32-byte X25519 private key from a 32-byte Ed25519 seed.
+
+    The Ed25519 private scalar is SHA-512(seed)[:32] with the standard
+    clamping applied (RFC 7748 §5).
+    """
+    import hashlib
+
+    h = bytearray(hashlib.sha512(seed).digest()[:32])
+    h[0] &= 248   # clear bits 0, 1, 2
+    h[31] &= 127  # clear bit 7
+    h[31] |= 64   # set bit 6
+    return bytes(h)
+
+
 class Evidence:
     """Structured proof-of-work attached to a task submission.
 
@@ -537,6 +571,7 @@ class AetherNetClient:
         description: str = "",
         category: str = "",
         budget: int = 0,
+        delivery_method: str = "public",
     ) -> Dict[str, Any]:
         """Post a new task to the marketplace.
 
@@ -546,10 +581,14 @@ class AetherNetClient:
         is used (single-binary deployments).
 
         Args:
-            title:       Short task title.
-            description: Detailed task description.
-            category:    Capability category (e.g. "ml", "nlp", "code").
-            budget:      Task budget in micro-AET.
+            title:           Short task title.
+            description:     Detailed task description.
+            category:        Capability category (e.g. "ml", "nlp", "code").
+            budget:          Task budget in micro-AET.
+            delivery_method: ``"public"`` (default) — result is plaintext.
+                             ``"encrypted"`` — result is ECDH+AES-256-GCM ciphertext
+                             that only the poster can decrypt with
+                             :meth:`decrypt_from_agent`.
 
         Returns:
             The created task dict including ``id`` and ``status``.
@@ -559,6 +598,7 @@ class AetherNetClient:
             "description": description,
             "category": category,
             "budget": budget,
+            "delivery_method": delivery_method,
         }
         if self.agent_id:
             body["poster_id"] = self.agent_id
@@ -616,6 +656,8 @@ class AetherNetClient:
         result_note: Optional[str] = None,
         evidence: Optional["Evidence"] = None,
         claimer_id: str = "",
+        result_content: str = "",
+        result_encrypted: bool = False,
     ) -> Dict[str, Any]:
         """Submit a result for a claimed task.
 
@@ -623,11 +665,16 @@ class AetherNetClient:
         callers can continue passing *result_hash* alone — both work.
 
         Args:
-            task_id:     The task being worked on.
-            result_hash: Content-addressed hash of the deliverable (legacy).
-            result_note: Human-readable summary of the work performed.
-            evidence:    :class:`Evidence` instance; hash/summary extracted automatically.
-            claimer_id:  The claiming agent's ID; defaults to the node's own identity.
+            task_id:          The task being worked on.
+            result_hash:      Content-addressed hash of the deliverable (legacy).
+            result_note:      Human-readable summary of the work performed.
+            evidence:         :class:`Evidence` instance; hash/summary extracted automatically.
+            claimer_id:       The claiming agent's ID; defaults to the node's own identity.
+            result_content:   Full output string (plaintext or ciphertext) delivered to
+                              the poster.  For public tasks pass the raw output; for
+                              encrypted tasks pass the base64 ciphertext returned by
+                              :meth:`encrypt_for_agent`.
+            result_encrypted: ``True`` when *result_content* is ciphertext.
 
         Returns the updated task dict.
         """
@@ -645,10 +692,134 @@ class AetherNetClient:
                 body["result_hash"] = result_hash
             if result_note:
                 body["result_note"] = result_note
+        if result_content:
+            body["result_content"] = result_content
+            if result_encrypted:
+                body["result_encrypted"] = True
         effective_id = claimer_id or self.agent_id
         if effective_id:
             body["claimer_id"] = effective_id
         return self._post(f"/v1/tasks/{task_id}/submit", body)
+
+    def get_task_result(self, task_id: str) -> Dict[str, Any]:
+        """Fetch the result content for a task.
+
+        Returns a dict with ``task_id``, ``status``, ``delivery_method``,
+        ``result_content``, and ``result_encrypted``.
+
+        For public tasks ``result_content`` is the raw output string.
+        For encrypted tasks ``result_content`` is base64 ciphertext — call
+        :meth:`decrypt_from_agent` to recover the plaintext.
+        """
+        return self._get(f"/v1/tasks/result/{task_id}")
+
+    def encrypt_for_agent(self, agent_id: str, plaintext: str) -> str:
+        """Encrypt *plaintext* so that only *agent_id* can decrypt it.
+
+        Performs ephemeral ECDH key agreement using the recipient's Ed25519
+        public key (converted to X25519 Montgomery form) and encrypts with
+        AES-256-GCM.  The result is a base64-encoded blob:
+        ``ephemeral_pubkey(32 bytes) || iv(12 bytes) || ciphertext+tag``.
+
+        Requires the ``cryptography`` package (``pip install aethernet-sdk``).
+
+        Args:
+            agent_id:  The target agent whose public key is fetched from the node.
+            plaintext: UTF-8 string to encrypt.
+
+        Returns:
+            Base64-encoded ciphertext string.
+        """
+        import base64
+        import os
+
+        from cryptography.hazmat.primitives.asymmetric.x25519 import (
+            X25519PrivateKey,
+            X25519PublicKey,
+        )
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.hashes import SHA256
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+        profile = self._get(f"/v1/agents/{agent_id}")
+        # Go serialises []byte as standard base64 in JSON.
+        pub_b64 = profile.get("public_key", "")
+        if not pub_b64:
+            raise ValueError(f"agent {agent_id!r} has no public_key in registry")
+        pub_bytes = base64.b64decode(pub_b64)
+        if len(pub_bytes) != 32:
+            raise ValueError(f"expected 32-byte Ed25519 public key, got {len(pub_bytes)}")
+
+        x25519_pub_bytes = _ed25519_pub_to_x25519(pub_bytes)
+        recipient = X25519PublicKey.from_public_bytes(x25519_pub_bytes)
+
+        ephemeral_priv = X25519PrivateKey.generate()
+        ephemeral_pub_bytes = ephemeral_priv.public_key().public_bytes_raw()
+        shared_secret = ephemeral_priv.exchange(recipient)
+
+        key = HKDF(algorithm=SHA256(), length=32, salt=None, info=b"aethernet-encrypt").derive(shared_secret)
+        iv = os.urandom(12)
+        ciphertext = AESGCM(key).encrypt(iv, plaintext.encode(), None)
+        return base64.b64encode(ephemeral_pub_bytes + iv + ciphertext).decode()
+
+    def decrypt_from_agent(self, ciphertext_b64: str) -> str:
+        """Decrypt a ciphertext produced by :meth:`encrypt_for_agent`.
+
+        Loads the local agent's Ed25519 private key from
+        ``~/.aethernet/keys/{agent_id}.key``, converts it to X25519, and
+        decrypts the AES-256-GCM payload.
+
+        Requires the ``cryptography`` package.
+
+        Args:
+            ciphertext_b64: Base64 blob returned by :meth:`encrypt_for_agent`.
+
+        Returns:
+            Decrypted UTF-8 plaintext string.
+
+        Raises:
+            ValueError: When no keypair is found or decryption fails.
+        """
+        import base64
+        import binascii
+        import json
+        import os
+
+        from cryptography.hazmat.primitives.asymmetric.x25519 import (
+            X25519PrivateKey,
+            X25519PublicKey,
+        )
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.hashes import SHA256
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+        agent_name = self.agent_id
+        if not agent_name:
+            raise ValueError("agent_id not set on client")
+        key_path = os.path.expanduser(f"~/.aethernet/keys/{agent_name}.key")
+        if not os.path.exists(key_path):
+            raise ValueError(f"no keypair found at {key_path}")
+        with open(key_path) as f:
+            saved = json.load(f)
+        priv_bytes = binascii.unhexlify(saved["private_key"])
+
+        x25519_priv_bytes = _ed25519_seed_to_x25519(priv_bytes)
+        my_priv = X25519PrivateKey.from_private_bytes(x25519_priv_bytes)
+
+        data = base64.b64decode(ciphertext_b64)
+        if len(data) < 32 + 12 + 16:
+            raise ValueError("ciphertext blob is too short")
+        ephemeral_pub = X25519PublicKey.from_public_bytes(data[:32])
+        iv = data[32:44]
+        ciphertext = data[44:]
+
+        shared_secret = my_priv.exchange(ephemeral_pub)
+        key = HKDF(algorithm=SHA256(), length=32, salt=None, info=b"aethernet-encrypt").derive(shared_secret)
+        try:
+            plaintext = AESGCM(key).decrypt(iv, ciphertext, None)
+        except Exception as e:
+            raise ValueError(f"decryption failed: {e}") from e
+        return plaintext.decode()
 
     def approve_task(self, task_id: str, approver_id: str = "") -> Dict[str, Any]:
         """Approve a submitted task, releasing the escrowed budget to the worker.

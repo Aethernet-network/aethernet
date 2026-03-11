@@ -103,6 +103,13 @@ type Task struct {
 	// an evidence block (output_preview, metrics, output_type, etc.).
 	// The auto-validator uses this for full-fidelity quality scoring.
 	SubmittedEvidence *evidence.Evidence `json:"submitted_evidence,omitempty"`
+	// Delivery fields — control how the result content reaches the poster.
+	// DeliveryMethod is "public" (default) or "encrypted". For public tasks
+	// ResultContent holds the plaintext output. For encrypted tasks it holds
+	// ECDH+AES-256-GCM ciphertext that only the poster can decrypt.
+	DeliveryMethod  string `json:"delivery_method,omitempty"`
+	ResultContent   string `json:"result_content,omitempty"`
+	ResultEncrypted bool   `json:"result_encrypted,omitempty"`
 }
 
 // taskStore is the subset of store.Store used by TaskManager.
@@ -257,8 +264,11 @@ func (m *TaskManager) LoadFromStore(s taskStore) error {
 }
 
 // PostTask creates a new task in Open state.
+// An optional deliveryMethod may be passed as the last argument; accepted
+// values are "public" (default) and "encrypted". Existing callers that omit
+// this argument continue to work unchanged.
 // Returns an error when title is empty, budget is 0, or posterID is empty.
-func (m *TaskManager) PostTask(posterID, title, description, category string, budget uint64) (*Task, error) {
+func (m *TaskManager) PostTask(posterID, title, description, category string, budget uint64, deliveryMethod ...string) (*Task, error) {
 	if title == "" {
 		return nil, fmt.Errorf("tasks: title required")
 	}
@@ -269,16 +279,22 @@ func (m *TaskManager) PostTask(posterID, title, description, category string, bu
 		return nil, fmt.Errorf("tasks: poster_id required")
 	}
 
+	dm := "public"
+	if len(deliveryMethod) > 0 && deliveryMethod[0] != "" {
+		dm = deliveryMethod[0]
+	}
+
 	now := time.Now()
 	task := &Task{
-		ID:          generateTaskID(posterID, title, now),
-		Title:       title,
-		Description: description,
-		Category:    category,
-		PosterID:    posterID,
-		Budget:      budget,
-		Status:      TaskStatusOpen,
-		PostedAt:    now.UnixNano(),
+		ID:             generateTaskID(posterID, title, now),
+		Title:          title,
+		Description:    description,
+		Category:       category,
+		PosterID:       posterID,
+		Budget:         budget,
+		Status:         TaskStatusOpen,
+		PostedAt:       now.UnixNano(),
+		DeliveryMethod: dm,
 	}
 
 	m.mu.Lock()
@@ -377,6 +393,25 @@ func (m *TaskManager) SubmitResult(taskID string, claimerID crypto.AgentID, resu
 	}
 	task.Status = TaskStatusSubmitted
 	task.SubmittedAt = time.Now().UnixNano()
+	m.persist(task)
+	return nil
+}
+
+// SetResultContent stores the full result output on a submitted task.
+// content is the raw output string (plaintext or ciphertext depending on the
+// delivery method). encrypted should be true when the content is ciphertext.
+// May be called on tasks in Submitted, Completed, or Disputed state.
+// Returns ErrTaskNotFound when the task doesn't exist.
+func (m *TaskManager) SetResultContent(taskID, content string, encrypted bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
+	}
+	task.ResultContent = content
+	task.ResultEncrypted = encrypted
 	m.persist(task)
 	return nil
 }

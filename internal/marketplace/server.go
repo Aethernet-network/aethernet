@@ -199,6 +199,7 @@ func (s *Server) buildMux() *http.ServeMux {
 	mux.HandleFunc("GET /v1/tasks/subtasks/{id}", s.handleGetSubtasks)
 	mux.HandleFunc("GET /v1/tasks", s.handleListTasks)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.handleGetTask)
+	mux.HandleFunc("GET /v1/tasks/result/{id}", s.handleGetTaskResult)
 	mux.HandleFunc("POST /v1/tasks/{id}/claim", s.handleClaimTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/submit", s.handleSubmitTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/approve", s.handleApproveTask)
@@ -246,12 +247,13 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		PosterID    string   `json:"poster_id"`
-		Title       string   `json:"title"`
-		Description string   `json:"description"`
-		Category    string   `json:"category"`
-		Budget      uint64   `json:"budget"`
-		Tags        []string `json:"tags,omitempty"`
+		PosterID       string   `json:"poster_id"`
+		Title          string   `json:"title"`
+		Description    string   `json:"description"`
+		Category       string   `json:"category"`
+		Budget         uint64   `json:"budget"`
+		Tags           []string `json:"tags,omitempty"`
+		DeliveryMethod string   `json:"delivery_method,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -262,7 +264,7 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := s.taskMgr.PostTask(req.PosterID, req.Title, req.Description, req.Category, req.Budget)
+	task, err := s.taskMgr.PostTask(req.PosterID, req.Title, req.Description, req.Category, req.Budget, req.DeliveryMethod)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -361,11 +363,13 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	var req struct {
-		ClaimerID  string             `json:"claimer_id"`
-		ResultHash string             `json:"result_hash"`
-		ResultNote string             `json:"result_note,omitempty"`
-		ResultURI  string             `json:"result_uri,omitempty"`
-		Evidence   *evidence.Evidence `json:"evidence,omitempty"`
+		ClaimerID       string             `json:"claimer_id"`
+		ResultHash      string             `json:"result_hash"`
+		ResultNote      string             `json:"result_note,omitempty"`
+		ResultURI       string             `json:"result_uri,omitempty"`
+		Evidence        *evidence.Evidence `json:"evidence,omitempty"`
+		ResultContent   string             `json:"result_content,omitempty"`
+		ResultEncrypted bool               `json:"result_encrypted,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -392,6 +396,12 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.ResultContent != "" {
+		if err := s.taskMgr.SetResultContent(id, req.ResultContent, req.ResultEncrypted); err != nil {
+			slog.Warn("marketplace: could not store result content", "task_id", id, "err", err)
+		}
+	}
+
 	if req.Evidence != nil {
 		if t2, err2 := s.taskMgr.Get(id); err2 == nil {
 			verifier := evidence.NewVerifier()
@@ -403,6 +413,26 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 
 	task, _ := s.taskMgr.Get(id)
 	writeJSON(w, http.StatusOK, task)
+}
+
+func (s *Server) handleGetTaskResult(w http.ResponseWriter, r *http.Request) {
+	if s.taskMgr == nil {
+		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
+		return
+	}
+	taskID := r.PathValue("id")
+	task, err := s.taskMgr.Get(taskID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"task_id":          task.ID,
+		"status":           task.Status,
+		"delivery_method":  task.DeliveryMethod,
+		"result_content":   task.ResultContent,
+		"result_encrypted": task.ResultEncrypted,
+	})
 }
 
 func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {

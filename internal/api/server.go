@@ -328,6 +328,7 @@ func (s *Server) registerL3Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/tasks/subtasks/{id}", s.handleGetSubtasks)
 	mux.HandleFunc("GET /v1/tasks", s.handleListTasks)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.handleGetTask)
+	mux.HandleFunc("GET /v1/tasks/result/{id}", s.handleGetTaskResult)
 	mux.HandleFunc("POST /v1/tasks/{id}/claim", s.handleClaimTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/submit", s.handleSubmitTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/approve", s.handleApproveTask)
@@ -794,11 +795,12 @@ type unstakeOpResponse struct {
 // ---------------------------------------------------------------------------
 
 type postTaskRequest struct {
-	PosterID    string `json:"poster_id,omitempty"`
-	Title       string `json:"title"`
-	Description string `json:"description,omitempty"`
-	Category    string `json:"category,omitempty"`
-	Budget      uint64 `json:"budget"`
+	PosterID       string `json:"poster_id,omitempty"`
+	Title          string `json:"title"`
+	Description    string `json:"description,omitempty"`
+	Category       string `json:"category,omitempty"`
+	Budget         uint64 `json:"budget"`
+	DeliveryMethod string `json:"delivery_method,omitempty"` // "public" (default) or "encrypted"
 }
 
 type claimTaskRequest struct {
@@ -807,11 +809,13 @@ type claimTaskRequest struct {
 }
 
 type submitTaskRequest struct {
-	ClaimerID  string             `json:"claimer_id,omitempty"`
-	ResultHash string             `json:"result_hash"`
-	ResultNote string             `json:"result_note,omitempty"`
-	ResultURI  string             `json:"result_uri,omitempty"`
-	Evidence   *evidence.Evidence `json:"evidence,omitempty"`
+	ClaimerID       string             `json:"claimer_id,omitempty"`
+	ResultHash      string             `json:"result_hash"`
+	ResultNote      string             `json:"result_note,omitempty"`
+	ResultURI       string             `json:"result_uri,omitempty"`
+	Evidence        *evidence.Evidence `json:"evidence,omitempty"`
+	ResultContent   string             `json:"result_content,omitempty"`   // full output (plaintext or ciphertext)
+	ResultEncrypted bool               `json:"result_encrypted,omitempty"` // true when content is ciphertext
 }
 
 type approveTaskRequest struct {
@@ -886,7 +890,7 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := s.taskMgr.PostTask(posterID, req.Title, req.Description, req.Category, req.Budget)
+	task, err := s.taskMgr.PostTask(posterID, req.Title, req.Description, req.Category, req.Budget, req.DeliveryMethod)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1051,8 +1055,41 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Store the full result content when the worker provides it.
+	if req.ResultContent != "" {
+		if err := s.taskMgr.SetResultContent(taskID, req.ResultContent, req.ResultEncrypted); err != nil {
+			slog.Warn("handleSubmitTask: could not store result content", "task_id", taskID, "err", err)
+		}
+	}
+
 	task, _ := s.taskMgr.Get(taskID)
 	writeJSON(w, http.StatusOK, task)
+}
+
+// handleGetTaskResult handles GET /v1/tasks/{id}/result. It returns only the
+// result delivery fields so the poster can retrieve output without fetching
+// the full task object. For encrypted tasks the content is base64 ciphertext —
+// only the original poster (who holds the private key) can decrypt it.
+func (s *Server) handleGetTaskResult(w http.ResponseWriter, r *http.Request) {
+	if s.taskMgr == nil {
+		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
+		return
+	}
+	// Route registered as GET /v1/tasks/result/{id} (noun-first) to avoid
+	// conflicting with GET /v1/tasks/agent/{agent_id} in Go 1.22 routing.
+	taskID := r.PathValue("id")
+	task, err := s.taskMgr.Get(taskID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"task_id":          task.ID,
+		"status":           task.Status,
+		"delivery_method":  task.DeliveryMethod,
+		"result_content":   task.ResultContent,
+		"result_encrypted": task.ResultEncrypted,
+	})
 }
 
 // handleApproveTask handles POST /v1/tasks/{id}/approve. It releases the escrowed
