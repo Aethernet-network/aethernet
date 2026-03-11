@@ -25,6 +25,13 @@ var (
 
 	// ErrMaxPeers is returned by Connect and acceptLoop when the peers map is full.
 	ErrMaxPeers = errors.New("network: max peers reached")
+
+	// ErrSelfConnection is returned by Connect when the target address resolves
+	// to this node itself — either because the IP matches a local interface and
+	// the port matches the node's own listener, or because the handshake reveals
+	// an identical AgentID. Both layers prevent wasted goroutines and broken
+	// peer state caused by a node connecting to its own DNS entry.
+	ErrSelfConnection = errors.New("network: refusing self-connection")
 )
 
 // NodeConfig holds the tunable parameters for a Node.
@@ -98,6 +105,44 @@ func (c *NodeConfig) voteMaxAge() int64 {
 // Slightly larger than the 60s stale-vote window so that any relay of an already-
 // expired vote is still recognised and dropped before forwarding.
 const voteSeenTTL = 90 * time.Second
+
+// localIPSet returns a set of all IP address strings bound to local network
+// interfaces. Used to detect self-connection attempts. Errors from the OS are
+// silently ignored — an empty set means no self-connection filtering.
+func localIPSet() map[string]bool {
+	ips := make(map[string]bool)
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ips
+	}
+	for _, addr := range addrs {
+		switch v := addr.(type) {
+		case *net.IPNet:
+			ips[v.IP.String()] = true
+		case *net.IPAddr:
+			ips[v.IP.String()] = true
+		}
+	}
+	return ips
+}
+
+// isSelfAddr reports whether address (host:port) refers to this node itself.
+// It returns true when host is one of the node's local interface IPs and the
+// port matches the port this node is listening on.
+func (n *Node) isSelfAddr(address string) bool {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	_, listenPort, err := net.SplitHostPort(n.ListenAddr())
+	if err != nil {
+		return false
+	}
+	if port != listenPort {
+		return false
+	}
+	return localIPSet()[host]
+}
 
 // Node is a running AetherNet participant. It manages peer connections, drives
 // the DAG sync protocol, and routes incoming messages to the local DAG.
@@ -218,6 +263,15 @@ func (n *Node) Stop() {
 // Connect dials the node at address, performs the two-way challenge-response
 // handshake, registers the peer, and starts its read/write goroutines.
 func (n *Node) Connect(address string) (*Peer, error) {
+	// Layer 1: IP-level self-connection guard. Skip immediately when the target
+	// address resolves to one of our own interface IPs on our listen port.
+	// This fires before any TCP dial, avoiding wasted goroutines and broken
+	// peer state on the node's own DNS entry (e.g. all nodes behind one name).
+	if n.isSelfAddr(address) {
+		slog.Debug("network: skipping self-connection (IP match)", "addr", address)
+		return nil, ErrSelfConnection
+	}
+
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		return nil, fmt.Errorf("network: dial %s: %w", address, err)
@@ -276,6 +330,16 @@ func (n *Node) Connect(address string) (*Peer, error) {
 	if err := json.Unmarshal(reply.Payload, &theirHS); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("network: decode handshake response: %w", err)
+	}
+
+	// Layer 2: AgentID self-connection guard (defense-in-depth). Even when the
+	// IP check above passes (e.g. NAT or load balancer routes traffic back to
+	// this node), the handshake will reveal the same AgentID. Catch it here and
+	// close cleanly rather than registering a looping peer entry.
+	if theirHS.AgentID == n.config.AgentID {
+		conn.Close()
+		slog.Debug("network: skipping self-connection (AgentID match)", "agent_id", n.config.AgentID)
+		return nil, ErrSelfConnection
 	}
 
 	// When the local node has a keypair, require the remote peer to authenticate.

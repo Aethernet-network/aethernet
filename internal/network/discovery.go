@@ -101,6 +101,15 @@ func (pd *PeerDiscovery) resolve() {
 	for _, ip := range addrs {
 		addr := net.JoinHostPort(ip, pd.port)
 
+		// Skip our own address before touching knownPeers or dialling.
+		// isSelfAddr compares the IP against all local interfaces and the port
+		// against the node's own listen port, so nodes on the same machine but
+		// different ports (e.g. in tests) are not incorrectly skipped.
+		if pd.node.isSelfAddr(addr) {
+			slog.Debug("peer discovery: skipping own address", "addr", addr)
+			continue
+		}
+
 		pd.mu.Lock()
 		known := pd.knownPeers[addr]
 		pd.mu.Unlock()
