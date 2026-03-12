@@ -189,13 +189,14 @@ type Peer struct {
 	State PeerState
 
 	conn net.Conn
-	enc  *json.Encoder    // owned by writeLoop after handshake
-	dec  *json.Decoder    // owned by readLoop after handshake
+	enc  *json.Encoder     // owned by writeLoop after handshake
+	dec  *json.Decoder     // owned by readLoop after handshake
 	rl   *resetLimitReader // per-message size limiter; Reset() called after each decode
 
-	send     chan Message
-	lastSeen time.Time
-	mu       sync.RWMutex
+	send        chan Message
+	lastSeen    time.Time
+	lastSyncReq time.Time // tracks last MsgRequestSync for per-peer rate limiting (NEW-6)
+	mu          sync.RWMutex
 }
 
 // NewPeer constructs a Peer for the given connection. agentID may be empty
@@ -290,6 +291,23 @@ func (p *Peer) UpdateLastSeen() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.lastSeen = time.Now()
+}
+
+// AllowSyncRequest reports whether a MsgRequestSync from this peer should be
+// processed. Enforces a 10-second per-peer rate limit to prevent sync spam
+// (NEW-6: a peer triggering continuous full DAG serialisations could cause
+// significant CPU and memory pressure). Returns true and updates the timestamp
+// when the request is allowed; returns false without updating when the peer has
+// sent a sync request within the last 10 seconds.
+func (p *Peer) AllowSyncRequest() bool {
+	const syncMinInterval = 10 * time.Second
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if time.Since(p.lastSyncReq) < syncMinInterval {
+		return false
+	}
+	p.lastSyncReq = time.Now()
+	return true
 }
 
 // writeLoop drains the send channel and writes each Message as a JSON line to

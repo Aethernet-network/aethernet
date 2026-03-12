@@ -388,6 +388,15 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 	}
 	votingRound := consensus.NewVotingRound(votingCfg, reg)
 	eng.SetConsensus(votingRound)
+	// Wire VotingRound persistence so in-flight consensus rounds survive node
+	// restarts. Votes are written to BadgerDB after each RegisterVote and
+	// reloaded on boot, preventing silent vote loss (NEW-1).
+	if s != nil {
+		votingRound.SetPersistence(s)
+		if err := votingRound.LoadPersistedVotes(s); err != nil {
+			slog.Warn("failed to reload persisted votes from store", "err", err)
+		}
+	}
 
 	// Economics: staking, fee collection, and deposit-address wallet.
 	// These are optional — engine and API server nil-check them — but the

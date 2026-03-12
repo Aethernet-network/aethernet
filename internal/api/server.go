@@ -42,6 +42,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -973,7 +974,10 @@ func (s *Server) handleClaimTask(w http.ResponseWriter, r *http.Request) {
 
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req claimTaskRequest
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
 	// Prefer agent_id (the canonical field); fall back to claimer_id (legacy), then the node's own identity.
 	claimerID := req.AgentID
 	if claimerID == "" {
@@ -1101,8 +1105,12 @@ func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req approveTaskRequest
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
 	approverID := req.ApproverID
 	if approverID == "" {
 		approverID = string(s.agentID)
@@ -1182,8 +1190,12 @@ func (s *Server) handleDisputeTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req disputeTaskRequest
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
 	posterID := req.PosterID
 	if posterID == "" {
 		posterID = string(s.agentID)
@@ -1208,8 +1220,12 @@ func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req cancelTaskRequest
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
 	posterID := req.PosterID
 	if posterID == "" {
 		posterID = string(s.agentID)
@@ -2742,6 +2758,7 @@ func (s *Server) handleRouterRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "task router not enabled")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req struct {
 		AgentID       string               `json:"agent_id"`
 		Categories    []string             `json:"categories"`

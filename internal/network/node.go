@@ -781,6 +781,15 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		_ = n.dag.Add(&e)
 
 	case MsgRequestSync:
+		// Rate-limit per-peer sync requests: allow at most one every 10 seconds.
+		// A misbehaving peer that sends continuous MsgRequestSync messages would
+		// otherwise force the node to serialise its full DAG on every message,
+		// causing significant CPU and memory pressure (NEW-6).
+		if !peer.AllowSyncRequest() {
+			slog.Debug("network: dropping MsgRequestSync from peer exceeding sync rate",
+				"peer", peer.AgentID)
+			return
+		}
 		// Respond with ALL known events so peers can fully catch up.
 		// Sending the complete set is safe because events are append-only and
 		// the receiver deduplicates via ErrDuplicateEvent in dag.Add.
@@ -803,6 +812,15 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 			return batch.Events[i].CausalTimestamp < batch.Events[j].CausalTimestamp
 		})
 		for _, e := range batch.Events {
+			// Verify each batched event's Ed25519 signature before adding to
+			// the DAG (NEW-5). The single-event MsgEvent path already enforces
+			// this; applying the same check here closes the gap where a
+			// malicious peer could inject tampered events via a sync batch.
+			if !crypto.VerifyEvent(e) {
+				slog.Warn("network: dropping MsgSyncBatch event with invalid signature",
+					"event_id", e.ID, "agent", e.AgentID, "peer", peer.AgentID)
+				continue
+			}
 			_ = n.dag.Add(e)
 		}
 

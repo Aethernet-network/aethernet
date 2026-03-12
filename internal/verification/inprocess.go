@@ -50,7 +50,15 @@ func (v *InProcessVerifier) Verify(_ context.Context, req VerificationRequest) (
 	// ConsensusSufficiencyChecker's verdict (threshold gate), followed by the
 	// structural gates from DeterministicVerifier. This ensures HardGates[0].Pass
 	// reflects the authoritative sufficiency decision for the autovalidator.
-	finalGates := []GateResult{{Name: "threshold", Pass: sufficient, Detail: detReport.HardGates[0].Detail}}
+	//
+	// DeterministicVerifier guarantees at least one gate in its output, but we
+	// guard with a bounds check here to prevent a panic if the contract is ever
+	// relaxed (NEW-8).
+	var thresholdDetail string
+	if len(detReport.HardGates) > 0 {
+		thresholdDetail = detReport.HardGates[0].Detail
+	}
+	finalGates := []GateResult{{Name: "threshold", Pass: sufficient, Detail: thresholdDetail}}
 	if len(detReport.HardGates) > 1 {
 		finalGates = append(finalGates, detReport.HardGates[1:]...)
 	}

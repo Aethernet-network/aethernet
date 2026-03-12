@@ -40,7 +40,9 @@ package marketplace
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -51,6 +53,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/discovery"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/evidence"
+	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 	"github.com/Aethernet-network/aethernet/internal/registry"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/router"
@@ -86,16 +89,34 @@ type Server struct {
 	// explorerDir is the directory to serve the web dashboard from.
 	explorerDir string
 
+	// Rate limiters applied in ServeHTTP (NEW-4).
+	writeLimiter *ratelimit.Limiter // POST/PUT/DELETE endpoints
+	readLimiter  *ratelimit.Limiter // GET endpoints
+
+	// requireAuth gates mutating registry operations (NEW-9).
+	requireAuth bool
+
 	mux *http.ServeMux
 	srv *http.Server
 }
 
 // New creates a marketplace Server bound to listenAddr.
 func New(listenAddr string) *Server {
-	s := &Server{listenAddr: listenAddr}
+	s := &Server{
+		listenAddr:   listenAddr,
+		writeLimiter: ratelimit.New(ratelimit.DefaultConfig()),
+		readLimiter:  ratelimit.New(ratelimit.ReadOnlyConfig()),
+	}
 	s.mux = s.buildMux()
 	s.srv = &http.Server{Addr: listenAddr, Handler: s}
 	return s
+}
+
+// SetRequireAuth enables mandatory ownership checks on mutating registry
+// operations. Off by default (testnet compatibility). Enable for production
+// deployments where callers must authenticate before modifying listings (NEW-9).
+func (s *Server) SetRequireAuth(v bool) {
+	s.requireAuth = v
 }
 
 // SetTaskManager wires the task manager and escrow system.
@@ -151,9 +172,17 @@ func (s *Server) Stop() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = s.srv.Shutdown(ctx)
+	if s.writeLimiter != nil {
+		s.writeLimiter.Stop()
+	}
+	if s.readLimiter != nil {
+		s.readLimiter.Stop()
+	}
 }
 
-// ServeHTTP implements http.Handler, adding CORS headers to every response.
+// ServeHTTP implements http.Handler, adding CORS headers and rate limiting to
+// every response (NEW-4). Write operations (POST/PUT/DELETE) use the tighter
+// writeLimiter; GETs use the more permissive readLimiter.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
@@ -162,6 +191,27 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+
+	ip := ratelimit.ExtractIP(r)
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		if s.readLimiter != nil && !s.readLimiter.Allow(ip) {
+			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate limit exceeded"}`))
+			return
+		}
+	default:
+		if s.writeLimiter != nil && !s.writeLimiter.Allow(ip) {
+			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate limit exceeded"}`))
+			return
+		}
+	}
+
 	s.mux.ServeHTTP(w, r)
 }
 
@@ -348,7 +398,10 @@ func (s *Server) handleClaimTask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ClaimerID string `json:"claimer_id"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
 
 	if err := s.taskMgr.ClaimTask(id, crypto.AgentID(req.ClaimerID)); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -448,7 +501,10 @@ func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ApproverID string `json:"approver_id"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
 
 	taskBefore, err := s.taskMgr.Get(id)
 	if err != nil {
@@ -462,7 +518,12 @@ func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if taskBefore.ClaimerID != "" {
-		_ = s.escrowMgr.Release(id, crypto.AgentID(taskBefore.ClaimerID))
+		if err := s.escrowMgr.Release(id, crypto.AgentID(taskBefore.ClaimerID)); err != nil {
+			slog.Error("marketplace: handleApproveTask: escrow release failed",
+				"task_id", id, "claimer", taskBefore.ClaimerID, "err", err)
+			writeError(w, http.StatusInternalServerError, "escrow release failed")
+			return
+		}
 	}
 
 	task, _ := s.taskMgr.Get(id)
@@ -497,7 +558,10 @@ func (s *Server) handleDisputeTask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		PosterID string `json:"poster_id"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
 
 	taskBefore, _ := s.taskMgr.Get(id)
 
@@ -524,14 +588,22 @@ func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		PosterID string `json:"poster_id"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
 
 	if err := s.taskMgr.CancelTask(id, crypto.AgentID(req.PosterID)); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	_ = s.escrowMgr.Refund(id)
+	if err := s.escrowMgr.Refund(id); err != nil {
+		slog.Error("marketplace: handleCancelTask: escrow refund failed",
+			"task_id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "escrow refund failed")
+		return
+	}
 
 	task, _ := s.taskMgr.Get(id)
 	writeJSON(w, http.StatusOK, task)
@@ -729,6 +801,16 @@ func (s *Server) handleDeleteRegistry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	agentID := crypto.AgentID(r.PathValue("agent_id"))
+	// Ownership check: when requireAuth is enabled the caller must prove they
+	// own the listing by supplying a matching X-Agent-ID header. This prevents
+	// arbitrary agents from deactivating other agents' listings (NEW-9).
+	if s.requireAuth {
+		callerID := crypto.AgentID(r.Header.Get("X-Agent-ID"))
+		if callerID != agentID {
+			writeError(w, http.StatusUnauthorized, "X-Agent-ID header must match the listing agent_id")
+			return
+		}
+	}
 	if ok := s.svcRegistry.Deactivate(agentID); !ok {
 		writeError(w, http.StatusNotFound, "listing not found")
 		return
