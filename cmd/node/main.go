@@ -422,14 +422,20 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 	}
 
 	// Task marketplace: task manager + escrow.
-	taskMgr := tasks.NewTaskManager()
-	escrowMgr := escrow.New(tl)
+	// Use LoadTaskManagerFromStore when a store is available so that tasks,
+	// results, and completion history survive restarts.
+	var taskMgr *tasks.TaskManager
 	if s != nil {
-		taskMgr.SetStore(s)
-		if err := taskMgr.LoadFromStore(s); err != nil {
-			slog.Warn("failed to restore task marketplace from store", "err", err)
+		var err error
+		taskMgr, err = tasks.LoadTaskManagerFromStore(s)
+		if err != nil {
+			slog.Warn("failed to restore task marketplace from store; starting fresh", "err", err)
+			taskMgr = tasks.NewTaskManager()
 		}
+	} else {
+		taskMgr = tasks.NewTaskManager()
 	}
+	escrowMgr := escrow.New(tl)
 
 	// Category-specific reputation tracking.
 	reputationMgr := reputation.NewReputationManager()

@@ -601,6 +601,18 @@ func (s *Store) GetTask(id string) ([]byte, error) {
 	return data, nil
 }
 
+// DeleteTask removes the stored task with the given id. It is a no-op when
+// the id is not found.
+func (s *Store) DeleteTask(id string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		err := txn.Delete([]byte(prefixTask + id))
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil
+		}
+		return err
+	})
+}
+
 // AllTasks returns all stored task blobs as a map from task ID to raw JSON.
 func (s *Store) AllTasks() (map[string][]byte, error) {
 	result := make(map[string][]byte)

@@ -119,6 +119,7 @@ type taskStore interface {
 	PutTask(id string, data []byte) error
 	GetTask(id string) ([]byte, error)
 	AllTasks() (map[string][]byte, error)
+	DeleteTask(id string) error
 }
 
 // Stats holds aggregate marketplace statistics.
@@ -228,6 +229,7 @@ func (m *TaskManager) cleanupLoop(ctx context.Context) {
 func (m *TaskManager) archiveCompleted() {
 	m.mu.RLock()
 	maxAge := m.maxCompletedAge
+	store := m.store
 	m.mu.RUnlock()
 	cutoff := time.Now().Add(-maxAge)
 	m.mu.Lock()
@@ -241,6 +243,9 @@ func (m *TaskManager) archiveCompleted() {
 		}
 		if time.Unix(0, task.CompletedAt).Before(cutoff) {
 			delete(m.tasks, id)
+			if store != nil {
+				_ = store.DeleteTask(id)
+			}
 		}
 	}
 }
@@ -261,6 +266,22 @@ func (m *TaskManager) LoadFromStore(s taskStore) error {
 		m.tasks[task.ID] = &task
 	}
 	return nil
+}
+
+// LoadTaskManagerFromStore reconstructs a TaskManager from a persisted store,
+// attaches the store for subsequent write-through, and returns the ready-to-use
+// manager. This is the preferred constructor when a store is available; it
+// follows the same pattern as LoadTransferLedgerFromStore.
+//
+// s must satisfy the taskStore interface; *store.Store from the store package
+// does so. Callers without a store should use NewTaskManager() directly.
+func LoadTaskManagerFromStore(s taskStore) (*TaskManager, error) {
+	m := NewTaskManager()
+	m.store = s
+	if err := m.LoadFromStore(s); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 // PostTask creates a new task in Open state.
