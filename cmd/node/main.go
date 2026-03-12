@@ -42,7 +42,6 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/evidence"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
-	"github.com/Aethernet-network/aethernet/internal/demo"
 	"github.com/Aethernet-network/aethernet/internal/discovery"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/event"
@@ -291,7 +290,6 @@ type nodeStack struct {
 	escrowMgr       *escrow.Escrow
 	reputationMgr   *reputation.ReputationManager
 	discoveryEngine *discovery.Engine
-	activityGen     *demo.ActivityGenerator
 	platformKeys    *platformpkg.KeyManager
 	taskRouter      *router.Router
 	peerDiscovery   *network.PeerDiscovery
@@ -635,11 +633,6 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	av.Start()
 	stack.autoVal = av
 
-	// Seed the task marketplace on first run only when marketplace is enabled.
-	// Only runs when TotalTasks == 0 to avoid duplicating tasks across restarts.
-	if enableMarketplace && stack.taskMgr.Stats().TotalTasks == 0 {
-		seedMarketplace(stack.transfer, stack.reg, stack.taskMgr, stack.escrowMgr, stack.stakeManager)
-	}
 	// Activate ledger archival: evict Settled/Adjusted entries older than the
 	// configured threshold from memory. Data is never deleted from the store —
 	// this prevents OOM on long-running nodes processing thousands of transactions.
@@ -767,54 +760,6 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		}
 	}()
 
-	// Background activity generator — simulates transfers between seed agents
-	// every 30 s so the explorer's activity feed stays live on the testnet.
-	// Gated behind AETHERNET_TESTNET=true to prevent spurious activity on
-	// mainnet or production nodes that don't need synthetic traffic.
-	if os.Getenv("AETHERNET_TESTNET") == "true" {
-		activityAgents := []string{"alpha-researcher", "data-scientist", "code-auditor", "doc-writer"}
-		transferFn := func(from, to string, amount uint64, memo string) error {
-			// Pre-check sender balance before building the event.  The OCS
-			// engine's BalanceCheck (using tp.FromAgent) is the authoritative
-			// gate, but checking here avoids the unnecessary event creation,
-			// signing overhead, and WARN log when an agent's liquid balance is
-			// temporarily below the transfer amount.  Agents self-recover as
-			// they receive settled incoming transfers from other ticks.
-			if bal, _ := stack.transfer.Balance(crypto.AgentID(from)); bal < amount {
-				return nil
-			}
-			tips := stack.dag.Tips()
-			priorTS := make(map[event.EventID]uint64, len(tips))
-			for _, ref := range tips {
-				if ev, err := stack.dag.Get(ref); err == nil {
-					priorTS[ref] = ev.CausalTimestamp
-				}
-			}
-			e, err := event.New(
-				event.EventTypeTransfer,
-				tips,
-				event.TransferPayload{FromAgent: from, ToAgent: to, Amount: amount, Currency: "AET", Memo: memo},
-				string(agentID),
-				priorTS,
-				stack.engine.MinEventStake(),
-			)
-			if err != nil {
-				return err
-			}
-			if err := crypto.SignEvent(e, stack.kp); err != nil {
-				return err
-			}
-			if err := stack.engine.Submit(e); err != nil {
-				return err
-			}
-			return stack.dag.Add(e)
-		}
-		actGen := demo.NewActivityGenerator(transferFn, activityAgents, 30*time.Second)
-		actGen.Start()
-		stack.activityGen = actGen
-		slog.Info("testnet activity generator started")
-	}
-
 	return node
 }
 
@@ -840,9 +785,6 @@ func stopStack(node *network.Node, stack *nodeStack) {
 	}
 	if stack.taskRouter != nil {
 		stack.taskRouter.Stop()
-	}
-	if stack.activityGen != nil {
-		stack.activityGen.Stop()
 	}
 	if stack.metricsStop != nil {
 		close(stack.metricsStop)
@@ -1154,180 +1096,6 @@ func cmdConnect() {
 	slog.Info("node stopped cleanly")
 }
 
-
-// seedMarketplace pre-populates the task marketplace with realistic starter
-// tasks on the very first node run (when TotalTasks == 0). It registers four
-// poster agent identities, funds each from the ecosystem allocation bucket, and
-// creates six tasks with escrow already held. This gives the explorer a live,
-// interactive economy from the moment the node starts.
-//
-// Funding and staking are idempotent: each agent is only funded when its
-// current liquid balance is below seedMinBalance, and only staked when it has
-// no existing stake. This prevents double-spending the genesis pool on
-// re-deploys where the ledger/staking store persists but task data is absent
-// (causing TotalTasks == 0 to trigger the seed path again).
-//
-// This is intentionally testnet-only: on mainnet, real agents post real tasks.
-func seedMarketplace(tl *ledger.TransferLedger, reg *identity.Registry, taskMgr *tasks.TaskManager, escrowMgr *escrow.Escrow, stakeMgr *staking.StakeManager) {
-	// seedFundTarget is the liquid balance each seed agent should have after
-	// seeding. seedMinBalance is the threshold below which a top-up is applied.
-	const (
-		seedFundTarget = uint64(50_000_000) // µAET — target balance
-		seedMinBalance = uint64(10_000_000) // µAET — top-up threshold
-	)
-
-	type poster struct {
-		id    string
-		funds uint64
-		stake uint64
-	}
-	// Half-stake model: each seed agent starts with 50 AET (50 000 000 µAET)
-	// total — 25 AET funded into the spendable bucket then 25 AET staked
-	// (Stake debits the bucket), leaving exactly 25 AET liquid and 25 AET
-	// locked as collateral. This gives the activity generator a long runway
-	// before any agent's balance reaches zero.
-	posters := []poster{
-		{"alpha-researcher", 50_000_000, 25_000_000},
-		{"data-scientist", 50_000_000, 25_000_000},
-		{"code-auditor", 50_000_000, 25_000_000},
-		{"doc-writer", 50_000_000, 25_000_000},
-	}
-
-	// Register each poster agent in the identity registry so it shows up in
-	// the explorer leaderboard. Use a deterministic zero-filled public key for
-	// simplicity — testnet only.
-	for _, p := range posters {
-		fp, err := identity.NewFingerprint(crypto.AgentID(p.id), make([]byte, 32), nil)
-		if err == nil {
-			_ = reg.Register(fp)
-		}
-
-		agentID := crypto.AgentID(p.id)
-		initialBal, _ := tl.Balance(agentID)
-		stakedBefore := uint64(0)
-		if stakeMgr != nil {
-			stakedBefore = stakeMgr.StakedAmount(agentID)
-		}
-
-		// Idempotent funding: only top up when the agent's current liquid
-		// balance is below the minimum threshold.  On re-deploys where the
-		// store persists ledger entries from a previous run, this prevents
-		// double-crediting the genesis pool.
-		topUp := uint64(0)
-		if initialBal < seedMinBalance {
-			topUp = seedFundTarget - initialBal
-			if err := tl.FundAgent(agentID, topUp); err != nil {
-				slog.Warn("seedMarketplace: failed to fund agent", "id", p.id, "err", err)
-				topUp = 0
-			}
-		}
-
-		// Idempotent staking: only stake when no stake is already recorded.
-		// On re-deploy with persisted staking state, skipping prevents
-		// over-staking and avoids draining the freshly-topped-up balance.
-		staked := false
-		if stakeMgr != nil && stakedBefore == 0 {
-			if err := stakeMgr.Stake(agentID, p.stake); err != nil {
-				slog.Warn("seedMarketplace: failed to stake agent", "id", p.id, "err", err)
-			} else {
-				staked = true
-			}
-		}
-
-		// Verify balance after funding and staking.  If it is still below the
-		// minimum threshold, stale Optimistic outflow entries from a previous
-		// OCS session are consuming the balance.  These were never settled and
-		// represent no real economic obligation — remove them so the agent
-		// starts the session with its correct liquid balance.
-		postBal, _ := tl.Balance(agentID)
-		stalePurged := 0
-		if postBal < seedMinBalance {
-			stalePurged = tl.ResetOptimisticOutflows(agentID)
-			postBal, _ = tl.Balance(agentID)
-			slog.Warn("seedMarketplace: purged stale optimistic outflows",
-				"id", p.id, "entries_removed", stalePurged, "balance_after", postBal)
-		}
-
-		slog.Info("seedMarketplace: agent ready",
-			"id", p.id,
-			"balance_before", initialBal,
-			"top_up", topUp,
-			"staked_before", stakedBefore,
-			"newly_staked", staked,
-			"stale_purged", stalePurged,
-			"balance_after", postBal,
-		)
-	}
-
-	type task struct {
-		posterID    string
-		title       string
-		description string
-		budget      uint64
-	}
-	seedTasks := []task{
-		{
-			posterID: "alpha-researcher",
-			title:    "Summarise top 10 AI research papers from arXiv this week",
-			description: "Retrieve and summarise the top 10 most-cited AI/ML papers published on " +
-				"arXiv in the last 7 days. Provide a 2-paragraph summary per paper, key findings, " +
-				"and a relevance score (1–10) for applied NLP work.",
-			budget: 50_000,
-		},
-		{
-			posterID: "data-scientist",
-			title:    "Classify 5 000-row customer review dataset",
-			description: "Apply multi-label sentiment classification (positive / neutral / negative + " +
-				"topic tags) to a CSV of 5 000 customer support messages. Return the augmented CSV " +
-				"with added columns: sentiment, confidence, primary_topic.",
-			budget: 75_000,
-		},
-		{
-			posterID: "code-auditor",
-			title:    "Audit Solidity escrow contract for reentrancy vulnerabilities",
-			description: "Review the provided Solidity escrow contract (≤300 lines). Identify reentrancy " +
-				"risks, integer overflow/underflow, and access-control issues. Deliver a structured report " +
-				"with severity ratings and suggested mitigations.",
-			budget: 100_000,
-		},
-		{
-			posterID: "doc-writer",
-			title:    "Write OpenAPI documentation for AetherNet task endpoints",
-			description: "Produce OpenAPI 3.0-compatible YAML for the 10 /v1/tasks/* endpoints. " +
-				"Include request/response schemas, example payloads, error codes, and a 1-page " +
-				"quick-start guide.",
-			budget: 30_000,
-		},
-		{
-			posterID: "alpha-researcher",
-			title:    "Translate ML paper abstract from French to English",
-			description: "Translate a 500-word French-language abstract of a machine-learning paper " +
-				"into professional academic English. Preserve technical terminology and ensure fluency " +
-				"for a native-English audience.",
-			budget: 15_000,
-		},
-		{
-			posterID: "data-scientist",
-			title:    "Generate analytics SQL queries for a SaaS dashboard",
-			description: "Write 10 optimised PostgreSQL queries for a SaaS product-analytics dashboard: " +
-				"DAU/MAU, retention cohorts, funnel drop-off, feature adoption, and revenue metrics. " +
-				"Include comments explaining each query.",
-			budget: 25_000,
-		},
-	}
-
-	for _, t := range seedTasks {
-		task, err := taskMgr.PostTask(t.posterID, t.title, t.description, "", t.budget)
-		if err != nil {
-			slog.Warn("seedMarketplace: failed to post task", "title", t.title, "err", err)
-			continue
-		}
-		if err := escrowMgr.Hold(task.ID, crypto.AgentID(t.posterID), t.budget); err != nil {
-			slog.Warn("seedMarketplace: failed to hold escrow", "task_id", task.ID, "err", err)
-		}
-	}
-	slog.Info("seedMarketplace: seeded task marketplace", "tasks", len(seedTasks))
-}
 
 // checkGenesisConsistency runs two checks against the loaded store:
 //

@@ -2,10 +2,10 @@
 // registration for AetherNet nodes running on Amazon ECS Fargate.
 //
 // When AETHERNET_CLOUDMAP_SERVICE_ID is set, a Registrar registers the node's
-// private IP (fetched from the EC2 instance metadata service) with the
-// specified Cloud Map service on Start and deregisters on Stop. This enables
-// other nodes to discover peers via DNS rather than static AETHERNET_PEER
-// configuration.
+// private IP (fetched from ECS container metadata, then EC2 IMDS, then local
+// interfaces as a last resort) with the specified Cloud Map service on Start
+// and deregisters on Stop. This enables other nodes to discover peers via DNS
+// rather than static AETHERNET_PEER configuration.
 //
 // The package is a no-op when the environment variable is absent, so the same
 // binary can run on ECS and non-ECS hosts without any code changes.
@@ -13,9 +13,11 @@ package cloudmap
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -61,7 +63,8 @@ func NewRegistrar(p2pPort, apiPort string) *Registrar {
 }
 
 // Start registers this node's private IP as an instance in the Cloud Map
-// service. It fetches the IP from the EC2 IMDS endpoint; if the IP cannot be
+// service. It fetches the IP using a fallback chain: ECS container metadata
+// (Fargate), EC2 IMDS, then local network interfaces. If the IP cannot be
 // determined or the registration call fails, a warning is logged and the node
 // continues without Cloud Map registration.
 func (r *Registrar) Start() {
@@ -69,12 +72,13 @@ func (r *Registrar) Start() {
 		return
 	}
 
-	ip := fetchPrivateIP()
+	ip, method := fetchPrivateIP()
 	if ip == "" {
 		slog.Warn("cloudmap: could not determine private IP; Cloud Map registration skipped")
 		return
 	}
 	r.instanceID = ip
+	slog.Info("cloudmap: detected private IP", "ip", ip, "method", method)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -116,10 +120,84 @@ func (r *Registrar) Stop() {
 	slog.Info("cloudmap: deregistered", "instance_id", r.instanceID)
 }
 
-// fetchPrivateIP queries the EC2 Instance Metadata Service for the node's
+// fetchPrivateIP returns the node's private IPv4 address and a string
+// describing the method used to obtain it.
+//
+// Fallback chain:
+//  1. ECS container metadata V4 endpoint (set automatically by Fargate)
+//  2. EC2 Instance Metadata Service (IMDSv2 then IMDSv1)
+//  3. First non-loopback IPv4 address from net.InterfaceAddrs()
+func fetchPrivateIP() (ip, method string) {
+	// 1. ECS container metadata V4 (Fargate).
+	if ip = fetchECSPrivateIP(); ip != "" {
+		return ip, "ecs-metadata-v4"
+	}
+
+	// 2. EC2 IMDS (IMDSv2 first, then IMDSv1).
+	if ip = fetchIMDSPrivateIP(); ip != "" {
+		return ip, "ec2-imds"
+	}
+
+	// 3. Local network interfaces (development / bare-metal fallback).
+	if ip = fetchLocalIP(); ip != "" {
+		return ip, "net.InterfaceAddrs"
+	}
+
+	return "", ""
+}
+
+// fetchECSPrivateIP reads the private IP from the ECS task metadata V4
+// endpoint. Fargate sets ECS_CONTAINER_METADATA_URI_V4 automatically; the
+// endpoint is not reachable on non-Fargate hosts.
+func fetchECSPrivateIP() string {
+	metaURI := os.Getenv("ECS_CONTAINER_METADATA_URI_V4")
+	if metaURI == "" {
+		return ""
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(metaURI + "/task")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	if err != nil {
+		return ""
+	}
+
+	// Parse the minimal structure we care about.
+	var meta struct {
+		Containers []struct {
+			Networks []struct {
+				IPv4Addresses []string `json:"IPv4Addresses"`
+			} `json:"Networks"`
+		} `json:"Containers"`
+	}
+	if err := json.Unmarshal(body, &meta); err != nil {
+		return ""
+	}
+
+	for _, c := range meta.Containers {
+		for _, n := range c.Networks {
+			for _, addr := range n.IPv4Addresses {
+				if addr != "" {
+					return addr
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// fetchIMDSPrivateIP queries the EC2 Instance Metadata Service for the node's
 // private IPv4 address. Tries IMDSv2 (token-based) first; falls back to
 // IMDSv1 if the token request fails.
-func fetchPrivateIP() string {
+func fetchIMDSPrivateIP() string {
 	const metaURL = "http://169.254.169.254/latest/meta-data/local-ipv4"
 	const tokenURL = "http://169.254.169.254/latest/api/token"
 
@@ -137,6 +215,31 @@ func fetchPrivateIP() string {
 	// IMDSv1 fallback.
 	ip, _ := imdsRequest(http.MethodGet, metaURL, nil)
 	return ip
+}
+
+// fetchLocalIP returns the first non-loopback, non-link-local IPv4 address
+// found on the local network interfaces. Used as a last-resort fallback.
+func fetchLocalIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, addr := range addrs {
+		var ip net.IP
+		switch v := addr.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			continue
+		}
+		if ip4 := ip.To4(); ip4 != nil {
+			return ip4.String()
+		}
+	}
+	return ""
 }
 
 // imdsRequest makes a single HTTP request to the EC2 metadata service and

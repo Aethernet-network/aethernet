@@ -36,10 +36,8 @@ import (
 	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
-	"github.com/Aethernet-network/aethernet/internal/demo"
 	"github.com/Aethernet-network/aethernet/internal/discovery"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
-	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	marketplace "github.com/Aethernet-network/aethernet/internal/marketplace"
@@ -143,8 +141,6 @@ func main() {
 	}
 	taskRouter := router.New(&marketplaceTaskSource{tm: taskMgr}, claimFn, repFn, 10*time.Second)
 
-	// Register seed agent capabilities for the testnet router.
-	seedRouterCapabilities(taskRouter)
 	taskRouter.Start()
 
 	// ---------------------------------------------------------------------------
@@ -170,12 +166,7 @@ func main() {
 	stakeMgr := staking.NewStakeManager()
 	localEngine.SetEconomics(nil, stakeMgr, "")
 
-	// Generate a temporary keypair for the local engine (not used for signing real events).
-	localKP, _ := crypto.GenerateKeyPair()
-	localAgentID := localKP.AgentID()
-
 	var autoVal *autovalidator.AutoValidator
-	var actGen *demo.ActivityGenerator
 
 	if *testnet {
 		slog.Info("marketplace: testnet mode enabled")
@@ -189,37 +180,6 @@ func main() {
 		autoVal.SetTaskManager(taskMgr, escrowMgr)
 		autoVal.SetReputationManager(reputationMgr)
 		autoVal.Start()
-
-		// Activity generator uses the protocol node's Transfer API via an event
-		// construction path that mirrors what the protocol node does internally.
-		activityAgents := []string{"alpha-researcher", "data-scientist", "code-auditor", "doc-writer"}
-		transferFn := func(from, to string, amount uint64, memo string) error {
-			// Fund activity agents locally so the local ledger balance checks pass.
-			_ = localLedger.FundAgent(crypto.AgentID(from), amount)
-			e, err := event.New(
-				event.EventTypeTransfer,
-				nil,
-				event.TransferPayload{
-					FromAgent: from,
-					ToAgent:   to,
-					Amount:    amount,
-					Currency:  "AET",
-					Memo:      memo,
-				},
-				string(localAgentID),
-				nil,
-				localEngine.MinEventStake(),
-			)
-			if err != nil {
-				return err
-			}
-			if signErr := crypto.SignEvent(e, localKP); signErr != nil {
-				return signErr
-			}
-			return localEngine.Submit(e)
-		}
-		actGen = demo.NewActivityGenerator(transferFn, activityAgents, 30*time.Second)
-		actGen.Start()
 	}
 
 	// ---------------------------------------------------------------------------
@@ -259,9 +219,6 @@ func main() {
 	if taskRouter != nil {
 		taskRouter.Stop()
 	}
-	if actGen != nil {
-		actGen.Stop()
-	}
 	if autoVal != nil {
 		autoVal.Stop()
 	}
@@ -299,48 +256,3 @@ func resolveExplorerDir() string {
 	return ""
 }
 
-// seedRouterCapabilities registers the four testnet seed agents in the
-// autonomous task router so they can receive auto-routed tasks from startup.
-func seedRouterCapabilities(r *router.Router) {
-	seeds := []router.AgentCapability{
-		{
-			AgentID:       "alpha-researcher",
-			Categories:    []string{"research", "writing"},
-			Tags:          []string{"papers", "nlp", "summarisation", "translation"},
-			Description:   "Research and writing specialist — arxiv papers, summaries, translations",
-			PricePerTask:  20_000,
-			MaxConcurrent: 3,
-			Available:     true,
-		},
-		{
-			AgentID:       "data-scientist",
-			Categories:    []string{"data", "ml"},
-			Tags:          []string{"csv", "classification", "sql", "analytics", "sentiment"},
-			Description:   "Data science and ML workloads — classification, analytics, SQL generation",
-			PricePerTask:  30_000,
-			MaxConcurrent: 2,
-			Available:     true,
-		},
-		{
-			AgentID:       "code-auditor",
-			Categories:    []string{"code", "security"},
-			Tags:          []string{"solidity", "audit", "reentrancy", "smart-contracts"},
-			Description:   "Code review and security auditing — Solidity, reentrancy, access control",
-			PricePerTask:  50_000,
-			MaxConcurrent: 2,
-			Available:     true,
-		},
-		{
-			AgentID:       "doc-writer",
-			Categories:    []string{"writing", "documentation"},
-			Tags:          []string{"openapi", "yaml", "docs", "technical-writing"},
-			Description:   "Technical documentation — OpenAPI specs, quickstarts, API docs",
-			PricePerTask:  15_000,
-			MaxConcurrent: 4,
-			Available:     true,
-		},
-	}
-	for _, s := range seeds {
-		r.RegisterCapability(s)
-	}
-}
