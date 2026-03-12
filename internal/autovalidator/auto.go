@@ -25,6 +25,7 @@
 package autovalidator
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -41,6 +42,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
+	"github.com/Aethernet-network/aethernet/internal/verification"
 )
 
 // AutoValidator periodically checks for pending OCS items and auto-approves
@@ -73,6 +75,11 @@ type AutoValidator struct {
 	// verifierRegistry routes tasks to the appropriate deterministic verifier by
 	// category. When nil, the default KeywordVerifier is used (backward-compatible).
 	verifierRegistry *evidence.VerifierRegistry
+
+	// verificationService is the optional higher-level evidence service. When set,
+	// it takes priority over verifierRegistry in verifyEvidence(). Falls back to
+	// verifierRegistry (then keyword verifier) when nil — backward compatible.
+	verificationService verification.VerificationService
 
 	// dag and kp are optional. When both are set, settleTask creates a Transfer
 	// DAG event recording the worker payment so the activity feed reflects task
@@ -175,6 +182,14 @@ func (av *AutoValidator) SetVerifierRegistry(r *evidence.VerifierRegistry) {
 	av.verifierRegistry = r
 }
 
+// SetVerificationService wires a VerificationService into the auto-validator.
+// When set, it takes priority over the direct VerifierRegistry call in
+// verifyEvidence(). If not called, the existing VerifierRegistry / keyword-verifier
+// fallback path is used unchanged.
+func (av *AutoValidator) SetVerificationService(svc verification.VerificationService) {
+	av.verificationService = svc
+}
+
 // SetDAG wires the causal DAG so that settled task payments are recorded as
 // Transfer events in the DAG, making them visible in the activity feed and
 // network statistics. Optional; settlement proceeds without DAG recording if
@@ -190,10 +205,30 @@ func (av *AutoValidator) SetKeyPair(kp *crypto.KeyPair) {
 	av.kp = kp
 }
 
-// verifyEvidence dispatches to the VerifierRegistry when wired, or falls back
-// to the default keyword verifier when not. This is the single call-site for
-// all evidence assessment in the auto-validator.
+// verifyEvidence dispatches to the VerificationService when wired, falls back
+// to the VerifierRegistry, and finally falls back to the default keyword
+// verifier. This is the single call-site for all evidence assessment in the
+// auto-validator.
 func (av *AutoValidator) verifyEvidence(ev *evidence.Evidence, title, description string, budget uint64, category string) (*evidence.Score, bool) {
+	if av.verificationService != nil {
+		req := verification.VerificationRequest{
+			Category:    category,
+			Title:       title,
+			Description: description,
+			Budget:      budget,
+			Evidence:    ev,
+		}
+		if result, err := av.verificationService.Verify(context.Background(), req); err == nil && result != nil {
+			score := &evidence.Score{
+				Relevance:    result.SubjectiveReport.Relevance,
+				Completeness: result.SubjectiveReport.Completeness,
+				Quality:      result.SubjectiveReport.Quality,
+				Overall:      result.SubjectiveReport.Overall,
+			}
+			passed := len(result.DeterministicReport.HardGates) > 0 && result.DeterministicReport.HardGates[0].Pass
+			return score, passed
+		}
+	}
 	if av.verifierRegistry != nil {
 		return av.verifierRegistry.Verify(ev, title, description, budget, category)
 	}

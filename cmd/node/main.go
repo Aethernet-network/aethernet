@@ -40,6 +40,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/config"
 	"github.com/Aethernet-network/aethernet/internal/consensus"
 	"github.com/Aethernet-network/aethernet/internal/evidence"
+	"github.com/Aethernet-network/aethernet/internal/verification"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
 	"github.com/Aethernet-network/aethernet/internal/discovery"
@@ -634,6 +635,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	vr := evidence.NewVerifierRegistry()
 	vr.SetPassThresholds(cfg.Evidence.CodePassThreshold, cfg.Evidence.DataPassThreshold, cfg.Evidence.ContentPassThreshold)
 	av.SetVerifierRegistry(vr)
+	av.SetVerificationService(verification.NewInProcessVerifier(vr))
 	// Task marketplace integration is conditional on --marketplace flag.
 	if enableMarketplace {
 		av.SetTaskManager(stack.taskMgr, stack.escrowMgr)
