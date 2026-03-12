@@ -7,62 +7,68 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/evidence"
 )
 
-// InProcessVerifier implements VerificationService by delegating to the
-// existing evidence.VerifierRegistry. It replicates the nil-safe fallback
-// logic of autovalidator.verifyEvidence() so behaviour is identical whether
-// the call comes through the service interface or the legacy direct path.
+// InProcessVerifier implements VerificationService by orchestrating three
+// roles in sequence:
 //
-// TrustProof is always nil — in-process execution has no attestation material.
+//  1. DeterministicVerifier — structural hard-gate checks + registry scoring
+//  2. SubjectiveRater       — translates scores into a SubjectiveReport
+//  3. ConsensusSufficiencyChecker — applies the sufficiency decision
+//
+// The external behaviour is identical to the previous single-function
+// implementation: the same inputs produce the same scores and pass/fail
+// verdict. TrustProof is always nil — in-process execution has no attestation.
 type InProcessVerifier struct {
-	registry *evidence.VerifierRegistry
+	det *DeterministicVerifier
+	sub SubjectiveRater
+	chk ConsensusSufficiencyChecker
 }
 
-// NewInProcessVerifier wraps r. Pass nil to use the keyword-verifier fallback
-// (same behaviour as calling autovalidator.verifyEvidence with no registry).
+// NewInProcessVerifier wraps r. Pass nil to use the keyword-verifier fallback.
 func NewInProcessVerifier(r *evidence.VerifierRegistry) *InProcessVerifier {
-	return &InProcessVerifier{registry: r}
+	return &InProcessVerifier{
+		det: NewDeterministicVerifier(r),
+	}
 }
 
 // Verify implements VerificationService. ctx is accepted for interface
-// compliance but ignored — the underlying evidence verifiers are synchronous.
+// compliance but ignored — all three underlying roles are synchronous.
 func (v *InProcessVerifier) Verify(_ context.Context, req VerificationRequest) (*VerificationResult, error) {
-	var score *evidence.Score
-	var passed bool
+	// 1. Deterministic checks + registry scoring.
+	detReport := v.det.Verify(req.Category, req.Evidence, req.Title, req.Description, req.Budget)
 
-	if v.registry != nil {
-		score, passed = v.registry.Verify(req.Evidence, req.Title, req.Description, req.Budget, req.Category)
-	} else {
-		score, passed = evidence.NewVerifier().Verify(req.Evidence, req.Title, req.Description, req.Budget)
-	}
-	if score == nil {
-		score = &evidence.Score{}
-	}
+	// 2. Translate deterministic scores into a subjective report.
+	subjReport := v.sub.Rate(req.Category, req.Evidence, detReport)
 
+	// 3. Sufficiency decision.
 	pv := req.PolicyVersion
 	if pv == "" {
 		pv = "v1"
+	}
+	sufficient, reasons := v.chk.Check(detReport, subjReport, pv)
+
+	// Construct the final DeterministicReport: HardGates[0] is the
+	// ConsensusSufficiencyChecker's verdict (threshold gate), followed by the
+	// structural gates from DeterministicVerifier. This ensures HardGates[0].Pass
+	// reflects the authoritative sufficiency decision for the autovalidator.
+	finalGates := []GateResult{{Name: "threshold", Pass: sufficient, Detail: detReport.HardGates[0].Detail}}
+	if len(detReport.HardGates) > 1 {
+		finalGates = append(finalGates, detReport.HardGates[1:]...)
 	}
 
 	return &VerificationResult{
 		TaskID: req.TaskID,
 		DeterministicReport: DeterministicReport{
-			HardGates: []GateResult{
-				{Name: "threshold", Pass: passed},
-			},
-			NumericScores: map[string]float64{
-				"relevance":    score.Relevance,
-				"completeness": score.Completeness,
-				"quality":      score.Quality,
-				"overall":      score.Overall,
-			},
+			HardGates:     finalGates,
+			NumericScores: detReport.NumericScores,
 		},
 		SubjectiveReport: SubjectiveReport{
-			Relevance:    score.Relevance,
-			Completeness: score.Completeness,
-			Quality:      score.Quality,
-			Overall:      score.Overall,
+			Relevance:    subjReport.Relevance,
+			Completeness: subjReport.Completeness,
+			Quality:      subjReport.Quality,
+			Overall:      subjReport.Overall,
+			ReasonCodes:  reasons,
 		},
-		Confidence:    score.Overall,
+		Confidence:    subjReport.Overall,
 		PolicyVersion: pv,
 		VerifierID:    "in-process",
 		Timestamp:     time.Now(),
