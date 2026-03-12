@@ -62,6 +62,17 @@ AetherNet is a three-layer protocol. Never cross layer boundaries in imports.
 - **Test the failure path, not just the happy path.** If a function handles errors, test what happens when the error occurs.
 - **Supply invariant test must pass after any settlement-related change.**
 
+## Change Discipline
+
+- **Run tests before and after every change.** Record pass count at start, verify same or higher at end.
+- **Never swallow store write errors.** Every store.Put*, store.Delete*, store.Get* call must have its error checked and logged at slog.Error with full context. No exceptions.
+- **One concern per prompt.** Do not refactor adjacent code that was not requested. If you notice an issue in unrelated code, note it in the response but do not fix it.
+- **Preserve all existing behavior unless explicitly told to change it.** A refactor that changes behavior is a bug, not an improvement.
+- **Persist before mutating in-memory state.** If the persist fails, abort the in-memory change.
+- **New interfaces must have at least one test.** New public types and methods require tests.
+- **Do not remove or rename existing public APIs** unless the prompt explicitly requests it. Other code may depend on them.
+- **When adding a new package, check imports don't violate layer boundaries.** L1 cannot import L2 or L3. L2 cannot import L3.
+
 ## Deployment
 
 - **Docker image: 435998721364.dkr.ecr.us-east-1.amazonaws.com/aethernet:latest**
