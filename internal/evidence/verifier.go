@@ -12,6 +12,9 @@ func NewVerifier() *Verifier { return &Verifier{} }
 // Verify scores the evidence against the task and returns (score, passed).
 // passed is true when score.Overall >= PassThreshold.
 func (v *Verifier) Verify(ev *Evidence, taskTitle, taskDescription string, claimedValue uint64) (*Score, bool) {
+	if ev == nil {
+		return &Score{}, false
+	}
 	score := &Score{}
 	score.Relevance = v.assessRelevance(ev.Summary, taskTitle, taskDescription)
 	score.Completeness = v.assessCompleteness(ev.OutputSize, ev.OutputType, claimedValue)

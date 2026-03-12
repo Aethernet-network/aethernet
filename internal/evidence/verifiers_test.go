@@ -386,6 +386,67 @@ func TestRegistry_UnknownCategoryFallsBackToKeywordVerifier(t *testing.T) {
 	_ = score.Overall // must be a valid float
 }
 
+// ---------------------------------------------------------------------------
+// Nil Evidence — must not panic across all verifier implementations
+// ---------------------------------------------------------------------------
+
+func TestCodeVerifier_NilEvidenceNoPanic(t *testing.T) {
+	cv := &evidence.CodeVerifier{}
+	score, passed := cv.Verify(nil, "task", "desc", 100_000)
+	if passed {
+		t.Error("nil evidence should not pass CodeVerifier")
+	}
+	if score == nil {
+		t.Error("expected non-nil Score for nil evidence")
+	}
+}
+
+func TestContentVerifier_NilEvidenceNoPanic(t *testing.T) {
+	cv := &evidence.ContentVerifier{}
+	score, passed := cv.Verify(nil, "task", "desc", 100_000)
+	if passed {
+		t.Error("nil evidence should not pass ContentVerifier")
+	}
+	if score == nil {
+		t.Error("expected non-nil Score for nil evidence")
+	}
+}
+
+func TestDataVerifier_NilEvidenceNoPanic(t *testing.T) {
+	dv := &evidence.DataVerifier{}
+	score, passed := dv.Verify(nil, "task", "desc", 100_000)
+	if passed {
+		t.Error("nil evidence should not pass DataVerifier")
+	}
+	if score == nil {
+		t.Error("expected non-nil Score for nil evidence")
+	}
+}
+
+func TestVerifier_NilEvidenceNoPanic(t *testing.T) {
+	v := evidence.NewVerifier()
+	score, passed := v.Verify(nil, "task", "desc", 100_000)
+	if passed {
+		t.Error("nil evidence should not pass Verifier")
+	}
+	if score == nil {
+		t.Error("expected non-nil Score for nil evidence")
+	}
+}
+
+func TestRegistry_NilEvidenceNoPanic(t *testing.T) {
+	reg := evidence.NewVerifierRegistry()
+	for _, cat := range []string{"code", "data", "writing", "research", "unknown"} {
+		score, passed := reg.Verify(nil, "task", "desc", 100_000, cat)
+		if passed {
+			t.Errorf("category %q: nil evidence should not pass", cat)
+		}
+		if score == nil {
+			t.Errorf("category %q: expected non-nil Score for nil evidence", cat)
+		}
+	}
+}
+
 func TestRegistry_AllCategoriesMapped(t *testing.T) {
 	reg := evidence.NewVerifierRegistry()
 	categories := []string{

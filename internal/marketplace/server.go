@@ -246,6 +246,7 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req struct {
 		PosterID       string   `json:"poster_id"`
 		Title          string   `json:"title"`
@@ -342,6 +343,7 @@ func (s *Server) handleClaimTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	id := r.PathValue("id")
 	var req struct {
 		ClaimerID string `json:"claimer_id"`
@@ -361,6 +363,7 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	id := r.PathValue("id")
 	var req struct {
 		ClaimerID       string             `json:"claimer_id"`
@@ -440,6 +443,7 @@ func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	id := r.PathValue("id")
 	var req struct {
 		ApproverID string `json:"approver_id"`
@@ -488,6 +492,7 @@ func (s *Server) handleDisputeTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	id := r.PathValue("id")
 	var req struct {
 		PosterID string `json:"poster_id"`
@@ -514,6 +519,7 @@ func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	id := r.PathValue("id")
 	var req struct {
 		PosterID string `json:"poster_id"`
@@ -536,6 +542,7 @@ func (s *Server) handleCreateSubtask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	parentID := r.PathValue("id")
 	var req struct {
 		ClaimerID   string `json:"claimer_id"`
@@ -586,6 +593,7 @@ func (s *Server) handleRouterRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "task router not enabled")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var cap router.AgentCapability
 	if err := json.NewDecoder(r.Body).Decode(&cap); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -614,6 +622,7 @@ func (s *Server) handleRouterAvailability(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotImplemented, "task router not enabled")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req struct {
 		Available bool `json:"available"`
 	}
@@ -676,6 +685,7 @@ func (s *Server) handlePostRegistry(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "service registry not enabled")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var listing registry.ServiceListing
 	if err := json.NewDecoder(r.Body).Decode(&listing); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")

@@ -765,10 +765,17 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 
 	switch msg.Type {
 	case MsgEvent:
-		// Deserialise and add to local DAG. Duplicates and missing causal refs
-		// are silently ignored — the DAG's sentinel errors handle these cases.
+		// Deserialise and verify the Ed25519 signature before adding to the DAG.
+		// An invalid or missing signature means the event was tampered with or
+		// was never signed. We drop it and log a warning; the peer is not
+		// disconnected because corruption in transit is also possible.
 		var e event.Event
 		if err := json.Unmarshal(msg.Payload, &e); err != nil {
+			return
+		}
+		if !crypto.VerifyEvent(&e) {
+			slog.Warn("network: dropping MsgEvent with invalid or missing signature",
+				"event_id", e.ID, "agent", e.AgentID, "peer", peer.AgentID)
 			return
 		}
 		_ = n.dag.Add(&e)

@@ -23,6 +23,9 @@ const dataPassThreshold = 0.70
 
 // Verify implements VerifierInterface.
 func (dv *DataVerifier) Verify(ev *Evidence, taskTitle, taskDescription string, budget uint64) (*Score, bool) {
+	if ev == nil {
+		return &Score{}, false
+	}
 	content := strings.TrimSpace(ev.Summary)
 	if ev.OutputPreview != "" {
 		content = strings.TrimSpace(content + "\n" + ev.OutputPreview)

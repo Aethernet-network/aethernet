@@ -22,6 +22,9 @@ const contentPassThreshold = 0.50
 
 // Verify implements VerifierInterface.
 func (cv *ContentVerifier) Verify(ev *Evidence, taskTitle, taskDescription string, budget uint64) (*Score, bool) {
+	if ev == nil {
+		return &Score{}, false
+	}
 	content := strings.TrimSpace(ev.Summary)
 	if ev.OutputPreview != "" {
 		content = strings.TrimSpace(content + "\n" + ev.OutputPreview)

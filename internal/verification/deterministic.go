@@ -30,6 +30,11 @@ func NewDeterministicVerifier(r *evidence.VerifierRegistry) *DeterministicVerifi
 // HardGates[0] for the primary pass/fail decision), followed by structural
 // gates that are informational only.
 func (dv *DeterministicVerifier) Verify(category string, ev *evidence.Evidence, title, description string, budget uint64) *DeterministicReport {
+	// Treat nil evidence as empty — all structural gates will fail and the
+	// registry verifiers return (zero score, false) for nil input.
+	if ev == nil {
+		ev = &evidence.Evidence{}
+	}
 	// Structural gates — evaluated before calling the registry so failures are
 	// visible even when the registry short-circuits on empty input.
 	hasOutput := ev != nil && (strings.TrimSpace(ev.Summary) != "" || strings.TrimSpace(ev.OutputPreview) != "" || ev.OutputSize > 0)

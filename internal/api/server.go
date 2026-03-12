@@ -2707,6 +2707,12 @@ func (s *Server) handleRevokeKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "platform API keys not enabled")
 		return
 	}
+	// Require authentication: key revocation is a destructive write operation.
+	// An unauthenticated caller must not be able to revoke arbitrary keys.
+	if s.requireAuth && !s.isAuthenticated(r) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 	keyStr := r.PathValue("key")
 	if !s.platformKeys.Revoke(keyStr) {
 		writeError(w, http.StatusNotFound, "key not found")

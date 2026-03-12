@@ -130,9 +130,15 @@ func CalculateFee(amount uint64) uint64 {
 }
 
 // CollectFee splits a settlement fee between the validator (80%) and the
-// protocol treasury (20%). It credits both via the TransferLedger and tracks
-// all splits internally for reporting via Stats. The burn amount is always 0 —
-// all fees stay in circulation.
+// protocol treasury (20%). It credits both via FundAgent (which mints new tokens)
+// and tracks all splits internally for reporting via Stats.
+//
+// WARNING: FundAgent creates tokens from nothing, which inflates the total supply
+// and violates the supply invariant. This function MUST NOT be called in settlement,
+// escrow release, or fee redistribution paths. Use CollectFeeFromRecipient (which
+// moves existing tokens via TransferFromBucket) or TrackFee (stats-only, no ledger
+// writes) instead. CollectFee exists only for legacy callers that have not yet
+// migrated to the supply-invariant alternatives.
 //
 // Returns the total fee and the amount burned (always 0). Both are zero when
 // the fee rounds to zero (small transaction amounts).
@@ -163,13 +169,20 @@ func (c *Collector) CollectFee(
 	c.persistStatsLocked()
 	c.mu.Unlock()
 
-	// Best-effort credits — errors are ignored because fee distribution should
-	// never block settlement.
+	// Credit validator and treasury via FundAgent.
+	// NOTE: FundAgent mints new tokens — see the WARNING in the CollectFee doc.
+	// Callers in settlement paths should use CollectFeeFromRecipient instead.
 	if validatorAmount > 0 {
-		_ = c.transfer.FundAgent(validatorID, validatorAmount)
+		if err := c.transfer.FundAgent(validatorID, validatorAmount); err != nil {
+			slog.Error("fees: CollectFee: validator credit failed (supply invariant may be violated)",
+				"validator", validatorID, "amount", validatorAmount, "err", err)
+		}
 	}
 	if treasuryAmount > 0 {
-		_ = c.transfer.FundAgent(treasuryID, treasuryAmount)
+		if err := c.transfer.FundAgent(treasuryID, treasuryAmount); err != nil {
+			slog.Error("fees: CollectFee: treasury credit failed (supply invariant may be violated)",
+				"treasury", treasuryID, "amount", treasuryAmount, "err", err)
+		}
 	}
 	return fee, burned
 }

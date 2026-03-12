@@ -73,6 +73,19 @@ func TestDeterministicVerifier_EmptyEvidenceFails(t *testing.T) {
 	}
 }
 
+func TestDeterministicVerifier_NilEvidenceNoPanic(t *testing.T) {
+	dv := verification.NewDeterministicVerifier(newRegistry())
+	// Must not panic; nil is treated as empty evidence — all gates fail.
+	report := dv.Verify("code", nil, "task", "desc", 100_000)
+	if report == nil {
+		t.Fatal("expected non-nil report for nil evidence")
+	}
+	// Threshold gate must fail for nil input.
+	if len(report.HardGates) == 0 || report.HardGates[0].Pass {
+		t.Error("threshold gate should fail for nil evidence")
+	}
+}
+
 func TestDeterministicVerifier_NilRegistryFallback(t *testing.T) {
 	dv := verification.NewDeterministicVerifier(nil) // keyword-verifier fallback
 	ev := makeEv("agent aethernet protocol task transfer settlement evidence", "")
