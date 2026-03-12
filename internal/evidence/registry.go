@@ -13,10 +13,11 @@ type VerifierRegistry struct {
 	fallback  *KeywordVerifier
 
 	// Per-category pass thresholds — override the individual verifiers' built-in
-	// constants. Initialised to the package defaults (0.5) by NewVerifierRegistry.
+	// constants. Initialised to the production defaults by NewVerifierRegistry.
 	codeThresh    float64
 	dataThresh    float64
 	contentThresh float64
+	defaultThresh float64 // fallback threshold for unknown categories
 }
 
 // NewVerifierRegistry returns a fully-populated VerifierRegistry with all
@@ -29,9 +30,10 @@ func NewVerifierRegistry() *VerifierRegistry {
 	r := &VerifierRegistry{
 		verifiers:     make(map[string]VerifierInterface),
 		fallback:      NewKeywordVerifier(),
-		codeThresh:    0.25,
-		dataThresh:    0.25,
-		contentThresh: 0.25,
+		codeThresh:    0.65, // static analysis tops out at ~0.71 for good code
+		dataThresh:    0.70,
+		contentThresh: 0.50,
+		defaultThresh: 0.60,
 	}
 
 	for _, cat := range []string{"code", "code-review", "technical", "security"} {
@@ -56,6 +58,12 @@ func (r *VerifierRegistry) SetPassThresholds(code, data, content float64) {
 	r.contentThresh = content
 }
 
+// SetDefaultThreshold overrides the fallback pass threshold for unknown categories.
+// Values should be in [0.0, 1.0].
+func (r *VerifierRegistry) SetDefaultThreshold(threshold float64) {
+	r.defaultThresh = threshold
+}
+
 // thresholdFor returns the pass threshold for the given category.
 func (r *VerifierRegistry) thresholdFor(category string) float64 {
 	switch category {
@@ -66,16 +74,10 @@ func (r *VerifierRegistry) thresholdFor(category string) float64 {
 	case "writing", "documentation", "translation", "content":
 		return r.contentThresh
 	default:
-		// KeywordVerifier fallback — use the highest of the three thresholds
-		// so that unknown categories are not easier to pass than known ones.
-		t := r.codeThresh
-		if r.dataThresh > t {
-			t = r.dataThresh
-		}
-		if r.contentThresh > t {
-			t = r.contentThresh
-		}
-		return t
+		// KeywordVerifier fallback — use the dedicated default threshold
+		// (0.60) so unknown categories have a consistent, independently-
+		// configured bar rather than inheriting the strictest category.
+		return r.defaultThresh
 	}
 }
 

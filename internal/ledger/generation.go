@@ -18,6 +18,7 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -136,7 +137,9 @@ func (l *GenerationLedger) Record(e *event.Event) error {
 		RecordedAt:       time.Now(),
 	}
 	if l.store != nil {
-		_ = l.store.PutGeneration(l.entries[e.ID])
+		if err := l.store.PutGeneration(l.entries[e.ID]); err != nil {
+			slog.Error("ledger: failed to persist generation record", "event_id", e.ID, "err", err)
+		}
 	}
 	return nil
 }
@@ -165,7 +168,9 @@ func (l *GenerationLedger) Verify(eventID event.EventID, verifiedValue uint64) e
 	entry.VerifiedValue = verifiedValue
 	entry.Settlement = event.SettlementSettled
 	if l.store != nil {
-		_ = l.store.PutGeneration(entry)
+		if err := l.store.PutGeneration(entry); err != nil {
+			slog.Error("ledger: failed to persist generation settlement", "event_id", eventID, "state", event.SettlementSettled, "err", err)
+		}
 	}
 	return nil
 }
@@ -192,7 +197,9 @@ func (l *GenerationLedger) Reject(eventID event.EventID) error {
 
 	entry.Settlement = event.SettlementAdjusted
 	if l.store != nil {
-		_ = l.store.PutGeneration(entry)
+		if err := l.store.PutGeneration(entry); err != nil {
+			slog.Error("ledger: failed to persist generation rejection", "event_id", eventID, "state", event.SettlementAdjusted, "err", err)
+		}
 	}
 	return nil
 }
@@ -338,7 +345,9 @@ func (l *GenerationLedger) RecordTaskGeneration(agentID crypto.AgentID, evidence
 	}
 	l.entries[entryID] = entry
 	if l.store != nil {
-		_ = l.store.PutGeneration(entry)
+		if err := l.store.PutGeneration(entry); err != nil {
+			slog.Error("ledger: failed to persist task generation record", "task_id", taskID, "err", err)
+		}
 	}
 	return nil
 }

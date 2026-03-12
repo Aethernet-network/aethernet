@@ -3,6 +3,7 @@ package identity
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -103,7 +104,9 @@ func (r *Registry) Register(fp *CapabilityFingerprint) error {
 	}
 	r.agents[fp.AgentID] = stored
 	if r.store != nil {
-		_ = r.store.PutIdentity(stored)
+		if err := r.store.PutIdentity(stored); err != nil {
+			slog.Error("identity: failed to persist registration", "agent_id", fp.AgentID, "err", err)
+		}
 	}
 	return nil
 }
@@ -139,7 +142,9 @@ func (r *Registry) Update(agentID crypto.AgentID, updatedFP *CapabilityFingerpri
 	}
 	r.agents[agentID] = stored
 	if r.store != nil {
-		_ = r.store.PutIdentity(stored)
+		if err := r.store.PutIdentity(stored); err != nil {
+			slog.Error("identity: failed to persist update", "agent_id", agentID, "err", err)
+		}
 	}
 	return nil
 }
@@ -251,7 +256,9 @@ func (r *Registry) RecordTaskCompletion(agentID crypto.AgentID, valueGenerated u
 		return err
 	}
 	if r.store != nil {
-		_ = r.store.PutIdentity(fp)
+		if err := r.store.PutIdentity(fp); err != nil {
+			slog.Error("identity: failed to persist task completion", "agent_id", agentID, "err", err)
+		}
 	}
 	return nil
 }
@@ -295,7 +302,9 @@ func (r *Registry) RecordTaskFailure(agentID crypto.AgentID, domain string) erro
 		return err
 	}
 	if r.store != nil {
-		_ = r.store.PutIdentity(fp)
+		if err := r.store.PutIdentity(fp); err != nil {
+			slog.Error("identity: failed to persist task failure", "agent_id", agentID, "err", err)
+		}
 	}
 	return nil
 }

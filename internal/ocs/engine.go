@@ -29,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -543,7 +544,9 @@ func (e *Engine) Submit(ev *event.Event) error {
 		Deadline:     e.config.VerificationTimeout,
 	}
 	if e.store != nil {
-		_ = e.store.PutPending(e.pending[ev.ID])
+		if err := e.store.PutPending(e.pending[ev.ID]); err != nil {
+			slog.Error("ocs: failed to persist pending item", "event_id", ev.ID, "err", err)
+		}
 	}
 	if e.nodeMetrics != nil {
 		e.nodeMetrics.TransactionsTotal.Inc()
@@ -619,7 +622,9 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 	e.processed[result.EventID] = struct{}{}
 	e.processedAt[result.EventID] = time.Now()
 	if e.store != nil {
-		_ = e.store.DeletePending(result.EventID)
+		if err := e.store.DeletePending(result.EventID); err != nil {
+			slog.Error("ocs: failed to delete pending item", "event_id", result.EventID, "err", err)
+		}
 	}
 	e.mu.Unlock()
 
@@ -715,16 +720,44 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 		// Slash the offending agent's stake and credit the amount to treasury.
 		// Transfer defaults (sender exploited trust) → full slash + reset timestamp.
 		// Other failures (bad generation claim) → 10% slash.
+		//
+		// Atomicity: if a treasury is configured, pre-check the staking-pool
+		// balance before slashing. If the pool is insufficient, skip the slash
+		// entirely — both operations must succeed or neither runs, so the supply
+		// invariant is preserved.
 		if e.stakeManager != nil {
 			var slashed uint64
-			if item.EventType == event.EventTypeTransfer {
-				slashed = e.stakeManager.SlashDefault(item.AgentID)
-			} else {
-				slashed = e.stakeManager.Slash(item.AgentID, 10)
+			skipSlash := false
+			if e.treasuryID != "" {
+				// Compute the expected slash amount from the current staked balance.
+				currentStake := e.stakeManager.StakedAmount(item.AgentID)
+				var checkAmount uint64
+				if item.EventType == event.EventTypeTransfer {
+					checkAmount = currentStake
+				} else {
+					checkAmount = currentStake * 10 / 100
+				}
+				if checkAmount > 0 {
+					if err := e.transfer.BalanceCheck(crypto.AgentID("staking-pool"), checkAmount); err != nil {
+						slog.Error("ocs: slash skipped — staking-pool insufficient, supply invariant preserved",
+							"agent", item.AgentID, "needed", checkAmount, "err", err)
+						skipSlash = true
+					}
+				}
+			}
+			if !skipSlash {
+				if item.EventType == event.EventTypeTransfer {
+					slashed = e.stakeManager.SlashDefault(item.AgentID)
+				} else {
+					slashed = e.stakeManager.Slash(item.AgentID, 10)
+				}
 			}
 			if slashed > 0 && e.treasuryID != "" {
 				// Move from staking-pool to treasury — no new tokens created.
-				_ = e.transfer.TransferFromBucket(crypto.AgentID("staking-pool"), e.treasuryID, slashed)
+				if err := e.transfer.TransferFromBucket(crypto.AgentID("staking-pool"), e.treasuryID, slashed); err != nil {
+					slog.Error("ocs: slash transfer failed — supply invariant break",
+						"agent", item.AgentID, "slashed", slashed, "err", err)
+				}
 			}
 			if slashed > 0 {
 				if e.nodeMetrics != nil {

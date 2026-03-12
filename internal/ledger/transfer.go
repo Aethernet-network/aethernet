@@ -213,7 +213,9 @@ func (l *TransferLedger) Record(e *event.Event) error {
 		RecordedAt: time.Now(),
 	}
 	if l.store != nil {
-		_ = l.store.PutTransfer(l.entries[e.ID])
+		if err := l.store.PutTransfer(l.entries[e.ID]); err != nil {
+			slog.Error("ledger: failed to persist transfer record", "event_id", e.ID, "err", err)
+		}
 	}
 	return nil
 }
@@ -256,7 +258,9 @@ func (l *TransferLedger) Settle(eventID event.EventID, state event.SettlementSta
 
 	entry.Settlement = state
 	if l.store != nil {
-		_ = l.store.PutTransfer(entry)
+		if err := l.store.PutTransfer(entry); err != nil {
+			slog.Error("ledger: failed to persist transfer settlement", "event_id", eventID, "state", state, "err", err)
+		}
 	}
 	return nil
 }
@@ -492,7 +496,9 @@ func (l *TransferLedger) ResetOptimisticOutflows(agentID crypto.AgentID) int {
 		if e.FromAgent == agentID && e.Settlement == event.SettlementOptimistic {
 			delete(l.entries, id)
 			if l.store != nil {
-				_ = l.store.DeleteTransfer(id)
+				if err := l.store.DeleteTransfer(id); err != nil {
+					slog.Error("ledger: failed to delete optimistic transfer", "event_id", id, "err", err)
+				}
 			}
 			removed++
 		}

@@ -8,6 +8,7 @@ package reputation
 
 import (
 	"encoding/json"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -271,6 +272,12 @@ func (rm *ReputationManager) persist(agentID crypto.AgentID, rep *AgentReputatio
 	if rm.store == nil {
 		return
 	}
-	data, _ := json.Marshal(rep)
-	_ = rm.store.PutReputation(string(agentID), data)
+	data, err := json.Marshal(rep)
+	if err != nil {
+		slog.Error("reputation: failed to marshal reputation", "agent_id", agentID, "err", err)
+		return
+	}
+	if err := rm.store.PutReputation(string(agentID), data); err != nil {
+		slog.Error("reputation: failed to persist reputation", "agent_id", agentID, "err", err)
+	}
 }

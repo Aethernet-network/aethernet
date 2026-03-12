@@ -20,6 +20,7 @@ import (
 
 	"github.com/Aethernet-network/aethernet/internal/consensus"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
@@ -38,6 +39,7 @@ const (
 	prefixRegistry   = "reg:"
 	prefixMeta       = "meta:" // generic metadata (genesis marker, onboarding counter, …)
 	prefixAPIKey     = "key:"  // platform developer API keys
+	prefixEscrow     = "esc:"  // task escrow entries
 )
 
 // Store is the durable persistence layer for a single AetherNet node.
@@ -754,6 +756,75 @@ func (s *Store) AllListings() (map[string][]byte, error) {
 		return nil
 	})
 	return result, err
+}
+
+// ---------------------------------------------------------------------------
+// Escrow entries
+// ---------------------------------------------------------------------------
+
+// PutEscrow serialises entry to JSON and stores it under "esc:<entry.TaskID>".
+func (s *Store) PutEscrow(entry *escrow.EscrowEntry) error {
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("store: marshal escrow: %w", err)
+	}
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(prefixEscrow+entry.TaskID), data)
+	})
+}
+
+// GetEscrow retrieves the EscrowEntry stored under "esc:<taskID>".
+func (s *Store) GetEscrow(taskID string) (*escrow.EscrowEntry, error) {
+	var entry escrow.EscrowEntry
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(prefixEscrow + taskID))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			return json.Unmarshal(val, &entry)
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: get escrow %s: %w", taskID, err)
+	}
+	return &entry, nil
+}
+
+// AllEscrowEntries returns every EscrowEntry in the store in unspecified order.
+func (s *Store) AllEscrowEntries() ([]*escrow.EscrowEntry, error) {
+	var entries []*escrow.EscrowEntry
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(prefixEscrow)
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			var entry escrow.EscrowEntry
+			if err := item.Value(func(val []byte) error {
+				return json.Unmarshal(val, &entry)
+			}); err != nil {
+				return err
+			}
+			entries = append(entries, &entry)
+		}
+		return nil
+	})
+	return entries, err
+}
+
+// DeleteEscrow removes the EscrowEntry stored under "esc:<taskID>".
+// Returns nil when the key does not exist (idempotent delete).
+func (s *Store) DeleteEscrow(taskID string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		err := txn.Delete([]byte(prefixEscrow + taskID))
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil
+		}
+		return err
+	})
 }
 
 // ---------------------------------------------------------------------------

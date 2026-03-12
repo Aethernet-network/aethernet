@@ -19,9 +19,10 @@ import (
 //
 // Pass threshold: 0.5 (lower than the default 0.6 because static analysis is
 // harder to satisfy than keyword matching while being much harder to game).
+// The VerifierRegistry applies a higher threshold (0.65) for production use.
 type CodeVerifier struct{}
 
-const codePassThreshold = 0.25
+const codePassThreshold = 0.50
 
 // Verify implements VerifierInterface.
 func (cv *CodeVerifier) Verify(ev *Evidence, taskTitle, taskDescription string, budget uint64) (*Score, bool) {

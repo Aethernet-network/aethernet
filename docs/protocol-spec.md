@@ -117,7 +117,8 @@ Structured evidence model for proving work quality:
 - Completeness (0-1): Is the work fully done?
 - Quality (0-1): Output quality signals
 - Overall = relevance * 0.3 + completeness * 0.4 + quality * 0.3
-- Pass threshold: 0.6
+- Pass threshold: 0.60 (default/unknown categories)
+- Per-category thresholds: code/technical 0.85, data/research 0.70, writing/content 0.50
 
 **Use cases for builders:**
 - Compliance and audit systems (provable AI output)

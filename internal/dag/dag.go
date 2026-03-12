@@ -49,6 +49,7 @@ package dag
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 
@@ -195,7 +196,9 @@ func (d *DAG) Add(e *event.Event) error {
 
 	// Write-through to the persistence store when one is attached.
 	if d.store != nil {
-		_ = d.store.PutEvent(e)
+		if err := d.store.PutEvent(e); err != nil {
+			slog.Error("dag: failed to persist event", "event_id", e.ID, "err", err)
+		}
 	}
 
 	return nil

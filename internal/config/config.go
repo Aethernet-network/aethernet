@@ -170,6 +170,13 @@ type ArchivalConfig struct {
 	ArchiveInterval Duration `json:"archive_interval"`
 }
 
+// ConsensusConfig controls the BFT voting round parameters.
+type ConsensusConfig struct {
+	// MinParticipants is the minimum number of validators required to finalise
+	// a consensus round. Production should be 3+; single-node testnet uses 1.
+	MinParticipants int `json:"min_participants"`
+}
+
 // ProtocolConfig is the top-level configuration for an AetherNet node.
 // Use DefaultConfig to obtain a config pre-populated with all production defaults.
 type ProtocolConfig struct {
@@ -182,6 +189,7 @@ type ProtocolConfig struct {
 	RateLimit RateLimitConfig `json:"rate_limit"`
 	Network   NetworkConfig   `json:"network"`
 	Archival  ArchivalConfig  `json:"archival"`
+	Consensus ConsensusConfig `json:"consensus"`
 }
 
 // DefaultConfig returns a ProtocolConfig pre-populated with all current
@@ -205,10 +213,10 @@ func DefaultConfig() *ProtocolConfig {
 			MaxCompletedAge:      Duration{7 * 24 * time.Hour},
 		},
 		Evidence: EvidenceConfig{
-			PassThreshold:        0.25,
-			CodePassThreshold:    0.25,
-			DataPassThreshold:    0.25,
-			ContentPassThreshold: 0.25,
+			PassThreshold:        0.60,
+			CodePassThreshold:    0.65,
+			DataPassThreshold:    0.70,
+			ContentPassThreshold: 0.50,
 		},
 		Router: RouterConfig{
 			NewcomerThreshold:  10,
@@ -240,6 +248,9 @@ func DefaultConfig() *ProtocolConfig {
 		Archival: ArchivalConfig{
 			ArchiveThreshold: Duration{7 * 24 * time.Hour},
 			ArchiveInterval:  Duration{time.Hour},
+		},
+		Consensus: ConsensusConfig{
+			MinParticipants: 3,
 		},
 	}
 }
@@ -301,6 +312,7 @@ func LoadFromFile(path string) (*ProtocolConfig, error) {
 //	AETHERNET_VOTE_MAX_AGE            → Network.VoteMaxAge
 //	AETHERNET_ARCHIVE_THRESHOLD       → Archival.ArchiveThreshold
 //	AETHERNET_ARCHIVE_INTERVAL        → Archival.ArchiveInterval
+//	AETHERNET_MIN_PARTICIPANTS        → Consensus.MinParticipants
 func LoadFromEnv(cfg *ProtocolConfig) {
 	setUint64 := func(key string, dest *uint64) {
 		if v := os.Getenv(key); v != "" {
@@ -388,4 +400,7 @@ func LoadFromEnv(cfg *ProtocolConfig) {
 	// Archival
 	setDuration("AETHERNET_ARCHIVE_THRESHOLD", &cfg.Archival.ArchiveThreshold)
 	setDuration("AETHERNET_ARCHIVE_INTERVAL", &cfg.Archival.ArchiveInterval)
+
+	// Consensus
+	setInt("AETHERNET_MIN_PARTICIPANTS", &cfg.Consensus.MinParticipants)
 }

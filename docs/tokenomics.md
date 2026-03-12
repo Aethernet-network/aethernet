@@ -49,9 +49,8 @@ Every settled transaction incurs a **0.1% fee** (10 basis points):
 
 | Recipient | Share |
 |:----------|:------|
-| Validator | 70% |
+| Validator | 80% |
 | Treasury | 20% |
-| Burned | 10% |
 
 ## Slashing
 
@@ -69,8 +68,8 @@ New agents receive free AET on a declining curve:
 | First 1,000 | 50 AET |
 | 1,001 - 10,000 | 10 AET |
 | 10,001 - 100,000 | 1 AET |
-| 100,001 - 1,000,000 | 0.1 AET |
-| Over 1,000,000 | 0 |
+| 100,001 - 800,000 | 0.1 AET |
+| Over 800,000 | 0 |
 
 ## Security
 

@@ -11,6 +11,7 @@ package registry
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -98,7 +99,9 @@ func (r *Registry) Register(listing *ServiceListing) {
 	r.listings[listing.AgentID] = &cp
 	if r.store != nil {
 		if data, err := json.Marshal(&cp); err == nil {
-			_ = r.store.PutListing(string(listing.AgentID), data)
+			if err := r.store.PutListing(string(listing.AgentID), data); err != nil {
+				slog.Error("registry: failed to persist listing", "agent_id", listing.AgentID, "err", err)
+			}
 		}
 	}
 }
@@ -115,7 +118,9 @@ func (r *Registry) Deactivate(agentID crypto.AgentID) bool {
 	l.UpdatedAt = time.Now().UnixNano()
 	if r.store != nil {
 		if data, err := json.Marshal(l); err == nil {
-			_ = r.store.PutListing(string(agentID), data)
+			if err := r.store.PutListing(string(agentID), data); err != nil {
+				slog.Error("registry: failed to persist deactivation", "agent_id", agentID, "err", err)
+			}
 		}
 	}
 	return true

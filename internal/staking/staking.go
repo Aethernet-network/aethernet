@@ -356,7 +356,9 @@ func (sm *StakeManager) SlashDefault(agentID crypto.AgentID) uint64 {
 	delete(sm.stakedSince, agentID)  // reset: agent re-earns trust from scratch
 	delete(sm.lastActivity, agentID)
 	if sm.store != nil {
-		_ = sm.store.PutStakeMeta(agentID, 0, 0, 0)
+		if err := sm.store.PutStakeMeta(agentID, 0, 0, 0); err != nil {
+			slog.Error("staking: failed to persist slash default", "agent", agentID, "err", err)
+		}
 	}
 	return slashed
 }

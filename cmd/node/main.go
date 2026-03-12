@@ -436,6 +436,9 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 		taskMgr = tasks.NewTaskManager()
 	}
 	escrowMgr := escrow.New(tl)
+	if s != nil {
+		escrowMgr.SetStore(s)
+	}
 
 	// Category-specific reputation tracking.
 	reputationMgr := reputation.NewReputationManager()

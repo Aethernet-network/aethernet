@@ -19,7 +19,7 @@ import (
 // Pass threshold: 0.5
 type DataVerifier struct{}
 
-const dataPassThreshold = 0.25
+const dataPassThreshold = 0.70
 
 // Verify implements VerifierInterface.
 func (dv *DataVerifier) Verify(ev *Evidence, taskTitle, taskDescription string, budget uint64) (*Score, bool) {

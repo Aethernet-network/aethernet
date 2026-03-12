@@ -18,7 +18,7 @@ import (
 // Pass threshold: 0.5
 type ContentVerifier struct{}
 
-const contentPassThreshold = 0.25
+const contentPassThreshold = 0.50
 
 // Verify implements VerifierInterface.
 func (cv *ContentVerifier) Verify(ev *Evidence, taskTitle, taskDescription string, budget uint64) (*Score, bool) {

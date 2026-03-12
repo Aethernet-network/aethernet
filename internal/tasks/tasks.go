@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -244,7 +245,9 @@ func (m *TaskManager) archiveCompleted() {
 		if time.Unix(0, task.CompletedAt).Before(cutoff) {
 			delete(m.tasks, id)
 			if store != nil {
-				_ = store.DeleteTask(id)
+				if err := store.DeleteTask(id); err != nil {
+					slog.Error("tasks: failed to delete archived task", "task_id", id, "err", err)
+				}
 			}
 		}
 	}
@@ -816,9 +819,12 @@ func (m *TaskManager) persist(task *Task) {
 	}
 	data, err := json.Marshal(task)
 	if err != nil {
+		slog.Error("tasks: failed to marshal task", "task_id", task.ID, "err", err)
 		return
 	}
-	_ = m.store.PutTask(task.ID, data)
+	if err := m.store.PutTask(task.ID, data); err != nil {
+		slog.Error("tasks: failed to persist task", "task_id", task.ID, "err", err)
+	}
 }
 
 // generateTaskID creates a unique task ID from poster, title, and nanosecond time.

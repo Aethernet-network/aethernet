@@ -1021,6 +1021,7 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<20) // 10 MiB
 	var req submitTaskRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -1662,7 +1663,9 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		if s.store != nil {
 			buf := make([]byte, 8)
 			binary.BigEndian.PutUint64(buf, newAllocated)
-			_ = s.store.PutMeta("onboarding_allocated", buf)
+			if err := s.store.PutMeta("onboarding_allocated", buf); err != nil {
+				slog.Error("onboarding: failed to persist allocation counter", "allocated", newAllocated, "err", err)
+			}
 		}
 
 		if err := s.transfer.TransferFromBucket(crypto.AgentID(genesis.BucketEcosystem), regAgentID, allocation); err == nil {

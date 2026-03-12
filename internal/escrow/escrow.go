@@ -13,6 +13,7 @@ package escrow
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
@@ -24,12 +25,21 @@ import (
 // disbursements have succeeded, enabling idempotent retry: if ReleaseNet
 // fails mid-way, a second call skips already-completed transfers (CRITICAL-3).
 type EscrowEntry struct {
-	TaskID        string
-	PosterID      crypto.AgentID
-	Amount        uint64
-	WorkerPaid    bool // true once the worker's net share has been transferred
-	ValidatorPaid bool // true once the validator's share has been transferred
-	TreasuryPaid  bool // true once the treasury's share has been transferred
+	TaskID        string         `json:"task_id"`
+	PosterID      crypto.AgentID `json:"poster_id"`
+	Amount        uint64         `json:"amount"`
+	WorkerPaid    bool           `json:"worker_paid"`    // true once the worker's net share has been transferred
+	ValidatorPaid bool           `json:"validator_paid"` // true once the validator's share has been transferred
+	TreasuryPaid  bool           `json:"treasury_paid"`  // true once the treasury's share has been transferred
+}
+
+// escrowPersistence is the subset of store.Store used by Escrow for durable writes.
+// *store.Store from the store package satisfies this interface.
+type escrowPersistence interface {
+	PutEscrow(entry *EscrowEntry) error
+	GetEscrow(taskID string) (*EscrowEntry, error)
+	AllEscrowEntries() ([]*EscrowEntry, error)
+	DeleteEscrow(taskID string) error
 }
 
 // ErrEscrowNotFound is returned when an operation references an unknown taskID.
@@ -41,6 +51,7 @@ type Escrow struct {
 	mu      sync.RWMutex
 	entries map[string]*EscrowEntry // keyed by taskID
 	ledger  *ledger.TransferLedger
+	store   escrowPersistence // optional; nil = in-memory only
 }
 
 // New creates a new Escrow backed by tl.
@@ -49,6 +60,39 @@ func New(tl *ledger.TransferLedger) *Escrow {
 		entries: make(map[string]*EscrowEntry),
 		ledger:  tl,
 	}
+}
+
+// SetStore attaches a persistence backend. After this call Hold, ReleaseNet,
+// and Refund write through to the store so escrow entries survive restarts.
+// s must satisfy escrowPersistence; *store.Store from the store package does so.
+func (e *Escrow) SetStore(s escrowPersistence) {
+	e.store = s
+}
+
+// persist writes entry to the store (best-effort; errors are logged not propagated).
+// Must be called while NOT holding e.mu — it acquires its own view of the entry.
+func (e *Escrow) persist(entry *EscrowEntry) {
+	if e.store == nil {
+		return
+	}
+	if err := e.store.PutEscrow(entry); err != nil {
+		slog.Error("escrow: failed to persist entry", "task_id", entry.TaskID, "err", err)
+	}
+}
+
+// LoadFromStore reconstructs in-flight escrow entries from the persistence store
+// on node restart. Call before serving requests. s must satisfy escrowPersistence.
+func LoadFromStore(tl *ledger.TransferLedger, s escrowPersistence) (*Escrow, error) {
+	entries, err := s.AllEscrowEntries()
+	if err != nil {
+		return nil, fmt.Errorf("escrow: load from store: %w", err)
+	}
+	escrow := New(tl)
+	escrow.store = s
+	for _, entry := range entries {
+		escrow.entries[entry.TaskID] = entry
+	}
+	return escrow, nil
 }
 
 // bucketID returns the virtual escrow agent ID for a task.
@@ -63,17 +107,25 @@ func (e *Escrow) Hold(taskID string, posterID crypto.AgentID, amount uint64) err
 	// Record the entry before the ledger transfer so a panic between the two
 	// operations cannot strand funds in the bucket with no entry to find them.
 	e.mu.Lock()
-	e.entries[taskID] = &EscrowEntry{
+	entry := &EscrowEntry{
 		TaskID:   taskID,
 		PosterID: posterID,
 		Amount:   amount,
 	}
+	e.entries[taskID] = entry
 	e.mu.Unlock()
+
+	e.persist(entry)
 
 	if err := e.ledger.TransferFromBucket(posterID, bucketID(taskID), amount); err != nil {
 		e.mu.Lock()
 		delete(e.entries, taskID)
 		e.mu.Unlock()
+		if e.store != nil {
+			if delErr := e.store.DeleteEscrow(taskID); delErr != nil {
+				slog.Error("escrow: failed to delete rolled-back entry", "task_id", taskID, "err", delErr)
+			}
+		}
 		return fmt.Errorf("escrow: hold for task %s: %w", taskID, err)
 	}
 	return nil
@@ -140,6 +192,7 @@ func (e *Escrow) ReleaseNet(
 		e.mu.Lock()
 		entry.WorkerPaid = true
 		e.mu.Unlock()
+		e.persist(entry)
 	}
 
 	// Distribute validator share from the remaining escrow balance.
@@ -150,6 +203,7 @@ func (e *Escrow) ReleaseNet(
 		e.mu.Lock()
 		entry.ValidatorPaid = true
 		e.mu.Unlock()
+		e.persist(entry)
 	}
 
 	// Distribute treasury share from the remaining escrow balance.
@@ -160,12 +214,18 @@ func (e *Escrow) ReleaseNet(
 		e.mu.Lock()
 		entry.TreasuryPaid = true
 		e.mu.Unlock()
+		e.persist(entry)
 	}
 
 	// All three disbursements complete — remove the entry.
 	e.mu.Lock()
 	delete(e.entries, taskID)
 	e.mu.Unlock()
+	if e.store != nil {
+		if err := e.store.DeleteEscrow(taskID); err != nil {
+			slog.Error("escrow: failed to delete completed entry", "task_id", taskID, "err", err)
+		}
+	}
 	return nil
 }
 
@@ -186,6 +246,11 @@ func (e *Escrow) Refund(taskID string) error {
 	e.mu.Lock()
 	delete(e.entries, taskID)
 	e.mu.Unlock()
+	if e.store != nil {
+		if err := e.store.DeleteEscrow(taskID); err != nil {
+			slog.Error("escrow: failed to delete refunded entry", "task_id", taskID, "err", err)
+		}
+	}
 	return nil
 }
 

@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -107,7 +108,9 @@ func (km *KeyManager) GenerateKey(name, email string, tier Tier) *APIKey {
 	km.keys[keyStr] = key
 	if km.store != nil {
 		if data, err := json.Marshal(key); err == nil {
-			_ = km.store.PutAPIKey(keyStr, data)
+			if err := km.store.PutAPIKey(keyStr, data); err != nil {
+				slog.Error("platform: failed to persist API key", "name", name, "err", err)
+			}
 		}
 	}
 	return key
@@ -150,7 +153,9 @@ func (km *KeyManager) Revoke(keyStr string) bool {
 	key.Active = false
 	if km.store != nil {
 		if data, err := json.Marshal(key); err == nil {
-			_ = km.store.PutAPIKey(keyStr, data)
+			if err := km.store.PutAPIKey(keyStr, data); err != nil {
+				slog.Error("platform: failed to persist API key revocation", "key", keyStr, "err", err)
+			}
 		}
 	}
 	return true
