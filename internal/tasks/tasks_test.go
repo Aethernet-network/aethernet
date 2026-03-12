@@ -294,7 +294,7 @@ func TestPostTask_DeliveryMethod_Default(t *testing.T) {
 
 func TestPostTask_DeliveryMethod_Encrypted(t *testing.T) {
 	m := tasks.NewTaskManager()
-	task, err := m.PostTask("alice", "Generate secret", "", "code", 1_000, "encrypted")
+	task, err := m.PostTask("alice", "Generate secret", "", "code", 1_000, tasks.PostTaskOpts{DeliveryMethod: "encrypted"})
 	if err != nil {
 		t.Fatalf("PostTask: %v", err)
 	}
@@ -453,5 +453,103 @@ func TestLoadTaskManagerFromStore_DeleteOnArchive(t *testing.T) {
 	// fresh mock and confirming PutTask was called on Approve.
 	if _, ok := store.data[task.ID]; !ok {
 		t.Fatal("task should still be in store after Approve (archival not triggered yet)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AcceptanceContract tests
+// ---------------------------------------------------------------------------
+
+func TestPostTask_SpecHashDeterministic(t *testing.T) {
+	m := tasks.NewTaskManager()
+
+	// Same inputs must produce the same SpecHash.
+	opts := tasks.PostTaskOpts{
+		SuccessCriteria: []string{"code compiles", "tests pass"},
+		RequiredChecks:  []string{"has_output", "hash_valid"},
+	}
+	t1, err := m.PostTask("alice", "Write code", "Write a Go function", "code", 5_000, opts)
+	if err != nil {
+		t.Fatalf("PostTask: %v", err)
+	}
+	t2, err := m.PostTask("alice", "Write code2", "Write a Go function", "code", 5_000, opts)
+	if err != nil {
+		t.Fatalf("PostTask: %v", err)
+	}
+
+	// Different titles → different hashes.
+	if t1.Contract.SpecHash == t2.Contract.SpecHash {
+		t.Error("tasks with different titles must have different SpecHashes")
+	}
+
+	// Same inputs repeated must produce identical hash.
+	t3, err := m.PostTask("alice", "Write code", "Write a Go function", "code", 6_000, opts)
+	if err != nil {
+		t.Fatalf("PostTask: %v", err)
+	}
+	if t1.Contract.SpecHash != t3.Contract.SpecHash {
+		t.Errorf("identical spec inputs must produce same SpecHash: %q != %q",
+			t1.Contract.SpecHash, t3.Contract.SpecHash)
+	}
+}
+
+func TestPostTask_AcceptanceContractDefaults(t *testing.T) {
+	m := tasks.NewTaskManager()
+
+	// No opts → all defaults applied.
+	task, err := m.PostTask("alice", "Default task", "desc", "code", 5_000)
+	if err != nil {
+		t.Fatalf("PostTask: %v", err)
+	}
+
+	if task.Contract.PolicyVersion != "v1" {
+		t.Errorf("PolicyVersion default: got %q, want \"v1\"", task.Contract.PolicyVersion)
+	}
+	if task.Contract.ChallengeWindowSecs != 300 {
+		t.Errorf("ChallengeWindowSecs default: got %d, want 300", task.Contract.ChallengeWindowSecs)
+	}
+	if !task.Contract.GenerationEligible {
+		t.Error("GenerationEligible default: want true")
+	}
+	if task.Contract.MaxDeliveryTimeSecs != 600 {
+		t.Errorf("MaxDeliveryTimeSecs default: got %d, want 600", task.Contract.MaxDeliveryTimeSecs)
+	}
+	if task.Contract.SpecHash == "" {
+		t.Error("SpecHash must be non-empty even with no criteria/checks")
+	}
+}
+
+func TestPostTask_AcceptanceContractExplicit(t *testing.T) {
+	m := tasks.NewTaskManager()
+	notEligible := false
+	opts := tasks.PostTaskOpts{
+		SuccessCriteria:     []string{"code compiles"},
+		RequiredChecks:      []string{"has_output"},
+		PolicyVersion:       "v2",
+		ChallengeWindowSecs: 60,
+		GenerationEligible:  &notEligible,
+		MaxDeliveryTimeSecs: 1200,
+	}
+
+	task, err := m.PostTask("alice", "Explicit opts", "desc", "code", 5_000, opts)
+	if err != nil {
+		t.Fatalf("PostTask: %v", err)
+	}
+
+	c := task.Contract
+	if c.PolicyVersion != "v2" {
+		t.Errorf("PolicyVersion: got %q, want \"v2\"", c.PolicyVersion)
+	}
+	if c.ChallengeWindowSecs != 60 {
+		t.Errorf("ChallengeWindowSecs: got %d, want 60", c.ChallengeWindowSecs)
+	}
+	if c.GenerationEligible {
+		t.Error("GenerationEligible: want false (explicit false)")
+	}
+	if c.MaxDeliveryTimeSecs != 1200 {
+		t.Errorf("MaxDeliveryTimeSecs: got %d, want 1200", c.MaxDeliveryTimeSecs)
+	}
+	if len(c.RequiredChecks) != 1 || c.RequiredChecks[0] != "has_output" {
+		t.Errorf("RequiredChecks: got %v, want [has_output]", c.RequiredChecks)
 	}
 }

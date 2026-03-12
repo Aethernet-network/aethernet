@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,6 +69,65 @@ var (
 	ErrTaskAlreadyRouted  = errors.New("tasks: task already routed to another agent")
 )
 
+// AcceptanceContract defines the settlement conditions for a task.
+// It is committed at post time via SpecHash and governs what the verification
+// pipeline must confirm before the task can settle.
+type AcceptanceContract struct {
+	// SpecHash is a SHA-256 commitment to the task specification (title,
+	// description, category, criteria, and checks). Set automatically by
+	// PostTask; callers must not set it manually.
+	SpecHash string `json:"spec_hash"`
+
+	// SuccessCriteria are human-readable conditions for acceptance.
+	// They are advisory — the auto-validator uses RequiredChecks for
+	// programmatic enforcement but may surface criteria in dispute messages.
+	SuccessCriteria []string `json:"success_criteria,omitempty"`
+
+	// RequiredChecks lists the named deterministic gates that must all pass
+	// in the verification pipeline for the task to settle. Empty means "run
+	// all gates" (backward-compatible default). Gate names correspond to
+	// keys produced by DeterministicVerifier (e.g. "has_output", "hash_valid",
+	// "min_length"). Future verifier versions may add "compile", "test", etc.
+	RequiredChecks []string `json:"required_checks,omitempty"`
+
+	// PolicyVersion selects the verification policy. Defaults to "v1".
+	PolicyVersion string `json:"policy_version,omitempty"`
+
+	// ChallengeWindowSecs is how long (in seconds) after result submission
+	// before settlement is considered final. Zero or unset defaults to 300 (5 min).
+	ChallengeWindowSecs int64 `json:"challenge_window_secs"`
+
+	// GenerationEligible indicates whether successful completion may create a
+	// generation ledger entry for the worker. Defaults to true.
+	GenerationEligible bool `json:"generation_eligible"`
+
+	// MaxDeliveryTimeSecs is the maximum seconds a claimer has to submit work
+	// after claiming. Zero or unset defaults to 600 (10 min).
+	MaxDeliveryTimeSecs int64 `json:"max_delivery_time_secs"`
+}
+
+// PostTaskOpts holds optional parameters for PostTask beyond the five required
+// positional arguments. The zero value applies sensible defaults:
+//   - DeliveryMethod  → "public"
+//   - PolicyVersion   → "v1"
+//   - ChallengeWindowSecs → 300 (5 minutes)
+//   - GenerationEligible  → true
+//   - MaxDeliveryTimeSecs → 600 (10 minutes)
+type PostTaskOpts struct {
+	// DeliveryMethod is "public" (default) or "encrypted".
+	DeliveryMethod string
+
+	// AcceptanceContract fields — see AcceptanceContract for docs.
+	SuccessCriteria     []string
+	RequiredChecks      []string
+	PolicyVersion       string
+	ChallengeWindowSecs int64
+	// GenerationEligible is a pointer so nil distinguishes "unset" from false.
+	// Nil means "use default = true".
+	GenerationEligible  *bool
+	MaxDeliveryTimeSecs int64
+}
+
 // Task is a unit of work posted to the marketplace.
 type Task struct {
 	ID                string           `json:"id"`
@@ -111,6 +171,10 @@ type Task struct {
 	DeliveryMethod  string `json:"delivery_method,omitempty"`
 	ResultContent   string `json:"result_content,omitempty"`
 	ResultEncrypted bool   `json:"result_encrypted,omitempty"`
+	// Contract defines the settlement conditions committed at post time.
+	// SpecHash is a cryptographic commitment; RequiredChecks drive the
+	// verification pipeline; ChallengeWindowSecs governs finality delay.
+	Contract AcceptanceContract `json:"contract"`
 }
 
 // taskStore is the subset of store.Store used by TaskManager.
@@ -288,11 +352,11 @@ func LoadTaskManagerFromStore(s taskStore) (*TaskManager, error) {
 }
 
 // PostTask creates a new task in Open state.
-// An optional deliveryMethod may be passed as the last argument; accepted
-// values are "public" (default) and "encrypted". Existing callers that omit
-// this argument continue to work unchanged.
+// An optional PostTaskOpts may be passed as the last argument to specify
+// delivery method and acceptance contract fields. Existing callers that omit
+// the opts argument continue to work unchanged (all defaults apply).
 // Returns an error when title is empty, budget is 0, or posterID is empty.
-func (m *TaskManager) PostTask(posterID, title, description, category string, budget uint64, deliveryMethod ...string) (*Task, error) {
+func (m *TaskManager) PostTask(posterID, title, description, category string, budget uint64, opts ...PostTaskOpts) (*Task, error) {
 	if title == "" {
 		return nil, fmt.Errorf("tasks: title required")
 	}
@@ -303,10 +367,38 @@ func (m *TaskManager) PostTask(posterID, title, description, category string, bu
 		return nil, fmt.Errorf("tasks: poster_id required")
 	}
 
-	dm := "public"
-	if len(deliveryMethod) > 0 && deliveryMethod[0] != "" {
-		dm = deliveryMethod[0]
+	var o PostTaskOpts
+	if len(opts) > 0 {
+		o = opts[0]
 	}
+
+	dm := o.DeliveryMethod
+	if dm == "" {
+		dm = "public"
+	}
+
+	// Build the AcceptanceContract with defaults applied.
+	contract := AcceptanceContract{
+		SuccessCriteria:     o.SuccessCriteria,
+		RequiredChecks:      o.RequiredChecks,
+		PolicyVersion:       o.PolicyVersion,
+		ChallengeWindowSecs: o.ChallengeWindowSecs,
+		GenerationEligible:  true, // default
+		MaxDeliveryTimeSecs: o.MaxDeliveryTimeSecs,
+	}
+	if contract.PolicyVersion == "" {
+		contract.PolicyVersion = "v1"
+	}
+	if contract.ChallengeWindowSecs == 0 {
+		contract.ChallengeWindowSecs = 300
+	}
+	if contract.MaxDeliveryTimeSecs == 0 {
+		contract.MaxDeliveryTimeSecs = 600
+	}
+	if o.GenerationEligible != nil {
+		contract.GenerationEligible = *o.GenerationEligible
+	}
+	contract.SpecHash = computeSpecHash(title, description, category, o.SuccessCriteria, o.RequiredChecks)
 
 	now := time.Now()
 	task := &Task{
@@ -319,6 +411,7 @@ func (m *TaskManager) PostTask(posterID, title, description, category string, bu
 		Status:         TaskStatusOpen,
 		PostedAt:       now.UnixNano(),
 		DeliveryMethod: dm,
+		Contract:       contract,
 	}
 
 	m.mu.Lock()
@@ -326,6 +419,18 @@ func (m *TaskManager) PostTask(posterID, title, description, category string, bu
 	m.tasks[task.ID] = task
 	m.persist(task)
 	return task, nil
+}
+
+// computeSpecHash returns a hex-encoded SHA-256 commitment to the task
+// specification. The hash is deterministic: identical inputs always produce
+// the same hash, and any change to the specification invalidates it.
+func computeSpecHash(title, description, category string, successCriteria, requiredChecks []string) string {
+	h := sha256.Sum256([]byte(
+		title + description + category +
+			strings.Join(successCriteria, ",") +
+			strings.Join(requiredChecks, ","),
+	))
+	return "sha256:" + hex.EncodeToString(h[:])
 }
 
 // ClaimTask assigns a task to claimerID. Returns ErrTaskNotFound if the task

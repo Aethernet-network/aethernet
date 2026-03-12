@@ -3,6 +3,7 @@ package verification_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/evidence"
 	"github.com/Aethernet-network/aethernet/internal/verification"
@@ -305,5 +306,202 @@ func TestInProcessVerifier_ResultFields(t *testing.T) {
 	}
 	if result.Timestamp.IsZero() {
 		t.Error("Timestamp must not be zero")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DeterministicVerifier — RequiredChecks filtering
+// ---------------------------------------------------------------------------
+
+func TestDeterministicVerifier_RequiredChecksFiltering(t *testing.T) {
+	dv := verification.NewDeterministicVerifier(newRegistry())
+	ev := makeEv("The quick brown fox jumps over the lazy dog.", "")
+
+	// Run with no RequiredChecks → all four gates returned.
+	allReport := dv.Verify("writing", ev, "title", "desc", 100_000)
+	if len(allReport.HardGates) < 4 {
+		t.Fatalf("expected ≥4 gates with no filter, got %d", len(allReport.HardGates))
+	}
+
+	// Run with RequiredChecks=["has_output"] → threshold + has_output only.
+	filtered := dv.Verify("writing", ev, "title", "desc", 100_000, "has_output")
+	names := make(map[string]bool)
+	for _, g := range filtered.HardGates {
+		names[g.Name] = true
+	}
+	if !names["threshold"] {
+		t.Error("threshold gate must always be present regardless of RequiredChecks")
+	}
+	if !names["has_output"] {
+		t.Error("has_output gate must be present when in RequiredChecks")
+	}
+	if names["min_length"] || names["hash_valid"] {
+		t.Error("min_length and hash_valid must be absent when not in RequiredChecks")
+	}
+}
+
+func TestDeterministicVerifier_RequiredChecksEmpty(t *testing.T) {
+	// Explicit empty slice must behave the same as no argument (run all gates).
+	dv := verification.NewDeterministicVerifier(newRegistry())
+	ev := makeEv("The quick brown fox jumps over the lazy dog.", "")
+
+	noArg := dv.Verify("writing", ev, "title", "desc", 100_000)
+	emptyArg := dv.Verify("writing", ev, "title", "desc", 100_000) // variadic, empty
+	if len(noArg.HardGates) != len(emptyArg.HardGates) {
+		t.Errorf("empty vs no arg: gate counts differ %d != %d",
+			len(noArg.HardGates), len(emptyArg.HardGates))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ConsensusSufficiencyChecker — RequiredChecks enforcement
+// ---------------------------------------------------------------------------
+
+func TestConsensusSufficiencyChecker_RequiredCheckFailed(t *testing.T) {
+	chk := verification.ConsensusSufficiencyChecker{}
+
+	// threshold passes but "hash_valid" gate is required and fails.
+	det := &verification.DeterministicReport{
+		HardGates: []verification.GateResult{
+			{Name: "threshold", Pass: true, Detail: "overall=0.800"},
+			{Name: "hash_valid", Pass: false, Detail: "evidence Hash must be non-empty"},
+		},
+		NumericScores: map[string]float64{"overall": 0.80},
+	}
+	subj := &verification.SubjectiveReport{Overall: 0.80}
+
+	sufficient, reasons := chk.Check(det, subj, "v1", verification.ContractHints{
+		RequiredChecks: []string{"hash_valid"},
+	})
+	if sufficient {
+		t.Error("expected sufficient=false when a RequiredCheck gate fails")
+	}
+	found := false
+	for _, r := range reasons {
+		if r == "required_check_failed:hash_valid" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected reason 'required_check_failed:hash_valid' in %v", reasons)
+	}
+}
+
+func TestConsensusSufficiencyChecker_RequiredCheckMissing(t *testing.T) {
+	// A RequiredCheck gate that doesn't exist in the report is treated as failed.
+	chk := verification.ConsensusSufficiencyChecker{}
+	det := &verification.DeterministicReport{
+		HardGates: []verification.GateResult{
+			{Name: "threshold", Pass: true, Detail: "overall=0.800"},
+		},
+		NumericScores: map[string]float64{"overall": 0.80},
+	}
+	subj := &verification.SubjectiveReport{Overall: 0.80}
+
+	sufficient, reasons := chk.Check(det, subj, "v1", verification.ContractHints{
+		RequiredChecks: []string{"has_output", "hash_valid"},
+	})
+	if sufficient {
+		t.Error("expected sufficient=false when RequiredCheck gates are missing")
+	}
+	if len(reasons) < 2 {
+		t.Errorf("expected 2 required_check_failed reasons, got %v", reasons)
+	}
+}
+
+func TestConsensusSufficiencyChecker_RequiredChecksPassed(t *testing.T) {
+	// All RequiredChecks present and passing → falls through to threshold decision.
+	chk := verification.ConsensusSufficiencyChecker{}
+	det := &verification.DeterministicReport{
+		HardGates: []verification.GateResult{
+			{Name: "threshold", Pass: true, Detail: "overall=0.800"},
+			{Name: "has_output", Pass: true, Detail: ""},
+			{Name: "hash_valid", Pass: true, Detail: ""},
+		},
+		NumericScores: map[string]float64{"overall": 0.80},
+	}
+	subj := &verification.SubjectiveReport{Overall: 0.80}
+
+	sufficient, reasons := chk.Check(det, subj, "v1", verification.ContractHints{
+		RequiredChecks: []string{"has_output", "hash_valid"},
+	})
+	if !sufficient {
+		t.Errorf("expected sufficient=true when all RequiredChecks pass, reasons=%v", reasons)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ConsensusSufficiencyChecker — challenge window enforcement
+// ---------------------------------------------------------------------------
+
+func TestConsensusSufficiencyChecker_ChallengeWindowOpen(t *testing.T) {
+	chk := verification.ConsensusSufficiencyChecker{}
+	det := &verification.DeterministicReport{
+		HardGates: []verification.GateResult{
+			{Name: "threshold", Pass: true, Detail: "overall=0.900"},
+		},
+		NumericScores: map[string]float64{"overall": 0.90},
+	}
+	subj := &verification.SubjectiveReport{Overall: 0.90}
+
+	// SubmittedAt is "now" and window is 300 seconds → window still open.
+	submittedAt := time.Now().UnixNano()
+	sufficient, reasons := chk.Check(det, subj, "v1", verification.ContractHints{
+		ChallengeWindowSecs: 300,
+		SubmittedAt:         submittedAt,
+	})
+	if sufficient {
+		t.Error("expected sufficient=false when challenge window is still open")
+	}
+	found := false
+	for _, r := range reasons {
+		if r == "challenge_window_open" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected reason 'challenge_window_open' in %v", reasons)
+	}
+}
+
+func TestConsensusSufficiencyChecker_ChallengeWindowExpired(t *testing.T) {
+	chk := verification.ConsensusSufficiencyChecker{}
+	det := &verification.DeterministicReport{
+		HardGates: []verification.GateResult{
+			{Name: "threshold", Pass: true, Detail: "overall=0.900"},
+		},
+		NumericScores: map[string]float64{"overall": 0.90},
+	}
+	subj := &verification.SubjectiveReport{Overall: 0.90}
+
+	// SubmittedAt is 10 minutes ago, window is 5 minutes → expired.
+	submittedAt := time.Now().Add(-10 * time.Minute).UnixNano()
+	sufficient, reasons := chk.Check(det, subj, "v1", verification.ContractHints{
+		ChallengeWindowSecs: 300, // 5 min
+		SubmittedAt:         submittedAt,
+	})
+	if !sufficient {
+		t.Errorf("expected sufficient=true when challenge window has expired, reasons=%v", reasons)
+	}
+}
+
+func TestConsensusSufficiencyChecker_ChallengeWindowZeroSkipped(t *testing.T) {
+	// ChallengeWindowSecs=0 → skip window check entirely.
+	chk := verification.ConsensusSufficiencyChecker{}
+	det := &verification.DeterministicReport{
+		HardGates: []verification.GateResult{
+			{Name: "threshold", Pass: true, Detail: "overall=0.900"},
+		},
+		NumericScores: map[string]float64{"overall": 0.90},
+	}
+	subj := &verification.SubjectiveReport{Overall: 0.90}
+
+	submittedAt := time.Now().UnixNano() // just submitted
+	sufficient, _ := chk.Check(det, subj, "v1", verification.ContractHints{
+		ChallengeWindowSecs: 0, // disabled
+		SubmittedAt:         submittedAt,
+	})
+	if !sufficient {
+		t.Error("expected sufficient=true when ChallengeWindowSecs=0 (disabled)")
 	}
 }

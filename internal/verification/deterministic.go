@@ -29,7 +29,13 @@ func NewDeterministicVerifier(r *evidence.VerifierRegistry) *DeterministicVerifi
 // HardGates are ordered: "threshold" first (so InProcessVerifier can rely on
 // HardGates[0] for the primary pass/fail decision), followed by structural
 // gates that are informational only.
-func (dv *DeterministicVerifier) Verify(category string, ev *evidence.Evidence, title, description string, budget uint64) *DeterministicReport {
+//
+// requiredChecks is an optional list of gate names from the task's
+// AcceptanceContract.RequiredChecks. When non-empty, only structural gates
+// whose names appear in the list are included in the output (the "threshold"
+// gate always runs regardless). When empty, all structural gates run —
+// backward-compatible default.
+func (dv *DeterministicVerifier) Verify(category string, ev *evidence.Evidence, title, description string, budget uint64, requiredChecks ...string) *DeterministicReport {
 	// Treat nil evidence as empty — all structural gates will fail and the
 	// registry verifiers return (zero score, false) for nil input.
 	if ev == nil {
@@ -62,6 +68,26 @@ func (dv *DeterministicVerifier) Verify(category string, ev *evidence.Evidence, 
 		score = &evidence.Score{}
 	}
 
+	// Build a filter set from requiredChecks so we can decide which structural
+	// gates to include. "threshold" is always included regardless.
+	filter := make(map[string]bool, len(requiredChecks))
+	for _, c := range requiredChecks {
+		filter[c] = true
+	}
+	runAll := len(requiredChecks) == 0
+
+	// Candidate structural gates (name, pass, detail).
+	type candidate struct {
+		name   string
+		pass   bool
+		detail string
+	}
+	candidates := []candidate{
+		{"has_output", hasOutput, "evidence must contain non-empty Summary, OutputPreview, or OutputSize"},
+		{"min_length", minLength, "content length (summary+preview) or OutputSize must be >= 10 bytes"},
+		{"hash_valid", hashValid, "evidence Hash must be non-empty"},
+	}
+
 	// "threshold" gate is first so callers can read HardGates[0] for the
 	// primary verdict without searching by name.
 	gates := []GateResult{
@@ -70,21 +96,11 @@ func (dv *DeterministicVerifier) Verify(category string, ev *evidence.Evidence, 
 			Pass:   thresholdPassed,
 			Detail: fmt.Sprintf("overall=%.3f", score.Overall),
 		},
-		{
-			Name:   "has_output",
-			Pass:   hasOutput,
-			Detail: "evidence must contain non-empty Summary, OutputPreview, or OutputSize",
-		},
-		{
-			Name:   "min_length",
-			Pass:   minLength,
-			Detail: "content length (summary+preview) or OutputSize must be >= 10 bytes",
-		},
-		{
-			Name:   "hash_valid",
-			Pass:   hashValid,
-			Detail: "evidence Hash must be non-empty",
-		},
+	}
+	for _, c := range candidates {
+		if runAll || filter[c.name] {
+			gates = append(gates, GateResult{Name: c.name, Pass: c.pass, Detail: c.detail})
+		}
 	}
 
 	return &DeterministicReport{

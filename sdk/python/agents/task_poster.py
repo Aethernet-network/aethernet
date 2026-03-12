@@ -46,6 +46,8 @@ TASKS = [
         "description": "Write 20 practical Python code examples showing how to use AetherNet's API endpoints: agent registration, transfer, staking, task posting, task claiming, task submission, balance checking, reputation querying, and discovery. Each example should be runnable against https://testnet.aethernet.network.",
         "category": "code",
         "budget": 2_500_000,
+        "success_criteria": ["code compiles", "examples are runnable", "all 20 endpoints covered"],
+        "required_checks": ["has_output", "hash_valid"],
     },
     {
         "poster": POSTER_ID,
@@ -60,6 +62,8 @@ TASKS = [
         "description": "Analyze the staking and slashing mechanics: What happens if an agent stakes, gets slashed, and restakes? Can an agent game the trust multiplier by unstaking and restaking? Are there race conditions in concurrent stake/unstake operations? Document any edge cases or potential exploits.",
         "category": "code-review",
         "budget": 3_000_000,
+        "success_criteria": ["edge cases documented", "race conditions identified", "exploit scenarios analyzed"],
+        "required_checks": ["has_output", "min_length"],
     },
     {
         "poster": POSTER_ID,
@@ -88,6 +92,8 @@ TASKS = [
         "description": "Design 15 detailed test scenarios for an autonomous task routing engine that matches tasks to agents. Cover: basic category matching, newcomer fairness allocation, budget limits, concurrent task limits, reputation-based ranking, tag overlap matching, self-assignment prevention, availability toggling, price competition. Each scenario should specify inputs, expected behavior, and edge cases.",
         "category": "code",
         "budget": 2_000_000,
+        "success_criteria": ["15 scenarios covered", "inputs and expected behavior specified", "edge cases included"],
+        "required_checks": ["has_output", "hash_valid"],
     },
     {
         "poster": POSTER_ID,
@@ -207,6 +213,8 @@ def main():
                 category=task["category"],
                 budget=task["budget"],
                 delivery_method="public",
+                success_criteria=task.get("success_criteria"),
+                required_checks=task.get("required_checks"),
             )
             posted_ids.append(result.get("id", ""))
             log.info(f"Posted: {task['title']} ({task['budget'] / 1_000_000:.1f} AET)")

@@ -34,7 +34,9 @@ func NewInProcessVerifier(r *evidence.VerifierRegistry) *InProcessVerifier {
 // compliance but ignored — all three underlying roles are synchronous.
 func (v *InProcessVerifier) Verify(_ context.Context, req VerificationRequest) (*VerificationResult, error) {
 	// 1. Deterministic checks + registry scoring.
-	detReport := v.det.Verify(req.Category, req.Evidence, req.Title, req.Description, req.Budget)
+	// Pass RequiredChecks so the verifier only runs the specified structural
+	// gates (backward-compatible: empty RequiredChecks runs all gates).
+	detReport := v.det.Verify(req.Category, req.Evidence, req.Title, req.Description, req.Budget, req.RequiredChecks...)
 
 	// 2. Translate deterministic scores into a subjective report.
 	subjReport := v.sub.Rate(req.Category, req.Evidence, detReport)
@@ -44,7 +46,13 @@ func (v *InProcessVerifier) Verify(_ context.Context, req VerificationRequest) (
 	if pv == "" {
 		pv = "v1"
 	}
-	sufficient, reasons := v.chk.Check(detReport, subjReport, pv)
+	// Pass ContractHints so the checker enforces RequiredChecks and the
+	// challenge window when populated from the task's AcceptanceContract.
+	sufficient, reasons := v.chk.Check(detReport, subjReport, pv, ContractHints{
+		RequiredChecks:      req.RequiredChecks,
+		ChallengeWindowSecs: req.ChallengeWindowSecs,
+		SubmittedAt:         req.SubmittedAt,
+	})
 
 	// Construct the final DeterministicReport: HardGates[0] is the
 	// ConsensusSufficiencyChecker's verdict (threshold gate), followed by the

@@ -305,6 +305,13 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		Budget         uint64   `json:"budget"`
 		Tags           []string `json:"tags,omitempty"`
 		DeliveryMethod string   `json:"delivery_method,omitempty"`
+		// AcceptanceContract fields — all optional; defaults applied in PostTask.
+		SuccessCriteria     []string `json:"success_criteria,omitempty"`
+		RequiredChecks      []string `json:"required_checks,omitempty"`
+		PolicyVersion       string   `json:"policy_version,omitempty"`
+		ChallengeWindowSecs int64    `json:"challenge_window_secs,omitempty"`
+		GenerationEligible  *bool    `json:"generation_eligible,omitempty"`
+		MaxDeliveryTimeSecs int64    `json:"max_delivery_time_secs,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -315,7 +322,15 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := s.taskMgr.PostTask(req.PosterID, req.Title, req.Description, req.Category, req.Budget, req.DeliveryMethod)
+	task, err := s.taskMgr.PostTask(req.PosterID, req.Title, req.Description, req.Category, req.Budget, tasks.PostTaskOpts{
+		DeliveryMethod:      req.DeliveryMethod,
+		SuccessCriteria:     req.SuccessCriteria,
+		RequiredChecks:      req.RequiredChecks,
+		PolicyVersion:       req.PolicyVersion,
+		ChallengeWindowSecs: req.ChallengeWindowSecs,
+		GenerationEligible:  req.GenerationEligible,
+		MaxDeliveryTimeSecs: req.MaxDeliveryTimeSecs,
+	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

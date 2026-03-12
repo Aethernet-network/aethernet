@@ -802,6 +802,13 @@ type postTaskRequest struct {
 	Category       string `json:"category,omitempty"`
 	Budget         uint64 `json:"budget"`
 	DeliveryMethod string `json:"delivery_method,omitempty"` // "public" (default) or "encrypted"
+	// AcceptanceContract fields — all optional; defaults applied in PostTask.
+	SuccessCriteria     []string `json:"success_criteria,omitempty"`
+	RequiredChecks      []string `json:"required_checks,omitempty"`
+	PolicyVersion       string   `json:"policy_version,omitempty"`
+	ChallengeWindowSecs int64    `json:"challenge_window_secs,omitempty"`
+	GenerationEligible  *bool    `json:"generation_eligible,omitempty"`
+	MaxDeliveryTimeSecs int64    `json:"max_delivery_time_secs,omitempty"`
 }
 
 type claimTaskRequest struct {
@@ -891,7 +898,15 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := s.taskMgr.PostTask(posterID, req.Title, req.Description, req.Category, req.Budget, req.DeliveryMethod)
+	task, err := s.taskMgr.PostTask(posterID, req.Title, req.Description, req.Category, req.Budget, tasks.PostTaskOpts{
+		DeliveryMethod:      req.DeliveryMethod,
+		SuccessCriteria:     req.SuccessCriteria,
+		RequiredChecks:      req.RequiredChecks,
+		PolicyVersion:       req.PolicyVersion,
+		ChallengeWindowSecs: req.ChallengeWindowSecs,
+		GenerationEligible:  req.GenerationEligible,
+		MaxDeliveryTimeSecs: req.MaxDeliveryTimeSecs,
+	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

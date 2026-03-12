@@ -69,6 +69,24 @@ type VerificationRequest struct {
 	// ConfidentialityMode controls whether evidence content may be logged or
 	// forwarded to remote verifiers. Defaults to "public" when empty.
 	ConfidentialityMode string
+
+	// AcceptanceContract fields — populated from the task's AcceptanceContract
+	// when available. Zero values apply backward-compatible defaults:
+	//   RequiredChecks empty → run all gates
+	//   ChallengeWindowSecs 0 → skip challenge-window enforcement
+	//   SubmittedAt 0 → skip challenge-window enforcement
+
+	// RequiredChecks lists gate names that must all pass for the task to
+	// settle. Empty means "all gates" (backward-compatible default).
+	RequiredChecks []string
+
+	// ChallengeWindowSecs is the number of seconds after result submission
+	// before settlement is considered final. 0 means no window enforced.
+	ChallengeWindowSecs int64
+
+	// SubmittedAt is the unix nanosecond timestamp of result submission.
+	// Used with ChallengeWindowSecs to enforce the challenge window.
+	SubmittedAt int64
 }
 
 // VerificationResult is the output of VerificationService.Verify.

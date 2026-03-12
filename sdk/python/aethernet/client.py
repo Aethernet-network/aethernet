@@ -572,6 +572,12 @@ class AetherNetClient:
         category: str = "",
         budget: int = 0,
         delivery_method: str = "public",
+        success_criteria: Optional[List[str]] = None,
+        required_checks: Optional[List[str]] = None,
+        policy_version: Optional[str] = None,
+        challenge_window_secs: Optional[int] = None,
+        generation_eligible: Optional[bool] = None,
+        max_delivery_time_secs: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Post a new task to the marketplace.
 
@@ -581,17 +587,26 @@ class AetherNetClient:
         is used (single-binary deployments).
 
         Args:
-            title:           Short task title.
-            description:     Detailed task description.
-            category:        Capability category (e.g. "ml", "nlp", "code").
-            budget:          Task budget in micro-AET.
-            delivery_method: ``"public"`` (default) — result is plaintext.
-                             ``"encrypted"`` — result is ECDH+AES-256-GCM ciphertext
-                             that only the poster can decrypt with
-                             :meth:`decrypt_from_agent`.
+            title:                 Short task title.
+            description:           Detailed task description.
+            category:              Capability category (e.g. "ml", "nlp", "code").
+            budget:                Task budget in micro-AET.
+            delivery_method:       ``"public"`` (default) — result is plaintext.
+                                   ``"encrypted"`` — ECDH+AES-256-GCM ciphertext.
+            success_criteria:      Human-readable acceptance conditions (advisory).
+            required_checks:       Gate names that must pass in the verification
+                                   pipeline (e.g. ``["has_output", "hash_valid"]``).
+                                   Empty means all gates (default).
+            policy_version:        Verification policy version (default ``"v1"``).
+            challenge_window_secs: Seconds after submission before settlement is
+                                   final (default 300 = 5 min).
+            generation_eligible:   Whether successful completion creates a
+                                   generation ledger entry (default True).
+            max_delivery_time_secs: Seconds a claimer has to submit work after
+                                    claiming (default 600 = 10 min).
 
         Returns:
-            The created task dict including ``id`` and ``status``.
+            The created task dict including ``id``, ``status``, and ``contract``.
         """
         body: Dict[str, Any] = {
             "title": title,
@@ -602,6 +617,18 @@ class AetherNetClient:
         }
         if self.agent_id:
             body["poster_id"] = self.agent_id
+        if success_criteria is not None:
+            body["success_criteria"] = success_criteria
+        if required_checks is not None:
+            body["required_checks"] = required_checks
+        if policy_version is not None:
+            body["policy_version"] = policy_version
+        if challenge_window_secs is not None:
+            body["challenge_window_secs"] = challenge_window_secs
+        if generation_eligible is not None:
+            body["generation_eligible"] = generation_eligible
+        if max_delivery_time_secs is not None:
+            body["max_delivery_time_secs"] = max_delivery_time_secs
         return self._post("/v1/tasks", body)
 
     def browse_tasks(

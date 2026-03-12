@@ -2,9 +2,29 @@ package verification
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/evidence"
 )
+
+// ContractHints carries acceptance-contract fields needed by
+// ConsensusSufficiencyChecker. All fields are optional; zero values apply
+// backward-compatible defaults.
+type ContractHints struct {
+	// RequiredChecks lists gate names that must all appear as passing gates
+	// in the DeterministicReport. Empty means no per-gate enforcement (only
+	// the threshold gate governs the sufficiency decision).
+	RequiredChecks []string
+
+	// ChallengeWindowSecs is the number of seconds after result submission
+	// before settlement is considered final. 0 means no window is enforced.
+	ChallengeWindowSecs int64
+
+	// SubmittedAt is the unix nanosecond timestamp of result submission.
+	// Used with ChallengeWindowSecs to enforce the challenge window.
+	// 0 means skip challenge-window enforcement even if ChallengeWindowSecs > 0.
+	SubmittedAt int64
+}
 
 // ConsensusSufficiencyChecker decides whether combined deterministic and
 // subjective reports meet the bar required for task settlement.
@@ -21,10 +41,52 @@ type ConsensusSufficiencyChecker struct{}
 
 // Check evaluates det and subj and returns whether the evidence is sufficient
 // for settlement together with human-readable reason codes for any failures.
+//
 // policyVersion is accepted for future policy-dispatch; currently ignored.
-func (c *ConsensusSufficiencyChecker) Check(det *DeterministicReport, subj *SubjectiveReport, _ string) (sufficient bool, reasons []string) {
+//
+// An optional ContractHints may be passed as the last argument to enable
+// acceptance-contract enforcement:
+//   - RequiredChecks: all named gates must be present and passing in det.
+//   - ChallengeWindowSecs + SubmittedAt: if the submission window is still
+//     open, returns sufficient=false with reason "challenge_window_open".
+//
+// Existing callers that omit ContractHints are unaffected.
+func (c *ConsensusSufficiencyChecker) Check(det *DeterministicReport, subj *SubjectiveReport, _ string, hints ...ContractHints) (sufficient bool, reasons []string) {
 	if det == nil {
 		return false, []string{"deterministic report is nil"}
+	}
+
+	var h ContractHints
+	if len(hints) > 0 {
+		h = hints[0]
+	}
+
+	// Challenge-window enforcement: if the task was submitted recently, hold
+	// settlement until the window expires. This gives the poster time to
+	// dispute before the auto-validator finalises.
+	if h.ChallengeWindowSecs > 0 && h.SubmittedAt > 0 {
+		submittedAt := time.Unix(0, h.SubmittedAt)
+		windowEnd := submittedAt.Add(time.Duration(h.ChallengeWindowSecs) * time.Second)
+		if time.Now().Before(windowEnd) {
+			return false, []string{"challenge_window_open"}
+		}
+	}
+
+	// Build a lookup of gate results from the deterministic report.
+	gateResults := make(map[string]bool, len(det.HardGates))
+	for _, gate := range det.HardGates {
+		gateResults[gate.Name] = gate.Pass
+	}
+
+	// Enforce RequiredChecks: every named check must be present and passing.
+	for _, check := range h.RequiredChecks {
+		pass, found := gateResults[check]
+		if !found || !pass {
+			reasons = append(reasons, fmt.Sprintf("required_check_failed:%s", check))
+		}
+	}
+	if len(reasons) > 0 {
+		return false, reasons
 	}
 
 	// Collect reason codes from every failing gate.
