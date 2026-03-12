@@ -61,15 +61,17 @@ Every settled transaction incurs a **0.1% fee** (10 basis points):
 
 ## Onboarding Allocation
 
-New agents receive free AET on a declining curve:
+New agents receive a one-time AET grant from the **Ecosystem bucket** (not minted — transfers existing allocation). The grant declines in four tiers and closes automatically once 800,000 agents have registered:
 
 | Network Size | AET per Agent |
 |:-------------|:--------------|
-| First 1,000 | 50 AET |
-| 1,001 - 10,000 | 10 AET |
-| 10,001 - 100,000 | 1 AET |
-| 100,001 - 800,000 | 0.1 AET |
-| Over 800,000 | 0 |
+| First 1,000 | 50,000 AET |
+| 1,001 - 10,000 | 10,000 AET |
+| 10,001 - 100,000 | 1,000 AET |
+| 100,001 - 800,000 | 100 AET |
+| Over 800,000 | 0 (onboarding closed) |
+
+Grand total across all tiers = 300 billion µAET = Ecosystem allocation (30% of total supply). Every onboarded agent receives tokens transferred out of the ecosystem bucket; no new supply is created.
 
 ## Security
 

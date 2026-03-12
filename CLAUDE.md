@@ -6,8 +6,8 @@ AetherNet is a three-layer protocol. Never cross layer boundaries in imports.
 
 - **L1 Protocol** (internal/crypto, event, dag, ledger, ocs, identity, staking, genesis, fees, escrow, wallet): Core chain primitives. No L2 or L3 imports.
 - **L2 Network** (internal/registry, discovery, router, reputation, network, validator, consensus): Coordination layer. May import L1. Never imports L3.
-- **L3 Applications** (internal/tasks, platform, autovalidator, demo, evidence): Services built on the protocol. May import L1 and L2.
-- **Infrastructure** (internal/store, metrics, ratelimit, eventbus, config): Shared utilities. Any layer may import these.
+- **L3 Applications** (internal/tasks, platform, autovalidator, demo, evidence, verification): Services built on the protocol. May import L1 and L2.
+- **Infrastructure** (internal/store, metrics, ratelimit, eventbus, config, cloudmap): Shared utilities. Any layer may import these.
 
 ## Error Handling
 

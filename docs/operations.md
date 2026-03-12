@@ -51,13 +51,17 @@ resource "aws_ecs_service" "aethernet_node" {
 
 ### 4. Configure the node
 
-Set the environment variable on every ECS task definition:
+Set these environment variables on every ECS task definition:
 
 ```
 AETHERNET_DISCOVER=nodes.aethernet.local
+AETHERNET_CLOUDMAP_SERVICE_ID=srv-XXXXXXXXXXXXXXXX
 ```
 
-Or pass the flag directly:
+`AETHERNET_DISCOVER` tells the node which DNS name to poll for peer IPs.
+`AETHERNET_CLOUDMAP_SERVICE_ID` tells the node to register its own private IP with Cloud Map so other nodes can discover it. When unset (non-ECS deployments) the Cloud Map registration is silently skipped.
+
+Or pass the discover flag directly:
 
 ```
 aethernet start --discover nodes.aethernet.local
@@ -99,9 +103,38 @@ after restarts.
 
 ---
 
+## Redeployment
+
+Force all three nodes to restart with the latest image:
+
+```bash
+for svc in aethernet-node aethernet-node2 aethernet-node3; do
+  aws ecs update-service \
+    --cluster aethernet \
+    --service "$svc" \
+    --force-new-deployment \
+    --region us-east-1
+done
+```
+
+Each service will drain its current task, pull the latest ECR image, and start a fresh container. Nodes reconnect to peers automatically via Cloud Map within 30 seconds.
+
+---
+
+## Genesis Consistency Check
+
+On every start the node compares the bucket totals in its BadgerDB store against the `TotalSupply` constant the binary was compiled with. A mismatch means the store was seeded with a different allocation (e.g. after a supply constant change).
+
+**Testnet (`AETHERNET_TESTNET=true`):** The node automatically wipes the store and re-seeds from scratch. All agent registrations, balances, and tasks are lost — this is intentional on testnet.
+
+**Mainnet (or when `AETHERNET_TESTNET` is unset):** The node logs a `slog.Error` and continues running with the stale store. Manual intervention is required; do not set `AETHERNET_RESET=true` without a maintenance window.
+
+---
+
 ## Database recovery
 
 If a node fails to start due to a corrupt BadgerDB store, set
 `AETHERNET_RESET=true` in the task definition and redeploy. The node will wipe
-its store and start fresh. Clear the variable after recovery to prevent
-accidental wipes on subsequent restarts.
+its store and start fresh. **Clear the variable immediately after recovery** to
+prevent accidental wipes on subsequent restarts — the CLAUDE.md convention
+"Never add AETHERNET_RESET to task definitions" applies here.

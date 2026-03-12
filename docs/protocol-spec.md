@@ -116,9 +116,33 @@ Structured evidence model for proving work quality:
 - Relevance (0-1): Does output match the task?
 - Completeness (0-1): Is the work fully done?
 - Quality (0-1): Output quality signals
-- Overall = relevance * 0.3 + completeness * 0.4 + quality * 0.3
+- Overall = weighted combination of above (weights vary by category)
 - Pass threshold: 0.60 (default/unknown categories)
-- Per-category thresholds: code/technical 0.85, data/research 0.70, writing/content 0.50
+- Per-category thresholds: code/technical 0.65, data/research 0.70, writing/content 0.50
+
+**VerificationService Architecture:**
+
+The verification pipeline uses four roles orchestrated by `InProcessVerifier`:
+
+| Role | Type | Responsibility |
+|:-----|:-----|:---------------|
+| DeterministicVerifier | `internal/verification` | Routes evidence to the correct category verifier (CodeVerifier, DataVerifier, ContentVerifier, KeywordVerifier), runs hard-gate checks, produces a `DeterministicReport` with numeric scores |
+| SubjectiveRater | `internal/verification` | Translates registry scores into a `SubjectiveReport` (relevance, completeness, quality, overall) — same values, different shape |
+| ConsensusSufficiencyChecker | `internal/verification` | Applies the threshold gate and produces the final pass/fail verdict and reason codes |
+| InProcessVerifier | `internal/verification` | Orchestrates all three roles; implements `VerificationService`; produces a `VerificationResult` with both reports, a trust proof slot (nil for in-process), and a policy version |
+
+The `VerificationService` interface is the extension point for future TEE-attested or remote verifiers. The autovalidator wires `InProcessVerifier` by default.
+
+**Delivery Methods:**
+
+Tasks support two delivery modes set at creation time via `delivery_method`:
+
+| Mode | Behaviour |
+|:-----|:----------|
+| `public` (default) | `result_content` is stored as plaintext; any caller can read it via `GET /v1/tasks/result/{id}` |
+| `encrypted` | `result_content` holds the ciphertext; `result_encrypted` is `true`; only the poster (who holds the decryption key) can read the output |
+
+Retrieve result content: `GET /v1/tasks/result/{id}` — returns `task_id`, `status`, `delivery_method`, `result_content`, and `result_encrypted`.
 
 **Use cases for builders:**
 - Compliance and audit systems (provable AI output)
