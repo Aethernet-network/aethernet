@@ -4,8 +4,24 @@ import (
 	"errors"
 	"log/slog"
 
+	"github.com/Aethernet-network/aethernet/internal/canary"
 	"github.com/Aethernet-network/aethernet/internal/verification"
 )
+
+// canaryEvalSource is the interface for canary task lookup by protocol task ID.
+// *canary.CanaryManager satisfies this interface without importing the canary
+// package back into replay (the import goes one-way: replay → canary).
+type canaryEvalSource interface {
+	GetCanaryByTaskID(taskID string) (*canary.CanaryTask, error)
+}
+
+// canaryEvalRecorder is the interface for computing and persisting calibration
+// signals. *canary.Evaluator satisfies this interface. observedOutput is the
+// raw output text; empty string is accepted when not available (replay path
+// typically has no output text — backward compatible).
+type canaryEvalRecorder interface {
+	Evaluate(c *canary.CanaryTask, actorID, role string, observedPass bool, observedChecks map[string]bool, observedOutput string) *canary.CalibrationSignal
+}
 
 // taskReplayInterface is the subset of *tasks.TaskManager used by ReplayEnforcer.
 // Defining a local interface avoids an import cycle between internal/replay and
@@ -36,6 +52,13 @@ type ReplayEnforcer struct {
 	taskMgr    taskReplayInterface
 	resolver   *ReplayResolver
 	genTrigger generationTrigger // optional; nil when generation hold not in use
+
+	// canaryLookup and canaryEval are optional. When both are non-nil, replay
+	// outcomes for canary tasks emit a CalibrationSignal with
+	// role=RoleReplaySubmitter. Evaluation is observational — it does not
+	// change the task state or verdict.
+	canaryLookup canaryEvalSource
+	canaryEval   canaryEvalRecorder
 }
 
 // NewReplayEnforcer returns a ReplayEnforcer. genTrigger may be nil if
@@ -50,6 +73,17 @@ func NewReplayEnforcer(
 		resolver:   resolver,
 		genTrigger: genTrigger,
 	}
+}
+
+// SetCanaryEvaluator wires canary evaluation into the replay enforcer. When
+// both src and rec are non-nil, replay outcomes whose task IDs map to a canary
+// record emit a CalibrationSignal with role=RoleReplaySubmitter and
+// observedPass=(outcome.Status=="match"). Evaluation is observational — it
+// does not affect the replay verdict, task status, or generation credit.
+// When not called (default), no canary evaluation occurs — backward compatible.
+func (e *ReplayEnforcer) SetCanaryEvaluator(src canaryEvalSource, rec canaryEvalRecorder) {
+	e.canaryLookup = src
+	e.canaryEval = rec
 }
 
 // ProcessReplayOutcome records outcome, evaluates the verdict, and applies the
@@ -103,6 +137,28 @@ func (e *ReplayEnforcer) ProcessReplayOutcome(
 	if err := e.taskMgr.SetReplayStatus(outcome.TaskID, newStatus, outcome.JobID); err != nil {
 		slog.Error("enforcer: set replay status", "task_id", outcome.TaskID, "status", newStatus, "err", err)
 		return verdict, err
+	}
+
+	// Canary calibration: if this task is a protocol-internal canary, emit a
+	// calibration signal for the replay submitter. Evaluation is observational
+	// and does not change the task state or generation credit.
+	if e.canaryLookup != nil && e.canaryEval != nil {
+		if c, err := e.canaryLookup.GetCanaryByTaskID(outcome.TaskID); err == nil {
+			observedPass := outcome.Status == "match"
+			// observedOutput is empty for the replay path — replay submitters
+			// provide structured check results, not free-form text. The truth
+			// model falls back to verifier-only scoring gracefully.
+			sig := e.canaryEval.Evaluate(c, outcome.ReplayerID, canary.RoleReplaySubmitter, observedPass, nil, "")
+			slog.Info("canary: replay calibration signal emitted",
+				"signal_id", sig.ID,
+				"task_id", outcome.TaskID,
+				"canary_id", c.ID,
+				"actor_id", outcome.ReplayerID,
+				"correctness", sig.Correctness,
+				"severity", sig.Severity,
+				"computed_by", sig.ComputedBy,
+			)
+		}
 	}
 
 	// Update the generation credit status and release held credit only for

@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Aethernet-network/aethernet/internal/canary"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/evidence"
 )
@@ -199,6 +200,16 @@ type taskStore interface {
 	DeleteTask(id string) error
 }
 
+// taskCanaryInjector is the interface used by TaskManager to link canary
+// records to newly created tasks. *canary.Injector satisfies this interface.
+// Defined as a local interface (even though canary is imported) for symmetry
+// with the autovalidator pattern and to ease testing with stubs.
+type taskCanaryInjector interface {
+	ShouldInject() bool
+	NextCanary(category string) *canary.CanaryTask
+	LinkTask(c *canary.CanaryTask, taskID string) error
+}
+
 // Stats holds aggregate marketplace statistics.
 type Stats struct {
 	TotalTasks     int    `json:"total_tasks"`
@@ -221,8 +232,13 @@ type TaskManager struct {
 	cancel context.CancelFunc
 
 	// Configurable lifecycle parameters — default to the package constants.
-	claimDeadline  time.Duration // default: DefaultClaimDeadline (10 min)
+	claimDeadline   time.Duration // default: DefaultClaimDeadline (10 min)
 	maxCompletedAge time.Duration // default: MaxCompletedAge (7 days)
+
+	// canaryInj is the optional canary injection hook. When non-nil and
+	// ShouldInject() returns true, PostTask probabilistically links a canary
+	// record to the newly created task. Nil by default — backward compatible.
+	canaryInj taskCanaryInjector
 }
 
 // NewTaskManager returns a new empty TaskManager.
@@ -247,6 +263,17 @@ func (m *TaskManager) SetClaimDeadline(d time.Duration) {
 func (m *TaskManager) SetMaxCompletedAge(d time.Duration) {
 	m.mu.Lock()
 	m.maxCompletedAge = d
+	m.mu.Unlock()
+}
+
+// SetCanaryInjector wires a canary injection hook. When set, PostTask will
+// probabilistically link a canary measurement record to each new task based
+// on the injector's ShouldInject() decision. Call before any concurrent
+// requests arrive (i.e., before Start). When not called (default), all
+// canary injection is bypassed — backward compatible.
+func (m *TaskManager) SetCanaryInjector(inj taskCanaryInjector) {
+	m.mu.Lock()
+	m.canaryInj = inj
 	m.mu.Unlock()
 }
 
@@ -427,9 +454,29 @@ func (m *TaskManager) PostTask(posterID, title, description, category string, bu
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.tasks[task.ID] = task
 	m.persist(task)
+	inj := m.canaryInj
+	m.mu.Unlock()
+
+	// Canary injection: probabilistically link a measurement canary to this
+	// task. Runs after the mutex is released because LinkTask may do I/O.
+	// Injection is observational — it does not change the task's visible
+	// structure and is skipped when disabled or when ShouldInject() returns false.
+	if inj != nil && inj.ShouldInject() {
+		c := inj.NextCanary(task.Category)
+		if c != nil {
+			if err := inj.LinkTask(c, task.ID); err != nil {
+				slog.Error("canary: failed to link task",
+					"task_id", task.ID, "canary_id", c.ID, "err", err)
+			} else {
+				slog.Debug("canary: task linked to measurement canary",
+					"task_id", task.ID, "canary_id", c.ID,
+					"category", c.Category, "type", c.CanaryType)
+			}
+		}
+	}
+
 	return task, nil
 }
 

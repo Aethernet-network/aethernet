@@ -30,12 +30,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/api"
 	"github.com/Aethernet-network/aethernet/internal/autovalidator"
+	"github.com/Aethernet-network/aethernet/internal/canary"
 	"github.com/Aethernet-network/aethernet/internal/cloudmap"
 	"github.com/Aethernet-network/aethernet/internal/config"
 	"github.com/Aethernet-network/aethernet/internal/consensus"
@@ -686,6 +688,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	// the node's BadgerDB store via the replayStore interface.
 	var replayEnforcer *replay.ReplayEnforcer
 	var submissionProc *replay.SubmissionProcessor
+	var canaryMgr *canary.CanaryManager
 	if stack.store != nil {
 		replayCoord := replay.NewReplayCoordinator(replay.DefaultReplayPolicy(), stack.store)
 		av.SetReplayCoordinator(replayCoord)
@@ -712,6 +715,32 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		// SubmissionProcessor handles POST /v1/replay/submit: external replay
 		// executors submit raw check results; the protocol performs the comparison.
 		submissionProc = replay.NewSubmissionProcessor(stack.store, replayEnforcer, replayDetails)
+
+		// Wire canary evaluation. The CanaryManager bridges the raw store to
+		// typed canary operations. Injection is disabled by default; set
+		// AETHERNET_CANARY_ENABLED=true to activate. The injection rate can be
+		// overridden with AETHERNET_CANARY_RATE (float, 0.0–1.0).
+		canaryMgr = canary.NewCanaryManager(stack.store)
+		injCfg := canary.DefaultInjectorConfig()
+		if os.Getenv("AETHERNET_CANARY_ENABLED") == "true" {
+			injCfg.Enabled = true
+		}
+		if rateStr := os.Getenv("AETHERNET_CANARY_RATE"); rateStr != "" {
+			if rate, parseErr := strconv.ParseFloat(rateStr, 64); parseErr == nil {
+				injCfg.InjectionRate = rate
+			}
+		}
+		canaryInj := canary.NewInjector(injCfg, canaryMgr)
+		canaryEval := canary.NewEvaluator(canaryMgr)
+		// Wire injection into the task creation path so that PostTask
+		// probabilistically links measurement canaries to new tasks.
+		stack.taskMgr.SetCanaryInjector(canaryInj)
+		// Wire into auto-validator (IsCanary lookup on settlement path).
+		av.SetCanaryInjector(canaryInj)
+		av.SetCanaryEvaluator(canaryMgr, canaryEval)
+		if replayEnforcer != nil {
+			replayEnforcer.SetCanaryEvaluator(canaryMgr, canaryEval)
+		}
 	}
 
 	// Task marketplace integration is conditional on --marketplace flag.
@@ -796,6 +825,10 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	}
 	apiSrv.SetEconomics(stack.walletMgr, stack.stakeManager, stack.feeCollector)
 	apiSrv.SetMinTaskBudget(cfg.Tasks.MinTaskBudget)
+	// Wire canary calibration endpoint. Only available when the store is present.
+	if canaryMgr != nil {
+		apiSrv.SetCalibrationStore(canaryMgr)
+	}
 	apiSrv.SetEventBus(bus)
 	if stack.platformKeys != nil {
 		apiSrv.SetPlatformKeys(stack.platformKeys)

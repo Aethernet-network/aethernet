@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Aethernet-network/aethernet/internal/canary"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
@@ -45,6 +46,29 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/verification"
 )
+
+// canarySource is the interface satisfied by *canary.Injector. Defined locally
+// to avoid import cycles and to keep the dependency surface minimal.
+type canarySource interface {
+	ShouldInject() bool
+	NextCanary(category string) *canary.CanaryTask
+	LinkTask(c *canary.CanaryTask, taskID string) error
+	IsCanary(taskID string) bool
+}
+
+// canaryEvalSource is the interface satisfied by *canary.CanaryManager for
+// looking up the canary record associated with a given protocol task ID.
+type canaryEvalSource interface {
+	GetCanaryByTaskID(taskID string) (*canary.CanaryTask, error)
+}
+
+// canaryEvalRecorder is the interface satisfied by *canary.Evaluator for
+// computing and persisting a calibration signal. observedOutput is the raw
+// work text submitted by the actor (ResultNote or similar); empty string is
+// accepted when not available (falls back to verifier-only scoring).
+type canaryEvalRecorder interface {
+	Evaluate(c *canary.CanaryTask, actorID, role string, observedPass bool, observedChecks map[string]bool, observedOutput string) *canary.CalibrationSignal
+}
 
 // AutoValidator periodically checks for pending OCS items and auto-approves
 // them with a positive verdict. Intended for testnet use only.
@@ -93,6 +117,19 @@ type AutoValidator struct {
 	// payouts alongside regular peer transfers.
 	dag *dag.DAG
 	kp  *crypto.KeyPair
+
+	// canaryInjector is optional. When set, IsCanary is checked for each
+	// submitted task to detect protocol-internal measurement tasks injected
+	// into the live stream. Used by SetCanaryInjector; nil = skip all injection
+	// logic (backward compatible).
+	canaryInjector canarySource
+
+	// canaryEvalStore and canaryEval are optional. When both are non-nil,
+	// every submitted task is checked for a canary record; if found, a
+	// CalibrationSignal is emitted. Evaluation is observational — it does not
+	// alter task settlement or reputation.
+	canaryEvalStore canaryEvalSource
+	canaryEval      canaryEvalRecorder
 
 	// taskStaleness is the minimum age a submitted task must reach before the
 	// auto-validator processes it. Defaults to 10 seconds so the task poster
@@ -195,6 +232,25 @@ func (av *AutoValidator) SetVerifierRegistry(r *evidence.VerifierRegistry) {
 // fallback path is used unchanged.
 func (av *AutoValidator) SetVerificationService(svc verification.VerificationService) {
 	av.verificationService = svc
+}
+
+// SetCanaryInjector wires a canary Injector for detecting canary tasks in the
+// live task stream. When set, SetCanaryEvaluator should also be called so that
+// detected canary tasks emit calibration signals. When not called (default),
+// all canary logic is bypassed — backward compatible.
+func (av *AutoValidator) SetCanaryInjector(src canarySource) {
+	av.canaryInjector = src
+}
+
+// SetCanaryEvaluator wires the canary evaluation components. When both src and
+// rec are non-nil, each submitted task is checked for a canary record; if
+// found, a CalibrationSignal is emitted recording how the worker's result
+// compared to the ground truth. Evaluation is observational — settlement and
+// reputation proceed unchanged. When not called (default), no evaluation
+// occurs — backward compatible.
+func (av *AutoValidator) SetCanaryEvaluator(src canaryEvalSource, rec canaryEvalRecorder) {
+	av.canaryEvalStore = src
+	av.canaryEval = rec
 }
 
 // SetReplayCoordinator wires an optional ReplayCoordinator. When set, every
@@ -308,6 +364,37 @@ func (av *AutoValidator) processSubmittedTasks() {
 		}
 		score, passed := av.verifyEvidence(ev, task.Title, task.Description, task.Budget, task.Category)
 		_ = av.taskMgr.SetVerificationScore(task.ID, score)
+
+		// Canary evaluation: check whether this task is a protocol-internal
+		// measurement canary. When a canary record is found, emit a
+		// CalibrationSignal comparing the worker's result to ground truth.
+		// Evaluation is observational — settlement proceeds normally regardless.
+		if av.canaryEvalStore != nil && av.canaryEval != nil {
+			if c, err := av.canaryEvalStore.GetCanaryByTaskID(task.ID); err == nil {
+				// Use the ResultNote as observed output for truth model evaluation.
+				// If structured evidence is available, prefer its Summary (it may
+				// be richer than the raw note).
+				observedOutput := task.ResultNote
+				if ev != nil && ev.Summary != "" {
+					observedOutput = ev.Summary
+				}
+				// Observed checks: not yet extracted from the evidence score in
+				// this path — the score is a set of floats, not named boolean gates.
+				// Pass nil; the truth model will handle keyword/length checks instead.
+				sig := av.canaryEval.Evaluate(c, task.ClaimerID, canary.RoleWorker, passed, nil, observedOutput)
+				slog.Info("canary: calibration signal emitted",
+					"signal_id", sig.ID,
+					"task_id", task.ID,
+					"canary_id", c.ID,
+					"actor_id", task.ClaimerID,
+					"correctness", sig.Correctness,
+					"severity", sig.Severity,
+					"computed_by", sig.ComputedBy,
+					"truth_model_score", sig.TruthModelScore,
+				)
+			}
+		}
+
 		if !passed {
 			slog.Info("auto-validator: task held below threshold",
 				"task_id", task.ID, "score", score.Overall, "threshold", evidence.PassThreshold)

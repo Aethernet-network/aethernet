@@ -86,7 +86,7 @@ func TestEvaluate_CorrectOutcome(t *testing.T) {
 	ev := NewEvaluator(store)
 
 	canary := makeCodeCanary(true, map[string]bool{"go_test": true, "lint": true})
-	sig := ev.Evaluate(canary, "worker-1", RoleWorker, true, map[string]bool{"go_test": true, "lint": true})
+	sig := ev.Evaluate(canary, "worker-1", RoleWorker, true, map[string]bool{"go_test": true, "lint": true}, "")
 
 	if sig.Correctness != CorrectnessCorrect {
 		t.Errorf("Correctness = %q; want %q", sig.Correctness, CorrectnessCorrect)
@@ -109,7 +109,7 @@ func TestEvaluate_MissedGoodWork(t *testing.T) {
 	ev := NewEvaluator(store)
 
 	canary := makeCodeCanary(true, nil)
-	sig := ev.Evaluate(canary, "worker-2", RoleWorker, false, nil)
+	sig := ev.Evaluate(canary, "worker-2", RoleWorker, false, nil, "")
 
 	if sig.Correctness != CorrectnessIncorrect {
 		t.Errorf("Correctness = %q; want %q", sig.Correctness, CorrectnessIncorrect)
@@ -127,7 +127,7 @@ func TestEvaluate_ApprovedBadWork(t *testing.T) {
 
 	canary := makeCodeCanary(false, nil)
 	canary.CanaryType = TypeKnownBad
-	sig := ev.Evaluate(canary, "validator-1", RoleValidator, true, nil)
+	sig := ev.Evaluate(canary, "validator-1", RoleValidator, true, nil, "")
 
 	if sig.Correctness != CorrectnessIncorrect {
 		t.Errorf("Correctness = %q; want %q", sig.Correctness, CorrectnessIncorrect)
@@ -146,7 +146,7 @@ func TestEvaluate_PartialMatch(t *testing.T) {
 	// Expect both checks to pass; observe go_test fail → 1 mismatch.
 	canary := makeCodeCanary(true, map[string]bool{"go_test": true, "lint": true})
 	sig := ev.Evaluate(canary, "worker-3", RoleWorker, true,
-		map[string]bool{"go_test": false, "lint": true})
+		map[string]bool{"go_test": false, "lint": true}, "")
 
 	if sig.Correctness != CorrectnessPartial {
 		t.Errorf("Correctness = %q; want %q", sig.Correctness, CorrectnessPartial)
@@ -166,7 +166,7 @@ func TestEvaluate_PartialMatch_TwoMismatches(t *testing.T) {
 	canary := makeCodeCanary(true, map[string]bool{"go_test": true, "lint": true, "vet": true})
 	// go_test and vet both mismatch; lint matches.
 	sig := ev.Evaluate(canary, "worker-4", RoleWorker, true,
-		map[string]bool{"go_test": false, "lint": true, "vet": false})
+		map[string]bool{"go_test": false, "lint": true, "vet": false}, "")
 
 	if sig.Correctness != CorrectnessPartial {
 		t.Errorf("Correctness = %q; want %q", sig.Correctness, CorrectnessPartial)
@@ -217,7 +217,7 @@ func TestSignalStoreRoundTrip(t *testing.T) {
 	ev := NewEvaluator(ms)
 
 	canary := makeCodeCanary(true, map[string]bool{"go_test": true})
-	sig := ev.Evaluate(canary, "worker-rt", RoleWorker, true, map[string]bool{"go_test": true})
+	sig := ev.Evaluate(canary, "worker-rt", RoleWorker, true, map[string]bool{"go_test": true}, "")
 
 	got, err := ms.GetSignal(sig.ID)
 	if err != nil {
@@ -251,9 +251,9 @@ func TestSignalsByActor_ReturnsOnlyMatchingActor(t *testing.T) {
 	c3 := makeCodeCanary(true, nil)
 
 	// Two signals for actor-A, one for actor-B.
-	ev.Evaluate(c1, "actor-A", RoleWorker, true, nil)
-	ev.Evaluate(c2, "actor-B", RoleValidator, true, nil) // approved bad work
-	ev.Evaluate(c3, "actor-A", RoleWorker, true, nil)
+	ev.Evaluate(c1, "actor-A", RoleWorker, true, nil, "")
+	ev.Evaluate(c2, "actor-B", RoleValidator, true, nil, "") // approved bad work
+	ev.Evaluate(c3, "actor-A", RoleWorker, true, nil, "")
 
 	signsA, err := ms.SignalsByActor("actor-A")
 	if err != nil {

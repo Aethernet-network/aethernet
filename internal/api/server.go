@@ -53,6 +53,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Aethernet-network/aethernet/internal/canary"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
 	"github.com/Aethernet-network/aethernet/internal/discovery"
@@ -84,6 +85,12 @@ import (
 type onboardingStore interface {
 	PutMeta(key string, value []byte) error
 	GetMeta(key string) ([]byte, error)
+}
+
+// calibrationSource is the minimal interface for querying canary calibration
+// signals by actor ID. *canary.CanaryManager satisfies this interface.
+type calibrationSource interface {
+	SignalsByActor(actorID string) ([]*canary.CalibrationSignal, error)
 }
 
 // taskRouterInterface is the subset of *router.Router used by the API server.
@@ -200,6 +207,11 @@ type Server struct {
 	// When non-nil, POST /v1/replay/submit is active: external replay executors
 	// submit raw check results and the protocol performs the comparison.
 	submissionProcessor *replay.SubmissionProcessor
+
+	// calibrationStore — optional; set via SetCalibrationStore.
+	// When non-nil, GET /v1/admin/calibration/{actor_id} returns the actor's
+	// canary calibration rollup (ActorCalibration).
+	calibrationStore calibrationSource
 }
 
 // NewServer constructs an API Server backed by the provided node components.
@@ -354,6 +366,8 @@ func (s *Server) registerL3Routes(mux *http.ServeMux) {
 	// Replay submission intake — external executors submit raw check results;
 	// the protocol performs the comparison and returns the derived verdict.
 	mux.HandleFunc("POST /v1/replay/submit", s.handleReplaySubmit)
+	// Admin calibration query — per-actor canary accuracy rollup.
+	mux.HandleFunc("GET /v1/admin/calibration/{actor_id}", s.handleAdminCalibration)
 	// Developer platform API key management.
 	mux.HandleFunc("POST /v1/platform/keys", s.handleGenerateKey)
 	mux.HandleFunc("GET /v1/platform/keys/{key}", s.handleGetKey)
@@ -483,6 +497,13 @@ func (s *Server) SetReplayEnforcer(e *replay.ReplayEnforcer) {
 // derived verdict. When nil the endpoint returns 501.
 func (s *Server) SetSubmissionProcessor(p *replay.SubmissionProcessor) {
 	s.submissionProcessor = p
+}
+
+// SetCalibrationStore wires the canary calibration signal store into the server.
+// When non-nil, GET /v1/admin/calibration/{actor_id} returns an ActorCalibration
+// rollup for the requested actor. When nil (default), the endpoint returns 501.
+func (s *Server) SetCalibrationStore(cs calibrationSource) {
+	s.calibrationStore = cs
 }
 
 // isAuthenticated reports whether r carries a valid X-API-Key credential.
@@ -3102,4 +3123,49 @@ func (s *Server) handleReplaySubmit(w http.ResponseWriter, r *http.Request) {
 		Outcome: outcome,
 		Verdict: verdict,
 	})
+}
+
+// handleAdminCalibration returns the canary calibration rollup for a single
+// actor. It queries all CalibrationSignals for the given actor_id and computes
+// an ActorCalibration summary including per-category accuracy breakdowns.
+//
+//	GET /v1/admin/calibration/{actor_id}
+//	Response 200: JSON-encoded canary.ActorCalibration
+//	Response 404: actor has no calibration signals (empty rollup returned with 200)
+//	Response 501: calibration store not configured
+func (s *Server) handleAdminCalibration(w http.ResponseWriter, r *http.Request) {
+	if s.calibrationStore == nil {
+		writeCodedError(w, http.StatusNotImplemented, "not_available",
+			"calibration store not configured", "")
+		return
+	}
+	// Admin-only: require authentication when auth is enabled.
+	if s.requireAuth && s.platformKeys != nil && !s.isAuthenticated(r) {
+		writeCodedError(w, http.StatusUnauthorized, "unauthorized",
+			"authentication required", "")
+		return
+	}
+	if s.readLimiter != nil && !s.readLimiter.Allow(ratelimit.ExtractIP(r)) {
+		if s.nodeMetrics != nil {
+			s.nodeMetrics.RateLimitRejects.Inc()
+		}
+		w.Header().Set("Retry-After", "1")
+		writeCodedError(w, http.StatusTooManyRequests, "rate_limited", "rate limit exceeded", "")
+		return
+	}
+	actorID := r.PathValue("actor_id")
+	if actorID == "" {
+		writeCodedError(w, http.StatusBadRequest, "missing_actor_id",
+			"actor_id path parameter is required", "")
+		return
+	}
+	signals, err := s.calibrationStore.SignalsByActor(actorID)
+	if err != nil {
+		slog.Error("admin calibration: query failed", "actor_id", actorID, "err", err)
+		writeCodedError(w, http.StatusInternalServerError, "query_failed",
+			"failed to query calibration signals", "")
+		return
+	}
+	rollup := canary.ComputeActorCalibration(signals)
+	writeJSON(w, http.StatusOK, rollup)
 }
