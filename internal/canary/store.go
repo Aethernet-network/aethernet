@@ -151,6 +151,20 @@ func (m *CanaryManager) GetSignal(id string) (*CalibrationSignal, error) {
 	return &sig, nil
 }
 
+// CategoryCalibrationForActor returns calibration metrics for a specific actor
+// within a single task category. It fetches all signals for the actor and
+// filters to the requested category using ComputeCategoryCalibration.
+//
+// Returns (nil, nil) when no signals exist for the actor or none match the
+// category — the nil return is a safe "no data" signal, not an error.
+func (m *CanaryManager) CategoryCalibrationForActor(actorID, category string) (*CategoryCalibration, error) {
+	signals, err := m.SignalsByActor(actorID)
+	if err != nil {
+		return nil, err
+	}
+	return ComputeCategoryCalibration(signals, category), nil
+}
+
 // SignalsByActor returns all CalibrationSignals for the given actorID.
 func (m *CanaryManager) SignalsByActor(actorID string) ([]*CalibrationSignal, error) {
 	blobs, err := m.backend.CalibrationSignalsByActor(actorID)

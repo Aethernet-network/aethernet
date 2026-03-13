@@ -2,12 +2,41 @@ package replay
 
 import (
 	"encoding/json"
+	"log/slog"
 	"math/rand"
 	"sync"
 	"time"
 
+	"github.com/Aethernet-network/aethernet/internal/canary"
 	"github.com/Aethernet-network/aethernet/internal/verification"
 )
+
+// calibrationSource is satisfied by *canary.CanaryManager and any test stub.
+// It is defined locally to avoid coupling the coordinator to CanaryManager
+// construction details.
+type calibrationSource interface {
+	CategoryCalibrationForActor(actorID string, category string) (*canary.CategoryCalibration, error)
+}
+
+// CalibrationDecision records the calibration-aware scrutiny adjustment made
+// during a ShouldReplay call. It is stored in memory (not persisted) for
+// inspection and logging.
+type CalibrationDecision struct {
+	ActorID      string    `json:"actor_id"`
+	Category     string    `json:"category"`
+	SampleCount  int       `json:"sample_count"`
+	Accuracy     float64   `json:"accuracy"`
+	AvgSeverity  float64   `json:"avg_severity"`
+	BaseRate     float64   `json:"base_rate"`
+	AdjustedRate float64   `json:"adjusted_rate"`
+	// Reason describes the adjustment applied:
+	//   "below_threshold_2x"  — not enough signals; 2× scrutiny
+	//   "weak_calibration_3x" — accuracy < 0.6; 3× scrutiny
+	//   "strong_calibration_0.5x" — accuracy > 0.9; 0.5× scrutiny
+	//   "no_calibration_data" — calibration source returned an error or no data
+	Reason    string    `json:"reason"`
+	Timestamp time.Time `json:"timestamp"`
+}
 
 // ReplayPolicy controls which tasks the ReplayCoordinator schedules for replay.
 type ReplayPolicy struct {
@@ -64,11 +93,13 @@ func DefaultReplayPolicy() ReplayPolicy {
 // for them. It does not execute replays — that requires domain-specific logic.
 // The coordinator is safe for concurrent use.
 type ReplayCoordinator struct {
-	policy    ReplayPolicy
-	store     replayStore
-	mu        sync.Mutex
-	scheduled map[string]bool // taskID → already scheduled (dedup guard)
-	rng       *rand.Rand
+	policy             ReplayPolicy
+	store              replayStore
+	mu                 sync.Mutex
+	scheduled          map[string]bool    // taskID → already scheduled (dedup guard)
+	rng                *rand.Rand
+	calibration        calibrationSource  // optional; nil = no calibration-aware adjustments
+	lastCalibDecision  *CalibrationDecision // most recent calibration decision (in-memory only)
 }
 
 // NewReplayCoordinator returns a ReplayCoordinator configured with policy and
@@ -80,6 +111,29 @@ func NewReplayCoordinator(policy ReplayPolicy, store replayStore) *ReplayCoordin
 		scheduled: make(map[string]bool),
 		rng:       rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
 	}
+}
+
+// SetCalibrationSource wires a calibration source. When set, ShouldReplay
+// adjusts the effective sample rate based on the actor's category accuracy:
+//   - no data / below MinCalibrationSamples → 2× base rate (more scrutiny)
+//   - accuracy < 0.6 → 3× base rate (weak actors)
+//   - accuracy > 0.9 → 0.5× base rate (strong actors)
+//
+// If not called, ShouldReplay behaves identically to its pre-calibration
+// behaviour — fully backward compatible.
+func (c *ReplayCoordinator) SetCalibrationSource(src calibrationSource) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calibration = src
+}
+
+// LastCalibrationDecision returns the most recent CalibrationDecision computed
+// by ShouldReplay, or nil if no calibration-aware call has been made yet.
+// The result is in-memory only and is not persisted.
+func (c *ReplayCoordinator) LastCalibrationDecision() *CalibrationDecision {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastCalibDecision
 }
 
 // ShouldReplay determines whether the given task should be scheduled for
@@ -96,8 +150,8 @@ func NewReplayCoordinator(policy ReplayPolicy, store replayStore) *ReplayCoordin
 //	h. (false, "")
 func (c *ReplayCoordinator) ShouldReplay(
 	taskID string,
-	_ string, // agentID — reserved for future policy extensions
-	_ string, // category — reserved for per-category policy
+	agentID string,
+	category string,
 	confidence float64,
 	generationEligible bool,
 	challenged bool,
@@ -142,12 +196,94 @@ func (c *ReplayCoordinator) ShouldReplay(
 		}
 	}
 
-	// g. Baseline random sample of ordinary tasks.
-	if c.rng.Float64() < c.policy.SampleRate {
+	// g. Calibration-aware scrutiny adjustment.
+	// Modifies the effective base sample rate before the random roll.
+	// Only applies when a calibration source is configured; no-op otherwise.
+	effectiveRate := c.policy.SampleRate
+	if c.calibration != nil {
+		effectiveRate = c.applyCalibrationAdjustment(agentID, category, c.policy.SampleRate)
+	}
+
+	// h. Baseline random sample of ordinary tasks (calibration-adjusted rate).
+	if c.rng.Float64() < effectiveRate {
 		return true, "sampled"
 	}
 
 	return false, ""
+}
+
+// applyCalibrationAdjustment computes the calibration-adjusted sample rate for
+// the given actor+category and records a CalibrationDecision. Must be called
+// with c.mu held. Never returns a negative rate.
+//
+// Adjustment rules:
+//   - error or not actionable (nil / < MinCalibrationSamples): 2× base rate
+//   - actionable, accuracy < 0.6: 3× base rate (weak actor)
+//   - actionable, accuracy > 0.9: 0.5× base rate (strong actor)
+//   - actionable, accuracy 0.6–0.9: 1× base rate (no adjustment)
+func (c *ReplayCoordinator) applyCalibrationAdjustment(agentID, category string, baseRate float64) float64 {
+	cal, err := c.calibration.CategoryCalibrationForActor(agentID, category)
+
+	decision := CalibrationDecision{
+		ActorID:   agentID,
+		Category:  category,
+		BaseRate:  baseRate,
+		Timestamp: time.Now(),
+	}
+
+	var multiplier float64
+	switch {
+	case err != nil:
+		multiplier = 2
+		decision.Reason = "no_calibration_data"
+
+	case !canary.CalibrationActionable(cal):
+		// nil or too few samples — uncertain actor, apply 2× scrutiny.
+		multiplier = 2
+		if cal != nil {
+			decision.SampleCount = cal.TotalSignals
+		}
+		decision.Reason = "below_threshold_2x"
+
+	case cal.Accuracy < 0.6:
+		multiplier = 3
+		decision.SampleCount = cal.TotalSignals
+		decision.Accuracy = cal.Accuracy
+		decision.AvgSeverity = cal.AvgSeverity
+		decision.Reason = "weak_calibration_3x"
+
+	case cal.Accuracy > 0.9:
+		multiplier = 0.5
+		decision.SampleCount = cal.TotalSignals
+		decision.Accuracy = cal.Accuracy
+		decision.AvgSeverity = cal.AvgSeverity
+		decision.Reason = "strong_calibration_0.5x"
+
+	default:
+		// Moderate accuracy (0.6–0.9): no adjustment to base rate.
+		multiplier = 1
+		decision.SampleCount = cal.TotalSignals
+		decision.Accuracy = cal.Accuracy
+		decision.AvgSeverity = cal.AvgSeverity
+		decision.Reason = "calibration_nominal"
+	}
+
+	adjustedRate := baseRate * multiplier
+	if adjustedRate < 0 {
+		adjustedRate = 0
+	}
+	decision.AdjustedRate = adjustedRate
+
+	slog.Debug("canary: calibration-adjusted replay rate",
+		"actor_id", agentID,
+		"category", category,
+		"accuracy", decision.Accuracy,
+		"adjusted_rate", adjustedRate,
+		"reason", decision.Reason,
+	)
+
+	c.lastCalibDecision = &decision
+	return adjustedRate
 }
 
 // ScheduleReplay creates a ReplayJob for the given task, persists it to the

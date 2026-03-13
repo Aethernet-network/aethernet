@@ -741,6 +741,10 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		if replayEnforcer != nil {
 			replayEnforcer.SetCanaryEvaluator(canaryMgr, canaryEval)
 		}
+		// Wire calibration-aware scrutiny: the replay coordinator uses the
+		// canary manager to look up per-actor per-category accuracy and adjust
+		// effective sample rates accordingly.
+		replayCoord.SetCalibrationSource(canaryMgr)
 	}
 
 	// Task marketplace integration is conditional on --marketplace flag.
