@@ -2,9 +2,29 @@ package replay
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/Aethernet-network/aethernet/internal/verification"
+)
+
+// Sentinel errors returned by ValidateOutcome.
+var (
+	// ErrEmptyJobID is returned when the outcome's JobID field is empty.
+	ErrEmptyJobID = errors.New("replay: outcome job_id must not be empty")
+
+	// ErrNegativeScoreDelta is returned when any CheckComparison has a
+	// negative ScoreDelta (score deltas must be ≥ 0).
+	ErrNegativeScoreDelta = errors.New("replay: score_delta must be non-negative")
+
+	// ErrJobNotFound is returned when the outcome references a job that
+	// does not exist in the store.
+	ErrJobNotFound = errors.New("replay: job not found")
+
+	// ErrOutcomeAlreadyTerminal is returned when an outcome is submitted for
+	// a job that has already reached a terminal state ("completed" or "failed").
+	ErrOutcomeAlreadyTerminal = errors.New("replay: job is already in a terminal state")
 )
 
 // ReplayResolver records completed ReplayOutcomes and evaluates them against
@@ -18,9 +38,49 @@ func NewReplayResolver(store replayStore) *ReplayResolver {
 	return &ReplayResolver{store: store}
 }
 
-// RecordOutcome persists the outcome and updates the corresponding ReplayJob's
-// status to "completed", or "failed" if outcome.Status is "error".
+// ValidateOutcome checks that outcome is structurally valid and consistent
+// with the stored job state. It returns a descriptive error when any of the
+// following conditions are met:
+//   - outcome.JobID is empty
+//   - any CheckComparison has a negative ScoreDelta
+//   - the job referenced by outcome.JobID does not exist in the store
+//   - the job is already in a terminal state ("completed" or "failed")
+func (r *ReplayResolver) ValidateOutcome(outcome *ReplayOutcome) error {
+	if outcome.JobID == "" {
+		return ErrEmptyJobID
+	}
+
+	for i, c := range outcome.Comparisons {
+		if c.ScoreDelta < 0 {
+			return fmt.Errorf("%w: comparison[%d] check_type=%q delta=%.4f",
+				ErrNegativeScoreDelta, i, c.CheckType, c.ScoreDelta)
+		}
+	}
+
+	jobData, err := r.store.GetReplayJob(outcome.JobID)
+	if err != nil {
+		return fmt.Errorf("%w: job_id=%s: %v", ErrJobNotFound, outcome.JobID, err)
+	}
+
+	var job ReplayJob
+	if err := json.Unmarshal(jobData, &job); err != nil {
+		return fmt.Errorf("replay: unmarshal job for validation: %w", err)
+	}
+
+	if job.Status == "completed" || job.Status == "failed" {
+		return fmt.Errorf("%w: job_id=%s status=%s", ErrOutcomeAlreadyTerminal, outcome.JobID, job.Status)
+	}
+
+	return nil
+}
+
+// RecordOutcome validates, persists the outcome and updates the corresponding
+// ReplayJob's status to "completed", or "failed" if outcome.Status is "error".
 func (r *ReplayResolver) RecordOutcome(outcome *ReplayOutcome) error {
+	if err := r.ValidateOutcome(outcome); err != nil {
+		return err
+	}
+
 	// Persist the outcome first (per CLAUDE.md: persist before memory update).
 	data, err := json.Marshal(outcome)
 	if err != nil {

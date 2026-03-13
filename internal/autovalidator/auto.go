@@ -318,13 +318,22 @@ func (av *AutoValidator) processSubmittedTasks() {
 		holdGeneration := false
 		var replayReason string
 		if av.replayCoordinator != nil {
+			// Fetch the real task count for the claimer so the probationary
+			// sampling rate is applied correctly to new agents.
+			agentTaskCount := 0
+			if av.identityRegistry != nil && task.ClaimerID != "" {
+				if fp, err := av.identityRegistry.Get(crypto.AgentID(task.ClaimerID)); err == nil {
+					agentTaskCount = int(fp.TasksCompleted)
+				}
+			}
+
 			shouldReplay, reason := av.replayCoordinator.ShouldReplay(
 				task.ID, task.ClaimerID, task.Category,
 				score.Overall,
 				task.Contract.GenerationEligible,
-				false, // challenged — not supported at settle time
-				nil,   // anomalyFlags — populated by executor, not yet available
-				0,     // agentTaskCount — not fetched here for performance
+				false,           // challenged — not supported at settle time
+				nil,             // anomalyFlags — populated by executor, not yet available
+				agentTaskCount,  // real count from identity registry
 			)
 			if shouldReplay {
 				replayReason = reason
@@ -342,9 +351,21 @@ func (av *AutoValidator) processSubmittedTasks() {
 		// Schedule the replay job after settlement so the task is in Completed
 		// state before the replay executor can query it.
 		if replayReason != "" && av.replayCoordinator != nil {
+			// Build minimal ReplayRequirements from the task's AcceptanceContract.
+			// These fields give the replay executor the contract commitment hash and
+			// the required gate list so it knows what to re-run.
+			var reqs *verification.ReplayRequirements
+			if task.Contract.SpecHash != "" || len(task.Contract.RequiredChecks) > 0 {
+				reqs = &verification.ReplayRequirements{
+					AcceptanceContractHash: task.Contract.SpecHash,
+					RequiredChecks:         task.Contract.RequiredChecks,
+				}
+			}
+
 			job, err := av.replayCoordinator.ScheduleReplay(
-				task.ID, task.ResultHash, task.Category, "v1",
-				nil, replayReason, task.ClaimerID,
+				task.ID, task.ResultHash, task.Category,
+				task.Contract.PolicyVersion,
+				reqs, replayReason, task.ClaimerID,
 			)
 			if err != nil {
 				slog.Error("auto-validator: failed to schedule replay",
@@ -588,6 +609,17 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score, hol
 			task.ID,
 		); err != nil {
 			slog.Error("auto-validator: generation ledger record failed", "task_id", task.ID, "err", err)
+		} else if task.Contract.GenerationEligible {
+			// Only set status for generation-eligible tasks; non-eligible tasks
+			// have generation recorded silently without a GenerationStatus transition.
+			if err := av.taskMgr.SetGenerationStatus(task.ID, "recognized"); err != nil {
+				slog.Error("auto-validator: set generation status recognized failed", "task_id", task.ID, "err", err)
+			}
+		}
+	} else if holdGeneration {
+		// Generation credit is withheld pending replay outcome.
+		if err := av.taskMgr.SetGenerationStatus(task.ID, "held"); err != nil {
+			slog.Error("auto-validator: set generation status held failed", "task_id", task.ID, "err", err)
 		}
 	}
 

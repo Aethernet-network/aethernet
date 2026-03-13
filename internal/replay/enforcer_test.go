@@ -13,15 +13,17 @@ import (
 
 // fakeTaskMgr implements taskReplayInterface for tests.
 type fakeTaskMgr struct {
-	status map[string]string
-	jobID  map[string]string
-	setErr error
+	status    map[string]string
+	jobID     map[string]string
+	genStatus map[string]string
+	setErr    error
 }
 
 func newFakeTaskMgr() *fakeTaskMgr {
 	return &fakeTaskMgr{
-		status: make(map[string]string),
-		jobID:  make(map[string]string),
+		status:    make(map[string]string),
+		jobID:     make(map[string]string),
+		genStatus: make(map[string]string),
 	}
 }
 
@@ -31,6 +33,14 @@ func (f *fakeTaskMgr) SetReplayStatus(taskID, status, jobID string) error {
 	}
 	f.status[taskID] = status
 	f.jobID[taskID] = jobID
+	return nil
+}
+
+func (f *fakeTaskMgr) SetGenerationStatus(taskID, status string) error {
+	if f.setErr != nil {
+		return f.setErr
+	}
+	f.genStatus[taskID] = status
 	return nil
 }
 
@@ -106,6 +116,9 @@ func TestEnforcer_CleanMatch_ReplayComplete(t *testing.T) {
 	if tm.status["task-ef-1"] != "replay_complete" {
 		t.Errorf("task status = %q; want %q", tm.status["task-ef-1"], "replay_complete")
 	}
+	if tm.genStatus["task-ef-1"] != "recognized" {
+		t.Errorf("generation status = %q; want %q", tm.genStatus["task-ef-1"], "recognized")
+	}
 	// Generation credit should have been released.
 	if len(gen.calls) != 1 {
 		t.Fatalf("generation trigger calls = %d; want 1", len(gen.calls))
@@ -143,6 +156,9 @@ func TestEnforcer_MultipleMismatches_ReplayDisputed(t *testing.T) {
 	if tm.status["task-ef-2"] != "replay_disputed" {
 		t.Errorf("task status = %q; want %q", tm.status["task-ef-2"], "replay_disputed")
 	}
+	if tm.genStatus["task-ef-2"] != "denied" {
+		t.Errorf("generation status = %q; want %q", tm.genStatus["task-ef-2"], "denied")
+	}
 	// Generation credit must NOT be released for a disputed task.
 	if len(gen.calls) != 0 {
 		t.Errorf("generation trigger should not be called for disputed tasks, got %d calls", len(gen.calls))
@@ -175,6 +191,9 @@ func TestEnforcer_SlashRecommended_ReplayDisputed(t *testing.T) {
 	if tm.status["task-ef-3"] != "replay_disputed" {
 		t.Errorf("task status = %q; want %q", tm.status["task-ef-3"], "replay_disputed")
 	}
+	if tm.genStatus["task-ef-3"] != "denied" {
+		t.Errorf("generation status = %q; want %q", tm.genStatus["task-ef-3"], "denied")
+	}
 	if len(gen.calls) != 0 {
 		t.Errorf("generation trigger should not fire for slash_recommended, got %d calls", len(gen.calls))
 	}
@@ -205,6 +224,9 @@ func TestEnforcer_FlagForReview_ReplayComplete(t *testing.T) {
 	}
 	if tm.status["task-ef-4"] != "replay_complete" {
 		t.Errorf("task status = %q; want %q", tm.status["task-ef-4"], "replay_complete")
+	}
+	if tm.genStatus["task-ef-4"] != "recognized" {
+		t.Errorf("generation status = %q; want %q", tm.genStatus["task-ef-4"], "recognized")
 	}
 	if len(gen.calls) != 1 {
 		t.Errorf("generation trigger calls = %d; want 1 for flag_for_review", len(gen.calls))

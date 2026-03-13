@@ -59,17 +59,18 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/eventbus"
+	"github.com/Aethernet-network/aethernet/internal/evidence"
 	"github.com/Aethernet-network/aethernet/internal/fees"
 	"github.com/Aethernet-network/aethernet/internal/genesis"
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/metrics"
 	"github.com/Aethernet-network/aethernet/internal/network"
-	"github.com/Aethernet-network/aethernet/internal/evidence"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/platform"
 	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 	svcregistry "github.com/Aethernet-network/aethernet/internal/registry"
+	"github.com/Aethernet-network/aethernet/internal/replay"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/router"
 	"github.com/Aethernet-network/aethernet/internal/staking"
@@ -188,6 +189,11 @@ type Server struct {
 	// minTaskBudget is the minimum budget (micro-AET) enforced in handlePostTask.
 	// Initialized from tasks.MinTaskBudget; overridable via SetMinTaskBudget.
 	minTaskBudget uint64
+
+	// replayEnforcer — optional; set via SetReplayEnforcer after construction.
+	// When non-nil, POST /v1/replay/outcome is active and routes replay outcomes
+	// through the enforcer to update task state and release held generation credits.
+	replayEnforcer *replay.ReplayEnforcer
 }
 
 // NewServer constructs an API Server backed by the provided node components.
@@ -327,6 +333,7 @@ func (s *Server) registerL3Routes(mux *http.ServeMux) {
 	// GET /v1/tasks/subtasks/{id} avoids a routing conflict with
 	// GET /v1/tasks/agent/{agent_id} that would arise from {id}/subtasks.
 	mux.HandleFunc("GET /v1/tasks/subtasks/{id}", s.handleGetSubtasks)
+	mux.HandleFunc("GET /v1/tasks/disputed", s.handleDisputedTasks)
 	mux.HandleFunc("GET /v1/tasks", s.handleListTasks)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.handleGetTask)
 	mux.HandleFunc("GET /v1/tasks/result/{id}", s.handleGetTaskResult)
@@ -336,6 +343,8 @@ func (s *Server) registerL3Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/tasks/{id}/dispute", s.handleDisputeTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/cancel", s.handleCancelTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/subtask", s.handleCreateSubtask)
+	// Replay outcome intake — driven by the replay executor once a ReplayJob completes.
+	mux.HandleFunc("POST /v1/replay/outcome", s.handleReplayOutcome)
 	// Developer platform API key management.
 	mux.HandleFunc("POST /v1/platform/keys", s.handleGenerateKey)
 	mux.HandleFunc("GET /v1/platform/keys/{key}", s.handleGetKey)
@@ -449,6 +458,14 @@ func (s *Server) SetPlatformKeys(km *platform.KeyManager) {
 // Default true (secure by default). Use --no-auth on testnet/development nodes.
 func (s *Server) SetRequireAuth(v bool) {
 	s.requireAuth = v
+}
+
+// SetReplayEnforcer wires the ReplayEnforcer into the server. Call before Start.
+// When non-nil, POST /v1/replay/outcome is active and routes completed replay
+// outcomes to the enforcer, which updates task ReplayStatus and optionally
+// releases held generation credits. When nil the endpoint returns 501.
+func (s *Server) SetReplayEnforcer(e *replay.ReplayEnforcer) {
+	s.replayEnforcer = e
 }
 
 // isAuthenticated reports whether r carries a valid X-API-Key credential.
@@ -934,6 +951,22 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 
 	result := s.taskMgr.Search(status, category, limit)
+	if result == nil {
+		result = []*tasks.Task{}
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// handleDisputedTasks handles GET /v1/tasks/disputed.
+// Returns all tasks whose ReplayStatus is "replay_disputed", ordered by
+// PostedAt descending (most recent first). Returns an empty JSON array when
+// there are no disputed tasks.
+func (s *Server) handleDisputedTasks(w http.ResponseWriter, r *http.Request) {
+	if s.taskMgr == nil {
+		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
+		return
+	}
+	result := s.taskMgr.GetDisputedTasks()
 	if result == nil {
 		result = []*tasks.Task{}
 	}
@@ -2902,4 +2935,69 @@ func (s *Server) handleRouterStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.taskRouter.Stats())
+}
+
+// handleReplayOutcome receives a completed ReplayOutcome from a replay executor,
+// routes it through the ReplayEnforcer, and returns the resulting verdict.
+//
+// POST /v1/replay/outcome
+//
+//	Request body: JSON-encoded replay.ReplayOutcome
+//	Response 200: JSON-encoded verification.ReplayVerdict
+//	Response 400: validation or unknown-job error from the enforcer
+//	Response 404: task not found for outcome.TaskID
+//	Response 501: replay enforcer not wired
+func (s *Server) handleReplayOutcome(w http.ResponseWriter, r *http.Request) {
+	if s.replayEnforcer == nil {
+		writeError(w, http.StatusNotImplemented, "replay enforcer not enabled")
+		return
+	}
+	if s.writeLimiter != nil {
+		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if !s.writeLimiter.Allow(ip) {
+			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+			return
+		}
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
+	var outcome replay.ReplayOutcome
+	if err := json.NewDecoder(r.Body).Decode(&outcome); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if outcome.JobID == "" || outcome.TaskID == "" {
+		writeError(w, http.StatusBadRequest, "job_id and task_id are required")
+		return
+	}
+
+	// Best-effort task lookup: supply the claimer agentID, result hash,
+	// task title, and budget-weighted verified value to the enforcer.
+	// If the task is not found (e.g. recently archived), these fields are
+	// left empty; the enforcer still records the outcome and updates job state.
+	var (
+		agentID       string
+		resultHash    string
+		title         string
+		verifiedValue uint64
+	)
+	if s.taskMgr != nil {
+		if task, err := s.taskMgr.Get(outcome.TaskID); err == nil {
+			agentID = task.ClaimerID
+			resultHash = task.ResultHash
+			title = task.Title
+			if task.VerificationScore != nil {
+				verifiedValue = uint64(float64(task.Budget) * task.VerificationScore.Overall)
+			}
+		}
+	}
+
+	verdict, err := s.replayEnforcer.ProcessReplayOutcome(&outcome, agentID, resultHash, title, verifiedValue)
+	if err != nil {
+		slog.Warn("api: replay outcome processing failed", "job_id", outcome.JobID, "err", err)
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, verdict)
 }

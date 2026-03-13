@@ -182,6 +182,11 @@ type Task struct {
 	// ReplayJobID is the ID of the ReplayJob scheduled for this task.
 	ReplayStatus string `json:"replay_status,omitempty"`
 	ReplayJobID  string `json:"replay_job_id,omitempty"`
+	// GenerationStatus tracks the lifecycle of the generation-ledger credit for
+	// this task. Values: "" (not applicable / not generation-eligible),
+	// "recognized" (credit issued), "held" (credit withheld pending replay),
+	// "denied" (credit permanently withheld after a disputed replay).
+	GenerationStatus string `json:"generation_status,omitempty"`
 }
 
 // taskStore is the subset of store.Store used by TaskManager.
@@ -584,6 +589,68 @@ func (m *TaskManager) SetReplayStatus(taskID string, status string, jobID string
 	task.ReplayJobID = jobID
 	m.persist(task)
 	return nil
+}
+
+// SetGenerationStatus updates the generation credit status for a task and
+// persists it. status should be one of "", "recognized", "held", or "denied".
+// Returns ErrTaskNotFound when the task doesn't exist.
+func (m *TaskManager) SetGenerationStatus(taskID string, status string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
+	}
+	task.GenerationStatus = status
+	m.persist(task)
+	return nil
+}
+
+// GetDisputedTasks returns all tasks whose ReplayStatus is "replay_disputed",
+// ordered by PostedAt descending (most recent first).
+func (m *TaskManager) GetDisputedTasks() []*Task {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var results []*Task
+	for _, task := range m.tasks {
+		if task.ReplayStatus == "replay_disputed" {
+			cp := *task
+			results = append(results, &cp)
+		}
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].PostedAt > results[j].PostedAt
+	})
+	return results
+}
+
+// IsCleanlyFinalized returns true only when the task is fully settled with no
+// outstanding replay or generation-credit concerns:
+//   - Status must be "completed"
+//   - ReplayStatus must be "" or "replay_complete" (not pending or disputed)
+//   - GenerationStatus must be "" or "recognized" (not held or denied)
+//
+// Returns ErrTaskNotFound when the task doesn't exist.
+func (m *TaskManager) IsCleanlyFinalized(taskID string) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return false, fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
+	}
+	if task.Status != TaskStatusCompleted {
+		return false, nil
+	}
+	if task.ReplayStatus != "" && task.ReplayStatus != "replay_complete" {
+		return false, nil
+	}
+	if task.GenerationStatus != "" && task.GenerationStatus != "recognized" {
+		return false, nil
+	}
+	return true, nil
 }
 
 // ApproveTask marks a submitted task as completed. The approverID may be the

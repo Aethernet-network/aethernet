@@ -666,6 +666,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	// Wire the replay coordinator so the auto-validator can schedule async
 	// verification replays for selected tasks. The coordinator is backed by
 	// the node's BadgerDB store via the replayStore interface.
+	var replayEnforcer *replay.ReplayEnforcer
 	if stack.store != nil {
 		replayCoord := replay.NewReplayCoordinator(replay.DefaultReplayPolicy(), stack.store)
 		av.SetReplayCoordinator(replayCoord)
@@ -675,9 +676,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		// replay confirms the original work.
 		replayResolver := replay.NewReplayResolver(stack.store)
 		genTrigger := &replayGenTrigger{gl: stack.generation, agentID: agentID}
-		_ = replay.NewReplayEnforcer(stack.taskMgr, replayResolver, genTrigger)
-		// ReplayEnforcer is not yet driven by a background loop; it will be
-		// called by the replay executor once one is wired.
+		replayEnforcer = replay.NewReplayEnforcer(stack.taskMgr, replayResolver, genTrigger)
 	}
 
 	// Task marketplace integration is conditional on --marketplace flag.
@@ -748,6 +747,11 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		if stack.taskRouter != nil {
 			stack.taskRouter.Start()
 			apiSrv.SetTaskRouter(stack.taskRouter)
+		}
+		// Wire the replay enforcer so POST /v1/replay/outcome is active when the
+		// marketplace is enabled. The enforcer is nil when store is not available.
+		if replayEnforcer != nil {
+			apiSrv.SetReplayEnforcer(replayEnforcer)
 		}
 	}
 	apiSrv.SetEconomics(stack.walletMgr, stack.stakeManager, stack.feeCollector)

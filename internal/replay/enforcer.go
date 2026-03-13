@@ -14,6 +14,10 @@ type taskReplayInterface interface {
 	// SetReplayStatus updates the task's ReplayStatus and ReplayJobID and
 	// persists the change.
 	SetReplayStatus(taskID string, status string, jobID string) error
+	// SetGenerationStatus updates the generation credit status for a task and
+	// persists the change. status should be one of "", "recognized", "held",
+	// or "denied".
+	SetGenerationStatus(taskID string, status string) error
 }
 
 // generationTrigger is called by ReplayEnforcer when a replay confirms the
@@ -76,18 +80,28 @@ func (e *ReplayEnforcer) ProcessReplayOutcome(
 	verdict := e.resolver.EvaluateOutcome(outcome)
 
 	var newStatus string
+	var newGenStatus string
 	switch verdict.Action {
 	case "no_action", "flag_for_review":
 		newStatus = "replay_complete"
+		newGenStatus = "recognized"
 	case "open_challenge", "slash_recommended":
 		newStatus = "replay_disputed"
+		newGenStatus = "denied"
 	default:
 		newStatus = "replay_complete"
+		newGenStatus = "recognized"
 	}
 
 	if err := e.taskMgr.SetReplayStatus(outcome.TaskID, newStatus, outcome.JobID); err != nil {
 		slog.Error("enforcer: set replay status", "task_id", outcome.TaskID, "status", newStatus, "err", err)
 		return verdict, err
+	}
+
+	// Update the generation credit status based on the verdict.
+	if err := e.taskMgr.SetGenerationStatus(outcome.TaskID, newGenStatus); err != nil {
+		slog.Error("enforcer: set generation status", "task_id", outcome.TaskID, "gen_status", newGenStatus, "err", err)
+		// Non-fatal: replay status has already been updated.
 	}
 
 	// Release the held generation credit when the replay confirms the work.
