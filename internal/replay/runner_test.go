@@ -175,6 +175,114 @@ func TestReplayRunner_NilTaskDetails_ZeroValues(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Submission-window / grace-period tests
+// ---------------------------------------------------------------------------
+
+// TestReplayRunner_SkipsJobWithinSubmissionWindow verifies that a job whose
+// SubmissionDeadline has not yet passed is NOT processed by the runner.
+// External replay executors still have time to submit real check results.
+func TestReplayRunner_SkipsJobWithinSubmissionWindow(t *testing.T) {
+	ms := newMemStore()
+	coord := NewReplayCoordinator(DefaultReplayPolicy(), ms)
+
+	job := makeCleanJob("job-grace-skip", "task-grace-skip")
+	// Deadline is 10 minutes from now — well within the window.
+	job.SubmissionDeadline = time.Now().Add(10 * time.Minute)
+	data, _ := json.Marshal(job)
+	_ = ms.PutReplayJob(job.ID, data)
+
+	resolver := NewReplayResolver(ms)
+	tm := newFakeTaskMgr()
+	enf := NewReplayEnforcer(tm, resolver, nil)
+	ex := &fakeExecutor{} // would produce "match" if called — must NOT be called
+
+	runner := NewReplayRunner(coord, ex, enf, nil, time.Second)
+	runner.processOnce()
+
+	// Job must still be "pending" — the runner skipped it.
+	allData, err := ms.AllReplayJobs()
+	if err != nil {
+		t.Fatalf("AllReplayJobs: %v", err)
+	}
+	var remaining ReplayJob
+	_ = json.Unmarshal(allData[job.ID], &remaining)
+	if remaining.Status != "pending" {
+		t.Errorf("job.Status = %q; want %q — runner must not process job within submission window",
+			remaining.Status, "pending")
+	}
+	// No task state changes.
+	if len(tm.status) != 0 {
+		t.Errorf("unexpected task status updates: %v", tm.status)
+	}
+}
+
+// TestReplayRunner_ProcessesJobAfterSubmissionDeadline verifies that once a
+// job's SubmissionDeadline has passed, the runner treats it as fallback-eligible
+// and processes it through InspectionExecutor.
+func TestReplayRunner_ProcessesJobAfterSubmissionDeadline(t *testing.T) {
+	ms := newMemStore()
+	coord := NewReplayCoordinator(DefaultReplayPolicy(), ms)
+
+	job := makeCleanJob("job-grace-expired", "task-grace-expired")
+	// Deadline expired 1 minute ago — fallback is eligible.
+	job.SubmissionDeadline = time.Now().Add(-1 * time.Minute)
+	data, _ := json.Marshal(job)
+	_ = ms.PutReplayJob(job.ID, data)
+
+	resolver := NewReplayResolver(ms)
+	tm := newFakeTaskMgr()
+	enf := NewReplayEnforcer(tm, resolver, nil)
+	ex := &fakeExecutor{} // returns "match" → job marked completed
+
+	runner := NewReplayRunner(coord, ex, enf, nil, time.Second)
+	runner.processOnce()
+
+	// Job should now be completed via fallback inspection.
+	allData, err := ms.AllReplayJobs()
+	if err != nil {
+		t.Fatalf("AllReplayJobs: %v", err)
+	}
+	var updated ReplayJob
+	_ = json.Unmarshal(allData[job.ID], &updated)
+	if updated.Status != "completed" {
+		t.Errorf("job.Status = %q; want %q — runner must process expired-deadline job as fallback",
+			updated.Status, "completed")
+	}
+	if tm.status["task-grace-expired"] != "replay_complete" {
+		t.Errorf("task status = %q; want %q", tm.status["task-grace-expired"], "replay_complete")
+	}
+}
+
+// TestReplayRunner_ZeroDeadline_ProcessesImmediately verifies that jobs with
+// a zero SubmissionDeadline (legacy / InspectionExecutor-only mode) are still
+// processed immediately — backward compatibility is preserved.
+func TestReplayRunner_ZeroDeadline_ProcessesImmediately(t *testing.T) {
+	ms := newMemStore()
+	coord := NewReplayCoordinator(DefaultReplayPolicy(), ms)
+
+	// makeCleanJob produces a job with zero SubmissionDeadline.
+	job := makeCleanJob("job-grace-zero", "task-grace-zero")
+	data, _ := json.Marshal(job)
+	_ = ms.PutReplayJob(job.ID, data)
+
+	resolver := NewReplayResolver(ms)
+	tm := newFakeTaskMgr()
+	enf := NewReplayEnforcer(tm, resolver, nil)
+	ex := &fakeExecutor{}
+
+	runner := NewReplayRunner(coord, ex, enf, nil, time.Second)
+	runner.processOnce()
+
+	allData, _ := ms.AllReplayJobs()
+	var updated ReplayJob
+	_ = json.Unmarshal(allData[job.ID], &updated)
+	if updated.Status != "completed" {
+		t.Errorf("job.Status = %q; want %q — zero-deadline job must be processed immediately",
+			updated.Status, "completed")
+	}
+}
+
 // TestReplayRunner_StartStop verifies that Start/Stop do not deadlock or panic.
 func TestReplayRunner_StartStop(t *testing.T) {
 	ms := newMemStore()

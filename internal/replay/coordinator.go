@@ -34,6 +34,17 @@ type ReplayPolicy struct {
 	// LowConfidenceThreshold triggers replay when the verifier's confidence
 	// score falls below this value. Default: 0.50.
 	LowConfidenceThreshold float64
+
+	// SubmissionGracePeriod is the window granted to external replay executors
+	// to submit results via POST /v1/replay/submit before InspectionExecutor
+	// is allowed to process the job as a fallback.
+	//
+	// Default: 2 hours — long enough for typical code builds, test suites, or
+	// ML inference runs to complete and submit results.
+	//
+	// Zero disables the grace period: InspectionExecutor processes jobs
+	// immediately (legacy / testnet mode).
+	SubmissionGracePeriod time.Duration
 }
 
 // DefaultReplayPolicy returns a ReplayPolicy with sensible production defaults.
@@ -45,6 +56,7 @@ func DefaultReplayPolicy() ReplayPolicy {
 		AlwaysReplayChallenged: true,
 		AlwaysReplayAnomalies:  true,
 		LowConfidenceThreshold: 0.50,
+		SubmissionGracePeriod:  2 * time.Hour,
 	}
 }
 
@@ -140,6 +152,11 @@ func (c *ReplayCoordinator) ShouldReplay(
 
 // ScheduleReplay creates a ReplayJob for the given task, persists it to the
 // store, and marks the taskID as scheduled to prevent future duplicates.
+//
+// When policy.SubmissionGracePeriod > 0, the job's SubmissionDeadline is set
+// to CreatedAt + SubmissionGracePeriod. The ReplayRunner will not process the
+// job via InspectionExecutor until this deadline has passed, giving external
+// replay executors the full grace window to submit real results.
 func (c *ReplayCoordinator) ScheduleReplay(
 	taskID, packetHash, category, policyVersion string,
 	reqs *verification.ReplayRequirements,
@@ -147,6 +164,9 @@ func (c *ReplayCoordinator) ScheduleReplay(
 	agentID string,
 ) (*ReplayJob, error) {
 	job := NewReplayJob(taskID, packetHash, category, policyVersion, agentID, reason, reqs, time.Now())
+	if c.policy.SubmissionGracePeriod > 0 {
+		job.SubmissionDeadline = job.CreatedAt.Add(c.policy.SubmissionGracePeriod)
+	}
 
 	data, err := json.Marshal(job)
 	if err != nil {

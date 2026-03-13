@@ -78,7 +78,24 @@ func (r *ReplayRunner) processOnce() {
 }
 
 // processJob executes one replay job and submits the outcome to the enforcer.
+// Jobs with a future SubmissionDeadline are skipped — the runner returns
+// without executing them, preserving the submission window for external
+// replay executors. On the next poll after the deadline passes, the job
+// becomes eligible for fallback inspection.
 func (r *ReplayRunner) processJob(job *ReplayJob) {
+	// Respect the external submission window. If SubmissionDeadline is set
+	// and has not yet passed, skip the job — an external executor may still
+	// submit real check results via POST /v1/replay/submit. The job will be
+	// processed as a fallback on the first poll after the deadline.
+	if !job.SubmissionDeadline.IsZero() && time.Now().Before(job.SubmissionDeadline) {
+		slog.Debug("replay-runner: job within submission window, deferring fallback inspection",
+			"job_id", job.ID,
+			"task_id", job.TaskID,
+			"deadline", job.SubmissionDeadline.Format(time.RFC3339),
+		)
+		return
+	}
+
 	ctx := context.Background()
 	outcome, err := r.executor.Execute(ctx, job)
 	if err != nil {

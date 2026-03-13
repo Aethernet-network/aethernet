@@ -2969,6 +2969,17 @@ func (s *Server) handleReplayOutcome(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "replay enforcer not enabled")
 		return
 	}
+	// When SubmissionProcessor is active, POST /v1/replay/outcome is disabled.
+	// External callers must use POST /v1/replay/submit, which runs results
+	// through ComparisonExecutor before reaching the enforcer.
+	// Accepting arbitrary pre-formed ReplayOutcome objects here would bypass
+	// the comparison layer entirely — any authenticated caller could claim
+	// Status="match" without providing check evidence.
+	if s.submissionProcessor != nil {
+		writeError(w, http.StatusGone,
+			"POST /v1/replay/outcome is disabled when the comparison path is active; use POST /v1/replay/submit to provide check results")
+		return
+	}
 	// Require authentication when both requireAuth and platformKeys are active.
 	// platformKeys == nil means auth is unconfigured (testnet/dev) — allow through.
 	if s.requireAuth && s.platformKeys != nil && !s.isAuthenticated(r) {

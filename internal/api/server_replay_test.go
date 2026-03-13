@@ -630,6 +630,26 @@ func TestHandleReplaySubmit_ValidMismatch_200(t *testing.T) {
 	}
 }
 
+// TestHandleReplayOutcome_DisabledWhenSubmissionProcessorActive verifies that
+// POST /v1/replay/outcome returns 410 Gone when the SubmissionProcessor is
+// active. Callers must use POST /v1/replay/submit instead.
+func TestHandleReplayOutcome_DisabledWhenSubmissionProcessorActive(t *testing.T) {
+	_, ts, _, _ := newReplayServerWithSubmission(t) // wires both enforcer + submissionProcessor
+
+	outcome := &replay.ReplayOutcome{
+		JobID:  "job-bypass-test",
+		TaskID: "task-bypass-test",
+		Status: "match",
+	}
+	resp := postReplayOutcome(t, ts, outcome)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusGone {
+		t.Errorf("status = %d; want 410 Gone — /v1/replay/outcome must be disabled when SubmissionProcessor is active",
+			resp.StatusCode)
+	}
+}
+
 // TestHandleReplayOutcome_DuplicateTerminal verifies that re-submitting an
 // outcome for a completed job returns 400.
 func TestHandleReplayOutcome_DuplicateTerminal(t *testing.T) {

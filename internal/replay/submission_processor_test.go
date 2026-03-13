@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/Aethernet-network/aethernet/internal/verification"
 )
 
 // ---------------------------------------------------------------------------
@@ -436,5 +438,104 @@ func TestSubmissionProcessor_PartialMatch_FlagForReview(t *testing.T) {
 	}
 	if verdict == nil {
 		t.Error("verdict must not be nil for partial_match")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Trust-boundary documentation test
+// ---------------------------------------------------------------------------
+
+// TestCoordinatedFraudBlindSpot documents that the protocol cannot detect
+// coordinated fraud between a worker and a colluding replay submitter.
+//
+// TRUST BOUNDARY: the protocol is a comparator, not a ground-truth verifier.
+// When an authenticated replay submitter confirms false original claims with
+// structurally consistent evidence (pass=true, matching artifact hashes,
+// matching numeric fields), the comparison produces a "match" outcome and the
+// enforcer issues a "no_action" verdict.
+//
+// The protocol has no way to distinguish:
+//   - a genuine replay that confirms real work, and
+//   - a colluding replay that confirms fabricated claims.
+//
+// Addressing this requires external trust signals explicitly deferred for a
+// later pass: TEE attestation, stake-weighted multi-party replay, or
+// cryptographically verified execution traces.
+//
+// This test is NOT expected to fail. It asserts the current behavior so that
+// the blind spot is explicit, durable, and visible in CI.
+func TestCoordinatedFraudBlindSpot_AuthenticatedSubmitterConfirmsFalseClaims(t *testing.T) {
+	ms := newMemStore()
+	resolver := NewReplayResolver(ms)
+	tm := newFakeTaskMgr()
+	gen := &fakeGenTrigger{}
+	enforcer := NewReplayEnforcer(tm, resolver, gen)
+	proc := NewSubmissionProcessor(ms, enforcer, nil)
+
+	// Worker originally claimed: go_test passed, artifact hash "sha256:false",
+	// with 100 tests passing. In reality, the work was never done.
+	job := minJobForSubmission("job-fraud", "task-fraud", "code", []string{"go_test"})
+	job.ArtifactRefs = []verification.ArtifactRef{
+		{CheckType: "go_test", Hash: "sha256:false-claim"},
+	}
+	job.MachineReadableResults = map[string]interface{}{
+		"go_test": map[string]interface{}{
+			"passed": float64(100),
+			"failed": float64(0),
+		},
+	}
+	storeJob(t, ms, job)
+
+	// Colluding replay submitter confirms the false claims exactly:
+	// pass=true, same artifact hash, same numeric values.
+	// The submitter ran no actual checks — they simply echo the original claims.
+	sub := &ReplaySubmission{
+		JobID:    "job-fraud",
+		TaskID:   "task-fraud",
+		Category: "code",
+		CheckResults: []SubmittedCheckResult{
+			{
+				CheckType:    "go_test",
+				Pass:         true,                       // confirms false claim
+				ArtifactHash: "sha256:false-claim",       // matches false claim exactly
+				MachineReadableResult: map[string]interface{}{
+					"passed": float64(100), // matches false claim exactly
+					"failed": float64(0),
+				},
+			},
+		},
+		SubmittedAt: time.Now(),
+	}
+
+	outcome, verdict, err := proc.Process(sub)
+	if err != nil {
+		t.Fatalf("Process: unexpected error: %v", err)
+	}
+
+	// KNOWN BLIND SPOT: coordinated fraud is structurally indistinguishable
+	// from a genuine replay. Both produce outcome.Status="match".
+	//
+	// If this assertion fails, something changed in the comparison logic that
+	// may have accidentally created false detection coverage. Investigate before
+	// removing — do not simply update the expected value.
+	if outcome.Status != "match" {
+		t.Errorf("outcome.Status = %q; want %q — coordinated fraud must produce match (blind spot documented)",
+			outcome.Status, "match")
+	}
+	if verdict.Action != "no_action" {
+		t.Errorf("verdict.Action = %q; want %q — coordinated fraud is currently undetectable by the protocol",
+			verdict.Action, "no_action")
+	}
+
+	// The task reaches replay_complete as if the work were genuine.
+	if tm.status["task-fraud"] != "replay_complete" {
+		t.Errorf("task status = %q; want %q — coordinated fraud reaches completion status",
+			tm.status["task-fraud"], "replay_complete")
+	}
+
+	// No anomaly flags — structurally consistent fraud produces a clean outcome.
+	if len(outcome.AnomalyFlags) != 0 {
+		t.Errorf("AnomalyFlags = %v; want none — coordinated fraud leaves no anomaly trace",
+			outcome.AnomalyFlags)
 	}
 }

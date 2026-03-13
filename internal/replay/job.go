@@ -68,6 +68,15 @@ type ReplayJob struct {
 	// CreatedAt is the time the replay job was created.
 	CreatedAt time.Time
 
+	// SubmissionDeadline is the time after which the job becomes eligible for
+	// fallback processing by InspectionExecutor. External replay executors must
+	// submit results before this deadline.
+	//
+	// Zero value means no deadline is configured — the ReplayRunner processes
+	// the job immediately (legacy / InspectionExecutor-only mode).
+	// Set by ReplayCoordinator.ScheduleReplay when SubmissionGracePeriod > 0.
+	SubmissionDeadline time.Time `json:"submission_deadline,omitempty"`
+
 	// Status is the current lifecycle state of the job:
 	// "pending", "running", "completed", or "failed".
 	Status string

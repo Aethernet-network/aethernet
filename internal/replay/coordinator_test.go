@@ -3,6 +3,7 @@ package replay
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -213,5 +214,86 @@ func TestDefaultReplayPolicy_SensibleValues(t *testing.T) {
 	}
 	if p.LowConfidenceThreshold != 0.50 {
 		t.Errorf("LowConfidenceThreshold: want 0.50, got %v", p.LowConfidenceThreshold)
+	}
+	// The default policy must grant a meaningful submission grace period so that
+	// external replay executors have time to run checks and submit results before
+	// InspectionExecutor processes the job as a fallback.
+	if p.SubmissionGracePeriod != 2*time.Hour {
+		t.Errorf("SubmissionGracePeriod: want 2h, got %v", p.SubmissionGracePeriod)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SubmissionGracePeriod — ScheduleReplay sets SubmissionDeadline
+// ---------------------------------------------------------------------------
+
+// TestScheduleReplay_SetsSubmissionDeadline verifies that when
+// SubmissionGracePeriod > 0, ScheduleReplay sets a SubmissionDeadline on the
+// created job equal to CreatedAt + SubmissionGracePeriod.
+func TestScheduleReplay_SetsSubmissionDeadline(t *testing.T) {
+	policy := DefaultReplayPolicy()
+	policy.SubmissionGracePeriod = 30 * time.Minute
+
+	ms := newMemStore()
+	coord := NewReplayCoordinator(policy, ms)
+
+	before := time.Now()
+	job, err := coord.ScheduleReplay("task-dl", "sha256:x", "code", "v1", nil, "spot-check", "agent-dl")
+	after := time.Now()
+	if err != nil {
+		t.Fatalf("ScheduleReplay: %v", err)
+	}
+
+	if job.SubmissionDeadline.IsZero() {
+		t.Fatal("SubmissionDeadline must be set when SubmissionGracePeriod > 0")
+	}
+
+	// Deadline must be approximately CreatedAt + 30 minutes.
+	minDeadline := before.Add(30 * time.Minute)
+	maxDeadline := after.Add(30 * time.Minute)
+	if job.SubmissionDeadline.Before(minDeadline) || job.SubmissionDeadline.After(maxDeadline) {
+		t.Errorf("SubmissionDeadline = %v; want in [%v, %v]",
+			job.SubmissionDeadline, minDeadline, maxDeadline)
+	}
+
+	// Verify deadline survives round-trip through the store.
+	data, err := ms.GetReplayJob(job.ID)
+	if err != nil {
+		t.Fatalf("GetReplayJob: %v", err)
+	}
+	var persisted ReplayJob
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if persisted.SubmissionDeadline.IsZero() {
+		t.Error("SubmissionDeadline must survive JSON round-trip through the store")
+	}
+	if !persisted.SubmissionDeadline.Equal(job.SubmissionDeadline.Truncate(time.Second)) &&
+		!persisted.SubmissionDeadline.Equal(job.SubmissionDeadline) {
+		// Allow sub-second precision loss in JSON.
+		diff := persisted.SubmissionDeadline.Sub(job.SubmissionDeadline)
+		if diff < -time.Second || diff > time.Second {
+			t.Errorf("SubmissionDeadline changed during round-trip: original=%v persisted=%v",
+				job.SubmissionDeadline, persisted.SubmissionDeadline)
+		}
+	}
+}
+
+// TestScheduleReplay_ZeroGracePeriod_NoDeadline verifies that when
+// SubmissionGracePeriod is zero, no SubmissionDeadline is set on the job
+// (InspectionExecutor processes immediately — legacy / testnet mode).
+func TestScheduleReplay_ZeroGracePeriod_NoDeadline(t *testing.T) {
+	policy := DefaultReplayPolicy()
+	policy.SubmissionGracePeriod = 0
+
+	ms := newMemStore()
+	coord := NewReplayCoordinator(policy, ms)
+
+	job, err := coord.ScheduleReplay("task-no-dl", "sha256:y", "code", "v1", nil, "spot-check", "agent-no-dl")
+	if err != nil {
+		t.Fatalf("ScheduleReplay: %v", err)
+	}
+	if !job.SubmissionDeadline.IsZero() {
+		t.Errorf("SubmissionDeadline = %v; want zero (no grace period configured)", job.SubmissionDeadline)
 	}
 }
