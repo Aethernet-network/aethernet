@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -178,10 +179,12 @@ func TestEvaluate_PartialMatch_TwoMismatches(t *testing.T) {
 }
 
 // TestSignalID_IsDeterministic verifies that signalID returns the same ID for
-// the same (canaryID, actorID, role) triple regardless of call order.
+// the same (canaryID, actorID, role, timestamp) quad. The function is a pure
+// hash — same inputs always produce the same output.
 func TestSignalID_IsDeterministic(t *testing.T) {
-	id1 := signalID("cnr-abc123", "agent-7", RoleWorker)
-	id2 := signalID("cnr-abc123", "agent-7", RoleWorker)
+	ts := time.Unix(1_700_000_000, 42)
+	id1 := signalID("cnr-abc123", "agent-7", RoleWorker, ts)
+	id2 := signalID("cnr-abc123", "agent-7", RoleWorker, ts)
 
 	if id1 != id2 {
 		t.Errorf("signalID is not deterministic: %q != %q", id1, id2)
@@ -194,19 +197,59 @@ func TestSignalID_IsDeterministic(t *testing.T) {
 // TestSignalID_DiffersForDifferentInputs verifies that different inputs produce
 // different IDs (no trivial collisions in the expected input space).
 func TestSignalID_DiffersForDifferentInputs(t *testing.T) {
+	ts := time.Unix(1_700_000_000, 42) // fixed timestamp; only non-ts inputs vary
 	cases := [][3]string{
 		{"cnr-aaa", "worker-1", RoleWorker},
-		{"cnr-aaa", "worker-1", RoleValidator},      // same canary+actor, different role
-		{"cnr-aaa", "worker-2", RoleWorker},          // same canary+role, different actor
-		{"cnr-bbb", "worker-1", RoleWorker},          // different canary
+		{"cnr-aaa", "worker-1", RoleValidator}, // same canary+actor, different role
+		{"cnr-aaa", "worker-2", RoleWorker},    // same canary+role, different actor
+		{"cnr-bbb", "worker-1", RoleWorker},    // different canary
 	}
 	seen := map[string]struct{}{}
 	for _, c := range cases {
-		id := signalID(c[0], c[1], c[2])
+		id := signalID(c[0], c[1], c[2], ts)
 		if _, ok := seen[id]; ok {
 			t.Errorf("signalID collision for inputs %v: %q", c, id)
 		}
 		seen[id] = struct{}{}
+	}
+}
+
+// TestSignalID_DifferentTimestamps_ProduceDifferentIDs verifies that the same
+// (canaryID, actorID, role) with different timestamps produces different IDs.
+// This is the property that enables history preservation: each evaluation of
+// the same canary by the same actor creates a new, unique record.
+func TestSignalID_DifferentTimestamps_ProduceDifferentIDs(t *testing.T) {
+	ts1 := time.Unix(1_700_000_000, 0)
+	ts2 := time.Unix(1_700_000_001, 0) // one second later
+	id1 := signalID("cnr-x", "worker-1", RoleWorker, ts1)
+	id2 := signalID("cnr-x", "worker-1", RoleWorker, ts2)
+	if id1 == id2 {
+		t.Errorf("expected different IDs for different timestamps, got %q", id1)
+	}
+}
+
+// TestEvaluate_PreservesHistory verifies that calling Evaluate twice for the
+// same (canary, actor, role) produces two distinct signal records rather than
+// overwriting the first. History preservation requires that signalID includes
+// the evaluation timestamp so each call produces a unique key.
+func TestEvaluate_PreservesHistory(t *testing.T) {
+	store := newMemCalibrationStore()
+	ev := NewEvaluator(store)
+
+	c := makeCodeCanary(true, nil)
+	sig1 := ev.Evaluate(c, "actor-hist", RoleWorker, true, nil, "")
+	sig2 := ev.Evaluate(c, "actor-hist", RoleWorker, true, nil, "")
+
+	if sig1.ID == sig2.ID {
+		t.Errorf("two evaluations produced the same signal ID %q; "+
+			"history would be overwritten rather than preserved", sig1.ID)
+	}
+	all, err := store.SignalsByActor("actor-hist")
+	if err != nil {
+		t.Fatalf("SignalsByActor: %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("expected 2 historical signals, got %d", len(all))
 	}
 }
 

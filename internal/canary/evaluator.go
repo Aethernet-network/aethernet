@@ -175,8 +175,9 @@ func (ev *Evaluator) Evaluate(
 
 	// ── Build and persist signal ─────────────────────────────────────────────
 
+	now := time.Now()
 	sig := &CalibrationSignal{
-		ID:                     signalID(canary.ID, actorID, role),
+		ID:                     signalID(canary.ID, actorID, role, now),
 		CanaryID:               canary.ID,
 		TaskID:                 canary.TaskID,
 		ActorID:                actorID,
@@ -191,7 +192,7 @@ func (ev *Evaluator) Evaluate(
 		Severity:               severity,
 		ForbiddenConceptsFound: forbidFound,
 		ComputedBy:             computedBy,
-		Timestamp:              time.Now(),
+		Timestamp:              now,
 	}
 
 	// Only populate optional truth-model fields when the phase ran.

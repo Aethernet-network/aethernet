@@ -42,9 +42,10 @@ const (
 // against a specific actor's response. It is the primary measurement unit
 // for executor and validator quality.
 type CalibrationSignal struct {
-	// ID is deterministic: sha256("signal|<canaryID>|<actorID>|<role>").
-	// The same actor evaluating the same canary always produces the same ID,
-	// which prevents duplicate signal accumulation across retries.
+	// ID is unique per evaluation: sha256("signal|<canaryID>|<actorID>|<role>|<unixNano>").
+	// Each call to Evaluator.Evaluate produces a new, distinct record so that
+	// calibration history is preserved rather than overwritten. Historical
+	// signals are queryable by actor via SignalsByActor.
 	ID        string    `json:"id"`
 	CanaryID  string    `json:"canary_id"`
 	TaskID    string    `json:"task_id"`
@@ -97,12 +98,16 @@ type CalibrationSignal struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-// signalID derives a deterministic, content-addressed ID for a calibration
-// signal from the triple (canaryID, actorID, role). The first 8 bytes of
-// sha256 give a 16-hex-char suffix — collision probability is negligible for
-// the expected signal volume.
-func signalID(canaryID, actorID, role string) string {
-	raw := fmt.Sprintf("signal|%s|%s|%s", canaryID, actorID, role)
+// signalID derives a unique ID for a calibration signal from the triple
+// (canaryID, actorID, role) and a nanosecond timestamp. Using the timestamp
+// ensures that repeated evaluations of the same canary by the same actor
+// produce distinct IDs and are preserved as separate historical records.
+//
+// The first 8 bytes of sha256 give a 16-hex-char suffix. Two calls within
+// the same nanosecond with identical inputs produce the same ID — this is
+// acceptable given the low frequency of canary evaluations.
+func signalID(canaryID, actorID, role string, ts time.Time) string {
+	raw := fmt.Sprintf("signal|%s|%s|%s|%d", canaryID, actorID, role, ts.UnixNano())
 	sum := sha256.Sum256([]byte(raw))
 	return fmt.Sprintf("sig-%x", sum[:8])
 }

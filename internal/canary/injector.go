@@ -94,6 +94,10 @@ func (inj *Injector) NextCanary(category string) *CanaryTask {
 	)
 	c.ExpectedMinScore = template.ExpectedMinScore
 	c.ExpectedMaxScore = template.ExpectedMaxScore
+	// Copy ExpectedEvidence so the Evaluator's truth model can run on live
+	// canaries. Without this copy, ExpectedEvidence is nil on every injected
+	// canary and the truth model phase is unreachable in production.
+	c.ExpectedEvidence = template.ExpectedEvidence
 
 	if err := inj.store.PutCanary(c); err != nil {
 		slog.Error("canary: injector failed to persist canary",

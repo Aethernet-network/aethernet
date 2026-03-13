@@ -282,7 +282,7 @@ func (av *AutoValidator) SetKeyPair(kp *crypto.KeyPair) {
 // to the VerifierRegistry, and finally falls back to the default keyword
 // verifier. This is the single call-site for all evidence assessment in the
 // auto-validator.
-func (av *AutoValidator) verifyEvidence(ev *evidence.Evidence, title, description string, budget uint64, category string) (*evidence.Score, bool) {
+func (av *AutoValidator) verifyEvidence(ev *evidence.Evidence, title, description string, budget uint64, category string) (*evidence.Score, bool, map[string]bool) {
 	if av.verificationService != nil {
 		req := verification.VerificationRequest{
 			Category:    category,
@@ -299,13 +299,24 @@ func (av *AutoValidator) verifyEvidence(ev *evidence.Evidence, title, descriptio
 				Overall:      result.SubjectiveReport.Overall,
 			}
 			passed := len(result.DeterministicReport.HardGates) > 0 && result.DeterministicReport.HardGates[0].Pass
-			return score, passed
+			// Extract named structural gates (indices 1+) for canary check comparison.
+			// Gate 0 is always "threshold" and is captured by passed; skip it.
+			var gates map[string]bool
+			if len(result.DeterministicReport.HardGates) > 1 {
+				gates = make(map[string]bool, len(result.DeterministicReport.HardGates)-1)
+				for _, g := range result.DeterministicReport.HardGates[1:] {
+					gates[g.Name] = g.Pass
+				}
+			}
+			return score, passed, gates
 		}
 	}
 	if av.verifierRegistry != nil {
-		return av.verifierRegistry.Verify(ev, title, description, budget, category)
+		score, passed := av.verifierRegistry.Verify(ev, title, description, budget, category)
+		return score, passed, nil
 	}
-	return evidence.NewVerifier().Verify(ev, title, description, budget)
+	score, passed := evidence.NewVerifier().Verify(ev, title, description, budget)
+	return score, passed, nil
 }
 
 // Start launches the background approval goroutine. It is safe to call once.
@@ -362,7 +373,7 @@ func (av *AutoValidator) processSubmittedTasks() {
 				OutputURL:  task.ResultURI,
 			}
 		}
-		score, passed := av.verifyEvidence(ev, task.Title, task.Description, task.Budget, task.Category)
+		score, passed, observedGates := av.verifyEvidence(ev, task.Title, task.Description, task.Budget, task.Category)
 		_ = av.taskMgr.SetVerificationScore(task.ID, score)
 
 		// Canary evaluation: check whether this task is a protocol-internal
@@ -378,10 +389,10 @@ func (av *AutoValidator) processSubmittedTasks() {
 				if ev != nil && ev.Summary != "" {
 					observedOutput = ev.Summary
 				}
-				// Observed checks: not yet extracted from the evidence score in
-				// this path — the score is a set of floats, not named boolean gates.
-				// Pass nil; the truth model will handle keyword/length checks instead.
-				sig := av.canaryEval.Evaluate(c, task.ClaimerID, canary.RoleWorker, passed, nil, observedOutput)
+				// observedGates carries named structural gate results from the
+				// VerificationService (e.g. "has_output", "min_length", "hash_valid").
+				// Nil when the legacy verifierRegistry / keyword-verifier path was used.
+				sig := av.canaryEval.Evaluate(c, task.ClaimerID, canary.RoleWorker, passed, observedGates, observedOutput)
 				slog.Info("canary: calibration signal emitted",
 					"signal_id", sig.ID,
 					"task_id", task.ID,
@@ -550,7 +561,7 @@ func (av *AutoValidator) processDisputedTasks() {
 				OutputURL:  task.ResultURI,
 			}
 			var s *evidence.Score
-			s, _ = av.verifyEvidence(ev, task.Title, task.Description, task.Budget, task.Category)
+			s, _, _ = av.verifyEvidence(ev, task.Title, task.Description, task.Budget, task.Category)
 			_ = av.taskMgr.SetVerificationScore(task.ID, s)
 			score = s
 		}
