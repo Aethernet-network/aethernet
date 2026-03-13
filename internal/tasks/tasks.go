@@ -175,6 +175,13 @@ type Task struct {
 	// SpecHash is a cryptographic commitment; RequiredChecks drive the
 	// verification pipeline; ChallengeWindowSecs governs finality delay.
 	Contract AcceptanceContract `json:"contract"`
+	// Replay fields — set by the auto-validator when the replay coordinator
+	// selects this task for asynchronous verification.
+	// ReplayStatus is one of: "" (none), "replay_pending", "replay_complete",
+	// "replay_disputed".
+	// ReplayJobID is the ID of the ReplayJob scheduled for this task.
+	ReplayStatus string `json:"replay_status,omitempty"`
+	ReplayJobID  string `json:"replay_job_id,omitempty"`
 }
 
 // taskStore is the subset of store.Store used by TaskManager.
@@ -556,6 +563,25 @@ func (m *TaskManager) SetVerificationScore(taskID string, score *evidence.Score)
 		return fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
 	}
 	task.VerificationScore = score
+	m.persist(task)
+	return nil
+}
+
+// SetReplayStatus records the replay state on a task and persists it.
+// status should be one of "", "replay_pending", "replay_complete", or
+// "replay_disputed". jobID is the ID of the associated ReplayJob (may be
+// empty when clearing the status). Returns ErrTaskNotFound when the task
+// doesn't exist.
+func (m *TaskManager) SetReplayStatus(taskID string, status string, jobID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
+	}
+	task.ReplayStatus = status
+	task.ReplayJobID = jobID
 	m.persist(task)
 	return nil
 }

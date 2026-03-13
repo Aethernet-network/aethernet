@@ -57,6 +57,7 @@ import (
 	platformpkg "github.com/Aethernet-network/aethernet/internal/platform"
 	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 	"github.com/Aethernet-network/aethernet/internal/registry"
+	"github.com/Aethernet-network/aethernet/internal/replay"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/router"
 	"github.com/Aethernet-network/aethernet/internal/staking"
@@ -311,6 +312,22 @@ func (s *taskManagerSource) OpenTasks() []router.RoutableTask {
 		result[i] = t
 	}
 	return result
+}
+
+// replayGenTrigger adapts *ledger.GenerationLedger to the
+// replay.generationTrigger interface. It is used by ReplayEnforcer to release
+// held generation credits after a replay confirms the original work.
+type replayGenTrigger struct {
+	gl      *ledger.GenerationLedger
+	agentID crypto.AgentID
+}
+
+func (t *replayGenTrigger) RecordGeneration(taskID, agentID, resultHash, title string, value uint64) error {
+	id := crypto.AgentID(agentID)
+	if id == "" {
+		id = t.agentID
+	}
+	return t.gl.RecordTaskGeneration(id, resultHash, title, value, taskID)
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
@@ -645,6 +662,24 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	vr.SetPassThresholds(cfg.Evidence.CodePassThreshold, cfg.Evidence.DataPassThreshold, cfg.Evidence.ContentPassThreshold)
 	av.SetVerifierRegistry(vr)
 	av.SetVerificationService(verification.NewInProcessVerifier(vr))
+
+	// Wire the replay coordinator so the auto-validator can schedule async
+	// verification replays for selected tasks. The coordinator is backed by
+	// the node's BadgerDB store via the replayStore interface.
+	if stack.store != nil {
+		replayCoord := replay.NewReplayCoordinator(replay.DefaultReplayPolicy(), stack.store)
+		av.SetReplayCoordinator(replayCoord)
+
+		// ReplayEnforcer maps completed outcomes to task state changes.
+		// The generation trigger releases held generation credits after a
+		// replay confirms the original work.
+		replayResolver := replay.NewReplayResolver(stack.store)
+		genTrigger := &replayGenTrigger{gl: stack.generation, agentID: agentID}
+		_ = replay.NewReplayEnforcer(stack.taskMgr, replayResolver, genTrigger)
+		// ReplayEnforcer is not yet driven by a background loop; it will be
+		// called by the replay executor once one is wired.
+	}
+
 	// Task marketplace integration is conditional on --marketplace flag.
 	if enableMarketplace {
 		av.SetTaskManager(stack.taskMgr, stack.escrowMgr)

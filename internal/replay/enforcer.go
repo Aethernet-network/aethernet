@@ -1,0 +1,109 @@
+package replay
+
+import (
+	"errors"
+	"log/slog"
+
+	"github.com/Aethernet-network/aethernet/internal/verification"
+)
+
+// taskReplayInterface is the subset of *tasks.TaskManager used by ReplayEnforcer.
+// Defining a local interface avoids an import cycle between internal/replay and
+// internal/tasks.
+type taskReplayInterface interface {
+	// SetReplayStatus updates the task's ReplayStatus and ReplayJobID and
+	// persists the change.
+	SetReplayStatus(taskID string, status string, jobID string) error
+}
+
+// generationTrigger is called by ReplayEnforcer when a replay confirms the
+// original work and a generation credit can be released. It receives the same
+// parameters that would have been passed to
+// ledger.GenerationLedger.RecordTaskGeneration.
+type generationTrigger interface {
+	RecordGeneration(taskID, agentID, resultHash, title string, value uint64) error
+}
+
+// ReplayEnforcer maps completed ReplayOutcomes to concrete task state changes.
+// It delegates outcome recording and evaluation to a ReplayResolver, then
+// updates the task's ReplayStatus and optionally triggers a held generation
+// ledger entry.
+type ReplayEnforcer struct {
+	taskMgr    taskReplayInterface
+	resolver   *ReplayResolver
+	genTrigger generationTrigger // optional; nil when generation hold not in use
+}
+
+// NewReplayEnforcer returns a ReplayEnforcer. genTrigger may be nil if
+// generation-hold semantics are not required.
+func NewReplayEnforcer(
+	taskMgr taskReplayInterface,
+	resolver *ReplayResolver,
+	genTrigger generationTrigger,
+) *ReplayEnforcer {
+	return &ReplayEnforcer{
+		taskMgr:    taskMgr,
+		resolver:   resolver,
+		genTrigger: genTrigger,
+	}
+}
+
+// ProcessReplayOutcome records outcome, evaluates the verdict, and applies the
+// resulting task state change:
+//
+//   - "no_action" or "flag_for_review" → "replay_complete"
+//     If genTrigger is set, RecordGeneration is called so the held generation
+//     credit (if any) is released.
+//   - "open_challenge" or "slash_recommended" → "replay_disputed"
+//     Generation credit is permanently withheld.
+//
+// Returns the evaluated ReplayVerdict and any persistence error.
+// Returns a non-nil error immediately if outcome is nil.
+func (e *ReplayEnforcer) ProcessReplayOutcome(
+	outcome *ReplayOutcome,
+	agentID, resultHash, title string,
+	verifiedValue uint64,
+) (*verification.ReplayVerdict, error) {
+	if outcome == nil {
+		return nil, errors.New("enforcer: nil outcome")
+	}
+
+	if err := e.resolver.RecordOutcome(outcome); err != nil {
+		slog.Error("enforcer: record outcome failed", "task_id", outcome.TaskID, "err", err)
+		return nil, err
+	}
+
+	verdict := e.resolver.EvaluateOutcome(outcome)
+
+	var newStatus string
+	switch verdict.Action {
+	case "no_action", "flag_for_review":
+		newStatus = "replay_complete"
+	case "open_challenge", "slash_recommended":
+		newStatus = "replay_disputed"
+	default:
+		newStatus = "replay_complete"
+	}
+
+	if err := e.taskMgr.SetReplayStatus(outcome.TaskID, newStatus, outcome.JobID); err != nil {
+		slog.Error("enforcer: set replay status", "task_id", outcome.TaskID, "status", newStatus, "err", err)
+		return verdict, err
+	}
+
+	// Release the held generation credit when the replay confirms the work.
+	if newStatus == "replay_complete" && e.genTrigger != nil {
+		if err := e.genTrigger.RecordGeneration(outcome.TaskID, agentID, resultHash, title, verifiedValue); err != nil {
+			slog.Error("enforcer: generation trigger failed",
+				"task_id", outcome.TaskID, "agent_id", agentID, "err", err)
+			// Non-fatal: the task status has already been updated.
+		}
+	}
+
+	slog.Info("enforcer: outcome processed",
+		"task_id", outcome.TaskID,
+		"verdict_action", verdict.Action,
+		"new_status", newStatus,
+		"severity", verdict.SeverityScore)
+
+	return verdict, nil
+}

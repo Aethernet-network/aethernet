@@ -40,6 +40,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
+	"github.com/Aethernet-network/aethernet/internal/replay"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/verification"
@@ -80,6 +81,12 @@ type AutoValidator struct {
 	// it takes priority over verifierRegistry in verifyEvidence(). Falls back to
 	// verifierRegistry (then keyword verifier) when nil — backward compatible.
 	verificationService verification.VerificationService
+
+	// replayCoordinator is optional. When set, every settled task is evaluated
+	// for replay eligibility. Generation-eligible tasks selected for replay
+	// have their generation ledger entry held until the replay confirms the
+	// original work.
+	replayCoordinator *replay.ReplayCoordinator
 
 	// dag and kp are optional. When both are set, settleTask creates a Transfer
 	// DAG event recording the worker payment so the activity feed reflects task
@@ -190,6 +197,16 @@ func (av *AutoValidator) SetVerificationService(svc verification.VerificationSer
 	av.verificationService = svc
 }
 
+// SetReplayCoordinator wires an optional ReplayCoordinator. When set, every
+// successfully verified task is evaluated for replay eligibility. Tasks
+// selected for replay have their ReplayStatus set to "replay_pending".
+// Generation-eligible tasks additionally have their generation ledger entry
+// withheld until the ReplayEnforcer confirms the original work via
+// ProcessReplayOutcome.
+func (av *AutoValidator) SetReplayCoordinator(c *replay.ReplayCoordinator) {
+	av.replayCoordinator = c
+}
+
 // SetDAG wires the causal DAG so that settled task payments are recorded as
 // Transfer events in the DAG, making them visible in the activity feed and
 // network statistics. Optional; settlement proceeds without DAG recording if
@@ -295,7 +312,53 @@ func (av *AutoValidator) processSubmittedTasks() {
 				"task_id", task.ID, "score", score.Overall, "threshold", evidence.PassThreshold)
 			continue
 		}
-		av.settleTask(task, score)
+
+		// Determine whether the replay coordinator wants to verify this task
+		// and, if so, whether to hold the generation ledger entry.
+		holdGeneration := false
+		var replayReason string
+		if av.replayCoordinator != nil {
+			shouldReplay, reason := av.replayCoordinator.ShouldReplay(
+				task.ID, task.ClaimerID, task.Category,
+				score.Overall,
+				task.Contract.GenerationEligible,
+				false, // challenged — not supported at settle time
+				nil,   // anomalyFlags — populated by executor, not yet available
+				0,     // agentTaskCount — not fetched here for performance
+			)
+			if shouldReplay {
+				replayReason = reason
+				if task.Contract.GenerationEligible {
+					holdGeneration = true
+				} else {
+					slog.Info("auto-validator: replay scheduled (non-generation task)",
+						"task_id", task.ID, "reason", reason)
+				}
+			}
+		}
+
+		av.settleTask(task, score, holdGeneration)
+
+		// Schedule the replay job after settlement so the task is in Completed
+		// state before the replay executor can query it.
+		if replayReason != "" && av.replayCoordinator != nil {
+			job, err := av.replayCoordinator.ScheduleReplay(
+				task.ID, task.ResultHash, task.Category, "v1",
+				nil, replayReason, task.ClaimerID,
+			)
+			if err != nil {
+				slog.Error("auto-validator: failed to schedule replay",
+					"task_id", task.ID, "reason", replayReason, "err", err)
+			} else {
+				if err := av.taskMgr.SetReplayStatus(task.ID, "replay_pending", job.ID); err != nil {
+					slog.Error("auto-validator: failed to set replay status",
+						"task_id", task.ID, "job_id", job.ID, "err", err)
+				}
+				slog.Info("auto-validator: replay scheduled",
+					"task_id", task.ID, "job_id", job.ID, "reason", replayReason,
+					"hold_generation", holdGeneration)
+			}
+		}
 	}
 }
 
@@ -440,14 +503,18 @@ func (av *AutoValidator) processDisputedTasks() {
 	}
 }
 
-// settleTask is the shared approval path used by both processSubmittedTasks and
-// processDisputedTasks (approve branch). It:
+// settleTask is the shared approval path used by processSubmittedTasks. It:
 //  1. Marks the task Completed via taskMgr.ApproveTask
 //  2. Releases (budget - fee) to the worker via escrow.ReleaseNet
 //  3. Distributes the fee to validator + treasury via feeCollector.CollectFee
-//  4. Records verified productive output in the generation ledger
+//  4. Records verified productive output in the generation ledger (unless holdGeneration is true)
 //  5. Records a reputation completion for the worker
-func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score) {
+//
+// holdGeneration should be true when the replay coordinator has selected this
+// task for replay and the task is generation-eligible. In that case the
+// generation ledger entry is withheld until ReplayEnforcer.ProcessReplayOutcome
+// confirms the original work.
+func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score, holdGeneration bool) {
 	approvedAt := time.Now().UnixNano()
 	if err := av.taskMgr.ApproveTask(task.ID, av.validatorID); err != nil {
 		slog.Warn("auto-validator: could not approve task", "task_id", task.ID, "err", err)
@@ -507,7 +574,11 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score) {
 	}
 
 	// Record verified productive AI computation in the generation ledger.
-	if av.generationLedger != nil && task.ClaimerID != "" && score != nil {
+	// Skipped when holdGeneration is true: the replay coordinator has selected
+	// this task for verification replay and the generation credit will be
+	// released by ReplayEnforcer.ProcessReplayOutcome once the replay confirms
+	// the original work.
+	if !holdGeneration && av.generationLedger != nil && task.ClaimerID != "" && score != nil {
 		verifiedValue := uint64(float64(task.Budget) * score.Overall)
 		if err := av.generationLedger.RecordTaskGeneration(
 			crypto.AgentID(task.ClaimerID),
