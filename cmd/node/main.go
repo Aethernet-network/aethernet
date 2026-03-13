@@ -685,6 +685,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	// verification replays for selected tasks. The coordinator is backed by
 	// the node's BadgerDB store via the replayStore interface.
 	var replayEnforcer *replay.ReplayEnforcer
+	var submissionProc *replay.SubmissionProcessor
 	if stack.store != nil {
 		replayCoord := replay.NewReplayCoordinator(replay.DefaultReplayPolicy(), stack.store)
 		av.SetReplayCoordinator(replayCoord)
@@ -707,6 +708,10 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			30*time.Second, // poll every 30 seconds
 		)
 		stack.replayRunner.Start()
+
+		// SubmissionProcessor handles POST /v1/replay/submit: external replay
+		// executors submit raw check results; the protocol performs the comparison.
+		submissionProc = replay.NewSubmissionProcessor(stack.store, replayEnforcer, replayDetails)
 	}
 
 	// Task marketplace integration is conditional on --marketplace flag.
@@ -782,6 +787,11 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		// marketplace is enabled. The enforcer is nil when store is not available.
 		if replayEnforcer != nil {
 			apiSrv.SetReplayEnforcer(replayEnforcer)
+		}
+		// Wire the submission processor so POST /v1/replay/submit accepts raw
+		// check results from external replay executors.
+		if submissionProc != nil {
+			apiSrv.SetSubmissionProcessor(submissionProc)
 		}
 	}
 	apiSrv.SetEconomics(stack.walletMgr, stack.stakeManager, stack.feeCollector)

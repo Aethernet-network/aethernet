@@ -72,6 +72,7 @@ import (
 	svcregistry "github.com/Aethernet-network/aethernet/internal/registry"
 	"github.com/Aethernet-network/aethernet/internal/replay"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
+	"github.com/Aethernet-network/aethernet/internal/verification"
 	"github.com/Aethernet-network/aethernet/internal/router"
 	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
@@ -194,6 +195,11 @@ type Server struct {
 	// When non-nil, POST /v1/replay/outcome is active and routes replay outcomes
 	// through the enforcer to update task state and release held generation credits.
 	replayEnforcer *replay.ReplayEnforcer
+
+	// submissionProcessor — optional; set via SetSubmissionProcessor.
+	// When non-nil, POST /v1/replay/submit is active: external replay executors
+	// submit raw check results and the protocol performs the comparison.
+	submissionProcessor *replay.SubmissionProcessor
 }
 
 // NewServer constructs an API Server backed by the provided node components.
@@ -345,6 +351,9 @@ func (s *Server) registerL3Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/tasks/{id}/subtask", s.handleCreateSubtask)
 	// Replay outcome intake — driven by the replay executor once a ReplayJob completes.
 	mux.HandleFunc("POST /v1/replay/outcome", s.handleReplayOutcome)
+	// Replay submission intake — external executors submit raw check results;
+	// the protocol performs the comparison and returns the derived verdict.
+	mux.HandleFunc("POST /v1/replay/submit", s.handleReplaySubmit)
 	// Developer platform API key management.
 	mux.HandleFunc("POST /v1/platform/keys", s.handleGenerateKey)
 	mux.HandleFunc("GET /v1/platform/keys/{key}", s.handleGetKey)
@@ -466,6 +475,14 @@ func (s *Server) SetRequireAuth(v bool) {
 // releases held generation credits. When nil the endpoint returns 501.
 func (s *Server) SetReplayEnforcer(e *replay.ReplayEnforcer) {
 	s.replayEnforcer = e
+}
+
+// SetSubmissionProcessor wires the SubmissionProcessor into the server.
+// When non-nil, POST /v1/replay/submit accepts raw check results from external
+// replay executors, performs the protocol-side comparison, and returns the
+// derived verdict. When nil the endpoint returns 501.
+func (s *Server) SetSubmissionProcessor(p *replay.SubmissionProcessor) {
+	s.submissionProcessor = p
 }
 
 // isAuthenticated reports whether r carries a valid X-API-Key credential.
@@ -3012,4 +3029,66 @@ func (s *Server) handleReplayOutcome(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, verdict)
+}
+
+// replaySubmitResult is the response body for POST /v1/replay/submit.
+// It includes both the protocol-derived outcome and the enforcement verdict
+// so callers can inspect the comparison detail alongside the decision.
+type replaySubmitResult struct {
+	Outcome *replay.ReplayOutcome          `json:"outcome"`
+	Verdict *verification.ReplayVerdict    `json:"verdict"`
+}
+
+// handleReplaySubmit receives raw check results from an external replay
+// executor, performs the protocol-side comparison against the original claimed
+// results stored in the ReplayJob, and returns the derived verdict.
+//
+// POST /v1/replay/submit
+//
+//	Request body:  JSON-encoded replay.ReplaySubmission
+//	Response 200:  JSON-encoded replaySubmitResult (outcome + verdict)
+//	Response 400:  unknown job, terminal job, binding mismatch, missing checks
+//	Response 401:  authentication required
+//	Response 501:  submission processor not wired
+func (s *Server) handleReplaySubmit(w http.ResponseWriter, r *http.Request) {
+	if s.submissionProcessor == nil {
+		writeError(w, http.StatusNotImplemented, "replay submission not enabled")
+		return
+	}
+	// Auth gate: same policy as handleReplayOutcome.
+	if s.requireAuth && s.platformKeys != nil && !s.isAuthenticated(r) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if s.writeLimiter != nil {
+		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if !s.writeLimiter.Allow(ip) {
+			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+			return
+		}
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
+	var sub replay.ReplaySubmission
+	if err := json.NewDecoder(r.Body).Decode(&sub); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if sub.JobID == "" || sub.TaskID == "" {
+		writeError(w, http.StatusBadRequest, "job_id and task_id are required")
+		return
+	}
+
+	outcome, verdict, err := s.submissionProcessor.Process(&sub)
+	if err != nil {
+		slog.Warn("api: replay submission processing failed",
+			"job_id", sub.JobID, "task_id", sub.TaskID, "err", err)
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, &replaySubmitResult{
+		Outcome: outcome,
+		Verdict: verdict,
+	})
 }

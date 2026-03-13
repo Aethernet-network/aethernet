@@ -51,6 +51,13 @@ type ReplayJob struct {
 	// ArtifactRefs is copied from ReplayRequirements.ArtifactRefs.
 	ArtifactRefs []verification.ArtifactRef
 
+	// MachineReadableResults holds the original claimed structured check output
+	// keyed by check type (e.g. "go_test" → {"passed": 42, "failed": 0}).
+	// Copied from ReplayRequirements.MachineReadableResults when present.
+	// Used by ComparisonExecutor to compare numeric/structured fields
+	// against replay-submitted results.
+	MachineReadableResults map[string]interface{} `json:"machine_readable_results,omitempty"`
+
 	// ReplayReason describes why this replay was requested
 	// (e.g. "spot-check", "dispute", "audit").
 	ReplayReason string
@@ -101,6 +108,7 @@ func NewReplayJob(
 		job.ToolchainManifestHash = reqs.ToolchainManifestHash
 		job.CommandSpecs = reqs.CommandSpecs
 		job.ArtifactRefs = reqs.ArtifactRefs
+		job.MachineReadableResults = reqs.MachineReadableResults
 	}
 
 	return job

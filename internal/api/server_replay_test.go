@@ -344,6 +344,292 @@ func TestHandleReplayOutcome_AuthenticatedPasses(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// POST /v1/replay/submit helpers and tests
+// ---------------------------------------------------------------------------
+
+// newReplayServerWithSubmission extends newReplayServer by also wiring a
+// SubmissionProcessor. It returns the server, httptest.Server, store, and
+// the task manager so tests can pre-populate tasks the enforcer will look up.
+func newReplayServerWithSubmission(t *testing.T) (*api.Server, *httptest.Server, *store.Store, *tasks.TaskManager) {
+	t.Helper()
+
+	kp, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	d := dag.New()
+	tl := ledger.NewTransferLedger()
+	if err := tl.FundAgent(crypto.AgentID(genesis.BucketEcosystem), genesis.EcosystemAllocation); err != nil {
+		t.Fatalf("seed ecosystem: %v", err)
+	}
+	gl := ledger.NewGenerationLedger()
+	reg := identity.NewRegistry()
+	eng := ocs.NewEngine(ocs.DefaultConfig(), tl, gl, reg)
+	if err := eng.Start(); err != nil {
+		t.Fatalf("start engine: %v", err)
+	}
+	t.Cleanup(eng.Stop)
+	sm := ledger.NewSupplyManager(tl, gl)
+
+	tm := tasks.NewTaskManager()
+	escrowMgr := escrow.New(tl)
+
+	st, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	resolver := replay.NewReplayResolver(st)
+	enforcer := replay.NewReplayEnforcer(tm, resolver, nil)
+	proc := replay.NewSubmissionProcessor(st, enforcer, nil)
+
+	srv := api.NewServer("", d, tl, gl, reg, eng, sm, nil, kp)
+	srv.SetTaskManager(tm, escrowMgr)
+	srv.SetReplayEnforcer(enforcer)
+	srv.SetSubmissionProcessor(proc)
+	srv.SetRequireAuth(false)
+
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	return srv, ts, st, tm
+}
+
+// storeReplayJobFull stores a pending job with Category, ChecksToReplay, and
+// AcceptanceContractHash populated — suitable for submit-path tests.
+func storeReplayJobFull(t *testing.T, st *store.Store, jobID, taskID, category string, checks []string, contractHash string) *replay.ReplayJob {
+	t.Helper()
+	job := &replay.ReplayJob{
+		ID:                     jobID,
+		TaskID:                 taskID,
+		Category:               category,
+		PolicyVersion:          "v1",
+		Status:                 "pending",
+		ChecksToReplay:         checks,
+		AcceptanceContractHash: contractHash,
+		CreatedAt:              time.Now(),
+	}
+	data, err := json.Marshal(job)
+	if err != nil {
+		t.Fatalf("marshal job: %v", err)
+	}
+	if err := st.PutReplayJob(jobID, data); err != nil {
+		t.Fatalf("PutReplayJob: %v", err)
+	}
+	return job
+}
+
+// postReplaySubmit sends POST /v1/replay/submit with the given submission.
+func postReplaySubmit(t *testing.T, ts *httptest.Server, sub *replay.ReplaySubmission) *http.Response {
+	t.Helper()
+	body, err := json.Marshal(sub)
+	if err != nil {
+		t.Fatalf("marshal submission: %v", err)
+	}
+	resp, err := http.Post(ts.URL+"/v1/replay/submit", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /v1/replay/submit: %v", err)
+	}
+	return resp
+}
+
+// TestHandleReplaySubmit_NoProcessor_501 verifies that when no SubmissionProcessor
+// is wired the endpoint returns 501.
+func TestHandleReplaySubmit_NoProcessor_501(t *testing.T) {
+	setup := newTestSetup(t) // no SubmissionProcessor wired
+	sub := &replay.ReplaySubmission{
+		JobID:  "job-sub-501",
+		TaskID: "task-sub-501",
+	}
+	resp := postReplaySubmit(t, setup.ts, sub)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Errorf("status = %d; want 501", resp.StatusCode)
+	}
+}
+
+// TestHandleReplaySubmit_InvalidJSON_400 verifies that a malformed body returns 400.
+func TestHandleReplaySubmit_InvalidJSON_400(t *testing.T) {
+	_, ts, _, _ := newReplayServerWithSubmission(t)
+	resp, err := http.Post(ts.URL+"/v1/replay/submit", "application/json",
+		bytes.NewBufferString("not-valid-json"))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d; want 400", resp.StatusCode)
+	}
+}
+
+// TestHandleReplaySubmit_MissingJobID_400 verifies that a submission with an
+// empty job_id returns 400.
+func TestHandleReplaySubmit_MissingJobID_400(t *testing.T) {
+	_, ts, _, _ := newReplayServerWithSubmission(t)
+	sub := &replay.ReplaySubmission{
+		JobID:  "", // empty
+		TaskID: "task-sub-missing",
+	}
+	resp := postReplaySubmit(t, ts, sub)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d; want 400", resp.StatusCode)
+	}
+}
+
+// TestHandleReplaySubmit_MissingTaskID_400 verifies that a submission with an
+// empty task_id returns 400.
+func TestHandleReplaySubmit_MissingTaskID_400(t *testing.T) {
+	_, ts, _, _ := newReplayServerWithSubmission(t)
+	sub := &replay.ReplaySubmission{
+		JobID:  "job-sub-notask",
+		TaskID: "", // empty
+	}
+	resp := postReplaySubmit(t, ts, sub)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d; want 400", resp.StatusCode)
+	}
+}
+
+// TestHandleReplaySubmit_UnknownJob_400 verifies that a submission referencing
+// a non-existent job returns 400.
+func TestHandleReplaySubmit_UnknownJob_400(t *testing.T) {
+	_, ts, _, _ := newReplayServerWithSubmission(t)
+	sub := &replay.ReplaySubmission{
+		JobID:    "job-sub-ghost",
+		TaskID:   "task-sub-ghost",
+		Category: "code",
+	}
+	resp := postReplaySubmit(t, ts, sub)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d; want 400 (unknown job)", resp.StatusCode)
+	}
+}
+
+// TestHandleReplaySubmit_TerminalJob_400 verifies that re-submitting for a job
+// in a terminal state returns 400.
+func TestHandleReplaySubmit_TerminalJob_400(t *testing.T) {
+	_, ts, st, _ := newReplayServerWithSubmission(t)
+
+	// Store a completed job.
+	job := storeReplayJobFull(t, st, "job-sub-term", "task-sub-term", "code", nil, "")
+	// Mark it as completed.
+	job.Status = "completed"
+	data, _ := json.Marshal(job)
+	_ = st.PutReplayJob(job.ID, data)
+
+	sub := &replay.ReplaySubmission{
+		JobID:    "job-sub-term",
+		TaskID:   "task-sub-term",
+		Category: "code",
+	}
+	resp := postReplaySubmit(t, ts, sub)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d; want 400 (terminal job)", resp.StatusCode)
+	}
+}
+
+// TestHandleReplaySubmit_ValidMatch_200 verifies the happy path: a valid
+// submission that produces a "match" outcome returns 200 with an outcome+verdict
+// body. No checks are required, so an empty submission matches trivially.
+func TestHandleReplaySubmit_ValidMatch_200(t *testing.T) {
+	_, ts, st, tm := newReplayServerWithSubmission(t)
+
+	// Pre-create the task so the enforcer can call SetReplayStatus.
+	task, err := tm.PostTask("poster-sub-1", "Run replay match", "check outputs", "code", 100_000)
+	if err != nil {
+		t.Fatalf("PostTask: %v", err)
+	}
+
+	// Job with no required checks — an empty submission matches trivially.
+	storeReplayJobFull(t, st, "job-sub-match", task.ID, "code", nil, "")
+
+	sub := &replay.ReplaySubmission{
+		JobID:       "job-sub-match",
+		TaskID:      task.ID,
+		Category:    "code",
+		SubmitterID: "test-replayer",
+		SubmittedAt: time.Now(),
+	}
+	resp := postReplaySubmit(t, ts, sub)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d; want 200", resp.StatusCode)
+	}
+
+	var result struct {
+		Outcome *replay.ReplayOutcome        `json:"outcome"`
+		Verdict *verification.ReplayVerdict  `json:"verdict"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if result.Outcome == nil {
+		t.Fatal("outcome must not be nil in 200 response")
+	}
+	if result.Verdict == nil {
+		t.Fatal("verdict must not be nil in 200 response")
+	}
+	if result.Outcome.Status != "match" {
+		t.Errorf("outcome.Status = %q; want %q", result.Outcome.Status, "match")
+	}
+	if result.Verdict.Action == "" {
+		t.Error("verdict.Action must be non-empty")
+	}
+}
+
+// TestHandleReplaySubmit_ValidMismatch_200 verifies that a submission that
+// produces a "mismatch" outcome (checks fail) still returns 200 (the protocol
+// successfully processed the submission and derived a verdict).
+func TestHandleReplaySubmit_ValidMismatch_200(t *testing.T) {
+	_, ts, st, tm := newReplayServerWithSubmission(t)
+
+	// Pre-create the task so the enforcer can call SetReplayStatus.
+	task, err := tm.PostTask("poster-sub-2", "Run replay mismatch", "check outputs", "code", 100_000)
+	if err != nil {
+		t.Fatalf("PostTask: %v", err)
+	}
+
+	storeReplayJobFull(t, st, "job-sub-mm", task.ID, "code",
+		[]string{"go_test"}, "")
+
+	sub := &replay.ReplaySubmission{
+		JobID:    "job-sub-mm",
+		TaskID:   task.ID,
+		Category: "code",
+		CheckResults: []replay.SubmittedCheckResult{
+			{CheckType: "go_test", Pass: false, ExitCode: 1},
+		},
+		SubmittedAt: time.Now(),
+	}
+	resp := postReplaySubmit(t, ts, sub)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d; want 200 (valid submission even when mismatch)", resp.StatusCode)
+	}
+
+	var result struct {
+		Outcome *replay.ReplayOutcome       `json:"outcome"`
+		Verdict *verification.ReplayVerdict `json:"verdict"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if result.Outcome.Status != "mismatch" {
+		t.Errorf("outcome.Status = %q; want %q", result.Outcome.Status, "mismatch")
+	}
+	switch result.Verdict.Action {
+	case "open_challenge", "slash_recommended":
+		// expected
+	default:
+		t.Errorf("verdict.Action = %q; want open_challenge or slash_recommended", result.Verdict.Action)
+	}
+}
+
 // TestHandleReplayOutcome_DuplicateTerminal verifies that re-submitting an
 // outcome for a completed job returns 400.
 func TestHandleReplayOutcome_DuplicateTerminal(t *testing.T) {
