@@ -828,6 +828,123 @@ func (s *Store) DeleteEscrow(taskID string) error {
 }
 
 // ---------------------------------------------------------------------------
+// Replay job and outcome entries (raw JSON blobs)
+// ---------------------------------------------------------------------------
+
+const prefixReplayJob     = "rpj:"
+const prefixReplayOutcome = "rpo:"
+
+// PutReplayJob stores a raw JSON-encoded ReplayJob under "rpj:<id>".
+func (s *Store) PutReplayJob(id string, data []byte) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(prefixReplayJob+id), data)
+	})
+}
+
+// GetReplayJob retrieves the raw JSON blob for the ReplayJob identified by id.
+// Returns an error wrapping badger.ErrKeyNotFound when absent.
+func (s *Store) GetReplayJob(id string) ([]byte, error) {
+	var data []byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(prefixReplayJob + id))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			data = make([]byte, len(val))
+			copy(data, val)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: get replay job %s: %w", id, err)
+	}
+	return data, nil
+}
+
+// AllReplayJobs returns all stored ReplayJob blobs as a map from job ID to raw JSON.
+func (s *Store) AllReplayJobs() (map[string][]byte, error) {
+	result := make(map[string][]byte)
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(prefixReplayJob)
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		prefixLen := len(prefixReplayJob)
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := string(item.Key()[prefixLen:])
+			if err := item.Value(func(val []byte) error {
+				blob := make([]byte, len(val))
+				copy(blob, val)
+				result[key] = blob
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return result, err
+}
+
+// PutReplayOutcome stores a raw JSON-encoded ReplayOutcome under "rpo:<id>".
+func (s *Store) PutReplayOutcome(id string, data []byte) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(prefixReplayOutcome+id), data)
+	})
+}
+
+// GetReplayOutcome retrieves the raw JSON blob for the ReplayOutcome identified by id.
+// Returns an error wrapping badger.ErrKeyNotFound when absent.
+func (s *Store) GetReplayOutcome(id string) ([]byte, error) {
+	var data []byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(prefixReplayOutcome + id))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			data = make([]byte, len(val))
+			copy(data, val)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: get replay outcome %s: %w", id, err)
+	}
+	return data, nil
+}
+
+// AllReplayOutcomes returns all stored ReplayOutcome blobs as a map from job ID to raw JSON.
+func (s *Store) AllReplayOutcomes() (map[string][]byte, error) {
+	result := make(map[string][]byte)
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(prefixReplayOutcome)
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		prefixLen := len(prefixReplayOutcome)
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := string(item.Key()[prefixLen:])
+			if err := item.Value(func(val []byte) error {
+				blob := make([]byte, len(val))
+				copy(blob, val)
+				result[key] = blob
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return result, err
+}
+
+// ---------------------------------------------------------------------------
 // Atomic multi-step operations (Fix 7: BadgerDB transactions)
 // ---------------------------------------------------------------------------
 
