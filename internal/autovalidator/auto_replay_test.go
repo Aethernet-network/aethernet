@@ -214,12 +214,11 @@ func TestAutoValidator_GenerationHeld_WhenReplaySelectedAndGenerationEligible(t 
 
 // TestAutoValidator_GenerationNotHeld_WhenReplaySelectedButNotGenEligible
 // verifies that when a replay is scheduled for a non-generation-eligible task,
-// settlement (including generation ledger) still proceeds normally.
+// the task completes and replay is scheduled, but the generation ledger receives
+// NO entry and GenerationStatus remains empty. Non-generation-eligible tasks
+// must never write generation ledger entries regardless of replay selection.
 func TestAutoValidator_GenerationNotHeld_WhenReplaySelectedButNotGenEligible(t *testing.T) {
-	const budget = 500_000
-	claimerID := crypto.AgentID("worker")
-
-	av, tm, gl, taskID := buildAVHarness(t, budget, false /* not genEligible */)
+	av, tm, gl, taskID := buildAVHarness(t, 500_000, false /* not genEligible */)
 
 	s := openTempStore(t)
 	coord := replay.NewReplayCoordinator(alwaysReplayPolicy(), s)
@@ -228,7 +227,7 @@ func TestAutoValidator_GenerationNotHeld_WhenReplaySelectedButNotGenEligible(t *
 	av.Start()
 	defer av.Stop()
 
-	// Wait for replay status to be set.
+	// Wait for replay status to be set (task is settled and replay scheduled).
 	waitForReplayStatus(t, tm, taskID, 2*time.Second)
 
 	tk, err := tm.Get(taskID)
@@ -239,15 +238,19 @@ func TestAutoValidator_GenerationNotHeld_WhenReplaySelectedButNotGenEligible(t *
 		t.Fatalf("task status = %q; want Completed", tk.Status)
 	}
 
-	// For non-generation-eligible tasks the generation ledger still records.
-	// Wait for the generation entry — ApproveTask runs before RecordTaskGeneration.
-	waitForGeneration(gl, claimerID, 2*time.Second)
+	// Generation ledger must have NO entry — non-eligible tasks are excluded.
+	claimerID := crypto.AgentID("worker")
 	entries, err := gl.GenerationHistory(claimerID, 10, 0)
 	if err != nil {
 		t.Fatalf("GenerationHistory: %v", err)
 	}
-	if len(entries) == 0 {
-		t.Error("generation ledger is empty; expected entry for non-eligible task with replay")
+	if len(entries) != 0 {
+		t.Errorf("generation ledger has %d entries; want 0 for non-generation-eligible task", len(entries))
+	}
+
+	// GenerationStatus must remain empty — no tracking for non-eligible tasks.
+	if tk.GenerationStatus != "" {
+		t.Errorf("GenerationStatus = %q; want empty for non-generation-eligible task", tk.GenerationStatus)
 	}
 
 	// Replay is still scheduled even for non-eligible tasks.

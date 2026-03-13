@@ -106,7 +106,7 @@ func TestEnforcer_CleanMatch_ReplayComplete(t *testing.T) {
 			{CheckType: "lint", Match: true},
 		}, nil)
 
-	verdict, err := enf.ProcessReplayOutcome(outcome, "agent-1", "sha256:hash1", "Build tests", 8_000)
+	verdict, err := enf.ProcessReplayOutcome(outcome, "agent-1", "sha256:hash1", "Build tests", 8_000, true)
 	if err != nil {
 		t.Fatalf("ProcessReplayOutcome: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestEnforcer_MultipleMismatches_ReplayDisputed(t *testing.T) {
 			{CheckType: "lint", Match: false, ScoreDelta: 0.12},
 		}, nil)
 
-	verdict, err := enf.ProcessReplayOutcome(outcome, "agent-2", "sha256:hash2", "Run linter", 5_000)
+	verdict, err := enf.ProcessReplayOutcome(outcome, "agent-2", "sha256:hash2", "Run linter", 5_000, true)
 	if err != nil {
 		t.Fatalf("ProcessReplayOutcome: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestEnforcer_SlashRecommended_ReplayDisputed(t *testing.T) {
 			{CheckType: "lint", Match: false},
 		}, []string{"hash_divergence"})
 
-	verdict, err := enf.ProcessReplayOutcome(outcome, "agent-3", "sha256:hash3", "Check hashes", 4_000)
+	verdict, err := enf.ProcessReplayOutcome(outcome, "agent-3", "sha256:hash3", "Check hashes", 4_000, true)
 	if err != nil {
 		t.Fatalf("ProcessReplayOutcome: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestEnforcer_FlagForReview_ReplayComplete(t *testing.T) {
 			{CheckType: "lint", Match: false, ScoreDelta: 0.08},
 		}, nil)
 
-	verdict, err := enf.ProcessReplayOutcome(outcome, "agent-4", "sha256:hash4", "Lint check", 3_000)
+	verdict, err := enf.ProcessReplayOutcome(outcome, "agent-4", "sha256:hash4", "Lint check", 3_000, true)
 	if err != nil {
 		t.Fatalf("ProcessReplayOutcome: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestEnforcer_FlagForReview_ReplayComplete(t *testing.T) {
 // TestEnforcer_NilOutcome_Error verifies that a nil outcome returns an error.
 func TestEnforcer_NilOutcome_Error(t *testing.T) {
 	enf, _, _, _ := makeEnforcer(t)
-	_, err := enf.ProcessReplayOutcome(nil, "agent-x", "", "", 0)
+	_, err := enf.ProcessReplayOutcome(nil, "agent-x", "", "", 0, false)
 	if err == nil {
 		t.Error("expected error for nil outcome")
 	}
@@ -259,9 +259,44 @@ func TestEnforcer_SetReplayStatusError_Propagates(t *testing.T) {
 	outcome := makeCompleteOutcome("job-ef-5", "task-ef-5", "match",
 		[]CheckComparison{{CheckType: "go_test", Match: true}}, nil)
 
-	_, err := enf.ProcessReplayOutcome(outcome, "agent-5", "", "", 0)
+	_, err := enf.ProcessReplayOutcome(outcome, "agent-5", "", "", 0, false)
 	if !errors.Is(err, sentinelErr) {
 		t.Errorf("expected sentinelErr, got %v", err)
+	}
+}
+
+// TestEnforcer_NonGenEligible_NoGenerationSideEffects verifies that when
+// generationEligible=false, the enforcer does not set GenerationStatus and
+// does not call the generation trigger, even on a clean match.
+func TestEnforcer_NonGenEligible_NoGenerationSideEffects(t *testing.T) {
+	enf, tm, gen, ms := makeEnforcer(t)
+
+	job := makeCleanJob("job-ef-6", "task-ef-6")
+	data, _ := json.Marshal(job)
+	_ = ms.PutReplayJob(job.ID, data)
+
+	outcome := makeCompleteOutcome("job-ef-6", "task-ef-6", "match",
+		[]CheckComparison{
+			{CheckType: "go_test", Match: true},
+		}, nil)
+
+	verdict, err := enf.ProcessReplayOutcome(outcome, "agent-6", "sha256:hash6", "Non-gen task", 2_000, false)
+	if err != nil {
+		t.Fatalf("ProcessReplayOutcome: %v", err)
+	}
+	if verdict.Action != "no_action" {
+		t.Errorf("verdict.Action = %q; want %q", verdict.Action, "no_action")
+	}
+	if tm.status["task-ef-6"] != "replay_complete" {
+		t.Errorf("task status = %q; want %q", tm.status["task-ef-6"], "replay_complete")
+	}
+	// GenerationStatus must NOT be set for non-generation-eligible tasks.
+	if gs := tm.genStatus["task-ef-6"]; gs != "" {
+		t.Errorf("generation status = %q; want empty for non-generation-eligible task", gs)
+	}
+	// Generation trigger must NOT fire for non-generation-eligible tasks.
+	if len(gen.calls) != 0 {
+		t.Errorf("generation trigger calls = %d; want 0 for non-gen-eligible task", len(gen.calls))
 	}
 }
 

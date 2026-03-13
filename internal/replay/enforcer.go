@@ -56,10 +56,16 @@ func NewReplayEnforcer(
 // resulting task state change:
 //
 //   - "no_action" or "flag_for_review" → "replay_complete"
-//     If genTrigger is set, RecordGeneration is called so the held generation
-//     credit (if any) is released.
+//     If generationEligible and genTrigger is set, RecordGeneration is called
+//     so the held generation credit (if any) is released.
 //   - "open_challenge" or "slash_recommended" → "replay_disputed"
 //     Generation credit is permanently withheld.
+//
+// generationEligible must be true for the task's AcceptanceContract to allow
+// generation ledger entries. When false, SetGenerationStatus and
+// RecordGeneration are skipped regardless of the verdict — ensuring
+// non-generation-eligible tasks never write generation ledger entries via
+// the replay path.
 //
 // Returns the evaluated ReplayVerdict and any persistence error.
 // Returns a non-nil error immediately if outcome is nil.
@@ -67,6 +73,7 @@ func (e *ReplayEnforcer) ProcessReplayOutcome(
 	outcome *ReplayOutcome,
 	agentID, resultHash, title string,
 	verifiedValue uint64,
+	generationEligible bool,
 ) (*verification.ReplayVerdict, error) {
 	if outcome == nil {
 		return nil, errors.New("enforcer: nil outcome")
@@ -98,18 +105,20 @@ func (e *ReplayEnforcer) ProcessReplayOutcome(
 		return verdict, err
 	}
 
-	// Update the generation credit status based on the verdict.
-	if err := e.taskMgr.SetGenerationStatus(outcome.TaskID, newGenStatus); err != nil {
-		slog.Error("enforcer: set generation status", "task_id", outcome.TaskID, "gen_status", newGenStatus, "err", err)
-		// Non-fatal: replay status has already been updated.
-	}
-
-	// Release the held generation credit when the replay confirms the work.
-	if newStatus == "replay_complete" && e.genTrigger != nil {
-		if err := e.genTrigger.RecordGeneration(outcome.TaskID, agentID, resultHash, title, verifiedValue); err != nil {
-			slog.Error("enforcer: generation trigger failed",
-				"task_id", outcome.TaskID, "agent_id", agentID, "err", err)
-			// Non-fatal: the task status has already been updated.
+	// Update the generation credit status and release held credit only for
+	// generation-eligible tasks. Non-eligible tasks must never write generation
+	// ledger entries — even on replay_complete.
+	if generationEligible {
+		if err := e.taskMgr.SetGenerationStatus(outcome.TaskID, newGenStatus); err != nil {
+			slog.Error("enforcer: set generation status", "task_id", outcome.TaskID, "gen_status", newGenStatus, "err", err)
+			// Non-fatal: replay status has already been updated.
+		}
+		if newStatus == "replay_complete" && e.genTrigger != nil {
+			if err := e.genTrigger.RecordGeneration(outcome.TaskID, agentID, resultHash, title, verifiedValue); err != nil {
+				slog.Error("enforcer: generation trigger failed",
+					"task_id", outcome.TaskID, "agent_id", agentID, "err", err)
+				// Non-fatal: the task status has already been updated.
+			}
 		}
 	}
 
@@ -117,6 +126,7 @@ func (e *ReplayEnforcer) ProcessReplayOutcome(
 		"task_id", outcome.TaskID,
 		"verdict_action", verdict.Action,
 		"new_status", newStatus,
+		"generation_eligible", generationEligible,
 		"severity", verdict.SeverityScore)
 
 	return verdict, nil

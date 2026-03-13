@@ -265,6 +265,7 @@ func (av *AutoValidator) Start() {
 					av.processSubmittedTasks()
 					av.processExpiredClaims()
 					av.processDisputedTasks()
+					av.processStuckHeld()
 				}
 			case <-av.stop:
 				return
@@ -361,6 +362,19 @@ func (av *AutoValidator) processSubmittedTasks() {
 					RequiredChecks:         task.Contract.RequiredChecks,
 				}
 			}
+
+			// Assess the replayability of the submitted material so operators
+			// can monitor how many replay jobs have full execution packs vs.
+			// structural-only material. This is informational; it does not
+			// block scheduling.
+			assessment := verification.AssessReplayability(reqs, task.Category, task.Contract.PolicyVersion)
+			slog.Debug("auto-validator: replay material assessment",
+				"task_id", task.ID,
+				"category", task.Category,
+				"replayable", assessment.Replayable,
+				"replay_level", assessment.ReplayLevel,
+				"missing_fields_count", len(assessment.MissingFields),
+			)
 
 			job, err := av.replayCoordinator.ScheduleReplay(
 				task.ID, task.ResultHash, task.Category,
@@ -482,11 +496,14 @@ func (av *AutoValidator) processDisputedTasks() {
 					av.feeCollector.TrackFee(fee, burned, treasuryAmount)
 				}
 			}
-			if av.generationLedger != nil && task.ClaimerID != "" && score != nil {
+			if av.generationLedger != nil && task.ClaimerID != "" && score != nil && task.Contract.GenerationEligible {
 				verifiedValue := uint64(float64(task.Budget) * score.Overall)
-				_ = av.generationLedger.RecordTaskGeneration(
+				if err := av.generationLedger.RecordTaskGeneration(
 					crypto.AgentID(task.ClaimerID), task.ResultHash, task.Title, verifiedValue, task.ID,
-				)
+				); err != nil {
+					slog.Error("auto-validator: generation ledger record failed (dispute resolved)",
+						"task_id", task.ID, "err", err)
+				}
 			}
 			if av.reputationMgr != nil && task.ClaimerID != "" {
 				approvedAt := time.Now().UnixNano()
@@ -595,11 +612,13 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score, hol
 	}
 
 	// Record verified productive AI computation in the generation ledger.
+	// Only for generation-eligible tasks; non-eligible tasks have their payout
+	// settled but must never write generation ledger entries.
 	// Skipped when holdGeneration is true: the replay coordinator has selected
 	// this task for verification replay and the generation credit will be
 	// released by ReplayEnforcer.ProcessReplayOutcome once the replay confirms
 	// the original work.
-	if !holdGeneration && av.generationLedger != nil && task.ClaimerID != "" && score != nil {
+	if !holdGeneration && av.generationLedger != nil && task.ClaimerID != "" && score != nil && task.Contract.GenerationEligible {
 		verifiedValue := uint64(float64(task.Budget) * score.Overall)
 		if err := av.generationLedger.RecordTaskGeneration(
 			crypto.AgentID(task.ClaimerID),
@@ -609,9 +628,7 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score, hol
 			task.ID,
 		); err != nil {
 			slog.Error("auto-validator: generation ledger record failed", "task_id", task.ID, "err", err)
-		} else if task.Contract.GenerationEligible {
-			// Only set status for generation-eligible tasks; non-eligible tasks
-			// have generation recorded silently without a GenerationStatus transition.
+		} else {
 			if err := av.taskMgr.SetGenerationStatus(task.ID, "recognized"); err != nil {
 				slog.Error("auto-validator: set generation status recognized failed", "task_id", task.ID, "err", err)
 			}
@@ -642,6 +659,32 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score, hol
 		)
 	}
 	slog.Info("auto-validator: task approved", "task_id", task.ID, "score", score.Overall, "claimer", task.ClaimerID)
+}
+
+// processStuckHeld scans completed tasks for those with GenerationStatus="held"
+// but no associated ReplayJobID. This condition indicates that settleTask set
+// the generation status to "held" but the subsequent ScheduleReplay call
+// failed, leaving the task in a state the ReplayEnforcer can never resolve.
+//
+// Recovery: the GenerationStatus is reset to "" so the task is no longer stuck
+// in an unresolvable hold. The lost generation credit is logged at ERROR
+// severity for operator review.
+func (av *AutoValidator) processStuckHeld() {
+	completed := av.taskMgr.Search(tasks.TaskStatusCompleted, "", 0)
+	for _, task := range completed {
+		if task.GenerationStatus != "held" || task.ReplayJobID != "" {
+			continue
+		}
+		slog.Error("auto-validator: stuck-held task detected — generation credit held with no replay job",
+			"task_id", task.ID,
+			"claimer_id", task.ClaimerID,
+			"remedy", "generation_status_reset_to_empty",
+		)
+		if err := av.taskMgr.SetGenerationStatus(task.ID, ""); err != nil {
+			slog.Error("auto-validator: failed to reset stuck-held generation status",
+				"task_id", task.ID, "err", err)
+		}
+	}
 }
 
 // processPending fetches all pending OCS items and submits a positive verdict

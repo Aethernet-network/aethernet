@@ -16,6 +16,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
+	"github.com/Aethernet-network/aethernet/internal/platform"
 	"github.com/Aethernet-network/aethernet/internal/replay"
 	"github.com/Aethernet-network/aethernet/internal/store"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
@@ -223,6 +224,123 @@ func TestHandleReplayOutcome_Success(t *testing.T) {
 	}
 	if updated.ReplayStatus != "replay_complete" {
 		t.Errorf("ReplayStatus = %q; want %q", updated.ReplayStatus, "replay_complete")
+	}
+}
+
+// newReplayServerWithAuth sets up a server that has both a ReplayEnforcer and
+// a platform.KeyManager wired. requireAuth defaults to true, so requests must
+// carry a valid X-API-Key to reach the enforcer. Returns the server, the
+// httptest.Server, the store, and the valid API key string.
+func newReplayServerWithAuth(t *testing.T) (*api.Server, *httptest.Server, *store.Store, string) {
+	t.Helper()
+
+	kp, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	d := dag.New()
+	tl := ledger.NewTransferLedger()
+	if err := tl.FundAgent(crypto.AgentID(genesis.BucketEcosystem), genesis.EcosystemAllocation); err != nil {
+		t.Fatalf("seed ecosystem: %v", err)
+	}
+	gl := ledger.NewGenerationLedger()
+	reg := identity.NewRegistry()
+	eng := ocs.NewEngine(ocs.DefaultConfig(), tl, gl, reg)
+	if err := eng.Start(); err != nil {
+		t.Fatalf("start engine: %v", err)
+	}
+	t.Cleanup(eng.Stop)
+	sm := ledger.NewSupplyManager(tl, gl)
+
+	tm := tasks.NewTaskManager()
+	escrowMgr := escrow.New(tl)
+
+	st, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	resolver := replay.NewReplayResolver(st)
+	enforcer := replay.NewReplayEnforcer(tm, resolver, nil)
+
+	km := platform.NewKeyManager()
+	apiKey := km.GenerateKey("test-app", "test@example.com", platform.TierDeveloper)
+
+	srv := api.NewServer("", d, tl, gl, reg, eng, sm, nil, kp)
+	srv.SetTaskManager(tm, escrowMgr)
+	srv.SetReplayEnforcer(enforcer)
+	srv.SetPlatformKeys(km)
+	// requireAuth=true by default; do NOT call SetRequireAuth(false)
+
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	return srv, ts, st, apiKey.Key
+}
+
+// postReplayOutcomeWithKey sends a POST /v1/replay/outcome request optionally
+// carrying an X-API-Key header.
+func postReplayOutcomeWithKey(t *testing.T, ts *httptest.Server, outcome *replay.ReplayOutcome, apiKey string) *http.Response {
+	t.Helper()
+	body, err := json.Marshal(outcome)
+	if err != nil {
+		t.Fatalf("marshal outcome: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/replay/outcome", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("X-API-Key", apiKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /v1/replay/outcome: %v", err)
+	}
+	return resp
+}
+
+// TestHandleReplayOutcome_RequiresAuth verifies that when requireAuth=true and
+// platformKeys are wired, an unauthenticated request returns 401.
+func TestHandleReplayOutcome_RequiresAuth(t *testing.T) {
+	_, ts, _, _ := newReplayServerWithAuth(t)
+
+	outcome := &replay.ReplayOutcome{
+		JobID:  "job-auth-1",
+		TaskID: "task-auth-1",
+		Status: "match",
+	}
+	// No X-API-Key header → 401.
+	resp := postReplayOutcomeWithKey(t, ts, outcome, "")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d; want 401 (unauthenticated)", resp.StatusCode)
+	}
+}
+
+// TestHandleReplayOutcome_AuthenticatedPasses verifies that a request with a
+// valid X-API-Key passes the auth gate (and then fails for business reasons
+// since the job doesn't exist — returning 400, not 401).
+func TestHandleReplayOutcome_AuthenticatedPasses(t *testing.T) {
+	_, ts, _, validKey := newReplayServerWithAuth(t)
+
+	outcome := &replay.ReplayOutcome{
+		JobID:  "job-auth-2",
+		TaskID: "task-auth-2",
+		Status: "match",
+	}
+	// Valid key → passes auth gate → fails on unknown job → 400 (not 401).
+	resp := postReplayOutcomeWithKey(t, ts, outcome, validKey)
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		t.Errorf("status = 401; request with valid key must not be rejected by auth gate")
+	}
+	// Expect 400: job doesn't exist in store.
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d; want 400 (unknown job, valid auth)", resp.StatusCode)
 	}
 }
 

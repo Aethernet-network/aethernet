@@ -31,6 +31,11 @@ type ReplayJob struct {
 	// SourceSnapshotHash is copied from ReplayRequirements.SourceSnapshotHash.
 	SourceSnapshotHash string
 
+	// AcceptanceContractHash is copied from ReplayRequirements.AcceptanceContractHash.
+	// It is the hash of the AcceptanceContract that governed what "pass" means
+	// for this task, enabling the executor to verify the contract commitment.
+	AcceptanceContractHash string
+
 	// ChecksToReplay is copied from ReplayRequirements.RequiredChecks.
 	ChecksToReplay []string
 
@@ -90,6 +95,7 @@ func NewReplayJob(
 
 	if reqs != nil {
 		job.SourceSnapshotHash = reqs.SourceSnapshotHash
+		job.AcceptanceContractHash = reqs.AcceptanceContractHash
 		job.ChecksToReplay = reqs.RequiredChecks
 		job.EnvironmentManifestHash = reqs.EnvironmentManifestHash
 		job.ToolchainManifestHash = reqs.ToolchainManifestHash

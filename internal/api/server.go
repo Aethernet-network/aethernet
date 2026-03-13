@@ -2952,6 +2952,12 @@ func (s *Server) handleReplayOutcome(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "replay enforcer not enabled")
 		return
 	}
+	// Require authentication when both requireAuth and platformKeys are active.
+	// platformKeys == nil means auth is unconfigured (testnet/dev) — allow through.
+	if s.requireAuth && s.platformKeys != nil && !s.isAuthenticated(r) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 	if s.writeLimiter != nil {
 		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 		if !s.writeLimiter.Allow(ip) {
@@ -2972,27 +2978,33 @@ func (s *Server) handleReplayOutcome(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Best-effort task lookup: supply the claimer agentID, result hash,
-	// task title, and budget-weighted verified value to the enforcer.
-	// If the task is not found (e.g. recently archived), these fields are
-	// left empty; the enforcer still records the outcome and updates job state.
+	// task title, budget-weighted verified value, and generation eligibility
+	// to the enforcer. When the task is not found (e.g. recently archived),
+	// these fields default to zero values; the enforcer still records the
+	// outcome and updates job state, but generation credit is withheld
+	// (generationEligible=false).
 	var (
-		agentID       string
-		resultHash    string
-		title         string
-		verifiedValue uint64
+		agentID            string
+		resultHash         string
+		title              string
+		verifiedValue      uint64
+		generationEligible bool
 	)
 	if s.taskMgr != nil {
 		if task, err := s.taskMgr.Get(outcome.TaskID); err == nil {
 			agentID = task.ClaimerID
 			resultHash = task.ResultHash
 			title = task.Title
+			generationEligible = task.Contract.GenerationEligible
 			if task.VerificationScore != nil {
 				verifiedValue = uint64(float64(task.Budget) * task.VerificationScore.Overall)
 			}
 		}
 	}
 
-	verdict, err := s.replayEnforcer.ProcessReplayOutcome(&outcome, agentID, resultHash, title, verifiedValue)
+	verdict, err := s.replayEnforcer.ProcessReplayOutcome(
+		&outcome, agentID, resultHash, title, verifiedValue, generationEligible,
+	)
 	if err != nil {
 		slog.Warn("api: replay outcome processing failed", "job_id", outcome.JobID, "err", err)
 		writeError(w, http.StatusBadRequest, err.Error())

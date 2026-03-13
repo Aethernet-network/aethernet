@@ -296,6 +296,7 @@ type nodeStack struct {
 	taskRouter      *router.Router
 	peerDiscovery   *network.PeerDiscovery
 	cloudmapReg     *cloudmap.Registrar
+	replayRunner    *replay.ReplayRunner
 }
 
 // taskManagerSource adapts *tasks.TaskManager to the router.TaskSource interface,
@@ -328,6 +329,23 @@ func (t *replayGenTrigger) RecordGeneration(taskID, agentID, resultHash, title s
 		id = t.agentID
 	}
 	return t.gl.RecordTaskGeneration(id, resultHash, title, value, taskID)
+}
+
+// taskReplayDetailsAdapter adapts *tasks.TaskManager to replay.TaskDetailsProvider.
+// It is used by the ReplayRunner to look up task metadata for ProcessReplayOutcome.
+type taskReplayDetailsAdapter struct {
+	tm *tasks.TaskManager
+}
+
+func (a *taskReplayDetailsAdapter) GetReplayDetails(taskID string) (agentID, resultHash, title string, verifiedValue uint64, generationEligible bool, err error) {
+	task, taskErr := a.tm.Get(taskID)
+	if taskErr != nil {
+		return "", "", "", 0, false, taskErr
+	}
+	if task.VerificationScore != nil {
+		verifiedValue = uint64(float64(task.Budget) * task.VerificationScore.Overall)
+	}
+	return task.ClaimerID, task.ResultHash, task.Title, verifiedValue, task.Contract.GenerationEligible, nil
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
@@ -677,6 +695,18 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		replayResolver := replay.NewReplayResolver(stack.store)
 		genTrigger := &replayGenTrigger{gl: stack.generation, agentID: agentID}
 		replayEnforcer = replay.NewReplayEnforcer(stack.taskMgr, replayResolver, genTrigger)
+
+		// ReplayRunner polls for pending replay jobs and executes them via
+		// the InspectionExecutor (testnet: material assessment, no sandbox).
+		replayDetails := &taskReplayDetailsAdapter{tm: stack.taskMgr}
+		stack.replayRunner = replay.NewReplayRunner(
+			replayCoord,
+			replay.NewInspectionExecutor(),
+			replayEnforcer,
+			replayDetails,
+			30*time.Second, // poll every 30 seconds
+		)
+		stack.replayRunner.Start()
 	}
 
 	// Task marketplace integration is conditional on --marketplace flag.
@@ -847,6 +877,9 @@ func stopStack(node *network.Node, stack *nodeStack) {
 	}
 	if stack.metricsStop != nil {
 		close(stack.metricsStop)
+	}
+	if stack.replayRunner != nil {
+		stack.replayRunner.Stop()
 	}
 	if stack.autoVal != nil {
 		stack.autoVal.Stop()
