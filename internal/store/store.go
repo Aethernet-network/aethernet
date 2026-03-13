@@ -1158,3 +1158,102 @@ func (s *Store) AllCanaries() (map[string][]byte, error) {
 	})
 	return result, err
 }
+
+// ---------------------------------------------------------------------------
+// Calibration signal entries (raw JSON blobs)
+// ---------------------------------------------------------------------------
+
+const prefixCalibration = "cal:"
+
+// PutCalibrationSignal stores a raw JSON-encoded CalibrationSignal under "cal:<id>".
+func (s *Store) PutCalibrationSignal(id string, data []byte) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(prefixCalibration+id), data)
+	})
+}
+
+// GetCalibrationSignal retrieves the raw JSON blob for the CalibrationSignal
+// identified by id. Returns an error wrapping badger.ErrKeyNotFound when absent.
+func (s *Store) GetCalibrationSignal(id string) ([]byte, error) {
+	var data []byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(prefixCalibration + id))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			data = make([]byte, len(val))
+			copy(data, val)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: get calibration signal %s: %w", id, err)
+	}
+	return data, nil
+}
+
+// AllCalibrationSignals returns all stored CalibrationSignal blobs as a map
+// from signal ID to raw JSON.
+func (s *Store) AllCalibrationSignals() (map[string][]byte, error) {
+	result := make(map[string][]byte)
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(prefixCalibration)
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		prefixLen := len(prefixCalibration)
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := string(item.Key()[prefixLen:])
+			if err := item.Value(func(val []byte) error {
+				blob := make([]byte, len(val))
+				copy(blob, val)
+				result[key] = blob
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return result, err
+}
+
+// CalibrationSignalsByActor scans the "cal:" prefix and returns raw JSON blobs
+// whose actor_id field matches the given actorID. This is an in-process filter
+// scan — calibration queries are infrequent measurement reads, not hot-path
+// operations, so a full scan is acceptable.
+func (s *Store) CalibrationSignalsByActor(actorID string) ([][]byte, error) {
+	var result [][]byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(prefixCalibration)
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			if err := item.Value(func(val []byte) error {
+				// Extract actor_id without full unmarshal.
+				var partial struct {
+					ActorID string `json:"actor_id"`
+				}
+				if err := json.Unmarshal(val, &partial); err != nil {
+					return nil // skip malformed entries rather than aborting the scan
+				}
+				if partial.ActorID == actorID {
+					blob := make([]byte, len(val))
+					copy(blob, val)
+					result = append(result, blob)
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return result, err
+}

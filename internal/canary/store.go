@@ -16,16 +16,32 @@ type canaryStore interface {
 	AllCanaries() ([]*CanaryTask, error)
 }
 
+// calibrationStore is the typed persistence interface for CalibrationSignals.
+// CanaryManager implements this interface, as does the in-memory test store.
+type calibrationStore interface {
+	PutSignal(sig *CalibrationSignal) error
+	GetSignal(id string) (*CalibrationSignal, error)
+	SignalsByActor(actorID string) ([]*CalibrationSignal, error)
+}
+
 // rawCanaryBackend is the raw-bytes interface satisfied by *store.Store without
 // requiring store to import the canary package.
 // *store.Store satisfies this via the PutCanary / GetCanary / AllCanaries /
-// PutCanaryTaskIndex / GetCanaryByTaskID methods added to internal/store/store.go.
+// PutCanaryTaskIndex / GetCanaryByTaskID / PutCalibrationSignal /
+// GetCalibrationSignal / AllCalibrationSignals / CalibrationSignalsByActor
+// methods added to internal/store/store.go.
 type rawCanaryBackend interface {
+	// canary task methods
 	PutCanary(id string, data []byte) error
 	GetCanary(id string) ([]byte, error)
 	AllCanaries() (map[string][]byte, error)
 	PutCanaryTaskIndex(taskID, canaryID string) error
 	GetCanaryByTaskID(taskID string) ([]byte, error)
+	// calibration signal methods
+	PutCalibrationSignal(id string, data []byte) error
+	GetCalibrationSignal(id string) ([]byte, error)
+	AllCalibrationSignals() (map[string][]byte, error)
+	CalibrationSignalsByActor(actorID string) ([][]byte, error)
 }
 
 // CanaryManager wraps a rawCanaryBackend and implements canaryStore with typed
@@ -101,6 +117,53 @@ func (m *CanaryManager) AllCanaries() ([]*CanaryTask, error) {
 			return nil, fmt.Errorf("canary: unmarshal in AllCanaries: %w", err)
 		}
 		result = append(result, &c)
+	}
+	return result, nil
+}
+
+// ---------------------------------------------------------------------------
+// CalibrationSignal persistence — CanaryManager implements calibrationStore
+// ---------------------------------------------------------------------------
+
+// PutSignal marshals sig and persists it. Errors are logged at slog.Error.
+func (m *CanaryManager) PutSignal(sig *CalibrationSignal) error {
+	data, err := json.Marshal(sig)
+	if err != nil {
+		return fmt.Errorf("canary: marshal signal %s: %w", sig.ID, err)
+	}
+	if err := m.backend.PutCalibrationSignal(sig.ID, data); err != nil {
+		slog.Error("canary: persist signal failed", "id", sig.ID, "err", err)
+		return fmt.Errorf("canary: put signal %s: %w", sig.ID, err)
+	}
+	return nil
+}
+
+// GetSignal retrieves the CalibrationSignal with the given ID.
+func (m *CanaryManager) GetSignal(id string) (*CalibrationSignal, error) {
+	data, err := m.backend.GetCalibrationSignal(id)
+	if err != nil {
+		return nil, err
+	}
+	var sig CalibrationSignal
+	if err := json.Unmarshal(data, &sig); err != nil {
+		return nil, fmt.Errorf("canary: unmarshal signal %s: %w", id, err)
+	}
+	return &sig, nil
+}
+
+// SignalsByActor returns all CalibrationSignals for the given actorID.
+func (m *CanaryManager) SignalsByActor(actorID string) ([]*CalibrationSignal, error) {
+	blobs, err := m.backend.CalibrationSignalsByActor(actorID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]*CalibrationSignal, 0, len(blobs))
+	for _, data := range blobs {
+		var sig CalibrationSignal
+		if err := json.Unmarshal(data, &sig); err != nil {
+			return nil, fmt.Errorf("canary: unmarshal signal in SignalsByActor: %w", err)
+		}
+		result = append(result, &sig)
 	}
 	return result, nil
 }
