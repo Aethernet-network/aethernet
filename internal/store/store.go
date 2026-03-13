@@ -1063,3 +1063,98 @@ func (s *Store) AllVoteEventIDs() ([]string, error) {
 	}
 	return ids, nil
 }
+
+// ---------------------------------------------------------------------------
+// Canary task entries (raw JSON blobs) + secondary taskID index
+// ---------------------------------------------------------------------------
+
+const prefixCanary          = "cnr:"
+const prefixCanaryTaskIndex = "cnrt:"
+
+// PutCanary stores a raw JSON-encoded CanaryTask under "cnr:<id>".
+func (s *Store) PutCanary(id string, data []byte) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(prefixCanary+id), data)
+	})
+}
+
+// GetCanary retrieves the raw JSON blob for the CanaryTask identified by id.
+// Returns an error wrapping badger.ErrKeyNotFound when absent.
+func (s *Store) GetCanary(id string) ([]byte, error) {
+	var data []byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(prefixCanary + id))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			data = make([]byte, len(val))
+			copy(data, val)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: get canary %s: %w", id, err)
+	}
+	return data, nil
+}
+
+// PutCanaryTaskIndex stores a mapping from taskID → canaryID under
+// "cnrt:<taskID>". Used by GetCanaryByTaskID for O(1) canary lookup by task.
+func (s *Store) PutCanaryTaskIndex(taskID, canaryID string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(prefixCanaryTaskIndex+taskID), []byte(canaryID))
+	})
+}
+
+// GetCanaryByTaskID looks up the canaryID for taskID from the secondary index,
+// then returns the full CanaryTask JSON blob.
+// Returns an error wrapping badger.ErrKeyNotFound when taskID is not a canary.
+func (s *Store) GetCanaryByTaskID(taskID string) ([]byte, error) {
+	// Step 1: resolve canaryID from the secondary index.
+	var canaryID string
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(prefixCanaryTaskIndex + taskID))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			canaryID = string(val)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: get canary task index %s: %w", taskID, err)
+	}
+	// Step 2: retrieve the CanaryTask blob.
+	return s.GetCanary(canaryID)
+}
+
+// AllCanaries returns all stored CanaryTask blobs as a map from canary ID to
+// raw JSON. Only "cnr:" prefixed keys are scanned; "cnrt:" index entries are
+// not included.
+func (s *Store) AllCanaries() (map[string][]byte, error) {
+	result := make(map[string][]byte)
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(prefixCanary)
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		prefixLen := len(prefixCanary)
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := string(item.Key()[prefixLen:])
+			if err := item.Value(func(val []byte) error {
+				blob := make([]byte, len(val))
+				copy(blob, val)
+				result[key] = blob
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return result, err
+}
