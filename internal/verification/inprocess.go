@@ -41,17 +41,30 @@ func (v *InProcessVerifier) Verify(_ context.Context, req VerificationRequest) (
 	// 2. Translate deterministic scores into a subjective report.
 	subjReport := v.sub.Rate(req.Category, req.Evidence, detReport)
 
-	// 3. Sufficiency decision.
+	// 3. Assess replay material if present. This must happen before the
+	// sufficiency check so the assessment can be forwarded to the checker,
+	// which enforces the generation-eligible gate.
 	pv := req.PolicyVersion
 	if pv == "" {
 		pv = "v1"
 	}
-	// Pass ContractHints so the checker enforces RequiredChecks and the
-	// challenge window when populated from the task's AcceptanceContract.
+	// Assess replay material. Always run when GenerationEligible so the
+	// checker can enforce the generation gate even when no requirements were
+	// submitted (nil → AssessReplayability returns Replayable=false).
+	var replayAssessment *ReplayabilityAssessment
+	if req.ReplayRequirements != nil || req.GenerationEligible {
+		replayAssessment = AssessReplayability(req.ReplayRequirements, req.Category, pv)
+	}
+
+	// 4. Sufficiency decision.
+	// Pass ContractHints so the checker enforces RequiredChecks, the
+	// challenge window, and the generation-eligible replayability gate.
 	sufficient, reasons := v.chk.Check(detReport, subjReport, pv, ContractHints{
-		RequiredChecks:      req.RequiredChecks,
-		ChallengeWindowSecs: req.ChallengeWindowSecs,
-		SubmittedAt:         req.SubmittedAt,
+		RequiredChecks:          req.RequiredChecks,
+		ChallengeWindowSecs:     req.ChallengeWindowSecs,
+		SubmittedAt:             req.SubmittedAt,
+		GenerationEligible:      req.GenerationEligible,
+		ReplayabilityAssessment: replayAssessment,
 	})
 
 	// Construct the final DeterministicReport: HardGates[0] is the
@@ -84,11 +97,12 @@ func (v *InProcessVerifier) Verify(_ context.Context, req VerificationRequest) (
 			Overall:      subjReport.Overall,
 			ReasonCodes:  reasons,
 		},
-		Confidence:    subjReport.Overall,
-		PolicyVersion: pv,
-		VerifierID:    "in-process",
-		Timestamp:     time.Now(),
-		TrustProof:    nil,
+		Confidence:              subjReport.Overall,
+		PolicyVersion:           pv,
+		VerifierID:              "in-process",
+		Timestamp:               time.Now(),
+		TrustProof:              nil,
+		ReplayabilityAssessment: replayAssessment,
 	}, nil
 }
 

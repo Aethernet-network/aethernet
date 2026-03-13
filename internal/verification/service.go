@@ -87,6 +87,18 @@ type VerificationRequest struct {
 	// SubmittedAt is the unix nanosecond timestamp of result submission.
 	// Used with ChallengeWindowSecs to enforce the challenge window.
 	SubmittedAt int64
+
+	// ReplayRequirements is the optional replay material submitted with the
+	// verification packet. Nil means no replay material was provided. When
+	// non-nil, AssessReplayability is called and the result is attached to
+	// VerificationResult.ReplayabilityAssessment.
+	ReplayRequirements *ReplayRequirements
+
+	// GenerationEligible indicates that the task is requesting
+	// generation-eligible settlement. When true, sufficient replay material
+	// is required before settlement can proceed; tasks without replayable
+	// evidence are blocked even if the quality threshold passes.
+	GenerationEligible bool
 }
 
 // VerificationResult is the output of VerificationService.Verify.
@@ -99,6 +111,10 @@ type VerificationResult struct {
 	VerifierID          string
 	Timestamp           time.Time
 	TrustProof          *TrustProof // nil for in-process verifiers
+
+	// ReplayabilityAssessment is the result of evaluating the replay material
+	// attached to the request. Nil when no ReplayRequirements were provided.
+	ReplayabilityAssessment *ReplayabilityAssessment
 }
 
 // VerificationService is the interface that any evidence-assessment backend
