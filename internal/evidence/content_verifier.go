@@ -45,6 +45,13 @@ func (cv *ContentVerifier) Verify(ev *Evidence, taskTitle, taskDescription strin
 
 	overall := language*0.20 + completeness*0.30 + relevance*0.30 + formatting*0.20
 
+	// Cap overall when content is clearly off-topic.
+	if topicTermFraction(content, taskTitle, taskDescription) < 0.25 {
+		if overall > 0.30 {
+			overall = 0.30
+		}
+	}
+
 	score := &Score{
 		Relevance:    relevance,
 		Completeness: completeness,

@@ -7,6 +7,47 @@ import (
 	"unicode"
 )
 
+// topicStopWords are excluded when extracting task-specific key terms for
+// topic relevance checks. Includes grammatical filler and task-framing verbs
+// that describe the assignment itself rather than the subject matter.
+var topicStopWords = map[string]bool{
+	"the": true, "and": true, "for": true, "with": true, "from": true,
+	"that": true, "this": true, "about": true, "what": true, "how": true,
+	"are": true, "was": true, "will": true, "can": true, "should": true,
+	"write": true, "create": true, "analyze": true, "analyse": true,
+	"research": true, "summarize": true, "summarise": true, "explain": true,
+	"describe": true, "implement": true, "build": true, "provide": true,
+	"calculate": true,
+}
+
+// topicTermFraction returns the fraction of task-specific terms (extracted from
+// title+description) that appear anywhere in content. Terms shorter than 4 chars
+// or in topicStopWords are excluded. Returns 1.0 when no task terms are found
+// (vacuously correct — cannot penalise a submission for lack of task context).
+func topicTermFraction(content, title, description string) float64 {
+	wordRe := regexp.MustCompile(`[a-zA-Z]{4,}`)
+	raw := wordRe.FindAllString(strings.ToLower(title+" "+description), -1)
+	seen := make(map[string]bool)
+	var terms []string
+	for _, w := range raw {
+		if !topicStopWords[w] && !seen[w] {
+			seen[w] = true
+			terms = append(terms, w)
+		}
+	}
+	if len(terms) == 0 {
+		return 1.0 // no task context — do not penalise
+	}
+	lower := strings.ToLower(content)
+	matched := 0
+	for _, term := range terms {
+		if strings.Contains(lower, term) {
+			matched++
+		}
+	}
+	return float64(matched) / float64(len(terms))
+}
+
 // DataVerifier implements VerifierInterface for task categories that require
 // analytical data output: "data", "data-analysis", "data-validation", "research".
 //
@@ -45,6 +86,13 @@ func (dv *DataVerifier) Verify(ev *Evidence, taskTitle, taskDescription string, 
 	citation := dv.scoreCitation(content)
 
 	overall := structure*0.20 + completeness*0.30 + depth*0.30 + citation*0.20
+
+	// Cap overall when content is clearly off-topic.
+	if topicTermFraction(content, taskTitle, taskDescription) < 0.20 {
+		if overall > 0.30 {
+			overall = 0.30
+		}
+	}
 
 	score := &Score{
 		Relevance:    depth,        // analytical depth maps to relevance (shows work)
@@ -127,15 +175,23 @@ func (dv *DataVerifier) scoreAnalyticalDepth(content string) float64 {
 	lower := strings.ToLower(content)
 	score := 0.0
 
-	// Quantitative terms: numbers, percentages, currency.
+	// Quantitative terms: numbers with units/symbols or decimal-precision values.
 	numRe := regexp.MustCompile(`\d+\.?\d*\s*(%|percent|million|billion|thousand|\$|€|£|GB|MB|KB|ms|ns)`)
-	if len(numRe.FindAllString(content, -1)) >= 2 {
+	numMatches := len(numRe.FindAllString(content, -1))
+	// Decimal-precision numbers (e.g. 1.45, 0.89) are strong signals of real data
+	// even when units are absent (e.g. JSON with scientific measurements).
+	decRe := regexp.MustCompile(`\b\d+\.\d{2,}\b`)
+	decMatches := len(decRe.FindAllString(content, -1))
+	hasQuantData := numMatches >= 2 || decMatches >= 2
+
+	if hasQuantData {
 		score += 0.35
 	} else if regexp.MustCompile(`\d+`).MatchString(content) {
-		score += 0.15 // has numbers but not with units
+		score += 0.15 // has numbers but not with units or decimal precision
 	}
 
-	// Analytical vocabulary.
+	// Analytical vocabulary — requires quantitative backing for the full bonus.
+	// Rich analytical language without sufficient data signals superficial filler.
 	analyticalTerms := []string{
 		"indicates", "suggests", "correlates", "trend", "analysis", "analysed",
 		"analyzed", "conclude", "therefore", "finding", "result", "demonstrates",
@@ -149,7 +205,11 @@ func (dv *DataVerifier) scoreAnalyticalDepth(content string) float64 {
 		}
 	}
 	if termCount >= 3 {
-		score += 0.35
+		if hasQuantData {
+			score += 0.35 // analytical vocabulary with quantitative support
+		} else {
+			score += 0.15 // analytical language but insufficient quantitative data
+		}
 	} else if termCount >= 1 {
 		score += float64(termCount) * 0.10
 	}

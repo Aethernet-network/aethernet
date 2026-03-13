@@ -4,6 +4,8 @@ bin/
 /aethernet
 /aet
 /marketplace
+/aet-harness
+/aet-loadtest
 *.exe
 *.exe~
 *.dll
