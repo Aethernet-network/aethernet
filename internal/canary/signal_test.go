@@ -353,9 +353,11 @@ func TestComputeActorCalibration_Aggregates(t *testing.T) {
 		t.Errorf("IncorrectCount = %d; want 1", ac.IncorrectCount)
 	}
 
-	wantAccuracy := 2.0 / 4.0 // 0.5
+	// Smoothed accuracy: (2 correct + 0.5 × 1 partial) / 4 = 2.5/4 = 0.625
+	wantAccuracy := (2.0 + 0.5*1.0) / 4.0
 	if ac.Accuracy != wantAccuracy {
-		t.Errorf("Accuracy = %v; want %v", ac.Accuracy, wantAccuracy)
+		t.Errorf("Accuracy = %v; want %v (smoothed: correct+0.5×partial / total)",
+			ac.Accuracy, wantAccuracy)
 	}
 
 	wantAvgSeverity := (0.0 + 0.4 + 1.0 + 0.0) / 4.0

@@ -89,9 +89,10 @@ func TestComputeCategoryCalibration_AllThreeCorrectness(t *testing.T) {
 	if got.IncorrectCount != 1 {
 		t.Errorf("IncorrectCount = %d; want 1", got.IncorrectCount)
 	}
-	wantAccuracy := 2.0 / 4.0
+	// Smoothed accuracy: (2 correct + 0.5 × 1 partial) / 4 = 2.5/4 = 0.625
+	wantAccuracy := (2.0 + 0.5*1.0) / 4.0
 	if got.Accuracy != wantAccuracy {
-		t.Errorf("Accuracy = %v; want %v", got.Accuracy, wantAccuracy)
+		t.Errorf("Accuracy = %v; want %v (smoothed: correct+0.5×partial / total)", got.Accuracy, wantAccuracy)
 	}
 }
 
@@ -132,6 +133,63 @@ func TestCalibrationActionable_ReturnsTrueAboveThreshold(t *testing.T) {
 	cal := &CategoryCalibration{TotalSignals: MinCalibrationSamples + 10}
 	if !CalibrationActionable(cal) {
 		t.Errorf("CalibrationActionable with %d signals = false; want true", cal.TotalSignals)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Smoothed accuracy — partial signals contribute 0.5
+// ---------------------------------------------------------------------------
+
+// TestSmoothedAccuracy_Partials verifies that partial signals contribute 0.5
+// to the smoothed accuracy formula rather than 0 (as incorrect would).
+func TestSmoothedAccuracy_Partials(t *testing.T) {
+	// 5 correct + 5 partial + 0 incorrect = 10 total
+	// smoothed accuracy = (5 + 0.5×5) / 10 = 7.5/10 = 0.75
+	var signals []*CalibrationSignal
+	for i := 0; i < 5; i++ {
+		signals = append(signals, &CalibrationSignal{
+			ActorID:     "a1",
+			Category:    "code",
+			Correctness: CorrectnessCorrect,
+			Severity:    0.0,
+		})
+	}
+	for i := 0; i < 5; i++ {
+		signals = append(signals, &CalibrationSignal{
+			ActorID:     "a1",
+			Category:    "code",
+			Correctness: CorrectnessPartial,
+			Severity:    0.3,
+		})
+	}
+
+	got := ComputeCategoryCalibration(signals, "code")
+	if got == nil {
+		t.Fatal("expected non-nil result")
+	}
+	wantAccuracy := (5.0 + 0.5*5.0) / 10.0 // 0.75
+	if got.Accuracy != wantAccuracy {
+		t.Errorf("Accuracy = %v; want %v (5 correct + 5 partial, smoothed)",
+			got.Accuracy, wantAccuracy)
+	}
+}
+
+// TestMinCalibrationSamples_Is20 is a regression guard verifying that
+// MinCalibrationSamples was raised from 5 to 20. This constant drives both
+// the canary and the router thresholds for "actionable" calibration data.
+func TestMinCalibrationSamples_Is20(t *testing.T) {
+	if MinCalibrationSamples != 20 {
+		t.Errorf("MinCalibrationSamples = %d; want 20 (regression: was previously 5)",
+			MinCalibrationSamples)
+	}
+	// 19 signals → not actionable; 20 signals → actionable.
+	below := &CategoryCalibration{TotalSignals: 19}
+	if CalibrationActionable(below) {
+		t.Errorf("CalibrationActionable({TotalSignals:19}) = true; want false (threshold 20)")
+	}
+	at := &CategoryCalibration{TotalSignals: 20}
+	if !CalibrationActionable(at) {
+		t.Errorf("CalibrationActionable({TotalSignals:20}) = false; want true (threshold 20)")
 	}
 }
 

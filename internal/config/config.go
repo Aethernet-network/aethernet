@@ -177,19 +177,45 @@ type ConsensusConfig struct {
 	MinParticipants int `json:"min_participants"`
 }
 
+// CalibrationConfig controls calibration-aware routing and scrutiny adjustments.
+// Both features are disabled by default (conservative flags). Enable routing via
+// AETHERNET_CALIBRATION_ROUTING=true and scrutiny via AETHERNET_CALIBRATION_SCRUTINY=true.
+type CalibrationConfig struct {
+	// RoutingEnabled activates calibration-aware routing score adjustments.
+	// Default: false.
+	RoutingEnabled bool `json:"routing_enabled"`
+	// ScrutinyEnabled activates calibration-aware replay scrutiny adjustments.
+	// When false, ShouldReplay uses the base sample rate for all actors.
+	// Default: false.
+	ScrutinyEnabled bool `json:"scrutiny_enabled"`
+	// BoostFactor is the score multiplier applied to strong agents (accuracy >
+	// StrongThreshold). Default: 1.1 (10% boost).
+	BoostFactor float64 `json:"boost_factor"`
+	// PenaltyFactor is the score multiplier applied to weak agents (accuracy <
+	// WeakThreshold). Default: 0.85 (15% penalty).
+	PenaltyFactor float64 `json:"penalty_factor"`
+	// StrongThreshold is the minimum accuracy required for a score boost.
+	// Default: 0.9 (top decile).
+	StrongThreshold float64 `json:"strong_threshold"`
+	// WeakThreshold is the maximum accuracy before a score penalty applies.
+	// Default: 0.6 (bottom tier).
+	WeakThreshold float64 `json:"weak_threshold"`
+}
+
 // ProtocolConfig is the top-level configuration for an AetherNet node.
 // Use DefaultConfig to obtain a config pre-populated with all production defaults.
 type ProtocolConfig struct {
-	Fees      FeesConfig      `json:"fees"`
-	Staking   StakingConfig   `json:"staking"`
-	Tasks     TasksConfig     `json:"tasks"`
-	Evidence  EvidenceConfig  `json:"evidence"`
-	Router    RouterConfig    `json:"router"`
-	OCS       OCSConfig       `json:"ocs"`
-	RateLimit RateLimitConfig `json:"rate_limit"`
-	Network   NetworkConfig   `json:"network"`
-	Archival  ArchivalConfig  `json:"archival"`
-	Consensus ConsensusConfig `json:"consensus"`
+	Fees        FeesConfig        `json:"fees"`
+	Staking     StakingConfig     `json:"staking"`
+	Tasks       TasksConfig       `json:"tasks"`
+	Evidence    EvidenceConfig    `json:"evidence"`
+	Router      RouterConfig      `json:"router"`
+	OCS         OCSConfig         `json:"ocs"`
+	RateLimit   RateLimitConfig   `json:"rate_limit"`
+	Network     NetworkConfig     `json:"network"`
+	Archival    ArchivalConfig    `json:"archival"`
+	Consensus   ConsensusConfig   `json:"consensus"`
+	Calibration CalibrationConfig `json:"calibration"`
 }
 
 // DefaultConfig returns a ProtocolConfig pre-populated with all current
@@ -252,6 +278,14 @@ func DefaultConfig() *ProtocolConfig {
 		Consensus: ConsensusConfig{
 			MinParticipants: 3,
 		},
+		Calibration: CalibrationConfig{
+			RoutingEnabled:  false,
+			ScrutinyEnabled: false,
+			BoostFactor:     1.1,
+			PenaltyFactor:   0.85,
+			StrongThreshold: 0.9,
+			WeakThreshold:   0.6,
+		},
 	}
 }
 
@@ -313,6 +347,8 @@ func LoadFromFile(path string) (*ProtocolConfig, error) {
 //	AETHERNET_ARCHIVE_THRESHOLD       → Archival.ArchiveThreshold
 //	AETHERNET_ARCHIVE_INTERVAL        → Archival.ArchiveInterval
 //	AETHERNET_MIN_PARTICIPANTS        → Consensus.MinParticipants
+//	AETHERNET_CALIBRATION_ROUTING     → Calibration.RoutingEnabled
+//	AETHERNET_CALIBRATION_SCRUTINY    → Calibration.ScrutinyEnabled
 func LoadFromEnv(cfg *ProtocolConfig) {
 	setUint64 := func(key string, dest *uint64) {
 		if v := os.Getenv(key); v != "" {
@@ -346,6 +382,13 @@ func LoadFromEnv(cfg *ProtocolConfig) {
 		if v := os.Getenv(key); v != "" {
 			if d, err := parseDuration(v); err == nil {
 				dest.Duration = d
+			}
+		}
+	}
+	setBool := func(key string, dest *bool) {
+		if v := os.Getenv(key); v != "" {
+			if b, err := strconv.ParseBool(v); err == nil {
+				*dest = b
 			}
 		}
 	}
@@ -403,4 +446,8 @@ func LoadFromEnv(cfg *ProtocolConfig) {
 
 	// Consensus
 	setInt("AETHERNET_MIN_PARTICIPANTS", &cfg.Consensus.MinParticipants)
+
+	// Calibration
+	setBool("AETHERNET_CALIBRATION_ROUTING", &cfg.Calibration.RoutingEnabled)
+	setBool("AETHERNET_CALIBRATION_SCRUTINY", &cfg.Calibration.ScrutinyEnabled)
 }

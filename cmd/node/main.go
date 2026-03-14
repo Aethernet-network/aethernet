@@ -333,6 +333,26 @@ func (t *replayGenTrigger) RecordGeneration(taskID, agentID, resultHash, title s
 	return t.gl.RecordTaskGeneration(id, resultHash, title, value, taskID)
 }
 
+// routerCalibrationAdapter bridges *canary.CanaryManager (L3) to the router's
+// calibrationSource interface (L2). The router cannot import canary directly
+// (layer boundary: L2 must not import L3), so this adapter lives in cmd/node
+// where all layers are already imported.
+type routerCalibrationAdapter struct {
+	mgr *canary.CanaryManager
+}
+
+func (a *routerCalibrationAdapter) CategoryCalibrationForActor(agentID, category string) (*router.CalibrationData, error) {
+	cal, err := a.mgr.CategoryCalibrationForActor(agentID, category)
+	if err != nil || cal == nil {
+		return nil, err
+	}
+	return &router.CalibrationData{
+		TotalSignals: cal.TotalSignals,
+		Accuracy:     cal.Accuracy,
+		AvgSeverity:  cal.AvgSeverity,
+	}, nil
+}
+
 // taskReplayDetailsAdapter adapts *tasks.TaskManager to replay.TaskDetailsProvider.
 // It is used by the ReplayRunner to look up task metadata for ProcessReplayOutcome.
 type taskReplayDetailsAdapter struct {
@@ -743,8 +763,25 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		}
 		// Wire calibration-aware scrutiny: the replay coordinator uses the
 		// canary manager to look up per-actor per-category accuracy and adjust
-		// effective sample rates accordingly.
+		// effective sample rates accordingly. Opt-in via config or
+		// AETHERNET_CALIBRATION_SCRUTINY=true.
 		replayCoord.SetCalibrationSource(canaryMgr)
+		replayCoord.SetCalibrationEnabled(cfg.Calibration.ScrutinyEnabled)
+
+		// Wire calibration-aware routing: agents with strong per-category
+		// calibration receive a mild routing score boost; agents with weak
+		// calibration are mildly penalized. Disabled by default; opt-in via
+		// AETHERNET_CALIBRATION_ROUTING=true or the config file.
+		if stack.taskRouter != nil {
+			stack.taskRouter.SetCalibrationSource(&routerCalibrationAdapter{mgr: canaryMgr})
+			stack.taskRouter.SetCalibrationRoutingEnabled(cfg.Calibration.RoutingEnabled)
+			stack.taskRouter.SetCalibrationFactors(
+				cfg.Calibration.BoostFactor,
+				cfg.Calibration.PenaltyFactor,
+				cfg.Calibration.StrongThreshold,
+				cfg.Calibration.WeakThreshold,
+			)
+		}
 	}
 
 	// Task marketplace integration is conditional on --marketplace flag.
@@ -829,9 +866,10 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	}
 	apiSrv.SetEconomics(stack.walletMgr, stack.stakeManager, stack.feeCollector)
 	apiSrv.SetMinTaskBudget(cfg.Tasks.MinTaskBudget)
-	// Wire canary calibration endpoint. Only available when the store is present.
+	// Wire canary calibration endpoints. Only available when the store is present.
 	if canaryMgr != nil {
 		apiSrv.SetCalibrationStore(canaryMgr)
+		apiSrv.SetCalibrationAgentsStore(canaryMgr)
 	}
 	apiSrv.SetEventBus(bus)
 	if stack.platformKeys != nil {

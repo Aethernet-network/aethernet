@@ -3,7 +3,8 @@ package canary
 // MinCalibrationSamples is the minimum number of signals required before a
 // CategoryCalibration is considered actionable. Below this threshold the
 // sample is too small to drive routing or scrutiny adjustments reliably.
-const MinCalibrationSamples = 5
+// Set to 20 to reduce noise from early/sparse evaluation history.
+const MinCalibrationSamples = 20
 
 // CategoryCalibration holds accuracy metrics for a single task category.
 type CategoryCalibration struct {
@@ -78,13 +79,16 @@ func ComputeActorCalibration(signals []*CalibrationSignal) *ActorCalibration {
 	}
 
 	if ac.TotalSignals > 0 {
-		ac.Accuracy = float64(ac.CorrectCount) / float64(ac.TotalSignals)
+		// Smoothed accuracy: partial signals contribute 0.5 rather than 0.
+		// This prevents treating "partial" the same as "incorrect" and avoids
+		// over-penalising actors whose verifier tends to return partial grades.
+		ac.Accuracy = (float64(ac.CorrectCount) + 0.5*float64(ac.PartialCount)) / float64(ac.TotalSignals)
 		ac.AvgSeverity = totalSeverity / float64(ac.TotalSignals)
 	}
 
 	for _, cat := range ac.ByCategory {
 		if cat.TotalSignals > 0 {
-			cat.Accuracy = float64(cat.CorrectCount) / float64(cat.TotalSignals)
+			cat.Accuracy = (float64(cat.CorrectCount) + 0.5*float64(cat.PartialCount)) / float64(cat.TotalSignals)
 			cat.AvgSeverity = cat.AvgSeverity / float64(cat.TotalSignals)
 		}
 	}
@@ -119,7 +123,9 @@ func ComputeCategoryCalibration(signals []*CalibrationSignal, category string) *
 	if cat.TotalSignals == 0 {
 		return nil
 	}
-	cat.Accuracy = float64(cat.CorrectCount) / float64(cat.TotalSignals)
+	// Smoothed accuracy: partial signals contribute 0.5 rather than 0.
+	// Matches the formula in ComputeActorCalibration.
+	cat.Accuracy = (float64(cat.CorrectCount) + 0.5*float64(cat.PartialCount)) / float64(cat.TotalSignals)
 	cat.AvgSeverity = totalSeverity / float64(cat.TotalSignals)
 	return cat
 }

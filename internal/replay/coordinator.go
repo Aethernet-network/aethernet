@@ -93,13 +93,14 @@ func DefaultReplayPolicy() ReplayPolicy {
 // for them. It does not execute replays — that requires domain-specific logic.
 // The coordinator is safe for concurrent use.
 type ReplayCoordinator struct {
-	policy             ReplayPolicy
-	store              replayStore
-	mu                 sync.Mutex
-	scheduled          map[string]bool    // taskID → already scheduled (dedup guard)
-	rng                *rand.Rand
-	calibration        calibrationSource  // optional; nil = no calibration-aware adjustments
-	lastCalibDecision  *CalibrationDecision // most recent calibration decision (in-memory only)
+	policy              ReplayPolicy
+	store               replayStore
+	mu                  sync.Mutex
+	scheduled           map[string]bool      // taskID → already scheduled (dedup guard)
+	rng                 *rand.Rand
+	calibration         calibrationSource    // optional; nil = no calibration-aware adjustments
+	calibrationEnabled  bool                 // gates calibration adjustment; default false (opt-in)
+	lastCalibDecision   *CalibrationDecision // most recent calibration decision (in-memory only)
 }
 
 // NewReplayCoordinator returns a ReplayCoordinator configured with policy and
@@ -111,6 +112,16 @@ func NewReplayCoordinator(policy ReplayPolicy, store replayStore) *ReplayCoordin
 		scheduled: make(map[string]bool),
 		rng:       rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec
 	}
+}
+
+// SetCalibrationEnabled toggles calibration-aware scrutiny adjustments.
+// When false (the default), ShouldReplay always uses the base SampleRate;
+// the calibration source is never queried. Call before the first ShouldReplay
+// call. Mirrors SetCalibrationRoutingEnabled on the Router.
+func (c *ReplayCoordinator) SetCalibrationEnabled(enabled bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calibrationEnabled = enabled
 }
 
 // SetCalibrationSource wires a calibration source. When set, ShouldReplay
@@ -198,7 +209,9 @@ func (c *ReplayCoordinator) ShouldReplay(
 
 	// g. Calibration-aware scrutiny adjustment.
 	// Modifies the effective base sample rate before the random roll.
-	// Only applies when a calibration source is configured; no-op otherwise.
+	// Only applies when both a calibration source is configured AND
+	// calibrationEnabled is true; records a CalibrationDecision in all cases
+	// when source is set (even when disabled, for explainability).
 	effectiveRate := c.policy.SampleRate
 	if c.calibration != nil {
 		effectiveRate = c.applyCalibrationAdjustment(agentID, category, c.policy.SampleRate)
@@ -216,20 +229,32 @@ func (c *ReplayCoordinator) ShouldReplay(
 // the given actor+category and records a CalibrationDecision. Must be called
 // with c.mu held. Never returns a negative rate.
 //
-// Adjustment rules:
+// When calibrationEnabled is false, the base rate is returned unchanged and a
+// CalibrationDecision with reason "calibration_disabled" is recorded so
+// operators can see the flag is off.
+//
+// Adjustment rules (when enabled):
 //   - error or not actionable (nil / < MinCalibrationSamples): 2× base rate
 //   - actionable, accuracy < 0.6: 3× base rate (weak actor)
 //   - actionable, accuracy > 0.9: 0.5× base rate (strong actor)
 //   - actionable, accuracy 0.6–0.9: 1× base rate (no adjustment)
 func (c *ReplayCoordinator) applyCalibrationAdjustment(agentID, category string, baseRate float64) float64 {
-	cal, err := c.calibration.CategoryCalibrationForActor(agentID, category)
-
 	decision := CalibrationDecision{
 		ActorID:   agentID,
 		Category:  category,
 		BaseRate:  baseRate,
 		Timestamp: time.Now(),
 	}
+
+	// When scrutiny is disabled, record why and return the base rate unchanged.
+	if !c.calibrationEnabled {
+		decision.AdjustedRate = baseRate
+		decision.Reason = "calibration_disabled"
+		c.lastCalibDecision = &decision
+		return baseRate
+	}
+
+	cal, err := c.calibration.CategoryCalibrationForActor(agentID, category)
 
 	var multiplier float64
 	switch {
@@ -303,6 +328,18 @@ func (c *ReplayCoordinator) ScheduleReplay(
 	if c.policy.SubmissionGracePeriod > 0 {
 		job.SubmissionDeadline = job.CreatedAt.Add(c.policy.SubmissionGracePeriod)
 	}
+
+	// Copy the most recent calibration decision into the job so operators can
+	// inspect why this task was scrutinized at a given rate. Fields are omitempty
+	// so jobs created without a calibration source are unaffected.
+	c.mu.Lock()
+	if c.lastCalibDecision != nil {
+		job.CalibrationReason = c.lastCalibDecision.Reason
+		job.CalibrationAdjustedRate = c.lastCalibDecision.AdjustedRate
+		job.CalibrationSampleCount = c.lastCalibDecision.SampleCount
+		job.CalibrationAccuracy = c.lastCalibDecision.Accuracy
+	}
+	c.mu.Unlock()
 
 	data, err := json.Marshal(job)
 	if err != nil {

@@ -93,6 +93,14 @@ type calibrationSource interface {
 	SignalsByActor(actorID string) ([]*canary.CalibrationSignal, error)
 }
 
+// calibrationAgentsSource is the interface used by GET /v1/admin/calibration/agents
+// to enumerate all calibration signals across every actor. Kept separate from
+// calibrationSource to avoid modifying existing test stubs.
+// *canary.CanaryManager satisfies this interface via AllSignals().
+type calibrationAgentsSource interface {
+	AllSignals() ([]*canary.CalibrationSignal, error)
+}
+
 // taskRouterInterface is the subset of *router.Router used by the API server.
 // Using a local interface keeps the server testable without a real router.
 type taskRouterInterface interface {
@@ -212,6 +220,11 @@ type Server struct {
 	// When non-nil, GET /v1/admin/calibration/{actor_id} returns the actor's
 	// canary calibration rollup (ActorCalibration).
 	calibrationStore calibrationSource
+
+	// calibrationAgentsStore — optional; set via SetCalibrationAgentsStore.
+	// When non-nil, GET /v1/admin/calibration/agents returns a list of all actors
+	// with calibration data, their per-category accuracy, and a scrutiny bucket.
+	calibrationAgentsStore calibrationAgentsSource
 }
 
 // NewServer constructs an API Server backed by the provided node components.
@@ -366,6 +379,8 @@ func (s *Server) registerL3Routes(mux *http.ServeMux) {
 	// Replay submission intake — external executors submit raw check results;
 	// the protocol performs the comparison and returns the derived verdict.
 	mux.HandleFunc("POST /v1/replay/submit", s.handleReplaySubmit)
+	// Admin calibration queries — list all actors (literal beats wildcard in Go 1.22).
+	mux.HandleFunc("GET /v1/admin/calibration/agents", s.handleAdminCalibrationAgents)
 	// Admin calibration query — per-actor canary accuracy rollup.
 	mux.HandleFunc("GET /v1/admin/calibration/{actor_id}", s.handleAdminCalibration)
 	// Developer platform API key management.
@@ -504,6 +519,14 @@ func (s *Server) SetSubmissionProcessor(p *replay.SubmissionProcessor) {
 // rollup for the requested actor. When nil (default), the endpoint returns 501.
 func (s *Server) SetCalibrationStore(cs calibrationSource) {
 	s.calibrationStore = cs
+}
+
+// SetCalibrationAgentsStore wires the all-actors calibration source into the server.
+// When non-nil, GET /v1/admin/calibration/agents returns a list of all actors with
+// calibration data, their per-category accuracy rollup, and a scrutiny bucket
+// classification. When nil (default), the endpoint returns 501.
+func (s *Server) SetCalibrationAgentsStore(cs calibrationAgentsSource) {
+	s.calibrationAgentsStore = cs
 }
 
 // isAuthenticated reports whether r carries a valid X-API-Key credential.
@@ -3168,4 +3191,102 @@ func (s *Server) handleAdminCalibration(w http.ResponseWriter, r *http.Request) 
 	}
 	rollup := canary.ComputeActorCalibration(signals)
 	writeJSON(w, http.StatusOK, rollup)
+}
+
+// calibrationAgentEntry is the per-actor row returned by handleAdminCalibrationAgents.
+type calibrationAgentEntry struct {
+	ActorID      string                                 `json:"actor_id"`
+	TotalSignals int                                    `json:"total_signals"`
+	Accuracy     float64                                `json:"accuracy"`
+	AvgSeverity  float64                                `json:"avg_severity"`
+	ByCategory   map[string]*canary.CategoryCalibration `json:"by_category"`
+	Bucket       string                                 `json:"bucket"` // "unknown", "weak", "moderate", "strong"
+}
+
+// calibrationAgentsResponse is the payload returned by GET /v1/admin/calibration/agents.
+type calibrationAgentsResponse struct {
+	Agents []*calibrationAgentEntry `json:"agents"`
+	Total  int                      `json:"total"`
+}
+
+// calibrationBucket classifies an ActorCalibration into a human-readable
+// scrutiny bucket based on sample count and accuracy.
+func calibrationBucket(ac *canary.ActorCalibration) string {
+	if ac.TotalSignals < canary.MinCalibrationSamples {
+		return "unknown"
+	}
+	if ac.Accuracy < 0.6 {
+		return "weak"
+	}
+	if ac.Accuracy > 0.9 {
+		return "strong"
+	}
+	return "moderate"
+}
+
+// handleAdminCalibrationAgents returns a list of all actors that have
+// calibration signals, with per-actor accuracy rollups and scrutiny bucket
+// classifications. This gives operators visibility into which agents are
+// being scrutinised more or less intensively.
+//
+//	GET /v1/admin/calibration/agents
+//	Response 200: JSON-encoded calibrationAgentsResponse
+//	Response 501: calibration agents store not configured
+func (s *Server) handleAdminCalibrationAgents(w http.ResponseWriter, r *http.Request) {
+	if s.calibrationAgentsStore == nil {
+		writeCodedError(w, http.StatusNotImplemented, "not_available",
+			"calibration agents store not configured", "")
+		return
+	}
+	// Admin-only: require authentication when auth is enabled.
+	if s.requireAuth && s.platformKeys != nil && !s.isAuthenticated(r) {
+		writeCodedError(w, http.StatusUnauthorized, "unauthorized",
+			"authentication required", "")
+		return
+	}
+	if s.readLimiter != nil && !s.readLimiter.Allow(ratelimit.ExtractIP(r)) {
+		if s.nodeMetrics != nil {
+			s.nodeMetrics.RateLimitRejects.Inc()
+		}
+		w.Header().Set("Retry-After", "1")
+		writeCodedError(w, http.StatusTooManyRequests, "rate_limited", "rate limit exceeded", "")
+		return
+	}
+
+	signals, err := s.calibrationAgentsStore.AllSignals()
+	if err != nil {
+		slog.Error("admin calibration agents: query failed", "err", err)
+		writeCodedError(w, http.StatusInternalServerError, "query_failed",
+			"failed to query calibration signals", "")
+		return
+	}
+
+	// Group signals by actor ID, then compute per-actor rollups.
+	byActor := make(map[string][]*canary.CalibrationSignal)
+	for _, sig := range signals {
+		byActor[sig.ActorID] = append(byActor[sig.ActorID], sig)
+	}
+
+	entries := make([]*calibrationAgentEntry, 0, len(byActor))
+	for actorID, sigs := range byActor {
+		ac := canary.ComputeActorCalibration(sigs)
+		entries = append(entries, &calibrationAgentEntry{
+			ActorID:      actorID,
+			TotalSignals: ac.TotalSignals,
+			Accuracy:     ac.Accuracy,
+			AvgSeverity:  ac.AvgSeverity,
+			ByCategory:   ac.ByCategory,
+			Bucket:        calibrationBucket(ac),
+		})
+	}
+
+	// Sort by actor ID for deterministic output.
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].ActorID < entries[j].ActorID
+	})
+
+	writeJSON(w, http.StatusOK, &calibrationAgentsResponse{
+		Agents: entries,
+		Total:  len(entries),
+	})
 }

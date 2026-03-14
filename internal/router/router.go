@@ -51,7 +51,47 @@ const (
 	// MaxNewcomerBudget is the maximum task budget (micro-AET) that may be
 	// routed via the newcomer slot. High-value tasks always go to established agents.
 	MaxNewcomerBudget = uint64(5_000_000)
+
+	// calibrationMinSamples is the minimum number of calibration signals
+	// required before routing score adjustments are applied for an agent.
+	// Below this count the data is considered insufficient to act on.
+	// Set to 20 to match canary.MinCalibrationSamples and reduce noise from
+	// sparse evaluation history.
+	calibrationMinSamples = 20
+
+	// calibCacheTTL is how long a cached CalibrationData entry is considered
+	// fresh before the router re-queries the calibration source.
+	calibCacheTTL = 60 * time.Second
+
+	// calibCacheMaxAge is the maximum age of a cache entry before it is
+	// evicted during routine lazy-eviction passes in applyCalibrationModifier.
+	calibCacheMaxAge = 5 * time.Minute
 )
+
+// CalibrationData holds per-actor per-category calibration metrics supplied
+// to the router via the calibrationSource adapter. It is exported so the
+// cmd/node adapter can construct it without importing internal router state.
+// The router (L2) never imports the canary package (L3) directly.
+type CalibrationData struct {
+	TotalSignals int
+	Accuracy     float64
+	AvgSeverity  float64
+}
+
+// calibrationSource is the minimal interface the router uses to fetch
+// calibration metrics. It is satisfied by the cmd/node adapter that wraps
+// *canary.CanaryManager, keeping the L2 router decoupled from L3 packages.
+type calibrationSource interface {
+	CategoryCalibrationForActor(agentID string, category string) (*CalibrationData, error)
+}
+
+// calibCacheEntry holds a cached CalibrationData value and the time it was
+// fetched. A nil Data field means the source returned no data for this actor
+// and category (and is also cached to avoid repeated failed lookups).
+type calibCacheEntry struct {
+	data      *CalibrationData
+	fetchedAt time.Time
+}
 
 // RoutableTask is the minimal interface the router needs to match and route a task.
 // It is implemented by tasks.Task but the router never imports the tasks package
@@ -133,6 +173,21 @@ type Router struct {
 	newcomerAllocation float64
 	maxNewcomerBudget  uint64
 	webhookTimeout     time.Duration
+
+	// Calibration-aware routing adjustment (optional; disabled by default).
+	// When calibEnabled is true and calibration is non-nil, applyCalibrationModifier
+	// adjusts the composite score produced by scoreMatch before comparison.
+	calibration       calibrationSource
+	calibEnabled      bool
+	calibBoost        float64 // multiplier for strong actors (accuracy > calibStrongThresh)
+	calibPenalty      float64 // multiplier for weak actors (accuracy < calibWeakThresh)
+	calibStrongThresh float64 // accuracy above which boost applies
+	calibWeakThresh   float64 // accuracy below which penalty applies
+
+	// calibCache is a short-lived in-process cache for CalibrationData results.
+	// Keyed by agentID + "|" + category. Entries are reused for calibCacheTTL
+	// and lazily evicted after calibCacheMaxAge. Accessed only under r.mu.
+	calibCache map[string]calibCacheEntry
 }
 
 // New creates a Router backed by the provided task source.
@@ -161,6 +216,12 @@ func New(
 		newcomerAllocation: NewcomerAllocation,
 		maxNewcomerBudget:  MaxNewcomerBudget,
 		webhookTimeout:     5 * time.Second,
+		calibEnabled:       false,
+		calibBoost:         1.1,
+		calibPenalty:       0.85,
+		calibStrongThresh:  0.9,
+		calibWeakThresh:    0.6,
+		calibCache:         make(map[string]calibCacheEntry),
 	}
 }
 
@@ -192,6 +253,38 @@ func (r *Router) SetWebhookTimeout(d time.Duration) {
 func (r *Router) SetClearRoutedToFunc(fn func(taskID string) error) {
 	r.mu.Lock()
 	r.clearRoutedTo = fn
+	r.mu.Unlock()
+}
+
+// SetCalibrationSource wires a calibration data provider. When set alongside
+// SetCalibrationRoutingEnabled(true), routing scores are adjusted based on
+// per-actor per-category accuracy from the canary evaluation system.
+// Call before Start.
+func (r *Router) SetCalibrationSource(src calibrationSource) {
+	r.mu.Lock()
+	r.calibration = src
+	r.mu.Unlock()
+}
+
+// SetCalibrationRoutingEnabled toggles calibration-aware score adjustments.
+// Default: false (adjustments disabled regardless of source). Call before Start.
+func (r *Router) SetCalibrationRoutingEnabled(enabled bool) {
+	r.mu.Lock()
+	r.calibEnabled = enabled
+	r.mu.Unlock()
+}
+
+// SetCalibrationFactors overrides the calibration score adjustment parameters.
+// boost is the multiplier for strong actors (accuracy > strongThresh; ≥1 = boost).
+// penalty is the multiplier for weak actors (accuracy < weakThresh; ≤1 = penalty).
+// strongThresh and weakThresh define the accuracy band boundaries.
+// Call before Start.
+func (r *Router) SetCalibrationFactors(boost, penalty, strongThresh, weakThresh float64) {
+	r.mu.Lock()
+	r.calibBoost = boost
+	r.calibPenalty = penalty
+	r.calibStrongThresh = strongThresh
+	r.calibWeakThresh = weakThresh
 	r.mu.Unlock()
 }
 
@@ -452,6 +545,7 @@ func (r *Router) findBestMatchLocked(task RoutableTask) *matchCandidate {
 		}
 
 		score := r.scoreMatch(cap, task)
+		score = r.applyCalibrationModifier(cap.AgentID, task.GetCategory(), score)
 		if score > bestScore {
 			bestScore = score
 			best = &matchCandidate{
@@ -666,6 +760,100 @@ func (r *Router) scoreMatch(cap *AgentCapability, task RoutableTask) float64 {
 	}
 
 	return categoryScore*0.40 + reputationScore*0.30 + priceScore*0.15 + availabilityScore*0.15
+}
+
+// applyCalibrationModifier adjusts score based on the agent's per-category
+// calibration accuracy. Must be called with r.mu held (or from a path that
+// already holds it, such as findBestMatchLocked).
+//
+// Results from the calibration source are cached per (agentID, category) pair
+// for calibCacheTTL (60 s). Entries older than calibCacheMaxAge (5 min) are
+// lazily evicted during routine calls. Errors from the source are NOT cached
+// so that transient failures resolve automatically on the next routing pass.
+//
+// Adjustment rules (only when calibEnabled and calibration source is set):
+//   - error from source        → no change (not cached; retried next call)
+//   - no data (nil) for actor  → no change (cached to suppress repeated lookups)
+//   - TotalSignals < minimum   → no change ("below_threshold")
+//   - accuracy > calibStrongThresh → score × calibBoost, clamped to 1.0 ("strong_boost")
+//   - accuracy < calibWeakThresh  → score × calibPenalty, floored at 0.0 ("weak_penalty")
+//   - accuracy in between         → no change (moderate, no log)
+func (r *Router) applyCalibrationModifier(agentID crypto.AgentID, category string, score float64) float64 {
+	if !r.calibEnabled || r.calibration == nil {
+		return score
+	}
+
+	// Lazy-init the cache (handles Router instances created in tests without New()).
+	if r.calibCache == nil {
+		r.calibCache = make(map[string]calibCacheEntry)
+	}
+
+	cacheKey := string(agentID) + "|" + category
+	now := time.Now()
+
+	// Lazy eviction: remove entries that have aged past calibCacheMaxAge.
+	for k, e := range r.calibCache {
+		if now.Sub(e.fetchedAt) > calibCacheMaxAge {
+			delete(r.calibCache, k)
+		}
+	}
+
+	// Return cached data when the entry is still within the TTL.
+	var cal *CalibrationData
+	if entry, ok := r.calibCache[cacheKey]; ok && now.Sub(entry.fetchedAt) < calibCacheTTL {
+		cal = entry.data // may be nil (cached "no data")
+	} else {
+		// Cache miss or stale — fetch from source.
+		fetched, err := r.calibration.CategoryCalibrationForActor(string(agentID), category)
+		if err != nil {
+			// Do not cache errors so transient failures resolve automatically.
+			slog.Debug("router: calibration source error; score unchanged",
+				"agent_id", agentID, "category", category, "err", err)
+			return score
+		}
+		cal = fetched
+		r.calibCache[cacheKey] = calibCacheEntry{data: cal, fetchedAt: now}
+	}
+
+	if cal == nil {
+		slog.Debug("router: no calibration data for actor; score unchanged",
+			"agent_id", agentID, "category", category, "reason", "no_data")
+		return score
+	}
+	if cal.TotalSignals < calibrationMinSamples {
+		slog.Debug("router: calibration below min samples; score unchanged",
+			"agent_id", agentID, "category", category,
+			"total_signals", cal.TotalSignals, "reason", "below_threshold")
+		return score
+	}
+
+	var multiplier float64
+	var reason string
+	switch {
+	case cal.Accuracy > r.calibStrongThresh:
+		multiplier = r.calibBoost
+		reason = "strong_boost"
+	case cal.Accuracy < r.calibWeakThresh:
+		multiplier = r.calibPenalty
+		reason = "weak_penalty"
+	default:
+		return score // moderate accuracy — no adjustment needed
+	}
+
+	adjusted := score * multiplier
+	if adjusted > 1.0 {
+		adjusted = 1.0
+	}
+	if adjusted < 0.0 {
+		adjusted = 0.0
+	}
+
+	slog.Debug("router: calibration-adjusted routing score",
+		"agent_id", agentID, "category", category,
+		"original_score", score, "adjusted_score", adjusted,
+		"accuracy", cal.Accuracy, "reason", reason)
+
+	return adjusted
 }
 
 // tagOverlap returns the fraction of taskTags that appear in agentTags

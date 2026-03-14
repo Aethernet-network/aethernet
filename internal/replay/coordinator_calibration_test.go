@@ -86,6 +86,7 @@ func TestShouldReplay_UncertainActor_BelowThreshold_2x(t *testing.T) {
 	// base 0.5 × 2 = 1.0 → always fires.
 	coord := NewReplayCoordinator(calibrationOnlyPolicy(0.5), newMemStore())
 	coord.SetCalibrationSource(&stubCalibrationSource{result: nil})
+	coord.SetCalibrationEnabled(true)
 
 	ok, _ := callShouldReplay(coord, "task-unc", "agent-unc", "code")
 	if !ok {
@@ -124,6 +125,7 @@ func TestShouldReplay_UncertainActor_BelowMinSamples_2x(t *testing.T) {
 	}
 	coord := NewReplayCoordinator(calibrationOnlyPolicy(0.5), newMemStore())
 	coord.SetCalibrationSource(&stubCalibrationSource{result: tooFew})
+	coord.SetCalibrationEnabled(true)
 
 	callShouldReplay(coord, "task-few", "agent-few", "code")
 
@@ -149,13 +151,14 @@ func TestShouldReplay_WeakActor_3x(t *testing.T) {
 	// base 0.4 × 3 = 1.2 → always fires.
 	cal := &canary.CategoryCalibration{
 		Category:     "code",
-		TotalSignals: 10,
+		TotalSignals: 20, // ≥ MinCalibrationSamples (20) → actionable
 		CorrectCount: 2,
 		Accuracy:     0.2, // clearly weak
 		AvgSeverity:  0.8,
 	}
 	coord := NewReplayCoordinator(calibrationOnlyPolicy(0.4), newMemStore())
 	coord.SetCalibrationSource(&stubCalibrationSource{result: cal})
+	coord.SetCalibrationEnabled(true)
 
 	ok, _ := callShouldReplay(coord, "task-weak", "agent-weak", "code")
 	if !ok {
@@ -177,8 +180,8 @@ func TestShouldReplay_WeakActor_3x(t *testing.T) {
 	if dec.Accuracy != 0.2 {
 		t.Errorf("Accuracy = %v; want 0.2", dec.Accuracy)
 	}
-	if dec.SampleCount != 10 {
-		t.Errorf("SampleCount = %d; want 10", dec.SampleCount)
+	if dec.SampleCount != 20 {
+		t.Errorf("SampleCount = %d; want 20", dec.SampleCount)
 	}
 	if dec.AvgSeverity != 0.8 {
 		t.Errorf("AvgSeverity = %v; want 0.8", dec.AvgSeverity)
@@ -203,6 +206,7 @@ func TestShouldReplay_StrongActor_0_5x(t *testing.T) {
 	}
 	coord := NewReplayCoordinator(calibrationOnlyPolicy(1.0), newMemStore())
 	coord.SetCalibrationSource(&stubCalibrationSource{result: cal})
+	coord.SetCalibrationEnabled(true)
 
 	// Call ShouldReplay; the main assertion is on the CalibrationDecision fields.
 	callShouldReplay(coord, "task-strong", "agent-strong", "code")
@@ -234,11 +238,12 @@ func TestShouldReplay_StrongActor_0_5x(t *testing.T) {
 func TestShouldReplay_StrongActor_ReducedRate_NeverFires(t *testing.T) {
 	cal := &canary.CategoryCalibration{
 		Category:     "research",
-		TotalSignals: 15,
+		TotalSignals: 20, // ≥ MinCalibrationSamples (20) → actionable
 		Accuracy:     0.93,
 	}
 	coord := NewReplayCoordinator(calibrationOnlyPolicy(0.0), newMemStore())
 	coord.SetCalibrationSource(&stubCalibrationSource{result: cal})
+	coord.SetCalibrationEnabled(true)
 
 	ok, _ := callShouldReplay(coord, "task-snf", "agent-snf", "research")
 	if ok {
@@ -263,7 +268,7 @@ func TestShouldReplay_StrongActor_ReducedRate_NeverFires(t *testing.T) {
 func TestCalibrationDecision_ContainsCorrectMetrics(t *testing.T) {
 	cal := &canary.CategoryCalibration{
 		Category:     "writing",
-		TotalSignals: 8,
+		TotalSignals: 20, // ≥ MinCalibrationSamples (20) → actionable
 		CorrectCount: 3,
 		Accuracy:     0.375, // < 0.6 → weak
 		AvgSeverity:  0.55,
@@ -271,6 +276,7 @@ func TestCalibrationDecision_ContainsCorrectMetrics(t *testing.T) {
 	baseRate := 0.1
 	coord := NewReplayCoordinator(calibrationOnlyPolicy(baseRate), newMemStore())
 	coord.SetCalibrationSource(&stubCalibrationSource{result: cal})
+	coord.SetCalibrationEnabled(true)
 
 	callShouldReplay(coord, "task-dm", "agent-dm", "writing")
 
@@ -286,7 +292,7 @@ func TestCalibrationDecision_ContainsCorrectMetrics(t *testing.T) {
 	}{
 		{"ActorID", dec.ActorID, "agent-dm"},
 		{"Category", dec.Category, "writing"},
-		{"SampleCount", dec.SampleCount, 8},
+		{"SampleCount", dec.SampleCount, 20},
 		{"Accuracy", dec.Accuracy, 0.375},
 		{"AvgSeverity", dec.AvgSeverity, 0.55},
 		{"BaseRate", dec.BaseRate, baseRate},
@@ -300,5 +306,117 @@ func TestCalibrationDecision_ContainsCorrectMetrics(t *testing.T) {
 	}
 	if dec.Timestamp.IsZero() {
 		t.Error("CalibrationDecision.Timestamp must not be zero")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestShouldReplay_ScrutinyDisabled_SkipsAdjustment
+// ---------------------------------------------------------------------------
+
+// TestShouldReplay_ScrutinyDisabled_SkipsAdjustment verifies that when
+// calibrationEnabled is false (the default), ShouldReplay records a
+// "calibration_disabled" decision and returns the base rate unchanged even
+// when a calibration source is configured with a weak actor.
+func TestShouldReplay_ScrutinyDisabled_SkipsAdjustment(t *testing.T) {
+	cal := &canary.CategoryCalibration{
+		Category:     "code",
+		TotalSignals: 20,
+		Accuracy:     0.1, // would be weak → 3× if scrutiny were enabled
+	}
+	// base 0.0 → never fires when rate unchanged.
+	coord := NewReplayCoordinator(calibrationOnlyPolicy(0.0), newMemStore())
+	coord.SetCalibrationSource(&stubCalibrationSource{result: cal})
+	// calibrationEnabled is false by default — do NOT call SetCalibrationEnabled(true).
+
+	ok, _ := callShouldReplay(coord, "task-dis", "agent-dis", "code")
+	if ok {
+		t.Error("expected ShouldReplay=false: scrutiny disabled, base 0.0 unchanged")
+	}
+
+	dec := coord.LastCalibrationDecision()
+	if dec == nil {
+		t.Fatal("CalibrationDecision should be recorded even when scrutiny is disabled")
+	}
+	if dec.Reason != "calibration_disabled" {
+		t.Errorf("Reason = %q; want %q", dec.Reason, "calibration_disabled")
+	}
+	if dec.AdjustedRate != 0.0 {
+		t.Errorf("AdjustedRate = %v; want 0.0 (base rate returned unchanged when disabled)", dec.AdjustedRate)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestShouldReplay_ScrutinyEnabled_AdjustmentApplies
+// ---------------------------------------------------------------------------
+
+// TestShouldReplay_ScrutinyEnabled_AdjustmentApplies verifies that after
+// calling SetCalibrationEnabled(true), the weak-actor 3× multiplier fires.
+func TestShouldReplay_ScrutinyEnabled_AdjustmentApplies(t *testing.T) {
+	cal := &canary.CategoryCalibration{
+		Category:     "code",
+		TotalSignals: 20,
+		Accuracy:     0.2, // weak → 3×
+	}
+	// base 0.4 × 3 = 1.2 → always fires.
+	coord := NewReplayCoordinator(calibrationOnlyPolicy(0.4), newMemStore())
+	coord.SetCalibrationSource(&stubCalibrationSource{result: cal})
+	coord.SetCalibrationEnabled(true)
+
+	ok, _ := callShouldReplay(coord, "task-en", "agent-en", "code")
+	if !ok {
+		t.Error("expected ShouldReplay=true: scrutiny enabled, weak actor 3× (0.4×3=1.2)")
+	}
+
+	dec := coord.LastCalibrationDecision()
+	if dec == nil {
+		t.Fatal("expected non-nil CalibrationDecision")
+	}
+	if dec.Reason != "weak_calibration_3x" {
+		t.Errorf("Reason = %q; want %q", dec.Reason, "weak_calibration_3x")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestScheduleReplay_PersistsCalibrationDecision
+// ---------------------------------------------------------------------------
+
+// TestScheduleReplay_PersistsCalibrationDecision verifies that after
+// ShouldReplay records a CalibrationDecision, ScheduleReplay copies the
+// calibration fields into the persisted ReplayJob.
+func TestScheduleReplay_PersistsCalibrationDecision(t *testing.T) {
+	cal := &canary.CategoryCalibration{
+		Category:     "code",
+		TotalSignals: 20,
+		Accuracy:     0.2, // weak → 3×
+		AvgSeverity:  0.7,
+	}
+	baseRate := 0.4
+	coord := NewReplayCoordinator(calibrationOnlyPolicy(baseRate), newMemStore())
+	coord.SetCalibrationSource(&stubCalibrationSource{result: cal})
+	coord.SetCalibrationEnabled(true)
+
+	// Run ShouldReplay to populate lastCalibDecision.
+	callShouldReplay(coord, "task-persist", "agent-persist", "code")
+
+	// Schedule the replay job.
+	job, err := coord.ScheduleReplay(
+		"task-persist", "hash-abc", "code", "v1", nil, "challenged", "agent-persist")
+	if err != nil {
+		t.Fatalf("ScheduleReplay: %v", err)
+	}
+
+	if job.CalibrationReason != "weak_calibration_3x" {
+		t.Errorf("CalibrationReason = %q; want %q", job.CalibrationReason, "weak_calibration_3x")
+	}
+	wantRate := baseRate * 3
+	const eps = 1e-9
+	if job.CalibrationAdjustedRate < wantRate-eps || job.CalibrationAdjustedRate > wantRate+eps {
+		t.Errorf("CalibrationAdjustedRate = %v; want %v", job.CalibrationAdjustedRate, wantRate)
+	}
+	if job.CalibrationSampleCount != 20 {
+		t.Errorf("CalibrationSampleCount = %d; want 20", job.CalibrationSampleCount)
+	}
+	if job.CalibrationAccuracy != 0.2 {
+		t.Errorf("CalibrationAccuracy = %v; want 0.2", job.CalibrationAccuracy)
 	}
 }

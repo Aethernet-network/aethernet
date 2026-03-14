@@ -165,6 +165,24 @@ func (m *CanaryManager) CategoryCalibrationForActor(actorID, category string) (*
 	return ComputeCategoryCalibration(signals, category), nil
 }
 
+// AllSignals returns every CalibrationSignal persisted in the store, across all
+// actors and categories. The result ordering is unspecified.
+func (m *CanaryManager) AllSignals() ([]*CalibrationSignal, error) {
+	blobs, err := m.backend.AllCalibrationSignals()
+	if err != nil {
+		return nil, err
+	}
+	result := make([]*CalibrationSignal, 0, len(blobs))
+	for _, data := range blobs {
+		var sig CalibrationSignal
+		if err := json.Unmarshal(data, &sig); err != nil {
+			return nil, fmt.Errorf("canary: unmarshal signal in AllSignals: %w", err)
+		}
+		result = append(result, &sig)
+	}
+	return result, nil
+}
+
 // SignalsByActor returns all CalibrationSignals for the given actorID.
 func (m *CanaryManager) SignalsByActor(actorID string) ([]*CalibrationSignal, error) {
 	blobs, err := m.backend.CalibrationSignalsByActor(actorID)

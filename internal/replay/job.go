@@ -80,6 +80,30 @@ type ReplayJob struct {
 	// Status is the current lifecycle state of the job:
 	// "pending", "running", "completed", or "failed".
 	Status string
+
+	// Calibration explanation fields — populated by ScheduleReplay from the
+	// most recent CalibrationDecision at scheduling time.
+	// Omitted (zero/empty) when no calibration source is configured.
+	//
+	// Note: ScheduleReplay copies from lastCalibDecision on a best-effort
+	// basis. In concurrent environments, the decision corresponds to the last
+	// ShouldReplay call, which is normally the one for this task.
+
+	// CalibrationReason is the reason string produced by the scrutiny
+	// adjustment (e.g. "weak_calibration_3x", "calibration_disabled").
+	CalibrationReason string `json:"calibration_reason,omitempty"`
+
+	// CalibrationAdjustedRate is the effective sample rate that was used for
+	// the random roll that decided this task should be replayed.
+	CalibrationAdjustedRate float64 `json:"calibration_adjusted_rate,omitempty"`
+
+	// CalibrationSampleCount is the number of calibration signals available
+	// for the actor at the time of the scrutiny decision.
+	CalibrationSampleCount int `json:"calibration_sample_count,omitempty"`
+
+	// CalibrationAccuracy is the smoothed accuracy value observed for the
+	// actor in this task's category at the time of the scrutiny decision.
+	CalibrationAccuracy float64 `json:"calibration_accuracy,omitempty"`
 }
 
 // NewReplayJob constructs a ReplayJob from a verification packet's replay
