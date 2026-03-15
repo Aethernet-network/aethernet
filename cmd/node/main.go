@@ -65,6 +65,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/store"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
+	"github.com/Aethernet-network/aethernet/internal/validator"
 	"github.com/Aethernet-network/aethernet/internal/wallet"
 )
 
@@ -299,6 +300,7 @@ type nodeStack struct {
 	peerDiscovery   *network.PeerDiscovery
 	cloudmapReg     *cloudmap.Registrar
 	replayRunner    *replay.ReplayRunner
+	validatorReg    *validator.ValidatorRegistry
 }
 
 // taskManagerSource adapts *tasks.TaskManager to the router.TaskSource interface,
@@ -570,6 +572,20 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 	// Apply fee distribution configuration.
 	feeCollector.SetFeeParams(cfg.Fees.FeeBasisPoints, cfg.Fees.FeeValidatorShare, cfg.Fees.FeeTreasuryShare)
 
+	// Validator registry: permissionless entry, dynamic stake, probation lifecycle.
+	// LoadFromStore restores any previously registered validators on restart.
+	var validatorReg *validator.ValidatorRegistry
+	if s != nil {
+		var loadErr error
+		validatorReg, loadErr = validator.LoadFromStore(&cfg.Validator, s)
+		if loadErr != nil {
+			slog.Error("failed to load validator registry from store", "err", loadErr)
+			validatorReg = validator.NewValidatorRegistry(&cfg.Validator, s)
+		}
+	} else {
+		validatorReg = validator.NewValidatorRegistry(&cfg.Validator, nil)
+	}
+
 	return &nodeStack{
 		dag:          d,
 		transfer:     tl,
@@ -589,6 +605,7 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 		discoveryEngine: discoveryEng,
 		platformKeys:    platformKeys,
 		taskRouter:      taskRouter,
+		validatorReg:    validatorReg,
 	}
 }
 
@@ -697,6 +714,22 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		"stale_purged", tvStalePurged,
 		"balance_after", tvPostBal,
 	)
+
+	// Ensure the testnet validator is registered in the ValidatorRegistry as a
+	// genesis participant (skips probation). Idempotent: GetByAgentID returns
+	// ErrRegistryValidatorNotFound only on first boot.
+	if stack.validatorReg != nil {
+		if _, lookupErr := stack.validatorReg.GetByAgentID(string(testnetValidatorID)); lookupErr != nil {
+			if _, regErr := stack.validatorReg.Register(
+				string(testnetValidatorID),
+				tvValidatorStakeAmt,
+				nil, // all categories
+				true, // genesis — skip probation
+			); regErr != nil {
+				slog.Warn("startStack: failed to register testnet-validator in ValidatorRegistry", "err", regErr)
+			}
+		}
+	}
 
 	av := autovalidator.NewAutoValidator(stack.engine, testnetValidatorID, 5*time.Second)
 	av.SetFeeCollector(stack.feeCollector, crypto.AgentID(genesis.BucketTreasury))

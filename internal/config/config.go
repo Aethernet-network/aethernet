@@ -177,6 +177,60 @@ type ConsensusConfig struct {
 	MinParticipants int `json:"min_participants"`
 }
 
+// ValidatorConfig controls validator registry dynamics: stake requirements,
+// probation rules, and permissionless entry parameters.
+type ValidatorConfig struct {
+	// StakeBaseMinimum is the floor stake (µAET) every validator must maintain.
+	// Default: 10_000_000_000 (10,000 AET).
+	StakeBaseMinimum uint64 `json:"stake_base_minimum"`
+	// StakeVolumeMultiple scales the stake requirement with network volume.
+	// volume_component = StakeVolumeMultiple × trailing30dAssuredVolume / activeValidatorCount
+	// Default: 0.5.
+	StakeVolumeMultiple float64 `json:"stake_volume_multiple"`
+	// StakeTaskSizeMultiple scales the stake requirement with task size.
+	// task_size_component = StakeTaskSizeMultiple × maxRecentAssuredTask
+	// Default: 0.3.
+	StakeTaskSizeMultiple float64 `json:"stake_task_size_multiple"`
+	// StakeRecheckPeriod is how often (days) stake requirements are recomputed.
+	// Default: 1.
+	StakeRecheckPeriod int `json:"stake_recheck_period"`
+	// StakeGracePeriod is the window (days) a validator has to top up stake
+	// before being suspended.
+	// Default: 7.
+	StakeGracePeriod int `json:"stake_grace_period"`
+
+	// ProbationDuration is the minimum days a new validator must complete
+	// a probation cycle before evaluation.
+	// Default: 30.
+	ProbationDuration int `json:"probation_duration"`
+	// ProbationMinTasks is the minimum tasks a probationer must handle in one
+	// cycle to be eligible for promotion.
+	// Default: 50.
+	ProbationMinTasks int `json:"probation_min_tasks"`
+	// ProbationMinAccuracy is the minimum accuracy a probationer must achieve
+	// across the cycle to be eligible for promotion.
+	// Default: 0.7.
+	ProbationMinAccuracy float64 `json:"probation_min_accuracy"`
+	// ProbationReplayRate is the replay scrutiny rate applied to probationary
+	// validators (higher than the baseline for new entrants).
+	// Default: 0.50.
+	ProbationReplayRate float64 `json:"probation_replay_rate"`
+	// ProbationCanaryRate is the canary injection rate for probationary validators.
+	// Default: 0.15.
+	ProbationCanaryRate float64 `json:"probation_canary_rate"`
+	// ProbationMaxCycles is the maximum number of probation cycles before a
+	// validator is excluded permanently.
+	// Default: 3.
+	ProbationMaxCycles int `json:"probation_max_cycles"`
+	// ProbationWeightMod is the routing weight multiplier applied to probationary
+	// validators relative to fully active ones.
+	// Default: 0.3.
+	ProbationWeightMod float64 `json:"probation_weight_mod"`
+	// GenesisSkipProbation skips the probation phase for genesis validators.
+	// Default: true.
+	GenesisSkipProbation bool `json:"genesis_skip_probation"`
+}
+
 // AssuranceConfig controls the assurance-lane fee schedule and security-floor
 // enforcement. Assurance lanes provide tiered service guarantees backed by
 // protocol-level validator coverage.
@@ -274,6 +328,7 @@ type ProtocolConfig struct {
 	Consensus   ConsensusConfig   `json:"consensus"`
 	Calibration CalibrationConfig `json:"calibration"`
 	Assurance   AssuranceConfig   `json:"assurance"`
+	Validator   ValidatorConfig   `json:"validator"`
 }
 
 // DefaultConfig returns a ProtocolConfig pre-populated with all current
@@ -358,6 +413,21 @@ func DefaultConfig() *ProtocolConfig {
 			SecurityDegradedRatio:   2.0,
 			SecurityTrailingDays:    30,
 			StructuredCategories:    []string{"code", "data", "api", "infrastructure"},
+		},
+		Validator: ValidatorConfig{
+			StakeBaseMinimum:      10_000_000_000,
+			StakeVolumeMultiple:   0.5,
+			StakeTaskSizeMultiple: 0.3,
+			StakeRecheckPeriod:    1,
+			StakeGracePeriod:      7,
+			ProbationDuration:     30,
+			ProbationMinTasks:     50,
+			ProbationMinAccuracy:  0.7,
+			ProbationReplayRate:   0.50,
+			ProbationCanaryRate:   0.15,
+			ProbationMaxCycles:    3,
+			ProbationWeightMod:    0.3,
+			GenesisSkipProbation:  true,
 		},
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -38,8 +39,9 @@ const (
 	prefixStakeMeta  = "stk:"
 	prefixRegistry   = "reg:"
 	prefixMeta       = "meta:" // generic metadata (genesis marker, onboarding counter, …)
-	prefixAPIKey     = "key:"  // platform developer API keys
-	prefixEscrow     = "esc:"  // task escrow entries
+	prefixAPIKey      = "key:"  // platform developer API keys
+	prefixEscrow      = "esc:"  // task escrow entries
+	prefixValidator   = "val:"  // validator registry records
 )
 
 // Store is the durable persistence layer for a single AetherNet node.
@@ -1248,6 +1250,82 @@ func (s *Store) CalibrationSignalsByActor(actorID string) ([][]byte, error) {
 					copy(blob, val)
 					result = append(result, blob)
 				}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return result, err
+}
+
+// ---------------------------------------------------------------------------
+// Validator registry records (raw JSON blobs)
+// ---------------------------------------------------------------------------
+
+// PutValidator stores a raw JSON-encoded Validator under "val:<id>".
+func (s *Store) PutValidator(id string, data []byte) error {
+	if err := s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(prefixValidator+id), data)
+	}); err != nil {
+		slog.Error("store: failed to persist validator", "id", id, "err", err)
+		return err
+	}
+	return nil
+}
+
+// GetValidator retrieves the raw JSON blob for the validator identified by id.
+// Returns an error wrapping badger.ErrKeyNotFound when absent.
+func (s *Store) GetValidator(id string) ([]byte, error) {
+	var data []byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(prefixValidator + id))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			data = make([]byte, len(val))
+			copy(data, val)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: get validator %s: %w", id, err)
+	}
+	return data, nil
+}
+
+// DeleteValidator removes the stored validator with the given id. It is a
+// no-op when the id is not found.
+func (s *Store) DeleteValidator(id string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		err := txn.Delete([]byte(prefixValidator + id))
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil
+		}
+		return err
+	})
+}
+
+// AllValidators returns all stored validator blobs as a map from validator ID
+// to raw JSON.
+func (s *Store) AllValidators() (map[string][]byte, error) {
+	result := make(map[string][]byte)
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(prefixValidator)
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		prefixLen := len(prefixValidator)
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := string(item.Key()[prefixLen:])
+			if err := item.Value(func(val []byte) error {
+				blob := make([]byte, len(val))
+				copy(blob, val)
+				result[key] = blob
 				return nil
 			}); err != nil {
 				return err

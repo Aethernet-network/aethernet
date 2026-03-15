@@ -26,8 +26,10 @@ var ErrValidatorNotFound = errors.New("validator: not registered")
 // ErrAlreadyAssigned is returned when an event already has an assigned validator.
 var ErrAlreadyAssigned = errors.New("validator: event already assigned")
 
-// ValidatorConfig holds tunable parameters for the mainnet Validator.
-type ValidatorConfig struct {
+// AssignmentConfig holds tunable parameters for the mainnet assignment
+// coordinator. Renamed from ValidatorConfig to free that name for the
+// persisted validator-registry config in internal/config.
+type AssignmentConfig struct {
 	// MaxConcurrentAssignments is the maximum number of unresolved verifications
 	// a single validator can hold simultaneously. Prevents monopolisation.
 	MaxConcurrentAssignments int
@@ -37,9 +39,9 @@ type ValidatorConfig struct {
 	AssignmentTimeout time.Duration
 }
 
-// DefaultValidatorConfig returns conservative defaults for production use.
-func DefaultValidatorConfig() *ValidatorConfig {
-	return &ValidatorConfig{
+// DefaultAssignmentConfig returns conservative defaults for production use.
+func DefaultAssignmentConfig() *AssignmentConfig {
+	return &AssignmentConfig{
 		MaxConcurrentAssignments: 50,
 		AssignmentTimeout:        5 * time.Minute,
 	}
@@ -60,26 +62,27 @@ type assignment struct {
 	assignedAt time.Time
 }
 
-// Validator manages the pool of registered mainnet verification nodes and routes
-// OCS verification work to them in a round-robin / stake-weighted fashion.
+// AssignmentCoordinator manages the pool of registered mainnet verification
+// nodes and routes OCS verification work to them. Renamed from Validator to
+// free that name for the persisted validator-registry record in registry.go.
 //
 // It is safe for concurrent use by multiple goroutines.
-type Validator struct {
-	config     *ValidatorConfig
-	engine     *ocs.Engine
-	mu         sync.RWMutex
-	validators map[crypto.AgentID]*ValidatorInfo
+type AssignmentCoordinator struct {
+	config      *AssignmentConfig
+	engine      *ocs.Engine
+	mu          sync.RWMutex
+	validators  map[crypto.AgentID]*ValidatorInfo
 	assignments map[event.EventID]*assignment
 }
 
-// NewValidator creates a Validator backed by the provided OCS engine.
-// config may be nil, in which case DefaultValidatorConfig is used.
-func NewValidator(engine *ocs.Engine, config *ValidatorConfig) *Validator {
-	if config == nil {
-		config = DefaultValidatorConfig()
+// NewAssignmentCoordinator creates an AssignmentCoordinator backed by the
+// provided OCS engine. cfg may be nil, in which case DefaultAssignmentConfig is used.
+func NewAssignmentCoordinator(engine *ocs.Engine, cfg *AssignmentConfig) *AssignmentCoordinator {
+	if cfg == nil {
+		cfg = DefaultAssignmentConfig()
 	}
-	return &Validator{
-		config:      config,
+	return &AssignmentCoordinator{
+		config:      cfg,
 		engine:      engine,
 		validators:  make(map[crypto.AgentID]*ValidatorInfo),
 		assignments: make(map[event.EventID]*assignment),
@@ -89,7 +92,7 @@ func NewValidator(engine *ocs.Engine, config *ValidatorConfig) *Validator {
 // RegisterValidator adds a verification node to the active pool.
 // Returns ErrValidatorNotFound (adapted) if the validator was already registered
 // (idempotent: registering twice re-activates without error).
-func (v *Validator) RegisterValidator(id crypto.AgentID) error {
+func (v *AssignmentCoordinator) RegisterValidator(id crypto.AgentID) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if existing, ok := v.validators[id]; ok {
@@ -107,7 +110,7 @@ func (v *Validator) RegisterValidator(id crypto.AgentID) error {
 // UnregisterValidator removes a verification node from the active pool.
 // Any pending assignments for this validator are not automatically reassigned;
 // they will time out via AssignmentTimeout and be picked up by another node.
-func (v *Validator) UnregisterValidator(id crypto.AgentID) error {
+func (v *AssignmentCoordinator) UnregisterValidator(id crypto.AgentID) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	info, ok := v.validators[id]
@@ -121,7 +124,7 @@ func (v *Validator) UnregisterValidator(id crypto.AgentID) error {
 // AssignVerification selects an available validator and assigns the OCS event
 // to it for verification. Returns ErrAlreadyAssigned if the event already has
 // an active assignment. Returns an error if no validators are available.
-func (v *Validator) AssignVerification(eventID event.EventID) (crypto.AgentID, error) {
+func (v *AssignmentCoordinator) AssignVerification(eventID event.EventID) (crypto.AgentID, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
@@ -158,7 +161,7 @@ func (v *Validator) AssignVerification(eventID event.EventID) (crypto.AgentID, e
 // ProcessVerification submits a validator's verdict to the OCS engine and
 // clears the assignment record. Returns ErrValidatorNotFound if the
 // submitting validator is not the assigned one (anti-spoofing).
-func (v *Validator) ProcessVerification(result ocs.VerificationResult) error {
+func (v *AssignmentCoordinator) ProcessVerification(result ocs.VerificationResult) error {
 	v.mu.Lock()
 	asgn, exists := v.assignments[result.EventID]
 	if !exists {
@@ -182,7 +185,7 @@ func (v *Validator) ProcessVerification(result ocs.VerificationResult) error {
 
 // SweepExpiredAssignments removes assignments that have exceeded AssignmentTimeout
 // without a verdict. Call periodically from a background goroutine.
-func (v *Validator) SweepExpiredAssignments() []event.EventID {
+func (v *AssignmentCoordinator) SweepExpiredAssignments() []event.EventID {
 	now := time.Now()
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -201,7 +204,7 @@ func (v *Validator) SweepExpiredAssignments() []event.EventID {
 }
 
 // ActiveValidators returns a snapshot of all currently registered validators.
-func (v *Validator) ActiveValidators() []*ValidatorInfo {
+func (v *AssignmentCoordinator) ActiveValidators() []*ValidatorInfo {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	out := make([]*ValidatorInfo, 0, len(v.validators))
