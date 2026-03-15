@@ -177,6 +177,63 @@ type ConsensusConfig struct {
 	MinParticipants int `json:"min_participants"`
 }
 
+// AssuranceConfig controls the assurance-lane fee schedule and security-floor
+// enforcement. Assurance lanes provide tiered service guarantees backed by
+// protocol-level validator coverage.
+type AssuranceConfig struct {
+	// StandardFeeRate is the fee fraction for the "standard" lane (0.0–1.0).
+	// Default: 0.03 (3%).
+	StandardFeeRate float64 `json:"standard_fee_rate"`
+	// StandardFeeFloor is the minimum protocol fee (µAET) for the standard lane.
+	// Default: 2_000_000 (2 AET).
+	StandardFeeFloor uint64 `json:"standard_fee_floor"`
+
+	// HighAssuranceFeeRate is the fee fraction for the "high_assurance" lane.
+	// Default: 0.06 (6%).
+	HighAssuranceFeeRate float64 `json:"high_assurance_fee_rate"`
+	// HighAssuranceFeeFloor is the minimum fee for the high_assurance lane.
+	// Default: 4_000_000 (4 AET).
+	HighAssuranceFeeFloor uint64 `json:"high_assurance_fee_floor"`
+
+	// EnterpriseFeeRate is the fee fraction for the "enterprise" lane.
+	// Default: 0.08 (8%).
+	EnterpriseFeeRate float64 `json:"enterprise_fee_rate"`
+	// EnterpriseFeeFloor is the minimum fee for the enterprise lane.
+	// Default: 8_000_000 (8 AET).
+	EnterpriseFeeFloor uint64 `json:"enterprise_fee_floor"`
+
+	// MinTaskBudgetAssured is the minimum budget (µAET) for tasks using any
+	// assurance lane. Tasks below this threshold cannot use assured lanes.
+	// Default: 25_000_000 (25 AET).
+	MinTaskBudgetAssured uint64 `json:"min_task_budget_assured"`
+
+	// SecurityFloorStandard is the minimum validator count required to offer
+	// the "standard" lane for a category.
+	// Default: 3.0.
+	SecurityFloorStandard float64 `json:"security_floor_standard"`
+	// SecurityFloorHigh is the minimum validator count for "high_assurance".
+	// Default: 5.0.
+	SecurityFloorHigh float64 `json:"security_floor_high"`
+	// SecurityFloorEnterprise is the minimum validator count for "enterprise".
+	// Default: 10.0.
+	SecurityFloorEnterprise float64 `json:"security_floor_enterprise"`
+
+	// SecurityDegradedRatio is how much degraded the available count must be
+	// relative to the floor before a security-degraded notice is emitted.
+	// Default: 2.0 (i.e. available ≥ floor/2.0 is borderline degraded).
+	SecurityDegradedRatio float64 `json:"security_degraded_ratio"`
+	// SecurityTrailingDays is the rolling window (days) used when computing
+	// category validator coverage metrics.
+	// Default: 30.
+	SecurityTrailingDays int `json:"security_trailing_days"`
+
+	// StructuredCategories is the list of task categories that qualify for
+	// high_assurance and enterprise lanes. Standard lane is open to all
+	// categories; high/enterprise require a structured category.
+	// Default: ["code", "data", "api", "infrastructure"].
+	StructuredCategories []string `json:"structured_categories"`
+}
+
 // CalibrationConfig controls calibration-aware routing and scrutiny adjustments.
 // Both features are disabled by default (conservative flags). Enable routing via
 // AETHERNET_CALIBRATION_ROUTING=true and scrutiny via AETHERNET_CALIBRATION_SCRUTINY=true.
@@ -216,6 +273,7 @@ type ProtocolConfig struct {
 	Archival    ArchivalConfig    `json:"archival"`
 	Consensus   ConsensusConfig   `json:"consensus"`
 	Calibration CalibrationConfig `json:"calibration"`
+	Assurance   AssuranceConfig   `json:"assurance"`
 }
 
 // DefaultConfig returns a ProtocolConfig pre-populated with all current
@@ -286,6 +344,21 @@ func DefaultConfig() *ProtocolConfig {
 			StrongThreshold: 0.9,
 			WeakThreshold:   0.6,
 		},
+		Assurance: AssuranceConfig{
+			StandardFeeRate:       0.03,
+			StandardFeeFloor:      2_000_000,
+			HighAssuranceFeeRate:  0.06,
+			HighAssuranceFeeFloor: 4_000_000,
+			EnterpriseFeeRate:     0.08,
+			EnterpriseFeeFloor:    8_000_000,
+			MinTaskBudgetAssured:  25_000_000,
+			SecurityFloorStandard:   3.0,
+			SecurityFloorHigh:       5.0,
+			SecurityFloorEnterprise: 10.0,
+			SecurityDegradedRatio:   2.0,
+			SecurityTrailingDays:    30,
+			StructuredCategories:    []string{"code", "data", "api", "infrastructure"},
+		},
 	}
 }
 
@@ -349,6 +422,7 @@ func LoadFromFile(path string) (*ProtocolConfig, error) {
 //	AETHERNET_MIN_PARTICIPANTS        → Consensus.MinParticipants
 //	AETHERNET_CALIBRATION_ROUTING     → Calibration.RoutingEnabled
 //	AETHERNET_CALIBRATION_SCRUTINY    → Calibration.ScrutinyEnabled
+//	AETHERNET_MIN_ASSURED_BUDGET      → Assurance.MinTaskBudgetAssured
 func LoadFromEnv(cfg *ProtocolConfig) {
 	setUint64 := func(key string, dest *uint64) {
 		if v := os.Getenv(key); v != "" {
@@ -450,4 +524,7 @@ func LoadFromEnv(cfg *ProtocolConfig) {
 	// Calibration
 	setBool("AETHERNET_CALIBRATION_ROUTING", &cfg.Calibration.RoutingEnabled)
 	setBool("AETHERNET_CALIBRATION_SCRUTINY", &cfg.Calibration.ScrutinyEnabled)
+
+	// Assurance
+	setUint64("AETHERNET_MIN_ASSURED_BUDGET", &cfg.Assurance.MinTaskBudgetAssured)
 }

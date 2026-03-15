@@ -578,6 +578,7 @@ class AetherNetClient:
         challenge_window_secs: Optional[int] = None,
         generation_eligible: Optional[bool] = None,
         max_delivery_time_secs: Optional[int] = None,
+        assurance_lane: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Post a new task to the marketplace.
 
@@ -604,6 +605,11 @@ class AetherNetClient:
                                    generation ledger entry (default True).
             max_delivery_time_secs: Seconds a claimer has to submit work after
                                     claiming (default 600 = 10 min).
+            assurance_lane:        Service-guarantee tier. ``None`` / ``""``
+                                   means unassured (no fee, no generation
+                                   credit). ``"standard"`` (3 %), ``"high_assurance"``
+                                   (6 %), or ``"enterprise"`` (8 %) require
+                                   budget ≥ 25 AET.
 
         Returns:
             The created task dict including ``id``, ``status``, and ``contract``.
@@ -629,6 +635,8 @@ class AetherNetClient:
             body["generation_eligible"] = generation_eligible
         if max_delivery_time_secs is not None:
             body["max_delivery_time_secs"] = max_delivery_time_secs
+        if assurance_lane is not None:
+            body["assurance_lane"] = assurance_lane
         return self._post("/v1/tasks", body)
 
     def browse_tasks(

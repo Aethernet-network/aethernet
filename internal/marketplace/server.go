@@ -312,6 +312,8 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		ChallengeWindowSecs int64    `json:"challenge_window_secs,omitempty"`
 		GenerationEligible  *bool    `json:"generation_eligible,omitempty"`
 		MaxDeliveryTimeSecs int64    `json:"max_delivery_time_secs,omitempty"`
+		// AssuranceLane selects the service-guarantee tier. "" = unassured.
+		AssuranceLane string `json:"assurance_lane,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -330,8 +332,21 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		ChallengeWindowSecs: req.ChallengeWindowSecs,
 		GenerationEligible:  req.GenerationEligible,
 		MaxDeliveryTimeSecs: req.MaxDeliveryTimeSecs,
+		AssuranceLane:       req.AssuranceLane,
 	})
 	if err != nil {
+		var sfe *tasks.SecurityFloorError
+		if errors.As(err, &sfe) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error":          "insufficient_category_security",
+				"requested_lane": sfe.RequestedLane,
+				"offered_lane":   sfe.OfferedLane,
+				"message":        err.Error(),
+			})
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

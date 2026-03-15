@@ -558,6 +558,12 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 	taskMgr.SetClaimDeadline(cfg.Tasks.DefaultClaimDeadline.Duration)
 	taskMgr.SetMaxCompletedAge(cfg.Tasks.MaxCompletedAge.Duration)
 
+	// Wire assurance lane fee schedule into the task manager so PostTask can
+	// compute AssuranceFee and WorkerNetPayout for assured tasks. The security
+	// floor is not wired here — no live validator state exists at boot time;
+	// operators wire it externally once the validator roster is populated.
+	taskMgr.SetAssuranceConfig(&cfg.Assurance)
+
 	// Apply staking decay configuration.
 	staking.SetDecayParams(cfg.Staking.DecayPeriodDays, cfg.Staking.DecayTasksPenalty)
 

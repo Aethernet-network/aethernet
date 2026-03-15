@@ -21,7 +21,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Aethernet-network/aethernet/internal/assurance"
 	"github.com/Aethernet-network/aethernet/internal/canary"
+	"github.com/Aethernet-network/aethernet/internal/config"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/evidence"
 )
@@ -105,6 +107,12 @@ type AcceptanceContract struct {
 	// MaxDeliveryTimeSecs is the maximum seconds a claimer has to submit work
 	// after claiming. Zero or unset defaults to 600 (10 min).
 	MaxDeliveryTimeSecs int64 `json:"max_delivery_time_secs"`
+
+	// AssuranceLane is the service-guarantee tier committed at post time.
+	// "" (LaneNone) means the task is unassured; "standard", "high_assurance",
+	// and "enterprise" are the three supported tiers. Unassured tasks do not
+	// earn generation-ledger credits for the worker.
+	AssuranceLane string `json:"assurance_lane,omitempty"`
 }
 
 // PostTaskOpts holds optional parameters for PostTask beyond the five required
@@ -124,9 +132,15 @@ type PostTaskOpts struct {
 	PolicyVersion       string
 	ChallengeWindowSecs int64
 	// GenerationEligible is a pointer so nil distinguishes "unset" from false.
-	// Nil means "use default = true".
+	// Nil means "use default = true". Overridden to false for unassured tasks
+	// (AssuranceLane == "") when the assurance lane feature is active.
 	GenerationEligible  *bool
 	MaxDeliveryTimeSecs int64
+
+	// AssuranceLane is the requested assurance tier for this task.
+	// "" (unassured) → generation eligibility defaults to false.
+	// "standard" | "high_assurance" | "enterprise" → fees computed, generation eligible.
+	AssuranceLane string
 }
 
 // Task is a unit of work posted to the marketplace.
@@ -188,6 +202,13 @@ type Task struct {
 	// "recognized" (credit issued), "held" (credit withheld pending replay),
 	// "denied" (credit permanently withheld after a disputed replay).
 	GenerationStatus string `json:"generation_status,omitempty"`
+
+	// AssuranceFee is the protocol fee charged for the assurance service (µAET).
+	// Zero for unassured tasks (LaneNone).
+	AssuranceFee uint64 `json:"assurance_fee,omitempty"`
+	// WorkerNetPayout is Budget − AssuranceFee; the amount the worker receives
+	// upon successful settlement. Zero for unassured tasks.
+	WorkerNetPayout uint64 `json:"worker_net_payout,omitempty"`
 }
 
 // taskStore is the subset of store.Store used by TaskManager.
@@ -208,6 +229,28 @@ type taskCanaryInjector interface {
 	ShouldInject() bool
 	NextCanary(category string) *canary.CanaryTask
 	LinkTask(c *canary.CanaryTask, taskID string) error
+}
+
+// securityFloorChecker is the local interface for the assurance-lane security
+// floor. *assurance.SecurityFloor satisfies this interface. Defined locally so
+// the tasks package can be tested with lightweight stubs.
+type securityFloorChecker interface {
+	CheckLane(category string, lane assurance.AssuranceLane) *assurance.AssuranceFeeResult
+}
+
+// SecurityFloorError is returned by PostTask when the security floor for the
+// requested assurance lane and category is not met. The API layer maps this
+// to a 422 Unprocessable Entity response.
+type SecurityFloorError struct {
+	RequestedLane string
+	OfferedLane   string
+}
+
+func (e *SecurityFloorError) Error() string {
+	if e.OfferedLane == "" {
+		return fmt.Sprintf("tasks: insufficient category security for lane %q; no lane available", e.RequestedLane)
+	}
+	return fmt.Sprintf("tasks: insufficient category security for lane %q; best available is %q", e.RequestedLane, e.OfferedLane)
 }
 
 // Stats holds aggregate marketplace statistics.
@@ -239,6 +282,16 @@ type TaskManager struct {
 	// ShouldInject() returns true, PostTask probabilistically links a canary
 	// record to the newly created task. Nil by default — backward compatible.
 	canaryInj taskCanaryInjector
+
+	// securityFloor is the optional assurance-lane security floor enforcer.
+	// When non-nil, PostTask calls CheckLane to validate the requested lane.
+	// Nil by default — backward compatible.
+	securityFloor securityFloorChecker
+
+	// assuranceCfg is the assurance fee schedule used by PostTask to compute
+	// AssuranceFee and WorkerNetPayout for assured tasks. Nil by default —
+	// when nil, no fee computation is performed.
+	assuranceCfg *config.AssuranceConfig
 }
 
 // NewTaskManager returns a new empty TaskManager.
@@ -274,6 +327,26 @@ func (m *TaskManager) SetMaxCompletedAge(d time.Duration) {
 func (m *TaskManager) SetCanaryInjector(inj taskCanaryInjector) {
 	m.mu.Lock()
 	m.canaryInj = inj
+	m.mu.Unlock()
+}
+
+// SetSecurityFloor wires an assurance-lane security floor enforcer. When set,
+// PostTask validates the requested assurance lane against the current category
+// validator coverage before accepting the task. Call before any concurrent
+// requests arrive. When not called (default), security floor checks are skipped.
+func (m *TaskManager) SetSecurityFloor(sf securityFloorChecker) {
+	m.mu.Lock()
+	m.securityFloor = sf
+	m.mu.Unlock()
+}
+
+// SetAssuranceConfig wires the assurance fee schedule. When set, PostTask
+// computes AssuranceFee and WorkerNetPayout for tasks that specify an
+// AssuranceLane. Call before any concurrent requests arrive. When not called
+// (default), no fee computation is performed and AssuranceFee is 0.
+func (m *TaskManager) SetAssuranceConfig(cfg *config.AssuranceConfig) {
+	m.mu.Lock()
+	m.assuranceCfg = cfg
 	m.mu.Unlock()
 }
 
@@ -416,6 +489,38 @@ func (m *TaskManager) PostTask(posterID, title, description, category string, bu
 		dm = "public"
 	}
 
+	// Assurance lane: validate the requested lane against the security floor,
+	// compute the protocol fee, and determine generation eligibility.
+	lane := assurance.AssuranceLane(o.AssuranceLane)
+	var assuranceFee, workerNetPayout uint64
+
+	m.mu.RLock()
+	sf := m.securityFloor
+	acfg := m.assuranceCfg
+	m.mu.RUnlock()
+
+	if lane != assurance.LaneNone {
+		// Security floor check — skipped when floor is not wired.
+		if sf != nil {
+			result := sf.CheckLane(category, lane)
+			if result.Lane != lane {
+				return nil, &SecurityFloorError{
+					RequestedLane: string(lane),
+					OfferedLane:   string(result.Lane),
+				}
+			}
+		}
+		// Fee computation — skipped when assurance config is not wired.
+		if acfg != nil {
+			feeResult, err := assurance.ComputeAssuranceFee(budget, lane, acfg)
+			if err != nil {
+				return nil, fmt.Errorf("tasks: assurance fee: %w", err)
+			}
+			assuranceFee = feeResult.Fee
+			workerNetPayout = feeResult.NetPayout
+		}
+	}
+
 	// Build the AcceptanceContract with defaults applied.
 	contract := AcceptanceContract{
 		SuccessCriteria:     o.SuccessCriteria,
@@ -424,6 +529,7 @@ func (m *TaskManager) PostTask(posterID, title, description, category string, bu
 		ChallengeWindowSecs: o.ChallengeWindowSecs,
 		GenerationEligible:  true, // default
 		MaxDeliveryTimeSecs: o.MaxDeliveryTimeSecs,
+		AssuranceLane:       string(lane),
 	}
 	if contract.PolicyVersion == "" {
 		contract.PolicyVersion = "v1"
@@ -434,6 +540,15 @@ func (m *TaskManager) PostTask(posterID, title, description, category string, bu
 	if contract.MaxDeliveryTimeSecs == 0 {
 		contract.MaxDeliveryTimeSecs = 600
 	}
+	// Unassured tasks (LaneNone) do not earn generation-ledger credits when the
+	// assurance feature is active (assuranceCfg wired). When assuranceCfg is
+	// nil the feature is inactive and the old default (true) is preserved for
+	// backward compatibility with tests and deployments that have not yet wired
+	// the assurance config.
+	if lane == assurance.LaneNone && acfg != nil {
+		contract.GenerationEligible = false
+	}
+	// Explicit GenerationEligible opt takes priority over lane default.
 	if o.GenerationEligible != nil {
 		contract.GenerationEligible = *o.GenerationEligible
 	}
@@ -441,16 +556,18 @@ func (m *TaskManager) PostTask(posterID, title, description, category string, bu
 
 	now := time.Now()
 	task := &Task{
-		ID:             generateTaskID(posterID, title, now),
-		Title:          title,
-		Description:    description,
-		Category:       category,
-		PosterID:       posterID,
-		Budget:         budget,
-		Status:         TaskStatusOpen,
-		PostedAt:       now.UnixNano(),
-		DeliveryMethod: dm,
-		Contract:       contract,
+		ID:              generateTaskID(posterID, title, now),
+		Title:           title,
+		Description:     description,
+		Category:        category,
+		PosterID:        posterID,
+		Budget:          budget,
+		Status:          TaskStatusOpen,
+		PostedAt:        now.UnixNano(),
+		DeliveryMethod:  dm,
+		Contract:        contract,
+		AssuranceFee:    assuranceFee,
+		WorkerNetPayout: workerNetPayout,
 	}
 
 	m.mu.Lock()
