@@ -286,6 +286,54 @@ type AssuranceConfig struct {
 	// categories; high/enterprise require a structured category.
 	// Default: ["code", "data", "api", "infrastructure"].
 	StructuredCategories []string `json:"structured_categories"`
+
+	// --- Fee split when no replay occurs ---
+
+	// VerifierShareNoReplay is the fraction of the assurance fee paid to the
+	// verifier when no replay is triggered. Default: 0.60 (60%).
+	VerifierShareNoReplay float64 `json:"verifier_share_no_replay"`
+	// ReplayReserveShare is the fraction of the assurance fee held in the
+	// per-category replay reserve when no replay occurs.
+	// Default: 0.25 (25%).
+	ReplayReserveShare float64 `json:"replay_reserve_share"`
+	// ProtocolShareNoReplay is the fraction of the assurance fee allocated to
+	// the protocol when no replay occurs. Default: 0.15 (15%).
+	ProtocolShareNoReplay float64 `json:"protocol_share_no_replay"`
+
+	// --- Fee split when replay occurs ---
+
+	// VerifierShareWithReplay is the verifier's fraction when replay is
+	// triggered. Default: 0.40 (40%).
+	VerifierShareWithReplay float64 `json:"verifier_share_with_replay"`
+	// ReplayExecutorShare is the replay executor's fraction of the fee.
+	// Default: 0.45 (45%).
+	ReplayExecutorShare float64 `json:"replay_executor_share"`
+	// ProtocolShareReplay is the protocol's fraction when replay occurs.
+	// Default: 0.15 (15%).
+	ProtocolShareReplay float64 `json:"protocol_share_replay"`
+
+	// --- Protocol-side breakdown (of the protocol portion) ---
+
+	// TreasuryShareOfProtocol is the fraction of the protocol portion routed
+	// to the treasury. Default: 0.667 (≈ 10% of total assurance fee).
+	TreasuryShareOfProtocol float64 `json:"treasury_share_of_protocol"`
+	// DisputeShareOfProtocol is the fraction of the protocol portion held for
+	// dispute resolution. Default: 0.200 (≈ 3% of total).
+	DisputeShareOfProtocol float64 `json:"dispute_share_of_protocol"`
+	// CanaryShareOfProtocol is the fraction of the protocol portion allocated
+	// to the canary measurement budget. Default: 0.133 (≈ 2% of total).
+	CanaryShareOfProtocol float64 `json:"canary_share_of_protocol"`
+
+	// --- Replay economics ---
+
+	// MinReplayPayout is the minimum µAET paid to a replay executor per task.
+	// When the computed share falls short, the deficit is drawn from the
+	// per-category replay reserve. Default: 5_000_000 (5 AET).
+	MinReplayPayout uint64 `json:"min_replay_payout"`
+	// ReplayReserveCircuitBreaker is the minimum reserve balance expressed as
+	// a fraction of a target balance below which new assured tasks are
+	// restricted for the category. Default: 0.20 (20%).
+	ReplayReserveCircuitBreaker float64 `json:"replay_reserve_circuit_breaker"`
 }
 
 // CalibrationConfig controls calibration-aware routing and scrutiny adjustments.
@@ -413,6 +461,21 @@ func DefaultConfig() *ProtocolConfig {
 			SecurityDegradedRatio:   2.0,
 			SecurityTrailingDays:    30,
 			StructuredCategories:    []string{"code", "data", "api", "infrastructure"},
+			// Fee split — no replay
+			VerifierShareNoReplay: 0.60,
+			ReplayReserveShare:    0.25,
+			ProtocolShareNoReplay: 0.15,
+			// Fee split — replay
+			VerifierShareWithReplay: 0.40,
+			ReplayExecutorShare:     0.45,
+			ProtocolShareReplay:     0.15,
+			// Protocol-side breakdown
+			TreasuryShareOfProtocol: 0.667,
+			DisputeShareOfProtocol:  0.200,
+			CanaryShareOfProtocol:   0.133,
+			// Replay economics
+			MinReplayPayout:             5_000_000,
+			ReplayReserveCircuitBreaker: 0.20,
 		},
 		Validator: ValidatorConfig{
 			StakeBaseMinimum:      10_000_000_000,

@@ -41,7 +41,8 @@ const (
 	prefixMeta       = "meta:" // generic metadata (genesis marker, onboarding counter, …)
 	prefixAPIKey      = "key:"  // platform developer API keys
 	prefixEscrow      = "esc:"  // task escrow entries
-	prefixValidator   = "val:"  // validator registry records
+	prefixValidator      = "val:"  // validator registry records
+	prefixReplayReserve  = "rsvr:" // per-category replay reserve balances
 )
 
 // Store is the durable persistence layer for a single AetherNet node.
@@ -1334,4 +1335,47 @@ func (s *Store) AllValidators() (map[string][]byte, error) {
 		return nil
 	})
 	return result, err
+}
+
+// ---------------------------------------------------------------------------
+// Replay reserve balances (uint64 per category)
+// ---------------------------------------------------------------------------
+
+// PutReplayReserve stores the balance for a per-category replay reserve under
+// "rsvr:<category>". The balance is encoded as big-endian uint64.
+func (s *Store) PutReplayReserve(category string, balance uint64) error {
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, balance)
+	if err := s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(prefixReplayReserve+category), buf)
+	}); err != nil {
+		slog.Error("store: failed to persist replay reserve", "category", category, "err", err)
+		return err
+	}
+	return nil
+}
+
+// GetReplayReserve retrieves the replay reserve balance for category.
+// Returns 0, nil when no balance has been recorded yet.
+func (s *Store) GetReplayReserve(category string) (uint64, error) {
+	var balance uint64
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(prefixReplayReserve + category))
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil // zero balance is the default
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			if len(val) == 8 {
+				balance = binary.BigEndian.Uint64(val)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return 0, fmt.Errorf("store: get replay reserve %s: %w", category, err)
+	}
+	return balance, nil
 }
