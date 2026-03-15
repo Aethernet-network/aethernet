@@ -229,6 +229,59 @@ type ValidatorConfig struct {
 	// GenesisSkipProbation skips the probation phase for genesis validators.
 	// Default: true.
 	GenesisSkipProbation bool `json:"genesis_skip_probation"`
+
+	// --- Assignment weight modifiers ---
+
+	// AssignmentCalibrationWeak is the weight multiplier for a validator whose
+	// category accuracy is below the weak calibration threshold.
+	// Default: 0.7.
+	AssignmentCalibrationWeak float64 `json:"assignment_calibration_weak"`
+	// AssignmentCalibrationModerate is the weight multiplier used when there is
+	// insufficient calibration data or accuracy is in the mid range.
+	// Default: 1.0.
+	AssignmentCalibrationModerate float64 `json:"assignment_calibration_moderate"`
+	// AssignmentCalibrationStrong is the weight multiplier for validators with
+	// strong category accuracy (>= strong threshold).
+	// Default: 1.2.
+	AssignmentCalibrationStrong float64 `json:"assignment_calibration_strong"`
+	// AssignmentProbationModifier is the weight multiplier applied to
+	// probationary validators. Default: 0.3.
+	AssignmentProbationModifier float64 `json:"assignment_probation_modifier"`
+
+	// --- Cap enforcement ---
+
+	// CapBelow10Validators is the maximum share of category assignments that a
+	// single validator may hold when the eligible pool has fewer than 10
+	// validators. Default: 0.20 (20%).
+	CapBelow10Validators float64 `json:"cap_below_10_validators"`
+	// CapAtOrAbove10Validators is the maximum share when the pool has 10 or
+	// more validators. Default: 0.15 (15%).
+	CapAtOrAbove10Validators float64 `json:"cap_at_or_above_10_validators"`
+	// CapEnforcementMinValidators is the minimum number of eligible validators
+	// required before cap enforcement activates.
+	// Default: 5.
+	CapEnforcementMinValidators int `json:"cap_enforcement_min_validators"`
+	// CapEpochHours is the rolling window length (hours) for assignment-count
+	// tracking. Counts are reset at the start of each epoch.
+	// Default: 24.
+	CapEpochHours int `json:"cap_epoch_hours"`
+
+	// --- Affiliated-cluster detection thresholds ---
+
+	// ClusterPairwiseThresholdDeterministic is the minimum agreement rate for a
+	// pair to be flagged as a cluster on deterministic (structured) tasks.
+	// Default: 0.98 (98%).
+	ClusterPairwiseThresholdDeterministic float64 `json:"cluster_pairwise_threshold_deterministic"`
+	// ClusterPairwiseThresholdNonDeterministic is the threshold for
+	// non-deterministic tasks. Default: 0.95 (95%).
+	ClusterPairwiseThresholdNonDeterministic float64 `json:"cluster_pairwise_threshold_non_deterministic"`
+	// ClusterPairwiseMinShared is the minimum number of shared tasks a pair
+	// must have before the agreement rate is considered meaningful.
+	// Default: 50.
+	ClusterPairwiseMinShared int `json:"cluster_pairwise_min_shared"`
+	// ClusterReplayRate is the replay scrutiny rate applied to all tasks
+	// assigned to a detected cluster. Default: 1.0 (100%).
+	ClusterReplayRate float64 `json:"cluster_replay_rate"`
 }
 
 // AssuranceConfig controls the assurance-lane fee schedule and security-floor
@@ -491,6 +544,21 @@ func DefaultConfig() *ProtocolConfig {
 			ProbationMaxCycles:    3,
 			ProbationWeightMod:    0.3,
 			GenesisSkipProbation:  true,
+			// Assignment weight modifiers
+			AssignmentCalibrationWeak:     0.7,
+			AssignmentCalibrationModerate: 1.0,
+			AssignmentCalibrationStrong:   1.2,
+			AssignmentProbationModifier:   0.3,
+			// Cap enforcement
+			CapBelow10Validators:        0.20,
+			CapAtOrAbove10Validators:    0.15,
+			CapEnforcementMinValidators: 5,
+			CapEpochHours:               24,
+			// Cluster detection
+			ClusterPairwiseThresholdDeterministic:    0.98,
+			ClusterPairwiseThresholdNonDeterministic: 0.95,
+			ClusterPairwiseMinShared:                 50,
+			ClusterReplayRate:                        1.0,
 		},
 	}
 }

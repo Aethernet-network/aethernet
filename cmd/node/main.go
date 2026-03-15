@@ -301,6 +301,7 @@ type nodeStack struct {
 	cloudmapReg     *cloudmap.Registrar
 	replayRunner    *replay.ReplayRunner
 	validatorReg    *validator.ValidatorRegistry
+	assignmentEng   *validator.AssignmentEngine
 }
 
 // taskManagerSource adapts *tasks.TaskManager to the router.TaskSource interface,
@@ -349,6 +350,25 @@ func (a *routerCalibrationAdapter) CategoryCalibrationForActor(agentID, category
 		return nil, err
 	}
 	return &router.CalibrationData{
+		TotalSignals: cal.TotalSignals,
+		Accuracy:     cal.Accuracy,
+		AvgSeverity:  cal.AvgSeverity,
+	}, nil
+}
+
+// validatorCalibrationAdapter bridges *canary.CanaryManager (L3) to the
+// validator package's calibrationSource interface (L2). Same pattern as
+// routerCalibrationAdapter but targets validator.CalibrationData.
+type validatorCalibrationAdapter struct {
+	mgr *canary.CanaryManager
+}
+
+func (a *validatorCalibrationAdapter) CategoryCalibrationForActor(agentID, category string) (*validator.CalibrationData, error) {
+	cal, err := a.mgr.CategoryCalibrationForActor(agentID, category)
+	if err != nil || cal == nil {
+		return nil, err
+	}
+	return &validator.CalibrationData{
 		TotalSignals: cal.TotalSignals,
 		Accuracy:     cal.Accuracy,
 		AvgSeverity:  cal.AvgSeverity,
@@ -586,6 +606,11 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 		validatorReg = validator.NewValidatorRegistry(&cfg.Validator, nil)
 	}
 
+	// Assignment engine: weighted validator selection with calibration and
+	// probation modifiers, hard caps, and affiliated-cluster handling.
+	// Calibration source is wired in startStack once the canary manager is ready.
+	assignmentEng := validator.NewAssignmentEngine(validatorReg, &cfg.Validator)
+
 	return &nodeStack{
 		dag:          d,
 		transfer:     tl,
@@ -606,6 +631,7 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 		platformKeys:    platformKeys,
 		taskRouter:      taskRouter,
 		validatorReg:    validatorReg,
+		assignmentEng:   assignmentEng,
 	}
 }
 
@@ -820,6 +846,11 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 				cfg.Calibration.StrongThreshold,
 				cfg.Calibration.WeakThreshold,
 			)
+		}
+		// Wire calibration into the assignment engine so it can apply per-
+		// category accuracy modifiers when selecting validators.
+		if stack.assignmentEng != nil {
+			stack.assignmentEng.SetCalibrationSource(&validatorCalibrationAdapter{mgr: canaryMgr})
 		}
 	}
 
