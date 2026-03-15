@@ -282,6 +282,31 @@ type ValidatorConfig struct {
 	// ClusterReplayRate is the replay scrutiny rate applied to all tasks
 	// assigned to a detected cluster. Default: 1.0 (100%).
 	ClusterReplayRate float64 `json:"cluster_replay_rate"`
+
+	// --- Slashing ---
+
+	// SlashFraudulentApproval is the stake fraction (0–1) burned when a
+	// validator is found to have approved a fraudulent task result.
+	// Default: 0.30 (30%).
+	SlashFraudulentApproval float64 `json:"slash_fraudulent_approval"`
+	// SlashDishonestReplay is the stake fraction burned when a validator
+	// submitted a dishonest replay report. Default: 0.40 (40%).
+	SlashDishonestReplay float64 `json:"slash_dishonest_replay"`
+	// SlashCollusion is the stake fraction burned when a validator is found
+	// to have colluded with affiliated validators. Default: 0.75 (75%).
+	SlashCollusion float64 `json:"slash_collusion"`
+	// CooldownTier1Days is the suspension duration (days) for
+	// FraudulentApproval offenses. Default: 30.
+	CooldownTier1Days int `json:"cooldown_tier1_days"`
+	// CooldownTier2Days is the suspension duration (days) for
+	// DishonestReplay offenses. Default: 60.
+	CooldownTier2Days int `json:"cooldown_tier2_days"`
+	// CooldownTier3Days is the suspension duration (days) for Collusion
+	// offenses. Default: 180.
+	CooldownTier3Days int `json:"cooldown_tier3_days"`
+	// CollusionRepeatExclusion permanently excludes a validator whose second
+	// (or later) collusion offense is detected. Default: true.
+	CollusionRepeatExclusion bool `json:"collusion_repeat_exclusion"`
 }
 
 // AssuranceConfig controls the assurance-lane fee schedule and security-floor
@@ -387,6 +412,43 @@ type AssuranceConfig struct {
 	// a fraction of a target balance below which new assured tasks are
 	// restricted for the category. Default: 0.20 (20%).
 	ReplayReserveCircuitBreaker float64 `json:"replay_reserve_circuit_breaker"`
+
+	// --- Challenge bond ---
+
+	// ChallengeBondRate is the fraction of the task budget required as a
+	// challenge bond. Default: 0.01 (1%).
+	ChallengeBondRate float64 `json:"challenge_bond_rate"`
+	// ChallengeBondFloor is the minimum challenge bond (µAET).
+	// Default: 1_000_000 (1 AET).
+	ChallengeBondFloor uint64 `json:"challenge_bond_floor"`
+
+	// --- Bootstrap override ---
+
+	// BootstrapDurationDays is the minimum number of days since network
+	// launch before the bootstrap phase can end. Default: 90.
+	BootstrapDurationDays int `json:"bootstrap_duration_days"`
+	// BootstrapMinValidators is the minimum number of active validators
+	// required before the bootstrap phase can end. Default: 20.
+	BootstrapMinValidators int `json:"bootstrap_min_validators"`
+	// BootstrapBaselineReplay is the baseline replay rate during bootstrap.
+	// Default: 0.40 (40%).
+	BootstrapBaselineReplay float64 `json:"bootstrap_baseline_replay"`
+	// BootstrapGenerationReplay is the generation-task replay rate during
+	// bootstrap. Default: 0.50 (50%).
+	BootstrapGenerationReplay float64 `json:"bootstrap_generation_replay"`
+	// BootstrapNewAgentReplay is the new-agent replay rate during bootstrap.
+	// Default: 0.75 (75%).
+	BootstrapNewAgentReplay float64 `json:"bootstrap_new_agent_replay"`
+	// BootstrapBaseReward is the maximum µAET bootstrap reward per task when
+	// monthly assured volume is zero. Default: 1_000_000 (1 AET).
+	BootstrapBaseReward uint64 `json:"bootstrap_base_reward"`
+	// BootstrapTargetMonthlyVolume is the monthly assured volume (µAET) at
+	// which the bootstrap reward decays to zero.
+	// Default: 100_000_000_000 (100,000 AET).
+	BootstrapTargetMonthlyVolume uint64 `json:"bootstrap_target_monthly_volume"`
+	// BootstrapSunsetMonths is the number of months after which bootstrap
+	// rewards are unconditionally set to zero. Default: 36.
+	BootstrapSunsetMonths int `json:"bootstrap_sunset_months"`
 }
 
 // CalibrationConfig controls calibration-aware routing and scrutiny adjustments.
@@ -529,6 +591,18 @@ func DefaultConfig() *ProtocolConfig {
 			// Replay economics
 			MinReplayPayout:             5_000_000,
 			ReplayReserveCircuitBreaker: 0.20,
+			// Challenge bond
+			ChallengeBondRate:  0.01,
+			ChallengeBondFloor: 1_000_000,
+			// Bootstrap override
+			BootstrapDurationDays:        90,
+			BootstrapMinValidators:       20,
+			BootstrapBaselineReplay:      0.40,
+			BootstrapGenerationReplay:    0.50,
+			BootstrapNewAgentReplay:      0.75,
+			BootstrapBaseReward:          1_000_000,
+			BootstrapTargetMonthlyVolume: 100_000_000_000,
+			BootstrapSunsetMonths:        36,
 		},
 		Validator: ValidatorConfig{
 			StakeBaseMinimum:      10_000_000_000,
@@ -559,6 +633,14 @@ func DefaultConfig() *ProtocolConfig {
 			ClusterPairwiseThresholdNonDeterministic: 0.95,
 			ClusterPairwiseMinShared:                 50,
 			ClusterReplayRate:                        1.0,
+			// Slashing
+			SlashFraudulentApproval:  0.30,
+			SlashDishonestReplay:     0.40,
+			SlashCollusion:           0.75,
+			CooldownTier1Days:        30,
+			CooldownTier2Days:        60,
+			CooldownTier3Days:        180,
+			CollusionRepeatExclusion: true,
 		},
 	}
 }

@@ -43,6 +43,7 @@ const (
 	prefixEscrow      = "esc:"  // task escrow entries
 	prefixValidator      = "val:"  // validator registry records
 	prefixReplayReserve  = "rsvr:" // per-category replay reserve balances
+	prefixChallenge      = "chal:" // challenge bond records (JSON blobs)
 )
 
 // Store is the durable persistence layer for a single AetherNet node.
@@ -1378,4 +1379,72 @@ func (s *Store) GetReplayReserve(category string) (uint64, error) {
 		return 0, fmt.Errorf("store: get replay reserve %s: %w", category, err)
 	}
 	return balance, nil
+}
+
+// ---------------------------------------------------------------------------
+// Challenge bond records (raw JSON blobs)
+// ---------------------------------------------------------------------------
+
+// PutChallenge stores the raw JSON blob for a challenge under "chal:<id>".
+func (s *Store) PutChallenge(id string, data []byte) error {
+	if err := s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(prefixChallenge+id), data)
+	}); err != nil {
+		slog.Error("store: failed to persist challenge", "id", id, "err", err)
+		return err
+	}
+	return nil
+}
+
+// GetChallenge retrieves the raw JSON blob for the challenge with the given id.
+// Returns (nil, nil) when no record exists.
+func (s *Store) GetChallenge(id string) ([]byte, error) {
+	var data []byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(prefixChallenge + id))
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			data = make([]byte, len(val))
+			copy(data, val)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: get challenge %s: %w", id, err)
+	}
+	return data, nil
+}
+
+// AllChallenges returns all challenge blobs keyed by challenge ID.
+func (s *Store) AllChallenges() (map[string][]byte, error) {
+	result := make(map[string][]byte)
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(prefixChallenge)
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := string(item.Key())
+			id := strings.TrimPrefix(key, prefixChallenge)
+			if err := item.Value(func(val []byte) error {
+				cp := make([]byte, len(val))
+				copy(cp, val)
+				result[id] = cp
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: all challenges: %w", err)
+	}
+	return result, nil
 }

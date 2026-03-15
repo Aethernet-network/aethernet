@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/api"
+	"github.com/Aethernet-network/aethernet/internal/assurance"
 	"github.com/Aethernet-network/aethernet/internal/autovalidator"
 	"github.com/Aethernet-network/aethernet/internal/canary"
 	"github.com/Aethernet-network/aethernet/internal/cloudmap"
@@ -302,6 +303,9 @@ type nodeStack struct {
 	replayRunner    *replay.ReplayRunner
 	validatorReg    *validator.ValidatorRegistry
 	assignmentEng   *validator.AssignmentEngine
+	slashEng        *validator.SlashEngine
+	challengeMgr    *assurance.ChallengeManager
+	bootstrapOvr    *assurance.BootstrapOverride
 }
 
 // taskManagerSource adapts *tasks.TaskManager to the router.TaskSource interface,
@@ -611,6 +615,46 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 	// Calibration source is wired in startStack once the canary manager is ready.
 	assignmentEng := validator.NewAssignmentEngine(validatorReg, &cfg.Validator)
 
+	// Slash engine: applies stake penalties and cooldown suspensions for
+	// protocol violations (fraudulent approval, dishonest replay, collusion).
+	slashEng := validator.NewSlashEngine(validatorReg, &cfg.Validator)
+
+	// Challenge manager: tracks challenge bonds posted against validators.
+	var challengeMgr *assurance.ChallengeManager
+	var chalLoadErr error
+	if s != nil {
+		challengeMgr, chalLoadErr = assurance.LoadChallengesFromStore(&cfg.Assurance, s)
+		if chalLoadErr != nil {
+			slog.Error("failed to load challenge records from store", "err", chalLoadErr)
+			challengeMgr = assurance.NewChallengeManager(&cfg.Assurance, s)
+		}
+	} else {
+		challengeMgr = assurance.NewChallengeManager(&cfg.Assurance, nil)
+	}
+
+	// Bootstrap override: determines elevated replay rates and reward
+	// supplements during network launch phase. Launch time is persisted so
+	// it survives node restarts.
+	launchTime := time.Now()
+	if s != nil {
+		if data, metaErr := s.GetMeta("launch_time"); metaErr == nil && len(data) > 0 {
+			if nanos, parseErr := strconv.ParseInt(string(data), 10, 64); parseErr == nil {
+				launchTime = time.Unix(0, nanos)
+			}
+		} else {
+			// First boot: persist the launch time.
+			if putErr := s.PutMeta("launch_time", []byte(strconv.FormatInt(launchTime.UnixNano(), 10))); putErr != nil {
+				slog.Error("failed to persist launch_time", "err", putErr)
+			}
+		}
+	}
+	normalReplRates := assurance.BootstrapRates{
+		BaselineReplay:   0.20,
+		GenerationReplay: 0.35,
+		NewAgentReplay:   0.50,
+	}
+	bootstrapOvr := assurance.NewBootstrapOverride(&cfg.Assurance, validatorReg, launchTime, normalReplRates)
+
 	return &nodeStack{
 		dag:          d,
 		transfer:     tl,
@@ -632,6 +676,9 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 		taskRouter:      taskRouter,
 		validatorReg:    validatorReg,
 		assignmentEng:   assignmentEng,
+		slashEng:        slashEng,
+		challengeMgr:    challengeMgr,
+		bootstrapOvr:    bootstrapOvr,
 	}
 }
 

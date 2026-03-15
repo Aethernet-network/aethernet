@@ -81,6 +81,9 @@ type Validator struct {
 	RegisteredAt       time.Time       `json:"registered_at"`
 	LastStakeCheck     time.Time       `json:"last_stake_check"`
 	IsGenesis          bool            `json:"is_genesis"`
+	// Slashing history.
+	SlashCount       int    `json:"slash_count,omitempty"`
+	LastSlashOffense string `json:"last_slash_offense,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +427,87 @@ func (r *ValidatorRegistry) ResetProbationOnSlash(validatorID string) error {
 	}
 	slog.Info("validator: probation reset after slash",
 		"id", v.ID, "agent_id", v.AgentID, "new_cycle", v.ProbationCycle)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Slash helpers (called by SlashEngine in slashing.go)
+// ---------------------------------------------------------------------------
+
+// ApplySlash reduces a validator's stake by slashAmount and transitions it to
+// StatusSuspended for cooldownUntil, or to StatusExcluded when permanent is
+// true. SlashCount and LastSlashOffense are updated. Must NOT be called while
+// r.mu is held.
+func (r *ValidatorRegistry) ApplySlash(validatorID string, slashAmount uint64, offense string, cooldownUntil time.Time, permanent bool) (*Validator, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	v, ok := r.validators[validatorID]
+	if !ok {
+		return nil, ErrRegistryValidatorNotFound
+	}
+	// Clamp to available stake (avoid underflow).
+	if slashAmount > v.StakeAmount {
+		slashAmount = v.StakeAmount
+	}
+	v.StakeAmount -= slashAmount
+	v.SlashCount++
+	v.LastSlashOffense = offense
+
+	now := time.Now()
+	if permanent {
+		v.Status = StatusExcluded
+		// Clear time-limited suspension fields — this exclusion is permanent.
+		v.SuspendedUntil = time.Time{}
+		v.SuspensionReason = "slashed:" + offense + ":permanent"
+	} else {
+		v.Status = StatusSuspended
+		v.SuspendedAt = now
+		v.SuspendedUntil = cooldownUntil
+		v.SuspensionReason = "slashed:" + offense
+	}
+
+	if err := r.persistLocked(v); err != nil {
+		slog.Error("validator: failed to persist slash", "id", validatorID, "offense", offense, "err", err)
+		return nil, err
+	}
+	slog.Warn("validator: slashed", "id", validatorID, "offense", offense,
+		"slash_amount", slashAmount, "permanent", permanent)
+	cp := *v
+	return &cp, nil
+}
+
+// ResumeFromSlash lifts a slash-imposed suspension and restores the validator
+// to StatusActive. Returns an error if the cooldown has not expired, the
+// validator is permanently excluded, or the validator is not in a suspended
+// state caused by slashing. Must NOT be called while r.mu is held.
+func (r *ValidatorRegistry) ResumeFromSlash(validatorID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	v, ok := r.validators[validatorID]
+	if !ok {
+		return ErrRegistryValidatorNotFound
+	}
+	if v.Status == StatusExcluded {
+		return ErrSlashPermanentlyExcluded
+	}
+	if v.Status != StatusSuspended {
+		return fmt.Errorf("validator: %s is not suspended (current: %s)", validatorID, v.Status)
+	}
+	if !v.SuspendedUntil.IsZero() && time.Now().Before(v.SuspendedUntil) {
+		return ErrSlashInCooldown
+	}
+
+	v.Status = StatusActive
+	v.SuspendedUntil = time.Time{}
+	v.SuspensionReason = ""
+
+	if err := r.persistLocked(v); err != nil {
+		slog.Error("validator: failed to persist resume from slash", "id", validatorID, "err", err)
+		return err
+	}
+	slog.Info("validator: resumed from slash cooldown", "id", validatorID)
 	return nil
 }
 
