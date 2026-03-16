@@ -7,6 +7,8 @@
 package assurance
 
 import (
+	"fmt"
+
 	"github.com/Aethernet-network/aethernet/internal/config"
 )
 
@@ -114,15 +116,18 @@ func ComputeReplayExecutorPayout(assuranceFee uint64, reserve *ReplayReserve, ca
 //   - Replay:    does NOT accrue; executor payout was already drawn when
 //                ComputeReplayExecutorPayout was called
 //
-// Returns the full FeeSplitResult for the caller to distribute tokens.
-func ProcessSettlement(assuranceFee uint64, category string, replayOccurred bool, reserve *ReplayReserve, cfg *config.AssuranceConfig) *FeeSplitResult {
+// Returns the full FeeSplitResult and any error from updating the reserve.
+// If Accrue fails, the error is returned and the caller should not proceed
+// with token distribution (the reserve state was not modified).
+func ProcessSettlement(assuranceFee uint64, category string, replayOccurred bool, reserve *ReplayReserve, cfg *config.AssuranceConfig) (*FeeSplitResult, error) {
 	result := ComputeFeeSplit(assuranceFee, replayOccurred, cfg)
 	if reserve == nil {
-		return result
+		return result, nil
 	}
 	if !replayOccurred && result.ReplayReservePortion > 0 {
-		// Best-effort: log on failure is handled inside Accrue via store.
-		_ = reserve.Accrue(category, result.ReplayReservePortion)
+		if err := reserve.Accrue(category, result.ReplayReservePortion); err != nil {
+			return nil, fmt.Errorf("assurance: process settlement: accrue reserve: %w", err)
+		}
 	}
-	return result
+	return result, nil
 }

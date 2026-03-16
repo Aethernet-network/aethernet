@@ -203,7 +203,12 @@ var ErrNoEligibleValidators = errors.New("validator: no eligible validators avai
 func (e *AssignmentEngine) SelectValidator(category string, excludeIDs []string, _ bool) (*Validator, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.selectValidatorLocked(category, excludeIDs)
+}
 
+// selectValidatorLocked performs weighted random validator selection.
+// Must be called with e.mu held.
+func (e *AssignmentEngine) selectValidatorLocked(category string, excludeIDs []string) (*Validator, error) {
 	e.maybeResetEpoch()
 
 	// Build exclude set.
@@ -438,10 +443,14 @@ func (e *AssignmentEngine) CheckPairwiseClusters(isStructured bool) [][]string {
 // ---------------------------------------------------------------------------
 
 // SelectReplayExecutor selects a replay executor that is independent from the
-// original verifier and their cluster. It calls SelectValidator with the
-// original verifier's ID (and all their cluster mates) added to excludeIDs.
+// original verifier and their cluster. The entire operation — cluster read
+// and validator selection — is performed under a single lock acquisition to
+// prevent a TOCTOU race where the cluster map could be updated between the
+// two operations (M7 fix).
 func (e *AssignmentEngine) SelectReplayExecutor(category string, originalVerifierID string, originalVerifierCluster string) (*Validator, error) {
 	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	// Build exclude list: original verifier + all in their cluster.
 	excludeIDs := []string{originalVerifierID}
 	clusterID := e.clusters[originalVerifierID]
@@ -456,9 +465,8 @@ func (e *AssignmentEngine) SelectReplayExecutor(category string, originalVerifie
 			}
 		}
 	}
-	e.mu.Unlock()
 
-	return e.SelectValidator(category, excludeIDs, false)
+	return e.selectValidatorLocked(category, excludeIDs)
 }
 
 // ---------------------------------------------------------------------------

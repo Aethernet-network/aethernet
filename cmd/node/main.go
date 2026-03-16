@@ -427,6 +427,48 @@ func (a *slashEngineAdapter) Slash(validatorID string, offense string) (uint64, 
 	return result.SlashAmount, nil
 }
 
+// nodeNetworkState bridges *validator.ValidatorRegistry, *assurance.BootstrapOverride,
+// and *assurance.ReplayReserve into the api.networkStateSource interface. It is
+// constructed once in startStack and wired via apiSrv.SetNetworkStateSource.
+type nodeNetworkState struct {
+	validatorReg  *validator.ValidatorRegistry
+	bootstrapOvr  *assurance.BootstrapOverride
+	replayReserve *assurance.ReplayReserve
+	categories    []string
+}
+
+func (n *nodeNetworkState) IsBootstrapActive() bool {
+	if n.bootstrapOvr == nil {
+		return false
+	}
+	return n.bootstrapOvr.IsBootstrapActive()
+}
+
+func (n *nodeNetworkState) ActiveValidatorCount() int {
+	if n.validatorReg == nil {
+		return 0
+	}
+	return n.validatorReg.ActiveEligibleCount()
+}
+
+func (n *nodeNetworkState) ValidatorCountForCategory(category string) int {
+	if n.validatorReg == nil {
+		return 0
+	}
+	return n.validatorReg.ActiveCountForCategory(category)
+}
+
+func (n *nodeNetworkState) IsReplayReserveHealthy(category string) bool {
+	if n.replayReserve == nil {
+		return true // optimistic when no reserve is configured
+	}
+	return n.replayReserve.CategoryHealthy(category)
+}
+
+func (n *nodeNetworkState) AssuranceCategories() []string {
+	return n.categories
+}
+
 // challengeManagerAdapter bridges *assurance.ChallengeManager (L3) to the
 // api.challengeSource interface (also L3). The api package uses primitive
 // return types to avoid an assurance import; this adapter converts between
@@ -470,6 +512,30 @@ func (a *challengeManagerAdapter) ChallengesForTask(taskID string) []api.Challen
 		out = append(out, rec)
 	}
 	return out
+}
+
+func (a *challengeManagerAdapter) GetChallenge(id string) (api.ChallengeRecord, error) {
+	c, err := a.mgr.GetChallenge(id)
+	if err != nil {
+		return api.ChallengeRecord{}, err
+	}
+	rec := api.ChallengeRecord{
+		ID:           c.ID,
+		TaskID:       c.TaskID,
+		ChallengerID: c.ChallengerID,
+		TargetID:     c.TargetID,
+		Bond:         c.Bond,
+		Status:       string(c.Status),
+		CreatedAt:    c.CreatedAt.Format(time.RFC3339),
+	}
+	if !c.ResolvedAt.IsZero() {
+		rec.ResolvedAt = c.ResolvedAt.Format(time.RFC3339)
+	}
+	return rec, nil
+}
+
+func (a *challengeManagerAdapter) MinBond(taskBudget uint64) uint64 {
+	return a.mgr.MinBond(taskBudget)
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
@@ -1104,6 +1170,14 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		if stack.challengeMgr != nil {
 			apiSrv.SetChallengeManager(&challengeManagerAdapter{mgr: stack.challengeMgr})
 		}
+		// Wire network state source so GET /v1/network/state returns live
+		// bootstrap status, validator coverage, and replay reserve health.
+		apiSrv.SetNetworkStateSource(&nodeNetworkState{
+			validatorReg:  stack.validatorReg,
+			bootstrapOvr:  stack.bootstrapOvr,
+			replayReserve: stack.replayReserve,
+			categories:    cfg.Assurance.StructuredCategories,
+		})
 	}
 	apiSrv.SetEconomics(stack.walletMgr, stack.stakeManager, stack.feeCollector)
 	apiSrv.SetMinTaskBudget(cfg.Tasks.MinTaskBudget)

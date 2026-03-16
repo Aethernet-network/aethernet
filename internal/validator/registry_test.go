@@ -63,6 +63,13 @@ func (m *memValidatorStore) DeleteValidator(id string) error {
 	return nil
 }
 
+// failingValidatorStore always returns an error on PutValidator.
+type failingValidatorStore struct{ memValidatorStore }
+
+func (f *failingValidatorStore) PutValidator(_ string, _ []byte) error {
+	return errors.New("simulated store failure")
+}
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
@@ -612,5 +619,127 @@ func TestActiveCountForCategory_ExcludesInactive(t *testing.T) {
 
 	if got := r.ActiveCountForCategory("code"); got != 0 {
 		t.Errorf("ActiveCountForCategory(code): got %d, want 0 (validator suspended)", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// H1: Register with failing store — error returned, no in-memory mutation
+// ---------------------------------------------------------------------------
+
+// TestRegister_PersistFailure_NoInMemoryMutation verifies that when the
+// backing store returns an error, Register() returns the error and does NOT
+// add the validator to the in-memory maps (CLAUDE.md: persist before mutate).
+func TestRegister_PersistFailure_NoInMemoryMutation(t *testing.T) {
+	fs := &failingValidatorStore{}
+	fs.memValidatorStore.data = make(map[string][]byte)
+	r := NewValidatorRegistry(testCfg(), fs)
+
+	_, err := r.Register("agent-fail", sufficientStake, []string{"code"}, false)
+	if err == nil {
+		t.Fatal("expected error from failing store, got nil")
+	}
+
+	// In-memory state must be untouched.
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.validators) != 0 {
+		t.Errorf("validators map should be empty after persist failure, got %d entries", len(r.validators))
+	}
+	if len(r.byAgent) != 0 {
+		t.Errorf("byAgent map should be empty after persist failure, got %d entries", len(r.byAgent))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M6: byAgent index cleaned on permanent exclusion
+// ---------------------------------------------------------------------------
+
+// TestEvaluateProbation_Exclusion_RemovesFromByAgent verifies that when a
+// validator reaches the max probation cycle and is set to StatusExcluded,
+// the reverse byAgent index entry is removed.
+func TestEvaluateProbation_Exclusion_RemovesFromByAgent(t *testing.T) {
+	cfg := testCfg()
+	cfg.ProbationMaxCycles = 1
+	r := NewValidatorRegistry(cfg, nil)
+	v, _ := r.Register("agent-excl", sufficientStake, nil, false)
+	id := v.ID
+
+	// Backdate and fail probation once to exhaust the single cycle.
+	r.mu.Lock()
+	r.validators[id].ProbationStartedAt = time.Now().Add(-31 * 24 * time.Hour)
+	r.validators[id].ProbationTaskCount = 0
+	r.mu.Unlock()
+
+	err := r.EvaluateProbation(id)
+	if !errors.Is(err, ErrMaxProbationCyclesExceeded) {
+		t.Fatalf("expected ErrMaxProbationCyclesExceeded, got %v", err)
+	}
+
+	// byAgent entry must be removed.
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if _, ok := r.byAgent["agent-excl"]; ok {
+		t.Error("byAgent entry should be removed after permanent exclusion")
+	}
+}
+
+// TestApplySlash_Permanent_RemovesFromByAgent verifies that a permanent slash
+// (StatusExcluded) removes the reverse byAgent index entry.
+func TestApplySlash_Permanent_RemovesFromByAgent(t *testing.T) {
+	r := NewValidatorRegistry(testCfg(), nil)
+	v, _ := r.Register("agent-perm-slash", sufficientStake, nil, true)
+
+	_, err := r.ApplySlash(v.ID, 1000, "collusion", time.Time{}, true)
+	if err != nil {
+		t.Fatalf("ApplySlash: %v", err)
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if _, ok := r.byAgent["agent-perm-slash"]; ok {
+		t.Error("byAgent entry should be removed after permanent slash exclusion")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M8: EvaluateProbation — promote persist failure rolls back in-memory state
+// ---------------------------------------------------------------------------
+
+// TestEvaluateProbation_PromotePersistFailure_Rollback verifies that when the
+// backing store fails to persist the StatusActive transition, the validator's
+// in-memory state is rolled back to StatusProbationary.
+func TestEvaluateProbation_PromotePersistFailure_Rollback(t *testing.T) {
+	fs := &failingValidatorStore{}
+	fs.memValidatorStore.data = make(map[string][]byte)
+	// Seed the registry with a validator using a non-failing store first,
+	// then swap to the failing store so only the promotion write fails.
+	goodStore := newMemValidatorStore()
+	cfg := testCfg()
+	r := NewValidatorRegistry(cfg, goodStore)
+	v, _ := r.Register("agent-m8", sufficientStake, nil, false)
+	id := v.ID
+
+	// Switch to the failing store.
+	r.store = fs
+
+	// Satisfy promotion requirements.
+	r.mu.Lock()
+	r.validators[id].ProbationStartedAt = time.Now().Add(-31 * 24 * time.Hour)
+	r.validators[id].ProbationTaskCount = 60
+	r.validators[id].ProbationAccuracy = 0.85
+	r.mu.Unlock()
+
+	err := r.EvaluateProbation(id)
+	if err == nil {
+		t.Fatal("expected error from failing store, got nil")
+	}
+
+	// In-memory state must be rolled back to probationary.
+	got, _ := r.Get(id)
+	if got.Status != StatusProbationary {
+		t.Errorf("expected StatusProbationary after rollback, got %s", got.Status)
+	}
+	if !got.ActivatedAt.IsZero() {
+		t.Errorf("ActivatedAt should be zero after rollback, got %v", got.ActivatedAt)
 	}
 }

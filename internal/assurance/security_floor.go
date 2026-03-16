@@ -66,6 +66,15 @@ func (sf *SecurityFloor) SetState(s CategorySecurityState) {
 //     lane (possibly LaneNone). The caller must treat Lane != requestedLane as
 //     an insufficient_category_security condition.
 //   - For LaneNone the result is always Lane == LaneNone.
+//
+// TOCTOU note (M5): CheckLane reads the validator count under a read-lock and
+// returns without holding any lock. In a multi-node deployment, a subsequent
+// task commit is a separate operation — between the floor check and the commit
+// the validator count could decrease (e.g. a validator disconnects). For
+// single-node testnet this window is acceptable.
+// TODO: For multi-node deployments, the security floor check and task commit
+// should be atomic or use optimistic locking (e.g. a generation counter that
+// is verified at commit time).
 func (sf *SecurityFloor) CheckLane(category string, lane AssuranceLane) *AssuranceFeeResult {
 	if lane == LaneNone {
 		return &AssuranceFeeResult{Lane: LaneNone}

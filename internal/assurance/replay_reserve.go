@@ -13,6 +13,7 @@ package assurance
 
 import (
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/Aethernet-network/aethernet/internal/config"
@@ -74,6 +75,8 @@ func LoadFromStore(cfg *config.AssuranceConfig, s reserveStore, categories []str
 
 // lazyLoad fetches the stored balance for category if it has not yet been
 // loaded into memory. Must be called with r.mu held (write-lock).
+// On store read failure the balance defaults to zero and a warning is logged
+// so operators can detect persistence issues (M4 fix).
 func (r *ReplayReserve) lazyLoad(category string) {
 	if r.store == nil {
 		return
@@ -81,9 +84,13 @@ func (r *ReplayReserve) lazyLoad(category string) {
 	if _, loaded := r.balances[category]; loaded {
 		return
 	}
-	if bal, err := r.store.GetReplayReserve(category); err == nil {
-		r.balances[category] = bal
+	bal, err := r.store.GetReplayReserve(category)
+	if err != nil {
+		slog.Warn("assurance: replay reserve: failed to load category balance from store — defaulting to zero",
+			"category", category, "err", err)
+		return
 	}
+	r.balances[category] = bal
 }
 
 // Accrue adds amount to the category's reserve balance and persists to store.

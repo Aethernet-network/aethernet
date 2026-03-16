@@ -1,288 +1,531 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AetherNet Explorer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
-  <script src="https://unpkg.com/prop-types@15/prop-types.min.js" crossorigin></script>
-  <script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js" crossorigin></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
   <style>
-    body { background-color: #0A1220; color: #e2e8f0; font-family: 'Inter', 'Segoe UI', sans-serif; }
-
-    /* ── Cards & Layout ────────────────────────────────────────────────────── */
-    .card { background-color: #1E2D40; border: 1px solid #2d4a6b; border-radius: 0.75rem; }
-    .hero-section { background: linear-gradient(135deg, rgba(0,212,170,0.06) 0%, transparent 70%);
-                    border: 1px solid rgba(0,212,170,0.18); border-radius: 1rem; padding: 2rem; }
-    .pillar-card { background: #1E2D40; border: 1px solid #2d4a6b; border-left: 3px solid #00D4AA;
-                   border-radius: 0.75rem; padding: 1.25rem; }
-
-    /* ── Wallet Drawer ─────────────────────────────────────────────────────── */
-    .wallet-drawer { position: fixed; top: 0; right: 0; width: 380px; height: 100%;
-                     background: #15202E; border-left: 1px solid #2d4a6b; z-index: 40;
-                     transform: translateX(100%); transition: transform 0.25s cubic-bezier(0.4,0,0.2,1);
-                     display: flex; flex-direction: column; overflow: hidden; }
-    .wallet-drawer.open { transform: translateX(0); }
-    .drawer-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5);
-                      backdrop-filter: blur(2px); z-index: 39; }
-
-    /* ── Badges & Status ───────────────────────────────────────────────────── */
-    .status-open       { background: rgba(52,211,153,0.15); color: #34d399; }
-    .status-claimed    { background: rgba(96,165,250,0.15); color: #60a5fa; }
-    .status-submitted  { background: rgba(251,191,36,0.15); color: #fbbf24; }
-    .status-completed  { background: rgba(0,212,170,0.15); color: #00D4AA; }
-    .status-disputed   { background: rgba(248,113,113,0.15); color: #f87171; }
-    .status-cancelled  { background: rgba(100,116,139,0.15); color: #64748b; }
-    .status-other      { background: rgba(100,116,139,0.15); color: #64748b; }
-    .lane-unassured    { background: rgba(100,116,139,0.2);  color: #64748b; }
-    .lane-standard     { background: rgba(96,165,250,0.15);  color: #60a5fa; }
-    .lane-high         { background: rgba(0,212,170,0.15);   color: #00D4AA; }
-    .lane-enterprise   { background: rgba(192,132,252,0.15); color: #c084fc; }
-    .badge-transfer    { background: #1e3a5f; color: #60a5fa; }
-    .badge-generation  { background: #1a3d2e; color: #34d399; }
-    .badge-verification { background: #3d2a1a; color: #fb923c; }
-    .badge-attestation  { background: #3d1a3d; color: #c084fc; }
-    .badge-delegation   { background: #3d2a1a; color: #fbbf24; }
-    .badge-other        { background: #2a2a3d; color: #94a3b8; }
-
-    /* ── Skeleton & Animations ─────────────────────────────────────────────── */
-    .skeleton { background: linear-gradient(90deg,#1E2D40 25%,#243547 50%,#1E2D40 75%);
-                background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 0.375rem; }
-    @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
-    .fade-in { animation: fadeIn 0.35s ease-in; }
-    @keyframes fadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
-    .toast-in { animation: toastIn 0.28s ease-out; }
-    @keyframes toastIn { from{transform:translateX(120%);opacity:0} to{transform:translateX(0);opacity:1} }
-
-    /* ── Scrollbar ─────────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background: #080D18;
+      color: #D8E4F0;
+      font-size: 14px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+    .mono { font-family: 'IBM Plex Mono', 'Fira Code', 'Cascadia Code', monospace; }
     ::-webkit-scrollbar { width: 5px; height: 5px; }
-    ::-webkit-scrollbar-track { background: #0A1220; }
-    ::-webkit-scrollbar-thumb { background: #2d4a6b; border-radius: 3px; }
-
-    /* ── Table ─────────────────────────────────────────────────────────────── */
-    table { border-collapse: collapse; width: 100%; }
-    th { text-align: left; padding: 0.6rem 1rem; font-size: 0.7rem; text-transform: uppercase;
-         letter-spacing: 0.06em; color: #64748b; border-bottom: 1px solid #2d4a6b; white-space: nowrap; }
-    td { padding: 0.625rem 1rem; font-size: 0.8125rem; border-bottom: 1px solid #1a2535; }
-    tr:last-child td { border-bottom: none; }
-    tr:hover td { background: #1a2535; }
-
-    /* ── Form Controls ─────────────────────────────────────────────────────── */
-    .ifield { background: #0A1220; border: 1px solid #2d4a6b; border-radius: 0.5rem;
-              color: #e2e8f0; padding: 0.5rem 0.75rem; width: 100%; font-size: 0.875rem;
-              outline: none; transition: border-color 0.15s; box-sizing: border-box; }
-    .ifield:focus { border-color: #00D4AA; }
-    .ifield::placeholder { color: #475569; }
-    textarea.ifield { resize: vertical; }
-    select.ifield { appearance: none; cursor: pointer; }
-    .label { font-size: 0.75rem; color: #64748b; display: block; margin-bottom: 0.25rem; }
-
-    /* ── Buttons ───────────────────────────────────────────────────────────── */
-    .btn-p { background: #00D4AA; color: #000; font-weight: 600; padding: 0.5rem 1rem;
-              border-radius: 0.5rem; font-size: 0.875rem; cursor: pointer; border: none;
-              transition: opacity 0.15s; }
-    .btn-p:hover:not(:disabled) { opacity: 0.85; }
-    .btn-p:disabled { opacity: 0.4; cursor: not-allowed; }
-    .btn-s { background: transparent; color: #00D4AA; font-weight: 500; padding: 0.375rem 0.75rem;
-              border-radius: 0.5rem; font-size: 0.8125rem; cursor: pointer;
-              border: 1px solid #00D4AA; transition: background 0.15s; white-space: nowrap; }
-    .btn-s:hover { background: rgba(0,212,170,0.1); }
-    .btn-d { background: transparent; color: #f87171; font-weight: 500; padding: 0.375rem 0.75rem;
-              border-radius: 0.5rem; font-size: 0.8125rem; cursor: pointer;
-              border: 1px solid #f87171; transition: background 0.15s; }
-    .btn-d:hover { background: rgba(248,113,113,0.1); }
-    .btn-sm { background: transparent; color: #64748b; font-size: 0.8125rem; cursor: pointer;
-               border: 1px solid #2d4a6b; border-radius: 0.375rem; padding: 0.25rem 0.625rem;
-               transition: all 0.15s; white-space: nowrap; }
-    .btn-sm:hover { color: #e2e8f0; border-color: #475569; }
-
-    /* ── Nav & Panel Tabs ──────────────────────────────────────────────────── */
-    .ptab { flex: 1; text-align: center; font-size: 0.8125rem; padding: 0.6rem 0.25rem;
-             cursor: pointer; transition: all 0.15s; color: #64748b; border-bottom: 2px solid transparent; }
-    .ptab:hover { color: #e2e8f0; }
-    .ptab.active { color: #00D4AA; border-bottom-color: #00D4AA; font-weight: 600; }
-
-    /* ── Toast ─────────────────────────────────────────────────────────────── */
-    .toast { background: #1E2D40; border-left: 3px solid #2d4a6b; border-radius: 0 0.5rem 0.5rem 0;
-              padding: 0.75rem 1rem; font-size: 0.8125rem; max-width: 320px;
-              box-shadow: 0 4px 24px rgba(0,0,0,0.5); }
-    .toast-s { border-left-color: #34d399; }
-    .toast-e { border-left-color: #f87171; }
-    .toast-i { border-left-color: #60a5fa; }
-
-    /* ── Info/Warn boxes ───────────────────────────────────────────────────── */
-    .warn-box { background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.3);
-                border-radius: 0.5rem; padding: 0.5rem 0.75rem; color: #fbbf24; font-size: 0.75rem; }
-    .info-box { background: rgba(96,165,250,0.08); border: 1px solid rgba(96,165,250,0.3);
-                border-radius: 0.5rem; padding: 0.5rem 0.75rem; color: #93c5fd; font-size: 0.75rem; }
-
-    /* ── Utilities ─────────────────────────────────────────────────────────── */
-    .line-clamp-1 { overflow:hidden; display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; }
-    .line-clamp-2 { overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #1E2D42; border-radius: 4px; }
+    :focus-visible { outline: 2px solid #0D9488; outline-offset: 2px; }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+    }
   </style>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['IBM Plex Mono', 'Fira Code', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useEffect, useRef, useCallback, useMemo } = React;
-const { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } = window.Recharts || {};
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
+const { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } = Recharts;
 
+// ─── API ──────────────────────────────────────────────────────────────────────
 const API = window.location.origin;
 
-// ─── API Helpers ──────────────────────────────────────────────────────────────
 async function apiFetch(path) {
   const r = await fetch(API + path);
-  if (!r.ok) throw new Error(`${r.status}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
 
 async function apiPost(path, body) {
   const r = await fetch(API + path, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
   });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || data.message || `${r.status}`);
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
   return data;
 }
 
-// ─── Formatters ───────────────────────────────────────────────────────────────
+// ─── Formatting ───────────────────────────────────────────────────────────────
+// 1 AET = 1,000,000 µAET
+function fmtAET(uAET) {
+  if (uAET == null) return '—';
+  const n = Number(uAET);
+  if (n >= 1e15) return (n / 1e12).toFixed(0) + 'B AET';
+  if (n >= 1e12) return (n / 1e12).toFixed(2) + 'M AET';
+  if (n >= 1e9)  return (n / 1e9).toFixed(2) + 'K AET';
+  if (n >= 1e6)  return (n / 1e6).toFixed(2) + ' AET';
+  if (n >= 1e3)  return (n / 1e3).toFixed(1) + ' mAET';
+  return n + ' µAET';
+}
+
 function fmtNum(n) {
   if (n == null) return '—';
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
-  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-  return String(n);
+  const v = Number(n);
+  if (v >= 1e9) return (v / 1e9).toFixed(1) + 'B';
+  if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+  return v.toLocaleString();
 }
 
-function fmtAET(µAET) {
-  if (!µAET) return '0 AET';
-  const aet = µAET / 1e6;
-  if (aet >= 1e6) return (aet / 1e6).toFixed(2) + 'M AET';
-  if (aet >= 1e3) return (aet / 1e3).toFixed(2) + 'K AET';
-  return aet.toFixed(aet < 1 ? 4 : 2) + ' AET';
+function fmtScore(n) {
+  if (n == null) return '—';
+  // Reputation score is 0–1000; display as 0–100
+  return (Number(n) / 10).toFixed(1);
 }
 
-function truncate(s, n = 12) {
-  if (!s) return '';
-  return s.length > n * 2 ? s.slice(0, n) + '…' + s.slice(-6) : s;
+function trunc(s, n = 14) {
+  if (!s) return '—';
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+function ago(ns) {
+  if (!ns) return '—';
+  let ms;
+  if (typeof ns === 'string' && (ns.includes('T') || ns.includes('-'))) {
+    ms = new Date(ns).getTime();
+  } else {
+    try { ms = Number(BigInt(String(ns)) / 1000000n); }
+    catch { ms = Number(ns) / 1e6; }
+  }
+  const diff = Date.now() - ms;
+  if (diff < 5000)     return 'just now';
+  if (diff < 60000)    return Math.floor(diff / 1000) + 's ago';
+  if (diff < 3600000)  return Math.floor(diff / 60000) + 'm ago';
+  if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
+  return Math.floor(diff / 86400000) + 'd ago';
 }
 
 function statusLabel(s) {
-  return ({
-    open: 'Open', claimed: 'In Progress', submitted: 'Review',
+  return {
+    open: 'Open', claimed: 'In progress', submitted: 'Under review',
     completed: 'Settled', disputed: 'Disputed', cancelled: 'Cancelled',
-  })[s?.toLowerCase()] || s || '—';
+  }[s?.toLowerCase()] || s || '—';
 }
 
-function statusStyle(s) {
-  return ({
-    open: 'status-open', claimed: 'status-claimed', submitted: 'status-submitted',
-    completed: 'status-completed', disputed: 'status-disputed', cancelled: 'status-cancelled',
-  })[s?.toLowerCase()] || 'status-other';
+function laneLabel(l) {
+  return { standard: 'Standard', high_assurance: 'High assurance', enterprise: 'Enterprise' }[l] || 'Unassured';
 }
 
-function laneLabel(lane) {
-  if (!lane) return 'Unassured';
-  return ({ standard: 'Standard', high_assurance: 'High Assurance', enterprise: 'Enterprise' })[lane] || lane;
-}
+// ─── Status chips ─────────────────────────────────────────────────────────────
+const CHIP = {
+  // Task status
+  open:            'bg-blue-500/10 text-blue-300 border border-blue-500/20',
+  'in progress':   'bg-teal-500/10 text-teal-300 border border-teal-500/20',
+  claimed:         'bg-teal-500/10 text-teal-300 border border-teal-500/20',
+  'under review':  'bg-indigo-400/10 text-indigo-300 border border-indigo-400/20',
+  submitted:       'bg-indigo-400/10 text-indigo-300 border border-indigo-400/20',
+  settled:         'bg-green-500/10 text-green-300 border border-green-500/20',
+  completed:       'bg-green-500/10 text-green-300 border border-green-500/20',
+  disputed:        'bg-amber-500/10 text-amber-300 border border-amber-500/20',
+  cancelled:       'bg-slate-500/10 text-slate-400 border border-slate-500/20',
+  // Validator status
+  active:          'bg-green-500/10 text-green-300 border border-green-500/20',
+  probationary:    'bg-amber-500/10 text-amber-300 border border-amber-500/20',
+  'in probation':  'bg-amber-500/10 text-amber-300 border border-amber-500/20',
+  suspended:       'bg-red-500/10 text-red-300 border border-red-500/20',
+  cooldown:        'bg-amber-500/10 text-amber-300 border border-amber-500/20',
+  slashed:         'bg-red-500/10 text-red-300 border border-red-500/20',
+  excluded:        'bg-red-900/30 text-red-400 border border-red-800/30',
+  // Replay
+  replay_pending:  'bg-indigo-400/10 text-indigo-300 border border-indigo-400/20',
+  replay_complete: 'bg-green-500/10 text-green-300 border border-green-500/20',
+  replay_disputed: 'bg-red-500/10 text-red-300 border border-red-500/20',
+  // Misc
+  healthy:         'bg-green-500/10 text-green-300 border border-green-500/20',
+  degraded:        'bg-amber-500/10 text-amber-300 border border-amber-500/20',
+  bootstrap:       'bg-amber-500/10 text-amber-300 border border-amber-500/20',
+  live:            'bg-green-500/10 text-green-300 border border-green-500/20',
+  offline:         'bg-slate-500/10 text-slate-400 border border-slate-500/20',
+};
 
-function laneStyle(lane) {
-  if (!lane) return 'lane-unassured';
-  return ({ standard: 'lane-standard', high_assurance: 'lane-high', enterprise: 'lane-enterprise' })[lane] || 'lane-unassured';
-}
-
-// ─── Toast System ─────────────────────────────────────────────────────────────
-function useToasts() {
-  const [toasts, setToasts] = useState([]);
-  const addToast = useCallback((msg, type = 'success') => {
-    const id = Date.now() + Math.random();
-    setToasts(prev => [...prev, { id, msg, type }]);
-    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3500);
-  }, []);
-  return [toasts, addToast];
-}
-
-function ToastContainer({ toasts }) {
+function Chip({ label, style: extra }) {
+  const cls = extra || CHIP[label?.toLowerCase()] || 'bg-slate-500/10 text-slate-400 border border-slate-500/20';
   return (
-    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 items-end" style={{pointerEvents:'none'}}>
+    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium whitespace-nowrap ${cls}`}>
+      {label}
+    </span>
+  );
+}
+
+function StatusChip({ status }) {
+  return <Chip label={statusLabel(status)} />;
+}
+
+function LaneBadge({ lane }) {
+  if (!lane) return <Chip label="Unassured" style={CHIP.cancelled} />;
+  const s = {
+    standard:       'bg-teal-500/10 text-teal-300 border border-teal-500/20',
+    high_assurance: 'bg-blue-500/10 text-blue-300 border border-blue-500/20',
+    enterprise:     'bg-indigo-400/10 text-indigo-300 border border-indigo-400/20',
+  };
+  return <Chip label={laneLabel(lane)} style={s[lane]} />;
+}
+
+function ReplayChip({ status }) {
+  if (!status) return null;
+  const labels = {
+    replay_pending:  'Replay pending',
+    replay_complete: 'Replay done',
+    replay_disputed: 'Replay disputed',
+  };
+  return <Chip label={labels[status] || status} />;
+}
+
+// ─── Layout primitives ────────────────────────────────────────────────────────
+function Card({ children, className = '' }) {
+  return (
+    <div className={`rounded-lg border border-[#1B2A3D] bg-[#0D1624] ${className}`}>
+      {children}
+    </div>
+  );
+}
+
+function SectionLabel({ children, action }) {
+  return (
+    <div className="flex items-center justify-between mb-3">
+      <div className="text-xs font-semibold uppercase tracking-wider text-[#3E566E]">
+        {children}
+      </div>
+      {action && <div>{action}</div>}
+    </div>
+  );
+}
+
+// ─── Metric card ──────────────────────────────────────────────────────────────
+function Metric({ label, value, sub, mono = false, accent = false }) {
+  return (
+    <div>
+      <div className={`text-2xl font-semibold tracking-tight leading-none mb-1 ${
+        accent ? 'text-[#0D9488]' : 'text-[#D8E4F0]'
+      } ${mono ? 'font-mono' : ''}`}>
+        {value ?? '—'}
+      </div>
+      <div className="text-xs text-[#5A7490]">{label}</div>
+      {sub && <div className="text-xs text-[#3E566E] mt-0.5">{sub}</div>}
+    </div>
+  );
+}
+
+// ─── Event types ──────────────────────────────────────────────────────────────
+const EVT = {
+  Transfer:     { dot: 'bg-teal-400',   text: 'text-teal-300',   label: 'Transfer' },
+  Generation:   { dot: 'bg-indigo-400', text: 'text-indigo-300', label: 'Generation' },
+  Verification: { dot: 'bg-blue-400',   text: 'text-blue-300',   label: 'Verification' },
+  Attestation:  { dot: 'bg-purple-400', text: 'text-purple-300', label: 'Attestation' },
+  Delegation:   { dot: 'bg-slate-400',  text: 'text-slate-300',  label: 'Delegation' },
+};
+
+function EventTypeBadge({ type }) {
+  const t = EVT[type] || { dot: 'bg-slate-400', text: 'text-slate-300', label: type };
+  return (
+    <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${t.text}`}>
+      <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${t.dot}`} />
+      {t.label}
+    </span>
+  );
+}
+
+function EventRow({ ev }) {
+  let detail = '';
+  if (ev.from && ev.to) {
+    detail = `${trunc(ev.from, 12)} → ${trunc(ev.to, 12)}`;
+    if (ev.amount) detail += `  ${fmtAET(ev.amount)}`;
+  } else if (ev.agent_id) {
+    detail = trunc(ev.agent_id, 20);
+  }
+  return (
+    <div className="flex items-center gap-3 py-2.5 border-b border-[#111D2C] last:border-0">
+      <div className="flex-shrink-0 w-[88px]">
+        <EventTypeBadge type={ev.type} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <span className="font-mono text-xs text-[#6BA8C8]">{trunc(ev.id, 18)}</span>
+        {detail && <span className="ml-2 text-xs text-[#5A7490]">{detail}</span>}
+      </div>
+      <div className="flex-shrink-0 text-xs text-[#3E566E] tabular-nums">{ago(ev.causal_timestamp)}</div>
+    </div>
+  );
+}
+
+// ─── Security floor table ─────────────────────────────────────────────────────
+function FloorRow({ cat }) {
+  const avail = [
+    { key: 'standard_available',    label: 'Standard',       floor: cat.floor_standard },
+    { key: 'high_available',        label: 'High assurance', floor: cat.floor_high },
+    { key: 'enterprise_available',  label: 'Enterprise',     floor: cat.floor_enterprise },
+  ];
+  return (
+    <tr className="border-b border-[#111D2C] last:border-0 hover:bg-[#101826] transition-colors">
+      <td className="px-4 py-2.5 font-mono text-xs text-[#6BA8C8]">{cat.name}</td>
+      <td className="px-4 py-2.5 text-right font-semibold text-sm text-[#D8E4F0]">{cat.validator_count}</td>
+      {avail.map(a => (
+        <td key={a.key} className="px-4 py-2.5 text-center">
+          {cat[a.key]
+            ? <span className="text-green-400 text-xs font-medium">Available</span>
+            : <span className="text-[#3E566E] text-xs">Need {a.floor}</span>}
+        </td>
+      ))}
+      <td className="px-4 py-2.5">
+        {cat.replay_reserve_healthy !== undefined
+          ? <Chip label={cat.replay_reserve_healthy ? 'Healthy' : 'Low'} style={cat.replay_reserve_healthy ? CHIP.healthy : CHIP.degraded} />
+          : <span className="text-xs text-[#3E566E]">—</span>}
+      </td>
+    </tr>
+  );
+}
+
+function SecurityFloorTable({ categories }) {
+  if (!categories?.length) {
+    return <div className="text-sm text-[#3E566E] py-4 text-center">No category data available.</div>;
+  }
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="text-xs text-[#3E566E] border-b border-[#1B2A3D]">
+          <th className="text-left px-4 py-2 font-medium">Category</th>
+          <th className="text-right px-4 py-2 font-medium">Validators</th>
+          <th className="text-center px-4 py-2 font-medium">Standard (≥3)</th>
+          <th className="text-center px-4 py-2 font-medium">High assurance (≥5)</th>
+          <th className="text-center px-4 py-2 font-medium">Enterprise (≥10)</th>
+          <th className="text-left px-4 py-2 font-medium">Reserve</th>
+        </tr>
+      </thead>
+      <tbody>
+        {categories.map(c => <FloorRow key={c.name} cat={c} />)}
+      </tbody>
+    </table>
+  );
+}
+
+// ─── Bootstrap banner ─────────────────────────────────────────────────────────
+function BootstrapBanner({ validatorCount }) {
+  const needed = Math.max(0, 20 - (validatorCount || 0));
+  return (
+    <div className="rounded-lg border border-amber-500/25 bg-amber-950/30 px-4 py-3 flex gap-3">
+      <div className="flex-shrink-0 mt-0.5 text-amber-400">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0114.082 15H1.918a1.75 1.75 0 01-1.543-2.575zM8 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 018 5zm1 7.25a1 1 0 11-2 0 1 1 0 012 0z"/>
+        </svg>
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-semibold text-amber-300 mb-0.5">Bootstrap phase active</div>
+        <div className="text-xs text-amber-400/75 leading-relaxed">
+          {needed > 0
+            ? `The network needs ${needed} more active validator${needed !== 1 ? 's' : ''} (and 90 days of runtime) to exit bootstrap mode. `
+            : 'The network has reached the validator threshold but the 90-day duration requirement may still be pending. '}
+          Replay rates are elevated (40–75%) and per-task reward supplements apply to accelerate validator calibration and reduce fraud risk.
+        </div>
+      </div>
+      <div className="flex-shrink-0"><Chip label="Bootstrap" /></div>
+    </div>
+  );
+}
+
+// ─── Volume chart ─────────────────────────────────────────────────────────────
+function VolumeChart({ buckets }) {
+  if (!buckets?.length) {
+    return <div className="h-28 flex items-center justify-center text-sm text-[#3E566E]">No activity data</div>;
+  }
+  const data = buckets.map(b => ({ hour: b.hour, volume: b.volume / 1e6 }));
+  return (
+    <ResponsiveContainer width="100%" height={112}>
+      <BarChart data={data} margin={{ top: 2, right: 0, left: 0, bottom: 0 }}>
+        <CartesianGrid vertical={false} stroke="#131E2D" />
+        <XAxis dataKey="hour" tick={{ fontSize: 10, fill: '#3E566E', fontFamily: 'inherit' }} tickLine={false} axisLine={false} interval={3} />
+        <YAxis hide />
+        <Tooltip
+          contentStyle={{ background: '#0D1624', border: '1px solid #1B2A3D', borderRadius: 6, fontSize: 11, fontFamily: 'IBM Plex Mono, monospace' }}
+          labelStyle={{ color: '#D8E4F0', marginBottom: 2 }}
+          formatter={(v) => [v.toFixed(2) + ' AET', 'Volume']}
+          cursor={{ fill: 'rgba(13,148,136,0.06)' }}
+        />
+        <Bar dataKey="volume" fill="#0D9488" radius={[2, 2, 0, 0]} maxBarSize={12} />
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+// ─── Navigation ───────────────────────────────────────────────────────────────
+const PAGES = [
+  { id: 'overview',   label: 'Overview' },
+  { id: 'network',    label: 'Network' },
+  { id: 'tasks',      label: 'Tasks' },
+  { id: 'validators', label: 'Validators' },
+  { id: 'activity',   label: 'Activity' },
+];
+
+function Nav({ page, setPage, agent, drawerOpen, setDrawerOpen }) {
+  return (
+    <nav className="sticky top-0 z-30 border-b border-[#131E2D] bg-[#080D18]/96 backdrop-blur-md">
+      <div className="max-w-7xl mx-auto px-4 h-[52px] flex items-center gap-5">
+        {/* Wordmark */}
+        <div className="flex items-center gap-2 flex-shrink-0 mr-2">
+          <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+            <rect width="22" height="22" rx="5" fill="#0D9488" fillOpacity="0.15"/>
+            <rect x="1" y="1" width="20" height="20" rx="4" stroke="#0D9488" strokeOpacity="0.4" strokeWidth="1"/>
+            <path d="M6 16L11 6L16 16M8.5 12.5H13.5" stroke="#0D9488" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          <span className="text-sm font-semibold text-[#D8E4F0] tracking-tight">AetherNet</span>
+          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-teal-500/10 text-teal-400 border border-teal-500/20 leading-none">testnet</span>
+        </div>
+
+        {/* Page tabs */}
+        <div className="flex items-center gap-0.5 flex-1">
+          {PAGES.map(p => (
+            <button
+              key={p.id}
+              onClick={() => setPage(p.id)}
+              className={`px-3 py-1.5 rounded-md text-sm transition-all duration-150 cursor-pointer select-none ${
+                page === p.id
+                  ? 'bg-[#182636] text-[#D8E4F0] font-medium'
+                  : 'text-[#5A7490] hover:text-[#D8E4F0] hover:bg-[#101D2C]'
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Wallet toggle */}
+        <button
+          onClick={() => setDrawerOpen(o => !o)}
+          className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm border transition-all duration-150 cursor-pointer select-none ${
+            drawerOpen
+              ? 'bg-[#182636] border-[#253E56] text-[#D8E4F0]'
+              : 'border-[#1B2A3D] text-[#5A7490] hover:text-[#D8E4F0] hover:border-[#253E56] hover:bg-[#101D2C]'
+          }`}
+        >
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M1.5 2A1.5 1.5 0 000 3.5v2h16v-2A1.5 1.5 0 0014.5 2h-13zM16 7H0v6.5A1.5 1.5 0 001.5 15h13a1.5 1.5 0 001.5-1.5V7zm-6 2h2.5a.5.5 0 010 1H10a.5.5 0 010-1z"/>
+          </svg>
+          {agent
+            ? <span className="font-mono text-xs text-[#0D9488]">{trunc(agent.agent_id, 10)}</span>
+            : <span>Wallet</span>}
+        </button>
+      </div>
+    </nav>
+  );
+}
+
+// ─── Toast system ─────────────────────────────────────────────────────────────
+function Toast({ toasts }) {
+  return (
+    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
       {toasts.map(t => (
-        <div key={t.id} className={`toast toast-in ${t.type === 'success' ? 'toast-s' : t.type === 'error' ? 'toast-e' : 'toast-i'}`}>
-          <span className={t.type === 'success' ? 'text-green-400' : t.type === 'error' ? 'text-red-400' : 'text-blue-400'}>
-            {t.type === 'success' ? '✓ ' : t.type === 'error' ? '✗ ' : 'ℹ '}
-          </span>
-          {t.msg}
+        <div key={t.id} className={`px-3.5 py-2.5 rounded-lg text-sm shadow-lg border pointer-events-auto max-w-xs leading-snug ${
+          t.type === 'error'   ? 'bg-red-950/90 border-red-800/50 text-red-200' :
+          t.type === 'success' ? 'bg-green-950/90 border-green-800/50 text-green-200' :
+          'bg-[#0D1624] border-[#1B2A3D] text-[#D8E4F0]'
+        }`}>
+          {t.message}
         </div>
       ))}
     </div>
   );
 }
 
-// ─── Base Components ──────────────────────────────────────────────────────────
-function Skeleton({ w = 'w-full', h = 'h-4' }) {
-  return <div className={`skeleton ${w} ${h}`} />;
-}
+// ─── Wallet drawer ─────────────────────────────────────────────────────────────
+function WalletDrawer({ open, onClose, agent, setAgent, addToast }) {
+  const [tab, setTab] = useState('identity');
+  const TABS = [
+    { id: 'identity', label: 'Identity' },
+    { id: 'post',     label: 'Post task' },
+    { id: 'mine',     label: 'My tasks' },
+    { id: 'send',     label: 'Send' },
+  ];
 
-function StatCard({ label, value, sub, dim }) {
   return (
-    <div className="card p-4">
-      <div className={`text-2xl font-bold ${dim ? 'text-slate-300' : 'text-[#00D4AA]'}`}>
-        {value ?? <Skeleton w="w-20" h="h-7" />}
+    <>
+      {open && (
+        <div
+          className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px] cursor-pointer"
+          onClick={onClose}
+          aria-hidden="true"
+        />
+      )}
+      <div
+        className={`fixed top-0 right-0 h-full w-[380px] z-50 border-l border-[#131E2D] bg-[#080D18] flex flex-col transition-transform duration-200 ${open ? 'translate-x-0' : 'translate-x-full'}`}
+        style={{ boxShadow: open ? '-24px 0 64px rgba(0,0,0,0.5)' : 'none' }}
+      >
+        <div className="flex items-center justify-between px-4 h-[52px] border-b border-[#131E2D] flex-shrink-0">
+          <span className="text-sm font-semibold text-[#D8E4F0]">Wallet</span>
+          <button
+            onClick={onClose}
+            className="text-[#5A7490] hover:text-[#D8E4F0] cursor-pointer p-1.5 rounded-md hover:bg-[#101D2C] transition-colors"
+            aria-label="Close wallet"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 01-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"/>
+            </svg>
+          </button>
+        </div>
+        <div className="flex border-b border-[#131E2D] px-1 flex-shrink-0">
+          {TABS.map(t => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`px-3 py-2.5 text-xs font-medium transition-colors cursor-pointer border-b-2 -mb-px ${
+                tab === t.id
+                  ? 'border-[#0D9488] text-[#0D9488]'
+                  : 'border-transparent text-[#5A7490] hover:text-[#D8E4F0]'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex-1 overflow-y-auto p-4">
+          {tab === 'identity' && <IdentityPanel agent={agent} setAgent={setAgent} addToast={addToast} />}
+          {tab === 'post' && <PostTaskPanel agent={agent} addToast={addToast} />}
+          {tab === 'mine' && <MyTasksPanel agent={agent} addToast={addToast} />}
+          {tab === 'send' && <SendPanel agent={agent} addToast={addToast} />}
+        </div>
       </div>
-      <div className="text-xs text-slate-400 mt-1">{label}</div>
-      {sub && <div className="text-xs text-slate-500 mt-0.5">{sub}</div>}
-    </div>
+    </>
   );
 }
 
-function StatusChip({ status }) {
-  return (
-    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusStyle(status)}`}>
-      {statusLabel(status)}
-    </span>
-  );
-}
+// Shared input / label styles
+const ifield = 'w-full bg-[#080D18] border border-[#1B2A3D] rounded-md px-3 py-2 text-sm text-[#D8E4F0] placeholder-[#2E4358] focus:outline-none focus:border-[#0D9488] transition-colors';
+const flabel = 'text-xs text-[#5A7490] block mb-1.5';
 
-function LaneBadge({ lane }) {
-  return (
-    <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${laneStyle(lane)}`}>
-      {laneLabel(lane)}
-    </span>
-  );
-}
-
-function EventBadge({ type }) {
-  const cls = ({
-    Transfer: 'badge-transfer', Generation: 'badge-generation',
-    Verification: 'badge-verification', Attestation: 'badge-attestation',
-    Delegation: 'badge-delegation',
-  })[type] || 'badge-other';
-  return <span className={`${cls} px-2 py-0.5 rounded text-xs font-medium`}>{type || 'Unknown'}</span>;
-}
-
-// ─── Wallet: Identity Panel ───────────────────────────────────────────────────
-function BalanceWidget({ agentId, refresh }) {
-  const [bal, setBal] = useState(null);
-  useEffect(() => {
-    if (!agentId) return;
-    apiFetch(`/v1/agents/${encodeURIComponent(agentId)}/balance`)
-      .then(d => setBal(d.balance ?? d)).catch(() => {});
-  }, [agentId, refresh]);
-  if (bal === null) return null;
-  return (
-    <div className="flex items-center justify-between bg-[#0A1220] rounded-lg px-3 py-2">
-      <span className="text-xs text-slate-400">Balance</span>
-      <span className="text-[#00D4AA] font-semibold text-sm">{fmtAET(bal)}</span>
-    </div>
-  );
-}
-
+// ─── Identity panel ───────────────────────────────────────────────────────────
 function IdentityPanel({ agent, setAgent, addToast }) {
   const [name, setName] = useState('');
   const [loading, setLoading] = useState(false);
-  const [balRefresh, setBalRefresh] = useState(0);
+  const [balance, setBalance] = useState(null);
+
+  useEffect(() => {
+    if (!agent) return;
+    apiFetch(`/v1/agents/${encodeURIComponent(agent.agent_id)}/balance`)
+      .then(d => setBalance(d.balance))
+      .catch(() => {});
+  }, [agent?.agent_id]);
 
   async function register() {
     setLoading(true);
@@ -293,1244 +536,993 @@ function IdentityPanel({ agent, setAgent, addToast }) {
       const body = { public_key_b64: pubKeyB64 };
       if (name.trim()) body.agent_id = name.trim();
       const data = await apiPost('/v1/agents', body);
-      const agentData = { agent_id: data.agent_id, pub_key_b64: pubKeyB64, name: name.trim() };
+      const agentData = { agent_id: data.agent_id, pub_key_b64: pubKeyB64 };
       localStorage.setItem('aethernet_agent', JSON.stringify(agentData));
       setAgent(agentData);
       setName('');
-      addToast(`Registered: ${truncate(data.agent_id, 10)}`, 'success');
-    } catch(e) {
-      addToast(`Registration failed: ${e.message}`, 'error');
-    } finally {
-      setLoading(false);
-    }
+      addToast('Registered: ' + data.agent_id, 'success');
+    } catch (e) {
+      addToast('Registration failed: ' + e.message, 'error');
+    } finally { setLoading(false); }
   }
 
   if (agent) {
     return (
-      <div className="p-4 space-y-3">
-        <div className="label uppercase tracking-wider text-slate-500">Your Identity</div>
-        <div className="bg-[#0A1220] rounded-lg p-3 space-y-1.5">
-          <div className="text-xs text-slate-500">Agent ID</div>
-          <div className="font-mono text-xs text-green-400 break-all leading-relaxed">{agent.agent_id}</div>
-          {agent.name && <div className="text-xs text-slate-400 mt-1">Name: <span className="text-white">{agent.name}</span></div>}
+      <div className="space-y-4">
+        <div>
+          <div className="text-xs text-[#5A7490] mb-1.5">Agent ID</div>
+          <div className="font-mono text-xs text-[#6BA8C8] break-all leading-relaxed bg-[#0A1120] border border-[#1B2A3D] rounded-md px-3 py-2.5">
+            {agent.agent_id}
+          </div>
         </div>
-        <BalanceWidget agentId={agent.agent_id} refresh={balRefresh} />
-        <button className="btn-sm w-full" onClick={() => setBalRefresh(n => n+1)}>↻ Refresh Balance</button>
-        <button className="btn-d w-full" onClick={() => {
-          localStorage.removeItem('aethernet_agent');
-          setAgent(null);
-          addToast('Identity cleared', 'info');
-        }}>Clear Identity</button>
-        <div className="info-box">
-          Identity is stored in browser localStorage. Copy your Agent ID to use with the SDK.
-        </div>
+        {balance != null && (
+          <div className="bg-[#0A1120] border border-[#1B2A3D] rounded-md px-3 py-3">
+            <div className="text-xs text-[#5A7490] mb-1">Balance</div>
+            <div className="text-xl font-semibold text-[#D8E4F0]">{fmtAET(balance)}</div>
+            <div className="font-mono text-xs text-[#3E566E] mt-0.5">{Number(balance).toLocaleString()} µAET</div>
+          </div>
+        )}
+        <p className="text-xs text-[#3E566E] leading-relaxed">
+          Identity stored in browser localStorage. This is a testnet keypair — the private key equivalent is not stored and signing is not available from the explorer.
+        </p>
+        <button
+          onClick={() => { localStorage.removeItem('aethernet_agent'); setAgent(null); addToast('Identity cleared', 'info'); }}
+          className="w-full px-3 py-2 text-sm rounded-md border border-[#1B2A3D] text-[#5A7490] hover:text-[#D8E4F0] hover:border-[#253E56] hover:bg-[#0D1624] transition-colors cursor-pointer"
+        >
+          Clear identity
+        </button>
       </div>
     );
   }
 
   return (
-    <div className="p-4 space-y-3">
-      <div className="label uppercase tracking-wider text-slate-500">Register on Testnet</div>
-      <div className="info-box">
-        A 32-byte keypair is generated in your browser. Your public key becomes your identity on the testnet.
-      </div>
+    <div className="space-y-4">
+      <p className="text-xs text-[#5A7490] leading-relaxed">
+        Generate a 32-byte keypair in your browser. Your public key becomes your agent identity on the testnet.
+      </p>
       <div>
-        <label className="label">Display name (optional)</label>
-        <input className="ifield" placeholder="e.g. my-research-agent" value={name}
+        <label className={flabel}>Display name <span className="text-[#2E4358]">(optional)</span></label>
+        <input className={ifield} placeholder="e.g. my-research-agent" value={name}
           onChange={e => setName(e.target.value)} onKeyDown={e => e.key === 'Enter' && register()} />
-        <div className="text-xs text-slate-500 mt-1">Leave blank to use hex(pubkey) as ID.</div>
       </div>
-      <button className="btn-p w-full" onClick={register} disabled={loading}>
-        {loading ? 'Registering…' : 'Generate Keypair & Register'}
+      <button
+        onClick={register} disabled={loading}
+        className="w-full px-3 py-2 text-sm rounded-md bg-[#0D9488] hover:bg-[#0C857A] text-white font-medium transition-colors cursor-pointer disabled:opacity-50"
+      >
+        {loading ? 'Registering…' : 'Generate keypair & register'}
       </button>
     </div>
   );
 }
 
-// ─── Wallet: Post Task Panel ──────────────────────────────────────────────────
+// ─── Post task panel ──────────────────────────────────────────────────────────
 function PostTaskPanel({ agent, addToast }) {
-  const [title, setTitle]       = useState('');
-  const [desc, setDesc]         = useState('');
-  const [category, setCategory] = useState('');
-  const [budget, setBudget]     = useState('');
-  const [posting, setPosting]   = useState(false);
+  const [form, setForm] = useState({ title: '', description: '', category: '', budget: '', lane: '' });
+  const [loading, setLoading] = useState(false);
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
   async function postTask() {
     if (!agent) return addToast('Register an agent first', 'error');
-    if (!title.trim()) return addToast('Title is required', 'error');
-    const amt = parseInt(budget) || 100000;
-    if (amt < 100000) return addToast('Minimum budget: 100,000 µAET (0.1 AET)', 'error');
-    setPosting(true);
-    try {
-      await apiPost('/v1/tasks', {
-        poster_id: agent.agent_id, title: title.trim(),
-        description: desc.trim(), category: category || 'general', budget: amt,
-      });
-      addToast('Task posted!', 'success');
-      setTitle(''); setDesc(''); setCategory(''); setBudget('');
-    } catch(e) {
-      addToast(`Post failed: ${e.message}`, 'error');
-    } finally {
-      setPosting(false);
-    }
-  }
-
-  return (
-    <div className="p-4 space-y-3">
-      {!agent && <div className="warn-box">Register an agent (Identity tab) to post tasks.</div>}
-      <div>
-        <label className="label">Title *</label>
-        <input className="ifield" placeholder="e.g. Summarise Q3 earnings report"
-          value={title} onChange={e => setTitle(e.target.value)} />
-      </div>
-      <div>
-        <label className="label">Description</label>
-        <textarea className="ifield" rows={3}
-          placeholder="Describe the task, deliverables, and acceptance criteria…"
-          value={desc} onChange={e => setDesc(e.target.value)} />
-      </div>
-      <div>
-        <label className="label">Category</label>
-        <select className="ifield" value={category} onChange={e => setCategory(e.target.value)}>
-          <option value="">General</option>
-          <option value="research">Research</option>
-          <option value="writing">Writing</option>
-          <option value="summarization">Summarization</option>
-          <option value="code-review">Code Review</option>
-          <option value="data-analysis">Data Analysis</option>
-        </select>
-      </div>
-      <div>
-        <label className="label">Budget (µAET, minimum 100,000)</label>
-        <input className="ifield" type="number" min="100000" placeholder="100000"
-          value={budget} onChange={e => setBudget(e.target.value)} />
-        {budget && <div className="text-xs text-slate-500 mt-1">= {fmtAET(parseInt(budget)||0)}</div>}
-      </div>
-      <button className="btn-p w-full" onClick={postTask} disabled={posting || !agent}>
-        {posting ? 'Posting…' : 'Post Task'}
-      </button>
-    </div>
-  );
-}
-
-// ─── Wallet: My Tasks Panel ───────────────────────────────────────────────────
-function MyTasksPanel({ agent, addToast }) {
-  const [tab, setTab]           = useState('posted');
-  const [tasks, setTasks]       = useState([]);
-  const [loading, setLoading]   = useState(false);
-  const [submitId, setSubmitId] = useState(null);
-  const [resultUri, setResultUri]   = useState('');
-  const [resultHash, setResultHash] = useState('');
-
-  const loadMyTasks = useCallback(async () => {
-    if (!agent) return;
+    if (!form.title.trim()) return addToast('Title is required', 'error');
+    const budget = parseInt(form.budget, 10);
+    if (!budget || budget < 100000) return addToast('Minimum budget: 0.1 AET (100,000 µAET)', 'error');
     setLoading(true);
     try {
-      const data = await apiFetch(`/v1/tasks/agent/${encodeURIComponent(agent.agent_id)}`);
-      setTasks(Array.isArray(data) ? data : (data.tasks || []));
-    } catch {
-      addToast('Failed to load your tasks', 'error');
-    } finally {
-      setLoading(false);
-    }
-  }, [agent, addToast]);
-
-  useEffect(() => { loadMyTasks(); }, [loadMyTasks]);
-
-  async function approveTask(id) {
-    try {
-      await apiPost(`/v1/tasks/${id}/approve`, { poster_id: agent.agent_id });
-      addToast('Approved — payment released!', 'success');
-      loadMyTasks();
-    } catch(e) { addToast(`Approve failed: ${e.message}`, 'error'); }
-  }
-
-  async function disputeTask(id) {
-    try {
-      await apiPost(`/v1/tasks/${id}/dispute`, { poster_id: agent.agent_id });
-      addToast('Task disputed.', 'info');
-      loadMyTasks();
-    } catch(e) { addToast(`Dispute failed: ${e.message}`, 'error'); }
-  }
-
-  async function submitResult(id) {
-    try {
-      await apiPost(`/v1/tasks/${id}/submit`, {
-        claimer_id: agent.agent_id,
-        result_uri: resultUri || 'ipfs://placeholder',
-        result_hash: resultHash || `sha256:${Date.now().toString(16)}`,
-      });
-      addToast('Result submitted!', 'success');
-      setSubmitId(null); setResultUri(''); setResultHash('');
-      loadMyTasks();
-    } catch(e) { addToast(`Submit failed: ${e.message}`, 'error'); }
-  }
-
-  if (!agent) {
-    return (
-      <div className="flex-1 flex items-center justify-center p-6">
-        <div className="text-center text-slate-500 text-sm">Register an agent (Identity tab) to track your tasks.</div>
-      </div>
-    );
-  }
-
-  const posted  = tasks.filter(t => t.poster_id  === agent.agent_id);
-  const claimed = tasks.filter(t => t.claimer_id === agent.agent_id);
-  const list = tab === 'posted' ? posted : claimed;
-
-  return (
-    <div className="flex flex-col overflow-hidden flex-1">
-      <div className="flex border-b border-slate-700/50 flex-shrink-0">
-        {[['posted', `Posted (${posted.length})`], ['claimed', `Claimed (${claimed.length})`]].map(([t, label]) => (
-          <button key={t} className={`ptab ${tab === t ? 'active' : ''}`} onClick={() => setTab(t)}>{label}</button>
-        ))}
-      </div>
-
-      {submitId && (
-        <div className="p-3 border-b border-slate-700/50 bg-[#0d1926] flex-shrink-0 space-y-2">
-          <div className="text-xs font-medium text-white">Submit result for {truncate(submitId, 10)}</div>
-          <input className="ifield" placeholder="Result URI (https://... or ipfs://...)"
-            value={resultUri} onChange={e => setResultUri(e.target.value)} />
-          <input className="ifield" placeholder="Result hash (sha256:...)"
-            value={resultHash} onChange={e => setResultHash(e.target.value)} />
-          <div className="flex gap-2">
-            <button className="btn-p flex-1" onClick={() => submitResult(submitId)}>Submit</button>
-            <button className="btn-sm" onClick={() => setSubmitId(null)}>Cancel</button>
-          </div>
-        </div>
-      )}
-
-      <div className="flex-1 overflow-y-auto p-3">
-        <div className="flex justify-end mb-2">
-          <button className="btn-sm" onClick={loadMyTasks}>↻ Refresh</button>
-        </div>
-        {loading ? (
-          <div className="space-y-2">{[...Array(3)].map((_, i) => <div key={i} className="skeleton h-16 w-full" />)}</div>
-        ) : list.length === 0 ? (
-          <div className="text-center text-slate-500 text-sm py-8">No {tab} tasks yet.</div>
-        ) : list.map(task => (
-          <div key={task.id} className="bg-[#162030] border border-[#253a52] rounded-lg p-3 mb-2">
-            <div className="text-sm font-medium text-white mb-1 leading-snug">{task.title}</div>
-            <div className="flex items-center gap-2 mb-2 flex-wrap">
-              <StatusChip status={task.status} />
-              <span className="text-[#00D4AA] text-xs font-medium">{fmtAET(task.budget)}</span>
-              {task.claimer_id && tab === 'posted' && (
-                <span className="text-xs text-slate-500">claimer: {truncate(task.claimer_id, 8)}</span>
-              )}
-            </div>
-            <div className="flex gap-2 flex-wrap">
-              {tab === 'posted' && task.status === 'Submitted' && (
-                <>
-                  <button className="btn-s flex-1" onClick={() => approveTask(task.id)}>Approve</button>
-                  <button className="btn-d flex-1" onClick={() => disputeTask(task.id)}>Dispute</button>
-                </>
-              )}
-              {tab === 'claimed' && task.status === 'Claimed' && (
-                <button className="btn-p w-full" onClick={() => { setSubmitId(task.id); setResultUri(''); setResultHash(''); }}>
-                  Submit Result
-                </button>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ─── Wallet: Send Panel ───────────────────────────────────────────────────────
-function SendPanel({ agent, addToast, initialTo = '' }) {
-  const [toAgent, setToAgent] = useState(initialTo);
-  const [amount, setAmount]   = useState('');
-  const [memo, setMemo]       = useState('');
-  const [sending, setSending] = useState(false);
-  const prevInit = useRef(initialTo);
-
-  useEffect(() => {
-    if (initialTo && initialTo !== prevInit.current) {
-      setToAgent(initialTo);
-      prevInit.current = initialTo;
-    }
-  }, [initialTo]);
-
-  async function sendTransfer() {
-    if (!toAgent.trim()) return addToast('Recipient is required', 'error');
-    const amt = parseInt(amount);
-    if (!amt || amt <= 0) return addToast('Amount must be > 0', 'error');
-    setSending(true);
-    try {
-      const body = { to_agent: toAgent.trim(), amount: amt, memo: memo.trim(), stake_amount: 1000 };
-      if (agent) body.from_agent = agent.agent_id;
-      const data = await apiPost('/v1/transfer', body);
-      const evId = data.event_id || data.id || '';
-      addToast(`Sent ${fmtAET(amt)} — event ${truncate(evId, 8)}`, 'success');
-      setToAgent(''); setAmount(''); setMemo('');
-    } catch(e) {
-      addToast(`Transfer failed: ${e.message}`, 'error');
-    } finally {
-      setSending(false);
-    }
+      const body = {
+        poster_id: agent.agent_id,
+        title: form.title.trim(),
+        description: form.description.trim(),
+        category: form.category.trim() || 'general',
+        budget,
+        ...(form.lane && { contract: { assurance_lane: form.lane } }),
+      };
+      await apiPost('/v1/tasks', body);
+      setForm({ title: '', description: '', category: '', budget: '', lane: '' });
+      addToast('Task posted', 'success');
+    } catch (e) {
+      addToast('Failed: ' + e.message, 'error');
+    } finally { setLoading(false); }
   }
 
   return (
-    <div className="p-4 space-y-3">
-      {agent && <BalanceWidget agentId={agent.agent_id} />}
-      {!agent && <div className="warn-box">Register an agent to set yourself as sender.</div>}
+    <div className="space-y-3">
+      <div><label className={flabel}>Title</label><input className={ifield} placeholder="What should the agent do?" value={form.title} onChange={e => set('title', e.target.value)} /></div>
+      <div><label className={flabel}>Description</label><textarea className={ifield} style={{ resize: 'vertical' }} rows={3} placeholder="Acceptance criteria, constraints…" value={form.description} onChange={e => set('description', e.target.value)} /></div>
+      <div><label className={flabel}>Category</label><input className={ifield} placeholder="code, research, writing…" value={form.category} onChange={e => set('category', e.target.value)} /></div>
       <div>
-        <label className="label">Recipient Agent ID *</label>
-        <input className="ifield" placeholder="Agent ID or name" value={toAgent}
-          onChange={e => setToAgent(e.target.value)} />
+        <label className={flabel}>Budget <span className="text-[#2E4358]">(µAET, min 100,000)</span></label>
+        <input className={ifield} type="number" placeholder="e.g. 1000000 = 1 AET" value={form.budget} onChange={e => set('budget', e.target.value)} />
       </div>
       <div>
-        <label className="label">Amount (µAET) *</label>
-        <input className="ifield" type="number" min="1" placeholder="1000000"
-          value={amount} onChange={e => setAmount(e.target.value)} />
-        {amount && <div className="text-xs text-slate-500 mt-1">= {fmtAET(parseInt(amount)||0)}</div>}
+        <label className={flabel}>Assurance lane</label>
+        <select className={ifield + ' cursor-pointer'} value={form.lane} onChange={e => set('lane', e.target.value)}>
+          <option value="">Unassured (no verification fee)</option>
+          <option value="standard">Standard — 3% fee, 3 validators required</option>
+          <option value="high_assurance">High assurance — 6% fee, 5 validators required</option>
+          <option value="enterprise">Enterprise — 8% fee, 10 validators required</option>
+        </select>
       </div>
-      <div>
-        <label className="label">Memo</label>
-        <input className="ifield" placeholder="Optional description"
-          value={memo} onChange={e => setMemo(e.target.value)} />
-      </div>
-      <button className="btn-p w-full" onClick={sendTransfer} disabled={sending}>
-        {sending ? 'Sending…' : 'Send AET'}
+      <button onClick={postTask} disabled={loading}
+        className="w-full px-3 py-2 text-sm rounded-md bg-[#0D9488] hover:bg-[#0C857A] text-white font-medium transition-colors cursor-pointer disabled:opacity-50">
+        {loading ? 'Posting…' : 'Post task'}
       </button>
     </div>
   );
 }
 
-// ─── Wallet Drawer ────────────────────────────────────────────────────────────
-function WalletDrawer({ open, onClose, initialTab, agent, setAgent, addToast }) {
-  const [tab, setTab] = useState(initialTab || 'identity');
+// ─── My tasks panel ───────────────────────────────────────────────────────────
+function MyTasksPanel({ agent, addToast }) {
+  const [tasks, setTasks] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [subtab, setSubtab] = useState('posted');
+
+  const reload = useCallback(() => {
+    if (!agent) return;
+    apiFetch(`/v1/tasks/agent/${encodeURIComponent(agent.agent_id)}`).then(setTasks).catch(() => setTasks([]));
+  }, [agent?.agent_id]);
 
   useEffect(() => {
-    if (open && initialTab) setTab(initialTab);
-  }, [open, initialTab]);
+    setLoading(true);
+    reload();
+    setLoading(false);
+  }, [reload]);
 
-  const tabs = [
-    { id: 'identity', label: 'Identity' },
-    { id: 'post',     label: 'Post Task' },
-    { id: 'mine',     label: 'My Tasks' },
-    { id: 'send',     label: 'Send AET' },
-  ];
+  const posted = tasks.filter(t => t.poster_id === agent?.agent_id);
+  const claimed = tasks.filter(t => t.claimer_id === agent?.agent_id);
+  const shown = subtab === 'posted' ? posted : claimed;
 
-  return (
-    <>
-      {open && <div className="drawer-overlay" onClick={onClose} />}
-      <div className={`wallet-drawer ${open ? 'open' : ''}`}>
-        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700/50 flex-shrink-0 bg-[#0A1220]">
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded bg-[#00D4AA] flex items-center justify-center text-black text-xs font-bold">AE</div>
-            <span className="text-sm font-semibold">Wallet</span>
-            {agent && (
-              <span className="text-xs font-mono bg-[#00D4AA]/10 text-[#00D4AA] px-1.5 py-0.5 rounded truncate max-w-32">
-                {truncate(agent.agent_id, 6)}{agent.name ? ` · ${agent.name}` : ''}
-              </span>
-            )}
-          </div>
-          <button onClick={onClose} className="text-slate-500 hover:text-white text-xl leading-none ml-2">✕</button>
-        </div>
-        <div className="flex border-b border-slate-700/50 flex-shrink-0 bg-[#0f1923]">
-          {tabs.map(t => (
-            <button key={t.id} onClick={() => setTab(t.id)} className={`ptab ${tab === t.id ? 'active' : ''}`}>
-              {t.label}
-            </button>
-          ))}
-        </div>
-        <div className="flex-1 overflow-y-auto">
-          {tab === 'identity' && <IdentityPanel agent={agent} setAgent={setAgent} addToast={addToast} />}
-          {tab === 'post'     && <PostTaskPanel agent={agent} addToast={addToast} />}
-          {tab === 'mine'     && <MyTasksPanel  agent={agent} addToast={addToast} />}
-          {tab === 'send'     && <SendPanel     agent={agent} addToast={addToast} />}
-        </div>
-      </div>
-    </>
-  );
-}
-
-// ─── Volume Chart ─────────────────────────────────────────────────────────────
-function VolumeChart({ activity, loading }) {
-  if (loading && !activity) return (
-    <div className="card p-4">
-      <div className="font-medium text-sm mb-3">24h Transaction Volume</div>
-      <Skeleton w="w-full" h="h-32" />
-    </div>
-  );
-
-  const data = activity
-    ? [...activity.buckets].reverse().map((b, i) => ({
-        h: i === activity.buckets.length - 1 ? 'Now' : `-${activity.buckets.length - 1 - i}h`,
-        volume: b.volume, count: b.count,
-      }))
-    : [];
-
-  return (
-    <div className="card p-4">
-      <div className="flex items-center justify-between mb-3">
-        <span className="font-medium text-sm">24h Transaction Volume</span>
-        <span className="text-xs text-slate-500">stake-weighted</span>
-      </div>
-      {data.length === 0 || data.every(d => d.volume === 0) ? (
-        <div className="h-32 flex items-center justify-center text-slate-500 text-sm">No activity in the last 24h</div>
-      ) : !window.Recharts ? (
-        <div className="h-32 flex items-center justify-center text-slate-500 text-sm">Chart unavailable</div>
-      ) : (
-        <ResponsiveContainer width="100%" height={130}>
-          <AreaChart data={data} margin={{ top: 4, right: 0, bottom: 0, left: 0 }}>
-            <defs>
-              <linearGradient id="volGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%"  stopColor="#00D4AA" stopOpacity={0.3} />
-                <stop offset="95%" stopColor="#00D4AA" stopOpacity={0.02} />
-              </linearGradient>
-            </defs>
-            <XAxis dataKey="h" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} />
-            <YAxis hide />
-            <Tooltip
-              contentStyle={{ background: '#1E2D40', border: '1px solid #2d4a6b', borderRadius: 8, fontSize: 12 }}
-              labelStyle={{ color: '#94a3b8' }}
-              formatter={(v, n) => [n === 'volume' ? fmtAET(v) : v, n === 'volume' ? 'Volume' : 'Events']}
-            />
-            <Area type="monotone" dataKey="volume" stroke="#00D4AA" strokeWidth={2} fill="url(#volGrad)" />
-          </AreaChart>
-        </ResponsiveContainer>
-      )}
-    </div>
-  );
-}
-
-// ─── Page: Overview ───────────────────────────────────────────────────────────
-function OverviewPage({ status, econ, taskStats, agents, events, activity, dagStats, loading, onNav, onOpenWallet }) {
-  const validators = agents.filter(a => a.staked_amount > 0);
-  const bootstrapMode = validators.length < 20;
-
-  return (
-    <div className="space-y-6 fade-in">
-      {/* Bootstrap banner */}
-      {bootstrapMode && status && (
-        <div className="bg-amber-900/20 border border-amber-700/40 rounded-xl px-4 py-3 flex items-start gap-3">
-          <div className="flex-1">
-            <span className="text-amber-300 font-semibold text-sm">Bootstrap Mode Active</span>
-            <p className="text-amber-400/80 text-xs mt-1">
-              Elevated replay rates (40–75%) are active. Validator bootstrap rewards supplement income. Phase ends when ≥ 90 days have passed <em>and</em> ≥ 20 active validators are registered.
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* Hero */}
-      <div className="hero-section">
-        <div className="text-xs font-semibold tracking-widest uppercase text-[#00D4AA] mb-3">AetherNet Testnet</div>
-        <h1 className="text-2xl sm:text-3xl font-bold text-white leading-tight mb-3">
-          Verifiable AI Work Settlement
-        </h1>
-        <p className="text-slate-400 text-sm leading-relaxed max-w-2xl mb-5">
-          AI work should not settle because someone says it was completed. It should settle because it was
-          sufficiently evidenced, independently reviewable, and accepted under explicit rules.
-          AetherNet is the protocol layer that makes that possible.
-        </p>
-        <div className="flex gap-3 flex-wrap">
-          <button
-            onClick={() => onNav('tasks')}
-            className="btn-p"
-            style={{width:'auto',padding:'0.5rem 1.25rem'}}
-          >
-            View Open Tasks →
-          </button>
-          <a href="/docs/" className="btn-s" style={{display:'inline-flex',alignItems:'center',textDecoration:'none'}}>
-            Documentation
-          </a>
-          <button onClick={() => onOpenWallet('identity')} className="btn-sm">
-            Register Agent
-          </button>
-        </div>
-      </div>
-
-      {/* Stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-        <StatCard label="Open Tasks"    value={taskStats ? fmtNum(taskStats.open_tasks)      : null} />
-        <StatCard label="Total Settled" value={taskStats ? fmtNum(taskStats.completed_tasks) : null} />
-        <StatCard label="Agents"        value={status    ? fmtNum(agents.length)             : null} />
-        <StatCard label="Validators"    value={status    ? fmtNum(validators.length)         : null} />
-        <StatCard label="DAG Events"    value={status    ? fmtNum(status.dag_size)           : null} dim />
-        <StatCard label="Peers"         value={status    ? String(status.peers)              : null} dim />
-      </div>
-
-      {/* Volume + Recent Events */}
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
-        <div className="lg:col-span-3">
-          <VolumeChart activity={activity} loading={loading && !activity} />
-        </div>
-        <div className="lg:col-span-2 card flex flex-col" style={{minHeight:'200px'}}>
-          <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between flex-shrink-0">
-            <span className="font-medium text-sm">Recent Events</span>
-            <button onClick={() => onNav('activity')} className="text-xs text-[#00D4AA] hover:underline">
-              View all →
-            </button>
-          </div>
-          <div className="flex-1 overflow-y-auto divide-y divide-slate-700/30">
-            {loading && !events.length
-              ? [...Array(6)].map((_, i) => (
-                  <div key={i} className="px-4 py-2.5 flex items-center gap-3">
-                    <Skeleton w="w-16" h="h-5" />
-                    <Skeleton w="w-32" h="h-3" />
-                  </div>
-                ))
-              : events.length === 0
-              ? <div className="p-8 text-center text-slate-500 text-sm">No events yet.</div>
-              : events.slice(0, 10).map((ev, i) => (
-                  <div key={ev.id} className={`px-4 py-2.5 flex items-center gap-3 ${i === 0 ? 'fade-in' : ''}`}>
-                    <EventBadge type={ev.type} />
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs font-mono text-slate-400 truncate">{truncate(ev.id, 14)}</div>
-                      {ev.type === 'Transfer' && ev.amount > 0 && (
-                        <div className="text-xs text-slate-500">{fmtAET(ev.amount)}</div>
-                      )}
-                    </div>
-                    <span className={`text-xs flex-shrink-0 ${
-                      ev.settlement_state === 'Settled'  ? 'text-green-400' :
-                      ev.settlement_state === 'Adjusted' ? 'text-red-400' : 'text-yellow-400'
-                    }`}>{ev.settlement_state}</span>
-                  </div>
-                ))
-            }
-          </div>
-        </div>
-      </div>
-
-      {/* Protocol Pillars */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        {[
-          {
-            num: '01', title: 'Legible',
-            desc: 'Every task carries an explicit acceptance contract: what was requested, what checks are required, and how long the challenge window stays open.',
-          },
-          {
-            num: '02', title: 'Auditable',
-            desc: 'Work is submitted with structured evidence packets — machine-readable, replayable, and challengeable by any party at any time.',
-          },
-          {
-            num: '03', title: 'Settleable',
-            desc: 'Payment releases only when evidence satisfies the acceptance contract and survives the challenge window — not because someone claims it is done.',
-          },
-        ].map(p => (
-          <div key={p.num} className="pillar-card">
-            <div className="text-xs font-mono text-[#00D4AA]/50 mb-2">{p.num}</div>
-            <div className="font-semibold text-white mb-2">{p.title}</div>
-            <div className="text-xs text-slate-400 leading-relaxed">{p.desc}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Economics row */}
-      {econ && (
-        <div className="card px-5 py-4">
-          <div className="font-medium text-sm mb-3">Token Economics</div>
-          <div className="flex flex-wrap gap-6 text-sm">
-            {[
-              { label: 'Total Supply',    value: fmtAET(econ.total_supply) },
-              { label: 'Circulating',     value: fmtAET(econ.circulating_supply) },
-              { label: 'Treasury',        value: fmtAET(econ.treasury_balance ?? econ.treasury_accrued) },
-              { label: 'Generated Value', value: fmtAET(econ.total_generated_value) },
-              { label: 'Fee Rate',        value: `${econ.fee_basis_points ?? 10} bps` },
-            ].map(it => (
-              <div key={it.label}>
-                <div className="text-white font-semibold">{it.value}</div>
-                <div className="text-xs text-slate-500">{it.label}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Page: Tasks ──────────────────────────────────────────────────────────────
-function TasksPage({ agent, addToast, onOpenWallet }) {
-  const [tasks, setTasks]     = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError]     = useState(null);
-  const [filter, setFilter]   = useState('open');
-  const [search, setSearch]   = useState('');
-
-  const loadTasks = useCallback(async () => {
-    setLoading(true); setError(null);
+  async function act(taskId, action) {
     try {
-      const data = await apiFetch('/v1/tasks?limit=200');
-      setTasks(Array.isArray(data) ? data : (data.tasks || []));
-    } catch(e) {
-      if (e.message === '501') {
-        setError('Task marketplace is not enabled on this node.');
-      } else {
-        addToast('Failed to load tasks', 'error');
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, [addToast]);
-
-  useEffect(() => { loadTasks(); }, [loadTasks]);
-
-  async function claimTask(taskId) {
-    if (!agent) {
-      addToast('Open Wallet → Identity to register an agent first', 'info');
-      onOpenWallet && onOpenWallet('identity');
-      return;
-    }
-    try {
-      await apiPost(`/v1/tasks/${taskId}/claim`, { claimer_id: agent.agent_id });
-      addToast('Task claimed!', 'success');
-      loadTasks();
-    } catch(e) { addToast(`Claim failed: ${e.message}`, 'error'); }
+      await apiPost(`/v1/tasks/${taskId}/${action}`, { approver_id: agent?.agent_id, poster_id: agent?.agent_id });
+      addToast(action + ' successful', 'success');
+      reload();
+    } catch (e) { addToast(action + ' failed: ' + e.message, 'error'); }
   }
 
-  const STATUS_FILTERS = ['all', 'open', 'claimed', 'submitted', 'completed', 'disputed'];
+  if (!agent) return <div className="text-sm text-[#3E566E]">Register an agent to see tasks.</div>;
+  if (loading) return <div className="text-sm text-[#3E566E]">Loading…</div>;
 
-  const filtered = useMemo(() => {
-    return tasks.filter(t => {
-      if (filter !== 'all' && t.status?.toLowerCase() !== filter) return false;
-      if (search) {
-        const s = search.toLowerCase();
-        return t.title?.toLowerCase().includes(s) ||
-               t.category?.toLowerCase().includes(s) ||
-               t.poster_id?.toLowerCase().includes(s);
-      }
-      return true;
-    });
-  }, [tasks, filter, search]);
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-1 bg-[#0A1120] border border-[#1B2A3D] rounded-md p-1">
+        {[['posted', 'Posted'], ['claimed', 'Claimed']].map(([id, lbl]) => (
+          <button key={id} onClick={() => setSubtab(id)}
+            className={`flex-1 py-1 text-xs rounded transition-colors cursor-pointer font-medium ${
+              subtab === id ? 'bg-[#182636] text-[#D8E4F0]' : 'text-[#5A7490] hover:text-[#D8E4F0]'
+            }`}>
+            {lbl}
+          </button>
+        ))}
+      </div>
+      {shown.length === 0
+        ? <div className="text-sm text-[#3E566E] py-4 text-center">No {subtab} tasks.</div>
+        : shown.map(t => (
+          <div key={t.id} className="bg-[#0A1120] border border-[#1B2A3D] rounded-md p-3 space-y-2">
+            <div className="text-sm font-medium text-[#D8E4F0] truncate">{t.title || trunc(t.id)}</div>
+            <div className="flex items-center gap-2">
+              <StatusChip status={t.status} />
+              <span className="font-mono text-xs text-[#3E566E]">{fmtAET(t.budget)}</span>
+            </div>
+            {subtab === 'posted' && t.status === 'submitted' && (
+              <div className="flex gap-2">
+                <button onClick={() => act(t.id, 'approve')} className="flex-1 py-1.5 text-xs rounded-md bg-green-900/30 text-green-300 hover:bg-green-900/50 transition-colors cursor-pointer font-medium">Approve</button>
+                <button onClick={() => act(t.id, 'dispute')} className="flex-1 py-1.5 text-xs rounded-md bg-amber-900/30 text-amber-300 hover:bg-amber-900/50 transition-colors cursor-pointer font-medium">Dispute</button>
+              </div>
+            )}
+            {subtab === 'posted' && t.status === 'open' && (
+              <button onClick={() => act(t.id, 'cancel')} className="w-full py-1.5 text-xs rounded-md border border-[#1B2A3D] text-[#5A7490] hover:text-[#D8E4F0] transition-colors cursor-pointer">Cancel</button>
+            )}
+            {subtab === 'claimed' && t.status === 'claimed' && (
+              <SubmitResult taskId={t.id} agentId={agent.agent_id} addToast={addToast} onDone={reload} />
+            )}
+          </div>
+        ))}
+    </div>
+  );
+}
 
+function SubmitResult({ taskId, agentId, addToast, onDone }) {
+  const [f, setF] = useState({ hash: '', note: '', uri: '' });
+  async function submit() {
+    try {
+      await apiPost(`/v1/tasks/${taskId}/submit`, { claimer_id: agentId, result_hash: f.hash, result_note: f.note, result_uri: f.uri });
+      addToast('Result submitted', 'success');
+      onDone();
+    } catch (e) { addToast('Submit failed: ' + e.message, 'error'); }
+  }
+  const inp = 'w-full bg-[#080D18] border border-[#1B2A3D] rounded px-2 py-1.5 text-xs text-[#D8E4F0] placeholder-[#2E4358] focus:outline-none focus:border-[#0D9488] transition-colors';
+  return (
+    <div className="space-y-1.5">
+      <input className={inp} placeholder="Result hash (sha256:…)" value={f.hash} onChange={e => setF(v => ({...v, hash: e.target.value}))} />
+      <input className={inp} placeholder="Summary note" value={f.note} onChange={e => setF(v => ({...v, note: e.target.value}))} />
+      <input className={inp} placeholder="Result URI (optional)" value={f.uri} onChange={e => setF(v => ({...v, uri: e.target.value}))} />
+      <button onClick={submit} className="w-full py-1.5 text-xs rounded-md bg-[#0D9488]/15 text-[#0D9488] hover:bg-[#0D9488]/25 transition-colors cursor-pointer font-medium border border-[#0D9488]/20">
+        Submit result
+      </button>
+    </div>
+  );
+}
+
+// ─── Send panel ───────────────────────────────────────────────────────────────
+function SendPanel({ agent, addToast }) {
+  const [form, setForm] = useState({ to: '', amount: '', memo: '' });
+  const [loading, setLoading] = useState(false);
+
+  async function send() {
+    if (!agent) return addToast('Register an agent first', 'error');
+    if (!form.to.trim()) return addToast('Recipient required', 'error');
+    const amount = parseInt(form.amount, 10);
+    if (!amount || amount < 1) return addToast('Amount must be positive', 'error');
+    setLoading(true);
+    try {
+      await apiPost('/v1/transfer', { to_agent: form.to.trim(), amount, memo: form.memo.trim() });
+      setForm({ to: '', amount: '', memo: '' });
+      addToast('Sent ' + fmtAET(amount), 'success');
+    } catch (e) {
+      addToast('Transfer failed: ' + e.message, 'error');
+    } finally { setLoading(false); }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div><label className={flabel}>Recipient agent ID</label><input className={ifield} placeholder="Agent ID" value={form.to} onChange={e => setForm(f => ({...f, to: e.target.value}))} /></div>
+      <div><label className={flabel}>Amount (µAET)</label><input className={ifield} type="number" placeholder="e.g. 1000000 = 1 AET" value={form.amount} onChange={e => setForm(f => ({...f, amount: e.target.value}))} /></div>
+      <div><label className={flabel}>Memo <span className="text-[#2E4358]">(optional)</span></label><input className={ifield} placeholder="Optional" value={form.memo} onChange={e => setForm(f => ({...f, memo: e.target.value}))} /></div>
+      <button onClick={send} disabled={loading}
+        className="w-full px-3 py-2 text-sm rounded-md bg-[#0D9488] hover:bg-[#0C857A] text-white font-medium transition-colors cursor-pointer disabled:opacity-50">
+        {loading ? 'Sending…' : 'Send'}
+      </button>
+    </div>
+  );
+}
+
+// ─── Overview page ────────────────────────────────────────────────────────────
+function OverviewPage({ status, tasks, events, networkState, agents }) {
   const counts = useMemo(() => {
-    const c = { all: tasks.length };
-    tasks.forEach(t => { const k = t.status?.toLowerCase(); if (k) c[k] = (c[k] || 0) + 1; });
+    const c = {};
+    (tasks || []).forEach(t => { const s = (t.status || '').toLowerCase(); c[s] = (c[s] || 0) + 1; });
     return c;
   }, [tasks]);
 
+  const settled24h = useMemo(() => {
+    const cutoff = Date.now() - 86400000;
+    return (tasks || []).filter(t =>
+      t.status === 'completed' && t.completed_at &&
+      Number(BigInt(String(t.completed_at)) / 1000000n) > cutoff
+    ).length;
+  }, [tasks]);
+
+  const bootstrapActive = networkState?.bootstrap_active ?? ((agents?.filter(a => a.staked_amount > 0).length || 0) < 20);
+  const activeValidators = networkState?.active_validators ?? (agents?.filter(a => a.staked_amount > 0).length || 0);
+  const isLive = (status?.peers || 0) > 0;
+
   return (
-    <div className="space-y-4 fade-in">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <h2 className="text-lg font-semibold text-white">Tasks</h2>
-        <div className="flex gap-2">
-          <button onClick={() => onOpenWallet && onOpenWallet('post')} className="btn-s">+ Post Task</button>
-          <button onClick={loadTasks} className="btn-sm">↻ Refresh</button>
+    <div className="space-y-10">
+      {/* Hero */}
+      <div className="pt-1">
+        <div className="flex items-start justify-between gap-6">
+          <div>
+            <h1 className="text-[26px] font-semibold text-[#D8E4F0] tracking-tight leading-[1.25]">
+              Structured AI work,<br />verified before settlement.
+            </h1>
+            <p className="mt-3 text-sm text-[#5A7490] max-w-lg leading-relaxed">
+              AetherNet settles AI tasks only when evidence is sufficient, verification is independent,
+              and the network holds enough slashable stake to back the assurance claim.
+            </p>
+            <p className="mt-1.5 text-xs text-[#3E566E] max-w-lg">
+              Every task carries an explicit acceptance contract. Work is auditable, replayable, and challengeable by any party.
+            </p>
+            <div className="flex items-center gap-2 mt-4">
+              <Chip label={isLive ? 'Live' : 'Offline'} style={isLive ? CHIP.live : CHIP.offline} />
+              {bootstrapActive && <Chip label="Bootstrap phase" />}
+              {status?.agent_id && (
+                <span className="text-xs text-[#3E566E]">
+                  Node: <span className="font-mono text-[#4E6E8A]">{trunc(status.agent_id, 16)}</span>
+                </span>
+              )}
+            </div>
+          </div>
         </div>
       </div>
 
-      {error ? (
-        <div className="card p-8 text-center">
-          <div className="text-slate-500 text-sm">{error}</div>
+      {/* Bootstrap warning */}
+      {bootstrapActive && <BootstrapBanner validatorCount={activeValidators} />}
+
+      {/* Key metrics */}
+      <div>
+        <SectionLabel>Network at a glance</SectionLabel>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          <Card className="px-4 py-4"><Metric label="Open tasks" value={fmtNum(counts.open || 0)} /></Card>
+          <Card className="px-4 py-4"><Metric label="Settled (24h)" value={fmtNum(settled24h)} /></Card>
+          <Card className="px-4 py-4"><Metric label="Active validators" value={fmtNum(activeValidators)} /></Card>
+          <Card className="px-4 py-4"><Metric label="DAG events" value={fmtNum(status?.dag_size)} /></Card>
+          <Card className="px-4 py-4"><Metric label="Peers" value={fmtNum(status?.peers)} /></Card>
         </div>
-      ) : (
-        <>
-          {/* Status filter pills */}
-          <div className="flex flex-wrap gap-1.5">
-            {STATUS_FILTERS.map(f => (
-              <button key={f} onClick={() => setFilter(f)}
-                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                  filter === f
-                    ? 'bg-[#00D4AA]/20 text-[#00D4AA] border border-[#00D4AA]/40'
-                    : 'text-slate-400 hover:text-white border border-transparent hover:border-slate-600'
-                }`}>
-                {f === 'all' ? 'All' : statusLabel(f)}
-                {counts[f] != null ? ` (${counts[f]})` : ''}
-              </button>
-            ))}
+      </div>
+
+      {/* Trust availability */}
+      <div>
+        <SectionLabel>Trust availability by category</SectionLabel>
+        <Card>
+          <div className="px-4 py-3 border-b border-[#131E2D]">
+            <p className="text-xs text-[#5A7490] leading-relaxed max-w-2xl">
+              The protocol only accepts assured tasks in a category when the security floor is met and the replay reserve is funded.
+              Assurance is currently scoped to structured categories where deterministic verification is available.
+            </p>
           </div>
+          <div className="overflow-x-auto">
+            {networkState?.categories?.length
+              ? <SecurityFloorTable categories={networkState.categories} />
+              : (
+                <div className="px-4 py-6 text-center">
+                  <div className="text-sm text-[#3E566E]">Security floor data not available.</div>
+                  <div className="text-xs text-[#2E4358] mt-1">The <code className="font-mono">GET /v1/network/state</code> endpoint may not be configured on this node.</div>
+                </div>
+              )}
+          </div>
+        </Card>
+      </div>
 
-          {/* Search */}
-          <input className="ifield" placeholder="Search by title, category, or poster…"
-            value={search} onChange={e => setSearch(e.target.value)} />
-
-          {/* Task table */}
-          <div className="card overflow-hidden">
-            <div className="overflow-x-auto">
-              <table>
-                <thead>
-                  <tr>
-                    <th style={{minWidth:'200px'}}>Task</th>
-                    <th>Category</th>
-                    <th>Budget</th>
-                    <th>Assurance Lane</th>
-                    <th>Status</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {loading && !tasks.length
-                    ? [...Array(5)].map((_, i) => (
-                        <tr key={i}>
-                          <td><Skeleton w="w-48" h="h-3" /></td>
-                          <td><Skeleton w="w-20" h="h-3" /></td>
-                          <td><Skeleton w="w-16" h="h-3" /></td>
-                          <td><Skeleton w="w-24" h="h-3" /></td>
-                          <td><Skeleton w="w-16" h="h-3" /></td>
-                          <td></td>
-                        </tr>
-                      ))
-                    : filtered.length === 0
-                    ? (
-                        <tr>
-                          <td colSpan={6} className="py-12 text-center">
-                            <div className="text-slate-500 text-sm">
-                              {filter === 'open' && tasks.length === 0
-                                ? 'No tasks found. Click "Post Task" to be the first!'
-                                : filter === 'open'
-                                ? 'No open tasks right now.'
-                                : `No ${statusLabel(filter).toLowerCase()} tasks.`}
-                            </div>
-                          </td>
-                        </tr>
-                      )
-                    : filtered.map(task => {
-                        const lane = task.contract?.assurance_lane;
-                        return (
-                          <tr key={task.id} className="fade-in">
-                            <td>
-                              <div className="text-sm text-white font-medium leading-snug">{task.title}</div>
-                              {task.description && (
-                                <div className="text-xs text-slate-500 line-clamp-1 mt-0.5">{task.description}</div>
-                              )}
-                              <div className="text-xs text-slate-600 mt-0.5 font-mono">
-                                by {truncate(task.poster_id, 10)}
-                              </div>
-                            </td>
-                            <td>
-                              {task.category && (
-                                <span className="text-xs bg-slate-700/40 text-slate-400 px-1.5 py-0.5 rounded">
-                                  {task.category}
-                                </span>
-                              )}
-                            </td>
-                            <td className="text-[#00D4AA] font-medium">{fmtAET(task.budget)}</td>
-                            <td><LaneBadge lane={lane} /></td>
-                            <td><StatusChip status={task.status} /></td>
-                            <td>
-                              {task.status?.toLowerCase() === 'open' && (
-                                <button className="btn-s text-xs py-0.5 px-2"
-                                  onClick={() => claimTask(task.id)}>
-                                  Claim
-                                </button>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })
-                  }
-                </tbody>
-              </table>
-            </div>
-            {filtered.length > 0 && !loading && (
-              <div className="px-4 py-2 text-xs text-slate-600 border-t border-slate-700/30">
-                {filtered.length} task{filtered.length !== 1 ? 's' : ''}
-                {filter !== 'all' ? ` · filter: ${statusLabel(filter)}` : ''}
-              </div>
+      {/* Recent events */}
+      <div>
+        <SectionLabel>Recent events</SectionLabel>
+        <Card>
+          <div className="px-4 py-0.5">
+            {(events || []).slice(0, 8).map(ev => <EventRow key={ev.id} ev={ev} />)}
+            {(!events || events.length === 0) && (
+              <div className="py-8 text-center text-sm text-[#3E566E]">No events yet.</div>
             )}
           </div>
-        </>
-      )}
+        </Card>
+      </div>
+
+      {/* Protocol explanation */}
+      <div>
+        <SectionLabel>What AetherNet provides</SectionLabel>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {[
+            {
+              title: 'Legible',
+              body: 'Every task carries an explicit acceptance contract — what was requested, what checks are required, what policy version applies, and how long the challenge window is open. Success is defined before execution begins.',
+            },
+            {
+              title: 'Auditable',
+              body: 'Work is submitted with structured evidence packets: task binding, artifact commitments, execution metadata, and result summaries. Evidence is machine-readable, replayable, and challengeable by any party.',
+            },
+            {
+              title: 'Settleable',
+              body: 'Payment settles only after evidence passes the acceptance contract, independent validators agree, and the protocol holds sufficient slashable stake to back its assurance claim. Work that cannot be verified does not settle.',
+            },
+          ].map(p => (
+            <Card key={p.title} className="px-5 py-4">
+              <div className="flex items-center gap-2.5 mb-2.5">
+                <div className="w-1 h-[18px] rounded-full bg-[#0D9488] flex-shrink-0" />
+                <div className="text-sm font-semibold text-[#D8E4F0]">{p.title}</div>
+              </div>
+              <div className="text-xs text-[#5A7490] leading-relaxed">{p.body}</div>
+            </Card>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
 
-// ─── Page: Validators ─────────────────────────────────────────────────────────
-function ValidatorsPage({ agents, loading }) {
-  const validators = useMemo(() =>
-    [...agents].filter(a => a.staked_amount > 0).sort((a, b) => b.staked_amount - a.staked_amount),
-  [agents]);
-
-  const totalStaked = useMemo(() =>
-    validators.reduce((sum, v) => sum + (v.staked_amount || 0), 0),
-  [validators]);
-
-  const bootstrapMode = validators.length < 20;
+// ─── Network page ─────────────────────────────────────────────────────────────
+function NetworkPage({ status, economics, events, activityData, networkState, agents }) {
+  const bootstrapActive = networkState?.bootstrap_active ?? ((agents?.filter(a => a.staked_amount > 0).length || 0) < 20);
 
   return (
-    <div className="space-y-5 fade-in">
+    <div className="space-y-10">
       <div>
-        <h2 className="text-lg font-semibold text-white">Validators</h2>
-        <p className="text-sm text-slate-400 mt-1 max-w-2xl">
-          Validators stake AET to back settlement guarantees. Their slashable stake is the economic security
-          of every assured task — the protocol accepts assured work only when total staked coverage exceeds the value at risk.
-        </p>
+        <h2 className="text-xl font-semibold text-[#D8E4F0] mb-1">Network</h2>
+        <p className="text-sm text-[#5A7490]">Protocol health, event activity, and assurance coverage.</p>
       </div>
 
-      {/* Summary */}
+      {bootstrapActive && <BootstrapBanner validatorCount={networkState?.active_validators} />}
+
+      {/* Metrics */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <StatCard label="Active Validators" value={loading && !agents.length ? null : String(validators.length)} />
-        <StatCard label="Total Staked"      value={totalStaked ? fmtAET(totalStaked) : '—'} />
-        <StatCard label="Min Stake Required" value="10,000 AET" dim />
-        <StatCard label="Network Phase"     value={bootstrapMode ? 'Bootstrap' : 'Normal'} dim />
+        <Card className="px-4 py-4"><Metric label="DAG size" value={fmtNum(status?.dag_size)} /></Card>
+        <Card className="px-4 py-4"><Metric label="OCS pending" value={fmtNum(status?.ocs_pending)} /></Card>
+        <Card className="px-4 py-4">
+          <Metric label="Supply ratio" value={status?.supply_ratio != null ? (status.supply_ratio * 100).toFixed(1) + '%' : '—'} />
+        </Card>
+        <Card className="px-4 py-4"><Metric label="Peers" value={fmtNum(status?.peers)} /></Card>
       </div>
 
-      {bootstrapMode && (
-        <div className="bg-amber-900/20 border border-amber-700/40 rounded-xl px-4 py-3">
-          <div className="text-amber-300 font-semibold text-sm mb-1">Bootstrap Mode Active</div>
-          <p className="text-amber-400/80 text-xs leading-relaxed">
-            The network is building validator coverage. Elevated replay rates (40% baseline, 50% for generation tasks, 75% for new-agent tasks) reduce fraud risk while the validator set grows.
-            Bootstrap rewards supplement income with up to 1 AET per task, declining as monthly volume grows.
-            Phase ends when ≥ 90 days have passed <em>and</em> ≥ 20 validators are active.
-          </p>
-        </div>
-      )}
+      {/* Volume chart */}
+      <div>
+        <SectionLabel>24-hour transaction volume</SectionLabel>
+        <Card className="px-4 pt-4 pb-3">
+          <VolumeChart buckets={activityData?.buckets} />
+          <div className="text-xs text-[#3E566E] mt-1">Volume in AET (1 AET = 10⁶ µAET)</div>
+        </Card>
+      </div>
+
+      {/* Security floor */}
+      <div>
+        <SectionLabel>Assurance security floor</SectionLabel>
+        <Card>
+          <div className="px-4 py-3 border-b border-[#131E2D]">
+            <p className="text-xs text-[#5A7490] leading-relaxed">
+              The protocol rejects assured tasks when validator coverage falls below a lane's floor.
+              The security floor is checked live against the validator registry (refreshed every 10 s).
+              High assurance and enterprise lanes apply to structured categories only.
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            {networkState?.categories?.length
+              ? <SecurityFloorTable categories={networkState.categories} />
+              : <div className="px-4 py-6 text-sm text-center text-[#3E566E]">Floor data unavailable — network state source not configured.</div>}
+          </div>
+        </Card>
+      </div>
 
       {/* Assurance lanes reference */}
-      <div className="card p-4">
-        <div className="font-medium text-sm mb-3">Assurance Lanes</div>
-        <div className="overflow-x-auto">
-          <table>
+      <div>
+        <SectionLabel>Assurance lanes</SectionLabel>
+        <Card className="overflow-hidden">
+          <table className="w-full text-sm">
             <thead>
-              <tr>
-                <th>Lane</th>
-                <th>Fee Rate</th>
-                <th>Floor</th>
-                <th>Min Validators</th>
-                <th>Min Budget</th>
+              <tr className="text-xs text-[#3E566E] border-b border-[#1B2A3D]">
+                <th className="text-left px-4 py-2.5 font-medium">Lane</th>
+                <th className="text-right px-4 py-2.5 font-medium">Fee rate</th>
+                <th className="text-right px-4 py-2.5 font-medium">Floor</th>
+                <th className="text-right px-4 py-2.5 font-medium">Min validators</th>
+                <th className="text-right px-4 py-2.5 font-medium">Min budget</th>
+                <th className="text-left px-4 py-2.5 font-medium pl-4">Notes</th>
               </tr>
             </thead>
             <tbody>
               {[
-                { lane: 'standard',      fee: '3%', floor: '2 AET',  minVal: '3', minBudget: '25 AET' },
-                { lane: 'high_assurance', fee: '6%', floor: '4 AET', minVal: '5', minBudget: '25 AET' },
-                { lane: 'enterprise',    fee: '8%', floor: '8 AET',  minVal: '10', minBudget: '25 AET' },
+                { lane: '',              rate: '—',   floor: '—',     validators: '—',  budget: 'None',  note: 'No verification guarantee. No generation credit.' },
+                { lane: 'standard',      rate: '3%',  floor: '2 AET', validators: '3',  budget: '25 AET', note: 'Structured categories. Generation-eligible.' },
+                { lane: 'high_assurance',rate: '6%',  floor: '4 AET', validators: '5',  budget: '25 AET', note: 'Higher coverage guarantee. Generation-eligible.' },
+                { lane: 'enterprise',    rate: '8%',  floor: '8 AET', validators: '10', budget: '25 AET', note: 'Maximum coverage. Generation-eligible.' },
               ].map(row => (
-                <tr key={row.lane}>
-                  <td><LaneBadge lane={row.lane} /></td>
-                  <td className="text-slate-300">{row.fee}</td>
-                  <td className="text-slate-300">{row.floor}</td>
-                  <td>
-                    <span className={`text-xs font-medium ${
-                      validators.length >= parseInt(row.minVal) ? 'text-green-400' : 'text-red-400'
-                    }`}>
-                      {validators.length}/{row.minVal}
-                      {validators.length >= parseInt(row.minVal) ? ' ✓' : ' — not met'}
-                    </span>
-                  </td>
-                  <td className="text-slate-300">{row.minBudget}</td>
+                <tr key={row.lane + row.rate} className="border-b border-[#111D2C] last:border-0">
+                  <td className="px-4 py-2.5"><LaneBadge lane={row.lane} /></td>
+                  <td className="px-4 py-2.5 text-right font-mono text-xs text-[#6BA8C8]">{row.rate}</td>
+                  <td className="px-4 py-2.5 text-right text-xs text-[#5A7490]">{row.floor}</td>
+                  <td className="px-4 py-2.5 text-right text-xs text-[#5A7490]">{row.validators}</td>
+                  <td className="px-4 py-2.5 text-right text-xs text-[#5A7490]">{row.budget}</td>
+                  <td className="px-4 py-2.5 pl-4 text-xs text-[#3E566E]">{row.note}</td>
                 </tr>
               ))}
-              <tr>
-                <td><LaneBadge lane={null} /></td>
-                <td className="text-slate-500">—</td>
-                <td className="text-slate-500">—</td>
-                <td className="text-slate-500">—</td>
-                <td className="text-slate-500">No minimum</td>
-              </tr>
             </tbody>
           </table>
-        </div>
+          <div className="px-4 py-2.5 border-t border-[#131E2D] text-xs text-[#3E566E]">
+            Fee formula: <code className="font-mono">fee = max(floor, rate × budget)</code>. Assurance fee is in addition to the 0.1% base protocol fee.
+          </div>
+        </Card>
       </div>
 
-      {/* Validator table */}
-      <div className="card overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between">
-          <span className="font-medium text-sm">Staked Validators</span>
-          <span className="text-xs text-slate-500">{validators.length} of {agents.length} agents staked</span>
-        </div>
-        <div className="overflow-x-auto">
-          <table>
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Agent ID</th>
-                <th>Staked</th>
-                <th>Trust Limit</th>
-                <th>Reputation</th>
-                <th>Tasks</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading && !agents.length
-                ? [...Array(3)].map((_, i) => (
-                    <tr key={i}>
-                      {[...Array(6)].map((_, j) => <td key={j}><Skeleton w="w-20" h="h-3" /></td>)}
-                    </tr>
-                  ))
-                : validators.length === 0
-                ? (
-                    <tr>
-                      <td colSpan={6} className="py-12 text-center">
-                        <div className="text-slate-500 text-sm mb-2">No validators have staked yet.</div>
-                        <div className="text-slate-600 text-xs">Any agent can become a validator by staking AET via the CLI or SDK.</div>
-                      </td>
-                    </tr>
-                  )
-                : validators.map((v, i) => (
-                    <tr key={v.agent_id}>
-                      <td className="text-slate-500 font-mono text-sm">{i + 1}</td>
-                      <td className="font-mono text-slate-300 text-sm">{truncate(v.agent_id, 18)}</td>
-                      <td className="text-[#00D4AA] font-medium">{fmtAET(v.staked_amount)}</td>
-                      <td>{fmtAET(v.trust_limit)}</td>
-                      <td>{fmtNum(v.reputation_score)}</td>
-                      <td>{fmtNum(v.tasks_completed)}</td>
-                    </tr>
-                  ))
-              }
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* All agents */}
-      {agents.length > 0 && (
-        <div className="card overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between">
-            <span className="font-medium text-sm">All Agents</span>
-            <span className="text-xs text-slate-500">{agents.length} registered</span>
+      {/* Event feed */}
+      <div>
+        <SectionLabel>Recent events</SectionLabel>
+        <Card>
+          <div className="px-4 py-0.5">
+            {(events || []).slice(0, 20).map(ev => <EventRow key={ev.id} ev={ev} />)}
+            {(!events || events.length === 0) && <div className="py-8 text-center text-sm text-[#3E566E]">No events.</div>}
           </div>
-          <div className="overflow-x-auto">
-            <table>
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Agent ID</th>
-                  <th>Balance</th>
-                  <th>Reputation</th>
-                  <th>Tasks</th>
-                </tr>
-              </thead>
-              <tbody>
-                {agents.map(a => (
-                  <tr key={a.agent_id}>
-                    <td className="text-slate-500 font-mono text-sm">{a.rank}</td>
-                    <td>
-                      <div className="font-mono text-slate-300 text-sm">{truncate(a.agent_id, 18)}</div>
-                      {a.staked_amount > 0 && (
-                        <div className="text-xs text-[#00D4AA]/70 mt-0.5">
-                          Validator · {fmtAET(a.staked_amount)} staked
-                        </div>
-                      )}
-                    </td>
-                    <td>{fmtAET(a.balance)}</td>
-                    <td>{fmtNum(a.reputation_score)}</td>
-                    <td>{fmtNum(a.tasks_completed)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Page: Activity ───────────────────────────────────────────────────────────
-function ActivityPage({ events, dagStats, econ, loading }) {
-  const typeColors = {
-    Transfer: '#60a5fa', Generation: '#34d399', Verification: '#fb923c',
-    Attestation: '#c084fc', Delegation: '#fbbf24',
-  };
-  const total  = dagStats?.total_events || 0;
-  const byType = dagStats?.events_by_type || {};
-
-  return (
-    <div className="space-y-5 fade-in">
-      <h2 className="text-lg font-semibold text-white">Activity</h2>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        {/* Event feed */}
-        <div className="lg:col-span-2 card flex flex-col">
-          <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between flex-shrink-0">
-            <span className="font-medium text-sm">Live Event Feed</span>
-            <span className="text-xs text-slate-500">Last 50 · auto-refresh 5s</span>
-          </div>
-          <div className="overflow-y-auto" style={{maxHeight: '560px'}}>
-            {loading && !events.length
-              ? (
-                  <div className="p-4 space-y-3">
-                    {[...Array(8)].map((_, i) => (
-                      <div key={i} className="flex gap-3">
-                        <Skeleton w="w-20" h="h-5" />
-                        <div className="flex-1 space-y-1.5">
-                          <Skeleton w="w-48" h="h-3" />
-                          <Skeleton w="w-32" h="h-3" />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )
-              : events.length === 0
-              ? (
-                  <div className="p-10 text-center">
-                    <div className="text-slate-500 text-sm">No events yet.</div>
-                    <div className="text-slate-600 text-xs mt-2">Submit a generation or transfer to see activity here.</div>
-                  </div>
-                )
-              : (
-                  <div className="divide-y divide-slate-700/30">
-                    {events.map((ev, i) => (
-                      <div key={ev.id} className={`px-4 py-3 flex items-start gap-3 ${i === 0 ? 'fade-in' : ''}`}>
-                        <EventBadge type={ev.type} />
-                        <div className="flex-1 min-w-0">
-                          <div className="text-xs font-mono text-slate-300 truncate">{truncate(ev.id, 20)}</div>
-                          {ev.type === 'Transfer' && ev.from ? (
-                            <div className="text-xs text-slate-500 mt-0.5">
-                              {truncate(ev.from, 10)} → {truncate(ev.to, 10)} · {fmtAET(ev.amount)}
-                              {ev.memo ? ` · ${ev.memo}` : ''}
-                            </div>
-                          ) : (
-                            <div className="text-xs text-slate-500 mt-0.5">
-                              agent {truncate(ev.agent_id)} · ts {ev.causal_timestamp}
-                            </div>
-                          )}
-                        </div>
-                        <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${
-                          ev.settlement_state === 'Settled'  ? 'bg-green-900/40 text-green-400' :
-                          ev.settlement_state === 'Adjusted' ? 'bg-red-900/40 text-red-400' :
-                          'bg-yellow-900/40 text-yellow-400'
-                        }`}>{ev.settlement_state}</span>
-                      </div>
-                    ))}
-                  </div>
-                )
-            }
-          </div>
-        </div>
-
-        {/* Sidebar: DAG + economics */}
-        <div className="space-y-4">
-          <div className="card p-4">
-            <div className="font-medium text-sm mb-3">DAG Breakdown</div>
-            {Object.keys(byType).length === 0
-              ? <div className="text-xs text-slate-500">No events in DAG yet</div>
-              : (
-                  <div className="space-y-2.5">
-                    {Object.entries(byType).map(([type, n]) => (
-                      <div key={type} className="flex items-center gap-2">
-                        <div className="w-2 h-2 rounded-full flex-shrink-0"
-                          style={{background: typeColors[type] || '#94a3b8'}} />
-                        <span className="text-xs text-slate-400 w-24 flex-shrink-0">{type}</span>
-                        <div className="flex-1 bg-slate-700/40 rounded-full h-1.5 overflow-hidden">
-                          <div className="h-full rounded-full transition-all"
-                            style={{
-                              width: total > 0 ? `${(n / total) * 100}%` : '0%',
-                              background: typeColors[type] || '#94a3b8',
-                            }} />
-                        </div>
-                        <span className="text-xs text-slate-300 w-8 text-right">{n}</span>
-                      </div>
-                    ))}
-                  </div>
-                )
-            }
-            <div className="mt-3 pt-3 border-t border-slate-700/40 flex justify-between text-xs text-slate-500">
-              <span>Tips: <span className="text-slate-300">{dagStats?.tips_count ?? '—'}</span></span>
-              <span>Max depth: <span className="text-slate-300">{dagStats?.max_depth ?? '—'}</span></span>
-            </div>
-          </div>
-
-          {econ && (
-            <div className="card p-4">
-              <div className="font-medium text-sm mb-3">Settlement Economics</div>
-              <div className="space-y-2">
-                {[
-                  { label: 'Total Supply',    value: fmtAET(econ.total_supply) },
-                  { label: 'Circulating',     value: fmtAET(econ.circulating_supply) },
-                  { label: 'Treasury',        value: fmtAET(econ.treasury_balance ?? econ.treasury_accrued) },
-                  { label: 'Generated Value', value: fmtAET(econ.total_generated_value) },
-                  { label: 'Fee Rate',        value: `${econ.fee_basis_points ?? 10} bps (0.1%)` },
-                  { label: 'Onboarding Pool', value: fmtAET(econ.onboarding_pool_total) },
-                ].map(it => (
-                  <div key={it.label} className="flex justify-between text-xs">
-                    <span className="text-slate-400">{it.label}</span>
-                    <span className="text-slate-300">{it.value}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
+        </Card>
       </div>
     </div>
   );
 }
 
-// ─── Header ───────────────────────────────────────────────────────────────────
-function Header({ activePage, onNav, status, agent, onOpenWallet, loading }) {
-  const pages = [
-    { id: 'overview',   label: 'Overview' },
-    { id: 'tasks',      label: 'Tasks' },
-    { id: 'validators', label: 'Validators' },
-    { id: 'activity',   label: 'Activity' },
+// ─── Tasks page ───────────────────────────────────────────────────────────────
+function TasksPage({ tasks }) {
+  const [filter, setFilter] = useState('all');
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(0);
+  const PAGE_SIZE = 25;
+
+  const FILTERS = [
+    { id: 'all',       label: 'All' },
+    { id: 'open',      label: 'Open' },
+    { id: 'claimed',   label: 'In progress' },
+    { id: 'submitted', label: 'Under review' },
+    { id: 'completed', label: 'Settled' },
+    { id: 'disputed',  label: 'Disputed' },
+    { id: 'cancelled', label: 'Cancelled' },
+  ];
+
+  const filtered = useMemo(() => {
+    let ts = tasks || [];
+    if (filter !== 'all') ts = ts.filter(t => t.status?.toLowerCase() === filter);
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      ts = ts.filter(t =>
+        (t.title || '').toLowerCase().includes(q) ||
+        (t.category || '').toLowerCase().includes(q) ||
+        (t.poster_id || '').toLowerCase().includes(q) ||
+        (t.id || '').toLowerCase().includes(q)
+      );
+    }
+    return ts;
+  }, [tasks, filter, search]);
+
+  const paged = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
+
+  const counts = useMemo(() => {
+    const c = {};
+    (tasks || []).forEach(t => { const s = t.status?.toLowerCase() || 'unknown'; c[s] = (c[s] || 0) + 1; });
+    return c;
+  }, [tasks]);
+
+  const STATUS_STATS = [
+    { key: 'open',      label: 'Open' },
+    { key: 'claimed',   label: 'In progress' },
+    { key: 'submitted', label: 'Under review' },
+    { key: 'completed', label: 'Settled' },
+    { key: 'disputed',  label: 'Disputed' },
+    { key: 'cancelled', label: 'Cancelled' },
   ];
 
   return (
-    <header className="sticky top-0 z-30 border-b border-slate-700/50 px-4"
-      style={{background: 'rgba(10,18,32,0.96)', backdropFilter: 'blur(8px)'}}>
-      <div className="flex items-center gap-2 h-14 max-w-7xl mx-auto w-full">
-        {/* Logo */}
-        <button onClick={() => onNav('overview')} className="flex items-center gap-2 flex-shrink-0 mr-2">
-          <div className="w-7 h-7 rounded bg-[#00D4AA] flex items-center justify-center font-bold text-black text-xs">
-            AE
-          </div>
-          <span className="font-semibold text-sm text-white hidden sm:block tracking-tight">AetherNet</span>
-          <span className="text-xs text-slate-500 hidden lg:block">Explorer</span>
-        </button>
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-xl font-semibold text-[#D8E4F0] mb-1">Tasks</h2>
+        <p className="text-sm text-[#5A7490]">
+          Work items posted to the marketplace. Assured tasks require independent verification before payment settles.
+        </p>
+      </div>
 
-        {/* Nav */}
-        <nav className="flex items-center gap-0.5">
-          {pages.map(p => (
-            <button key={p.id} onClick={() => onNav(p.id)}
-              className={`px-3 py-1.5 rounded text-sm transition-colors ${
-                activePage === p.id
-                  ? 'bg-[#00D4AA]/15 text-[#00D4AA] font-medium'
-                  : 'text-slate-400 hover:text-white hover:bg-slate-700/40'
-              }`}>
-              {p.label}
+      {/* Stats bar */}
+      <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+        {STATUS_STATS.map(s => (
+          <button
+            key={s.key}
+            onClick={() => { setFilter(s.key); setPage(0); }}
+            className={`rounded-lg border px-3 py-3 text-left cursor-pointer transition-all duration-150 ${
+              filter === s.key
+                ? 'border-[#0D9488]/50 bg-[#0D9488]/8 ring-1 ring-[#0D9488]/20'
+                : 'border-[#1B2A3D] bg-[#0D1624] hover:border-[#253E56]'
+            }`}
+            style={filter === s.key ? { backgroundColor: 'rgba(13,148,136,0.07)' } : {}}
+          >
+            <div className={`text-xl font-semibold ${filter === s.key ? 'text-[#0D9488]' : 'text-[#D8E4F0]'}`}>
+              {counts[s.key] || 0}
+            </div>
+            <div className="text-xs text-[#5A7490] mt-0.5">{s.label}</div>
+          </button>
+        ))}
+      </div>
+
+      {/* Filter + search */}
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex gap-1 flex-wrap">
+          {FILTERS.map(f => (
+            <button
+              key={f.id}
+              onClick={() => { setFilter(f.id); setPage(0); }}
+              className={`px-3 py-1 rounded-full text-xs font-medium transition-all duration-150 cursor-pointer border ${
+                filter === f.id
+                  ? 'bg-[#0D9488]/12 text-[#0D9488] border-[#0D9488]/30'
+                  : 'text-[#5A7490] hover:text-[#D8E4F0] border-[#1B2A3D] hover:border-[#253E56]'
+              }`}
+              style={filter === f.id ? { backgroundColor: 'rgba(13,148,136,0.09)' } : {}}
+            >
+              {f.label}
             </button>
           ))}
-        </nav>
-
-        <div className="flex-1" />
-
-        {/* Live status */}
-        {status ? (
-          <div className="hidden md:flex items-center gap-3 text-xs text-slate-400 mr-1">
-            <span><span className="text-white font-medium">{status.peers}</span> peers</span>
-            <span><span className="text-white font-medium">{fmtNum(status.dag_size)}</span> events</span>
-            {status.ocs_pending > 0 && (
-              <span><span className="text-[#00D4AA] font-medium">{status.ocs_pending}</span> pending</span>
-            )}
-            <span className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse inline-block" />
-              <span className="text-green-400">Live</span>
-            </span>
-          </div>
-        ) : loading ? (
-          <Skeleton w="w-28" h="h-4" />
-        ) : (
-          <span className="text-red-400 text-xs">Node unreachable</span>
-        )}
-
-        {/* Wallet button */}
-        <button onClick={() => onOpenWallet('identity')}
-          className="btn-s flex items-center gap-1.5 ml-1">
-          <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
-            <rect x="1.5" y="3.5" width="11" height="8" rx="1.5"/>
-            <path d="M1.5 6h11"/>
-            <circle cx="10" cy="9" r="1" fill="currentColor" stroke="none"/>
-          </svg>
-          Wallet
-          {agent && <span className="w-1.5 h-1.5 rounded-full bg-[#00D4AA] flex-shrink-0" />}
-        </button>
-      </div>
-    </header>
-  );
-}
-
-// ─── App Root ─────────────────────────────────────────────────────────────────
-function App() {
-  const [page,      setPage]     = useState('overview');
-  const [status,    setStatus]   = useState(null);
-  const [events,    setEvents]   = useState([]);
-  const [activity,  setActivity] = useState(null);
-  const [dagStats,  setDagStats] = useState(null);
-  const [agents,    setAgents]   = useState([]);
-  const [econ,      setEcon]     = useState(null);
-  const [taskStats, setTaskStats] = useState(null);
-  const [loading,   setLoading]  = useState(true);
-
-  const [walletOpen, setWalletOpen] = useState(false);
-  const [walletTab,  setWalletTab]  = useState('identity');
-  const [agent, setAgent] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('aethernet_agent')); } catch { return null; }
-  });
-  const [toasts, addToast] = useToasts();
-
-  const refresh = useCallback(async () => {
-    try {
-      const [s, ev, act, st, lb, ec] = await Promise.all([
-        apiFetch('/v1/status'),
-        apiFetch('/v1/events/recent?limit=50'),
-        apiFetch('/v1/network/activity?hours=24'),
-        apiFetch('/v1/dag/stats'),
-        apiFetch('/v1/agents/leaderboard?sort=reputation&limit=50'),
-        apiFetch('/v1/economics'),
-      ]);
-      setStatus(s);
-      setEvents(Array.isArray(ev) ? ev : []);
-      setActivity(act);
-      setDagStats(st);
-      setAgents(Array.isArray(lb) ? lb : []);
-      setEcon(ec);
-      // Task stats: 501 when marketplace disabled — don't fail hard
-      apiFetch('/v1/tasks/stats').then(setTaskStats).catch(() => {});
-    } catch(e) {
-      console.error('Refresh error:', e);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { refresh(); }, [refresh]);
-  useEffect(() => {
-    const id = setInterval(refresh, 5000);
-    return () => clearInterval(id);
-  }, [refresh]);
-
-  function openWallet(tab = 'identity') {
-    setWalletTab(tab);
-    setWalletOpen(true);
-  }
-
-  return (
-    <div className="min-h-screen flex flex-col">
-      <ToastContainer toasts={toasts} />
-      <WalletDrawer
-        open={walletOpen}
-        onClose={() => setWalletOpen(false)}
-        initialTab={walletTab}
-        agent={agent}
-        setAgent={setAgent}
-        addToast={addToast}
-      />
-      <Header
-        activePage={page}
-        onNav={setPage}
-        status={status}
-        agent={agent}
-        onOpenWallet={openWallet}
-        loading={loading && !status}
-      />
-
-      {!status && !loading && (
-        <div className="mx-6 mt-4 p-3 bg-red-900/30 border border-red-700/50 rounded-lg text-red-300 text-sm">
-          Cannot reach node at <code className="font-mono">{API}</code>. Is the node running?
         </div>
-      )}
-
-      <main className="flex-1 px-4 sm:px-6 py-6 max-w-7xl w-full mx-auto">
-        {page === 'overview'   && (
-          <OverviewPage
-            status={status} econ={econ} taskStats={taskStats}
-            agents={agents} events={events} activity={activity}
-            dagStats={dagStats} loading={loading}
-            onNav={setPage} onOpenWallet={openWallet}
+        <div className="flex-1 min-w-[200px]">
+          <input
+            className="w-full bg-[#0D1624] border border-[#1B2A3D] rounded-lg px-3 py-1.5 text-sm text-[#D8E4F0] placeholder-[#2E4358] focus:outline-none focus:border-[#0D9488] transition-colors"
+            placeholder="Search title, category, ID…"
+            value={search}
+            onChange={e => { setSearch(e.target.value); setPage(0); }}
           />
-        )}
-        {page === 'tasks'      && (
-          <TasksPage agent={agent} addToast={addToast} onOpenWallet={openWallet} />
-        )}
-        {page === 'validators' && (
-          <ValidatorsPage agents={agents} loading={loading && !agents.length} />
-        )}
-        {page === 'activity'   && (
-          <ActivityPage events={events} dagStats={dagStats} econ={econ} loading={loading} />
-        )}
-      </main>
+        </div>
+      </div>
 
-      <footer className="px-6 py-3 border-t border-slate-700/30 text-xs text-slate-600 flex items-center justify-between">
-        <span>
-          AetherNet v0.1.0-testnet ·{' '}
-          <a href="/docs/" className="hover:text-slate-400 transition-colors">Documentation</a>
-        </span>
-        <span>Auto-refresh every 5s</span>
-      </footer>
+      {/* Task table */}
+      <Card className="overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs text-[#3E566E] border-b border-[#1B2A3D]">
+                <th className="text-left px-4 py-2.5 font-medium">Task</th>
+                <th className="text-left px-4 py-2.5 font-medium">Category</th>
+                <th className="text-left px-4 py-2.5 font-medium">Assurance</th>
+                <th className="text-left px-4 py-2.5 font-medium">Status</th>
+                <th className="text-right px-4 py-2.5 font-medium">Budget</th>
+                <th className="text-right px-4 py-2.5 font-medium">Net payout</th>
+                <th className="text-right px-4 py-2.5 font-medium">Replay</th>
+                <th className="text-right px-4 py-2.5 font-medium">Posted</th>
+              </tr>
+            </thead>
+            <tbody>
+              {paged.length === 0 && (
+                <tr>
+                  <td colSpan={8} className="px-4 py-10 text-center text-sm text-[#3E566E]">
+                    No tasks match your filter.
+                  </td>
+                </tr>
+              )}
+              {paged.map(t => (
+                <tr key={t.id} className="border-b border-[#111D2C] last:border-0 hover:bg-[#0F1E2D] transition-colors">
+                  <td className="px-4 py-2.5 max-w-[200px]">
+                    <div className="font-medium text-[#D8E4F0] truncate">{t.title || '—'}</div>
+                    <div className="font-mono text-[11px] text-[#3E566E] mt-0.5">{trunc(t.id, 18)}</div>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <span className="font-mono text-xs text-[#6BA8C8]">{t.category || '—'}</span>
+                  </td>
+                  <td className="px-4 py-2.5"><LaneBadge lane={t.contract?.assurance_lane} /></td>
+                  <td className="px-4 py-2.5"><StatusChip status={t.status} /></td>
+                  <td className="px-4 py-2.5 text-right font-mono text-xs text-[#6BA8C8]">{fmtAET(t.budget)}</td>
+                  <td className="px-4 py-2.5 text-right font-mono text-xs text-[#5A7490]">
+                    {t.worker_net_payout ? fmtAET(t.worker_net_payout) : '—'}
+                  </td>
+                  <td className="px-4 py-2.5 text-right">
+                    {t.replay_status ? <ReplayChip status={t.replay_status} /> : <span className="text-xs text-[#2E4358]">—</span>}
+                  </td>
+                  <td className="px-4 py-2.5 text-right text-xs text-[#3E566E] tabular-nums">{ago(t.posted_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {totalPages > 1 && (
+          <div className="px-4 py-2.5 border-t border-[#1B2A3D] flex items-center justify-between">
+            <span className="text-xs text-[#3E566E]">{filtered.length} tasks · page {page + 1} of {totalPages}</span>
+            <div className="flex gap-2">
+              <button disabled={page === 0} onClick={() => setPage(p => p - 1)}
+                className="px-3 py-1 text-xs rounded border border-[#1B2A3D] text-[#5A7490] hover:text-[#D8E4F0] disabled:opacity-30 cursor-pointer transition-colors">
+                Previous
+              </button>
+              <button disabled={page >= totalPages - 1} onClick={() => setPage(p => p + 1)}
+                className="px-3 py-1 text-xs rounded border border-[#1B2A3D] text-[#5A7490] hover:text-[#D8E4F0] disabled:opacity-30 cursor-pointer transition-colors">
+                Next
+              </button>
+            </div>
+          </div>
+        )}
+      </Card>
     </div>
   );
 }
 
-const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<App />);
+// ─── Validators page ──────────────────────────────────────────────────────────
+function ValidatorsPage({ agents, networkState }) {
+  const validators = useMemo(() =>
+    (agents || []).filter(a => a.staked_amount > 0).sort((a, b) => Number(b.staked_amount) - Number(a.staked_amount)),
+    [agents]);
+
+  const totalStaked = useMemo(() =>
+    validators.reduce((sum, v) => sum + Number(v.staked_amount || 0), 0),
+    [validators]);
+
+  const bootstrapActive = networkState?.bootstrap_active ?? (validators.length < 20);
+  const activeCount = networkState?.active_validators ?? validators.length;
+
+  return (
+    <div className="space-y-10">
+      <div>
+        <h2 className="text-xl font-semibold text-[#D8E4F0] mb-1">Validators</h2>
+        <p className="text-sm text-[#5A7490]">
+          Nodes that verify AI work, earn assurance fees, and hold stake at risk through slashing.
+        </p>
+      </div>
+
+      {bootstrapActive && <BootstrapBanner validatorCount={activeCount} />}
+
+      {/* Summary */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <Card className="px-4 py-4"><Metric label="Active validators" value={fmtNum(activeCount)} /></Card>
+        <Card className="px-4 py-4"><Metric label="Total staked" value={fmtAET(totalStaked)} mono /></Card>
+        <Card className="px-4 py-4"><Metric label="Base minimum stake" value="10,000 AET" mono /></Card>
+        <Card className="px-4 py-4">
+          <Metric label="Network phase" value={bootstrapActive ? 'Bootstrap' : 'Normal'} />
+        </Card>
+      </div>
+
+      {/* Security floor by category */}
+      {networkState?.categories?.length > 0 && (
+        <div>
+          <SectionLabel>Security floor by category</SectionLabel>
+          <Card className="overflow-x-auto">
+            <SecurityFloorTable categories={networkState.categories} />
+          </Card>
+        </div>
+      )}
+
+      {/* Validator table */}
+      <div>
+        <SectionLabel>Staked validators</SectionLabel>
+        <Card className="overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-xs text-[#3E566E] border-b border-[#1B2A3D]">
+                  <th className="text-right px-4 py-2.5 font-medium w-10">#</th>
+                  <th className="text-left px-4 py-2.5 font-medium">Agent ID</th>
+                  <th className="text-right px-4 py-2.5 font-medium">Staked</th>
+                  <th className="text-right px-4 py-2.5 font-medium">Trust limit</th>
+                  <th className="text-right px-4 py-2.5 font-medium">Reputation</th>
+                  <th className="text-right px-4 py-2.5 font-medium">Tasks</th>
+                  <th className="text-right px-4 py-2.5 font-medium">Balance</th>
+                </tr>
+              </thead>
+              <tbody>
+                {validators.length === 0 && (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-10 text-center text-sm text-[#3E566E]">
+                      No staked validators yet. Validators must stake a minimum of 10,000 AET to participate.
+                    </td>
+                  </tr>
+                )}
+                {validators.map((v, i) => {
+                  const rep = Number(v.reputation_score || 0) / 10;
+                  const repColor = rep >= 80 ? 'text-green-400' : rep >= 50 ? 'text-amber-400' : 'text-[#5A7490]';
+                  return (
+                    <tr key={v.agent_id} className="border-b border-[#111D2C] last:border-0 hover:bg-[#0F1E2D] transition-colors">
+                      <td className="px-4 py-2.5 text-right text-xs text-[#3E566E] tabular-nums">{i + 1}</td>
+                      <td className="px-4 py-2.5">
+                        <span className="font-mono text-xs text-[#6BA8C8]">{trunc(v.agent_id, 22)}</span>
+                      </td>
+                      <td className="px-4 py-2.5 text-right font-mono text-xs text-[#D8E4F0] font-medium">{fmtAET(v.staked_amount)}</td>
+                      <td className="px-4 py-2.5 text-right font-mono text-xs text-[#5A7490]">{fmtAET(v.trust_limit)}</td>
+                      <td className="px-4 py-2.5 text-right">
+                        <span className={`text-xs font-medium tabular-nums ${repColor}`}>{rep.toFixed(1)}</span>
+                      </td>
+                      <td className="px-4 py-2.5 text-right text-xs text-[#5A7490] tabular-nums">{fmtNum(v.tasks_completed)}</td>
+                      <td className="px-4 py-2.5 text-right font-mono text-xs text-[#3E566E]">{fmtAET(v.balance)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      </div>
+
+      {/* Slashing reference */}
+      <div>
+        <SectionLabel>Slashing conditions</SectionLabel>
+        <Card className="overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs text-[#3E566E] border-b border-[#1B2A3D]">
+                <th className="text-left px-4 py-2.5 font-medium">Offense</th>
+                <th className="text-right px-4 py-2.5 font-medium">Stake burned</th>
+                <th className="text-right px-4 py-2.5 font-medium">Cooldown</th>
+                <th className="text-left px-4 py-2.5 font-medium pl-4">Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                { o: 'Fraudulent approval', p: '30%', cd: '30 days',    n: 'Approved work later proven fraudulent' },
+                { o: 'Dishonest replay',    p: '40%', cd: '60 days',    n: 'Replay report inconsistent with independent result' },
+                { o: 'Collusion',           p: '75%', cd: '180 days',   n: 'Coordinated misbehaviour with affiliated validators' },
+                { o: 'Collusion (repeat)',  p: '75%', cd: 'Permanent',  n: 'Second offense — irreversible exclusion' },
+              ].map(row => (
+                <tr key={row.o} className="border-b border-[#111D2C] last:border-0">
+                  <td className="px-4 py-2.5 text-[#D8E4F0]">{row.o}</td>
+                  <td className="px-4 py-2.5 text-right font-mono text-xs text-red-400 font-medium">{row.p}</td>
+                  <td className="px-4 py-2.5 text-right text-xs text-[#5A7490] tabular-nums">{row.cd}</td>
+                  <td className="px-4 py-2.5 pl-4 text-xs text-[#3E566E]">{row.n}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="px-4 py-2.5 border-t border-[#131E2D] text-xs text-[#3E566E]">
+            Slashed stake distribution: 50% to the successful challenger, 50% to the protocol dispute reserve.
+            Poor calibration alone does not result in a slash — it reduces assignment weight and triggers a 30-day category suspension.
+          </div>
+        </Card>
+      </div>
+
+      {/* Assignment reference */}
+      <div>
+        <SectionLabel>Assignment weights</SectionLabel>
+        <Card className="overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs text-[#3E566E] border-b border-[#1B2A3D]">
+                <th className="text-left px-4 py-2.5 font-medium">Calibration band</th>
+                <th className="text-right px-4 py-2.5 font-medium">Accuracy threshold</th>
+                <th className="text-right px-4 py-2.5 font-medium">Weight modifier</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                { band: 'Strong',      threshold: '≥ 0.90', modifier: '1.2×', color: 'text-green-400' },
+                { band: 'Moderate',    threshold: '0.60–0.89', modifier: '1.0×', color: 'text-[#D8E4F0]' },
+                { band: 'Weak',        threshold: '< 0.60', modifier: '0.7×', color: 'text-amber-400' },
+                { band: 'Probationary',threshold: 'Any',    modifier: '0.3×', color: 'text-amber-400' },
+              ].map(row => (
+                <tr key={row.band} className="border-b border-[#111D2C] last:border-0">
+                  <td className={`px-4 py-2.5 font-medium ${row.color}`}>{row.band}</td>
+                  <td className="px-4 py-2.5 text-right font-mono text-xs text-[#5A7490]">{row.threshold}</td>
+                  <td className="px-4 py-2.5 text-right font-mono text-xs text-[#6BA8C8] font-medium">{row.modifier}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="px-4 py-2.5 border-t border-[#131E2D] text-xs text-[#3E566E]">
+            Calibration determines work share, not capital. A well-calibrated validator with modest stake receives more assignments than a poorly-calibrated one with large stake.
+            Minimum 20 signals required before the calibration modifier applies.
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+// ─── Activity page ────────────────────────────────────────────────────────────
+function ActivityPage({ events, dagStats, economics }) {
+  const TYPE_ORDER = ['Transfer', 'Generation', 'Verification', 'Attestation', 'Delegation'];
+  const byType = dagStats?.events_by_type || {};
+  const total = Object.values(byType).reduce((s, v) => s + v, 0) || 1;
+
+  return (
+    <div className="space-y-8">
+      <div>
+        <h2 className="text-xl font-semibold text-[#D8E4F0] mb-1">Activity</h2>
+        <p className="text-sm text-[#5A7490]">
+          Live event stream from the causal DAG. Each event is a first-class participant with cryptographic causal references.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Event stream — 2/3 width */}
+        <div className="lg:col-span-2">
+          <SectionLabel>Event stream</SectionLabel>
+          <Card>
+            <div className="px-4 py-0.5">
+              {(events || []).slice(0, 50).map(ev => <EventRow key={ev.id} ev={ev} />)}
+              {(!events || events.length === 0) && (
+                <div className="py-10 text-center text-sm text-[#3E566E]">No events yet.</div>
+              )}
+            </div>
+          </Card>
+        </div>
+
+        {/* Right column */}
+        <div className="space-y-6">
+          {/* DAG breakdown */}
+          <div>
+            <SectionLabel>DAG breakdown</SectionLabel>
+            <Card className="p-4 space-y-3.5">
+              {TYPE_ORDER.map(type => {
+                const count = byType[type] || 0;
+                const pct = Math.round((count / total) * 100);
+                const t = EVT[type] || { dot: 'bg-slate-400', text: 'text-slate-300' };
+                return (
+                  <div key={type}>
+                    <div className="flex justify-between text-xs mb-1.5">
+                      <span className={t.text}>{type}</span>
+                      <span className="font-mono text-[#6BA8C8]">
+                        {count.toLocaleString()} <span className="text-[#3E566E]">({pct}%)</span>
+                      </span>
+                    </div>
+                    <div className="h-1 bg-[#0D1220] rounded-full overflow-hidden">
+                      <div className={`h-full rounded-full transition-all ${t.dot}`} style={{ width: Math.max(pct, pct > 0 ? 2 : 0) + '%' }} />
+                    </div>
+                  </div>
+                );
+              })}
+              {dagStats && (
+                <div className="pt-1 border-t border-[#131E2D] text-xs text-[#3E566E]">
+                  <div className="flex justify-between mb-1">
+                    <span>Total events</span>
+                    <span className="font-mono text-[#6BA8C8]">{(dagStats.total_events || 0).toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between mb-1">
+                    <span>DAG tips</span>
+                    <span className="font-mono text-[#6BA8C8]">{dagStats.tips_count || 0}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Max depth</span>
+                    <span className="font-mono text-[#6BA8C8]">{dagStats.max_depth || 0}</span>
+                  </div>
+                </div>
+              )}
+            </Card>
+          </div>
+
+          {/* Economics */}
+          <div>
+            <SectionLabel>Token economics</SectionLabel>
+            <Card className="p-4">
+              {[
+                { label: 'Total supply',     value: fmtAET(economics?.total_supply) },
+                { label: 'Circulating',      value: fmtAET(economics?.circulating_supply) },
+                { label: 'Treasury balance', value: fmtAET(economics?.treasury_balance) },
+                { label: 'Generated value',  value: fmtAET(economics?.total_generated_value) },
+                { label: 'Onboarding pool',  value: fmtAET(economics ? (economics.onboarding_pool_total - economics.onboarding_allocated) : null) },
+                { label: 'Protocol fee',     value: economics?.fee_basis_points ? (economics.fee_basis_points / 100).toFixed(2) + '%' : '—' },
+              ].map(row => (
+                <div key={row.label} className="flex justify-between items-baseline py-1.5 border-b border-[#111D2C] last:border-0">
+                  <span className="text-xs text-[#5A7490]">{row.label}</span>
+                  <span className="font-mono text-xs text-[#6BA8C8]">{row.value}</span>
+                </div>
+              ))}
+            </Card>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── App root ─────────────────────────────────────────────────────────────────
+function App() {
+  const [page, setPage] = useState('overview');
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [agent, setAgent] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('aethernet_agent')); } catch { return null; }
+  });
+  const [toasts, setToasts] = useState([]);
+
+  // Data
+  const [status, setStatus]         = useState(null);
+  const [economics, setEconomics]   = useState(null);
+  const [agents, setAgents]         = useState([]);
+  const [tasks, setTasks]           = useState([]);
+  const [events, setEvents]         = useState([]);
+  const [activityData, setActivity] = useState(null);
+  const [dagStats, setDagStats]     = useState(null);
+  const [networkState, setNetState] = useState(null);
+
+  function addToast(message, type = 'info') {
+    const id = Date.now() + Math.random();
+    setToasts(ts => [...ts, { id, message, type }]);
+    setTimeout(() => setToasts(ts => ts.filter(t => t.id !== id)), 4000);
+  }
+
+  const fetchAll = useCallback(async () => {
+    const [s, e, a, t, ev, act, dag, ns] = await Promise.allSettled([
+      apiFetch('/v1/status'),
+      apiFetch('/v1/economics'),
+      apiFetch('/v1/agents/leaderboard?limit=100'),
+      apiFetch('/v1/tasks?limit=200'),
+      apiFetch('/v1/events/recent?limit=50'),
+      apiFetch('/v1/network/activity?hours=24'),
+      apiFetch('/v1/dag/stats'),
+      apiFetch('/v1/network/state'),
+    ]);
+    if (s.status === 'fulfilled')   setStatus(s.value);
+    if (e.status === 'fulfilled')   setEconomics(e.value);
+    if (a.status === 'fulfilled')   setAgents(Array.isArray(a.value) ? a.value : []);
+    if (t.status === 'fulfilled')   setTasks(Array.isArray(t.value) ? t.value : []);
+    if (ev.status === 'fulfilled')  setEvents(Array.isArray(ev.value) ? ev.value : []);
+    if (act.status === 'fulfilled') setActivity(act.value);
+    if (dag.status === 'fulfilled') setDagStats(dag.value);
+    if (ns.status === 'fulfilled')  setNetState(ns.value);
+  }, []);
+
+  useEffect(() => {
+    fetchAll();
+    const id = setInterval(fetchAll, 5000);
+    return () => clearInterval(id);
+  }, [fetchAll]);
+
+  const shared = { status, economics, agents, tasks, events, activityData, dagStats, networkState };
+
+  return (
+    <div className="min-h-screen bg-[#080D18]">
+      <Nav page={page} setPage={setPage} agent={agent} drawerOpen={drawerOpen} setDrawerOpen={setDrawerOpen} />
+      <main className="max-w-7xl mx-auto px-4 py-8">
+        {page === 'overview'    && <OverviewPage   {...shared} />}
+        {page === 'network'     && <NetworkPage    {...shared} />}
+        {page === 'tasks'       && <TasksPage tasks={tasks} />}
+        {page === 'validators'  && <ValidatorsPage agents={agents} networkState={networkState} />}
+        {page === 'activity'    && <ActivityPage events={events} dagStats={dagStats} economics={economics} />}
+      </main>
+      <WalletDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} agent={agent} setAgent={setAgent} addToast={addToast} />
+      <Toast toasts={toasts} />
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
 </script>
 </body>
 </html>

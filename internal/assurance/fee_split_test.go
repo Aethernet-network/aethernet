@@ -222,7 +222,10 @@ func TestProcessSettlement_NoReplay_AccruesReserve(t *testing.T) {
 	cfg := testAssuranceCfg()
 	reserve := NewReplayReserve(cfg, nil)
 
-	result := ProcessSettlement(testFee, "code", false, reserve, cfg)
+	result, err := ProcessSettlement(testFee, "code", false, reserve, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if result.ReplayOccurred {
 		t.Error("ReplayOccurred should be false")
@@ -244,7 +247,10 @@ func TestProcessSettlement_WithReplay_NoAccrual(t *testing.T) {
 	cfg := testAssuranceCfg()
 	reserve := NewReplayReserve(cfg, nil)
 
-	result := ProcessSettlement(testFee, "code", true, reserve, cfg)
+	result, err := ProcessSettlement(testFee, "code", true, reserve, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if !result.ReplayOccurred {
 		t.Error("ReplayOccurred should be true")

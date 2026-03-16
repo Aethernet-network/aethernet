@@ -209,14 +209,17 @@ func (r *ValidatorRegistry) Register(agentID string, stakeAmount uint64, categor
 		IsGenesis:          isGenesis,
 	}
 
+	// Persist BEFORE updating in-memory state (CLAUDE.md invariant).
+	// If persistence fails, return error without modifying in-memory state.
+	if err := r.persist(v); err != nil {
+		return nil, fmt.Errorf("validator: register: persist failed: %w", err)
+	}
+
 	r.mu.Lock()
 	r.validators[id] = v
 	r.byAgent[agentID] = id
 	r.mu.Unlock()
 
-	if err := r.persist(v); err != nil {
-		slog.Error("validator: failed to persist new validator", "id", id, "agent_id", agentID, "err", err)
-	}
 	return v, nil
 }
 
@@ -337,7 +340,12 @@ func (r *ValidatorRegistry) EvaluateProbation(validatorID string) error {
 		v.Status = StatusActive
 		v.ActivatedAt = now
 		if err := r.persistLocked(v); err != nil {
-			slog.Error("validator: failed to persist promotion", "id", v.ID, "err", err)
+			// M8: roll back in-memory state if persistence fails.
+			v.Status = StatusProbationary
+			v.ActivatedAt = time.Time{}
+			slog.Error("validator: failed to persist promotion — rolled back in-memory state",
+				"id", v.ID, "agent_id", v.AgentID, "err", err)
+			return err
 		}
 		slog.Info("validator: promoted to active",
 			"id", v.ID, "agent_id", v.AgentID,
@@ -352,6 +360,8 @@ func (r *ValidatorRegistry) EvaluateProbation(validatorID string) error {
 		if err := r.persistLocked(v); err != nil {
 			slog.Error("validator: failed to persist exclusion", "id", v.ID, "err", err)
 		}
+		// M6: remove stale reverse-index entry for permanently excluded validators.
+		delete(r.byAgent, v.AgentID)
 		slog.Warn("validator: excluded after max probation cycles",
 			"id", v.ID, "agent_id", v.AgentID, "cycles", v.ProbationCycle-1)
 		return ErrMaxProbationCyclesExceeded
@@ -460,6 +470,8 @@ func (r *ValidatorRegistry) ApplySlash(validatorID string, slashAmount uint64, o
 		// Clear time-limited suspension fields — this exclusion is permanent.
 		v.SuspendedUntil = time.Time{}
 		v.SuspensionReason = "slashed:" + offense + ":permanent"
+		// M6: remove stale reverse-index entry for permanently excluded validators.
+		delete(r.byAgent, v.AgentID)
 	} else {
 		v.Status = StatusSuspended
 		v.SuspendedAt = now

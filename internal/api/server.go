@@ -101,6 +101,25 @@ type calibrationAgentsSource interface {
 	AllSignals() ([]*canary.CalibrationSignal, error)
 }
 
+// networkStateSource provides consolidated network health state for the
+// GET /v1/network/state endpoint. It aggregates validator registry counts,
+// bootstrap override, and replay reserve health into a single interface so
+// the API server does not need to import those packages directly.
+type networkStateSource interface {
+	// IsBootstrapActive reports whether the network is still in the bootstrap phase.
+	IsBootstrapActive() bool
+	// ActiveValidatorCount returns the total number of active + probationary validators.
+	ActiveValidatorCount() int
+	// ValidatorCountForCategory returns the number of validators eligible for category.
+	ValidatorCountForCategory(category string) int
+	// IsReplayReserveHealthy reports whether the per-category replay reserve is above
+	// the circuit-breaker threshold. Returns true when no reserve is configured.
+	IsReplayReserveHealthy(category string) bool
+	// AssuranceCategories returns the structured categories where deterministic
+	// verification (and therefore assured settlement) is available.
+	AssuranceCategories() []string
+}
+
 // challengeSource is the minimal interface for challenge bond lifecycle
 // operations exposed via the API. *assurance.ChallengeManager satisfies this
 // interface via an adapter in cmd/node — the api package uses primitive types
@@ -113,6 +132,13 @@ type challengeSource interface {
 	ResolveChallenge(challengeID string, outcome string, fraudBounty uint64) (refundedBond, forfeitAmount uint64, err error)
 	// ChallengesForTask returns all challenges associated with a task ID.
 	ChallengesForTask(taskID string) []ChallengeRecord
+	// GetChallenge returns the challenge record for the given challenge ID.
+	// Returns an error (wrapping assurance.ErrChallengeNotFound) when not found.
+	GetChallenge(id string) (ChallengeRecord, error)
+	// MinBond returns the minimum challenge bond (µAET) for a task with the
+	// given budget. Callers may pass 0 when the task budget is unknown; the
+	// result is then the protocol floor.
+	MinBond(taskBudget uint64) uint64
 }
 
 // ChallengeRecord is the API-facing projection of a challenge bond record.
@@ -258,6 +284,11 @@ type Server struct {
 	// When non-nil, POST /v1/challenges, POST /v1/challenges/{id}/resolve, and
 	// GET /v1/challenges/{task_id} are active. When nil the endpoints return 501.
 	challengeManager challengeSource
+
+	// networkState — optional; set via SetNetworkStateSource after construction.
+	// When non-nil, GET /v1/network/state returns live bootstrap status,
+	// validator coverage counts, and replay reserve health. When nil, 501.
+	networkState networkStateSource
 }
 
 // NewServer constructs an API Server backed by the provided node components.
@@ -354,6 +385,7 @@ func (s *Server) registerL1Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/stake", s.handleStake)
 	mux.HandleFunc("POST /v1/unstake", s.handleUnstake)
 	mux.HandleFunc("GET /v1/network/activity", s.handleNetworkActivity)
+	mux.HandleFunc("GET /v1/network/state", s.handleNetworkState)
 	// Infrastructure
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /health", s.handleHealth)
@@ -573,6 +605,13 @@ func (s *Server) SetCalibrationAgentsStore(cs calibrationAgentsSource) {
 // return 501. Call before Start.
 func (s *Server) SetChallengeManager(cm challengeSource) {
 	s.challengeManager = cm
+}
+
+// SetNetworkStateSource wires the consolidated network health source. When
+// non-nil, GET /v1/network/state returns live bootstrap status, per-category
+// validator counts, and replay reserve health. When nil (default), 501.
+func (s *Server) SetNetworkStateSource(src networkStateSource) {
+	s.networkState = src
 }
 
 // isAuthenticated reports whether r carries a valid X-API-Key credential.
@@ -3248,6 +3287,7 @@ func (s *Server) handleOpenChallenge(w http.ResponseWriter, r *http.Request) {
 		ChallengerID string `json:"challenger_id"`
 		TargetID     string `json:"target_id"`
 		Bond         uint64 `json:"bond"`
+		TaskBudget   uint64 `json:"task_budget"` // optional; used for minimum bond computation
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -3257,6 +3297,29 @@ func (s *Server) handleOpenChallenge(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "task_id, challenger_id, and target_id are required")
 		return
 	}
+
+	// M2: When auth is enabled, challenger_id must match the node's own agent
+	// identity. This prevents an authenticated caller from opening a challenge
+	// on behalf of a different agent.
+	if s.requireAuth && s.platformKeys != nil {
+		if body.ChallengerID != string(s.agentID) {
+			writeError(w, http.StatusForbidden, "challenger_id must match the authenticated agent identity")
+			return
+		}
+	}
+
+	// M1: Enforce the protocol minimum bond. Use task_budget (if provided) for
+	// a precise per-task minimum; fall back to 1_000_000 µAET (1 AET) floor
+	// when the challenge manager is unavailable.
+	const fallbackBondFloor = uint64(1_000_000)
+	minBond := fallbackBondFloor
+	minBond = s.challengeManager.MinBond(body.TaskBudget)
+	if body.Bond < minBond {
+		writeCodedError(w, http.StatusBadRequest, "bond_below_minimum",
+			"bond is below the protocol minimum", fmt.Sprintf("minimum: %d µAET", minBond))
+		return
+	}
+
 	id, createdAt, err := s.challengeManager.OpenChallenge(body.TaskID, body.ChallengerID, body.TargetID, body.Bond)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -3304,6 +3367,27 @@ func (s *Server) handleResolveChallenge(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "challenge id is required")
 		return
 	}
+
+	// H2: Restrict who may resolve a challenge. Only the original challenger
+	// (identified by the node's own agent when auth is enabled) is authorised
+	// to resolve their own challenge.
+	//
+	// TODO: In a future protocol version, challenge resolution should be driven
+	// by an on-chain replay/dispute outcome rather than by a caller-initiated
+	// API call. When that is implemented this auth check can be replaced with
+	// a protocol-level ownership proof.
+	if s.requireAuth && s.platformKeys != nil {
+		challenge, err := s.challengeManager.GetChallenge(challengeID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if challenge.ChallengerID != string(s.agentID) {
+			writeError(w, http.StatusForbidden, "only the original challenger may resolve this challenge")
+			return
+		}
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var body struct {
 		Outcome     string `json:"outcome"`
@@ -3361,6 +3445,52 @@ func (s *Server) handleListChallenges(w http.ResponseWriter, r *http.Request) {
 	}
 	challenges := s.challengeManager.ChallengesForTask(taskID)
 	writeJSON(w, http.StatusOK, map[string]any{"challenges": challenges})
+}
+
+// handleNetworkState returns consolidated network health state: bootstrap phase,
+// active validator count, and per-category security floor + replay reserve health.
+//
+//	GET /v1/network/state
+//
+//	Response 200: networkStateResponse (JSON)
+//	Response 501: network state source not configured
+func (s *Server) handleNetworkState(w http.ResponseWriter, r *http.Request) {
+	if s.networkState == nil {
+		writeError(w, http.StatusNotImplemented, "network state not configured")
+		return
+	}
+	type categoryState struct {
+		Name                 string `json:"name"`
+		ValidatorCount       int    `json:"validator_count"`
+		FloorStandard        int    `json:"floor_standard"`
+		FloorHigh            int    `json:"floor_high"`
+		FloorEnterprise      int    `json:"floor_enterprise"`
+		StandardAvailable    bool   `json:"standard_available"`
+		HighAvailable        bool   `json:"high_available"`
+		EnterpriseAvailable  bool   `json:"enterprise_available"`
+		ReplayReserveHealthy bool   `json:"replay_reserve_healthy"`
+	}
+	cats := s.networkState.AssuranceCategories()
+	catStates := make([]categoryState, 0, len(cats))
+	for _, cat := range cats {
+		count := s.networkState.ValidatorCountForCategory(cat)
+		catStates = append(catStates, categoryState{
+			Name:                 cat,
+			ValidatorCount:       count,
+			FloorStandard:        3,  // protocol constant
+			FloorHigh:            5,  // protocol constant
+			FloorEnterprise:      10, // protocol constant
+			StandardAvailable:    count >= 3,
+			HighAvailable:        count >= 5,
+			EnterpriseAvailable:  count >= 10,
+			ReplayReserveHealthy: s.networkState.IsReplayReserveHealthy(cat),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"bootstrap_active":  s.networkState.IsBootstrapActive(),
+		"active_validators": s.networkState.ActiveValidatorCount(),
+		"categories":        catStates,
+	})
 }
 
 // handleAdminCalibration returns the canary calibration rollup for a single

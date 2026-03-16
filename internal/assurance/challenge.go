@@ -175,6 +175,14 @@ func ComputeBond(taskBudget uint64, cfg *config.AssuranceConfig) uint64 {
 	return computed
 }
 
+// MinBond returns the minimum required challenge bond for a task with the
+// given budget. This is a method wrapper around ComputeBond that allows the
+// ChallengeManager to satisfy the api.challengeSource interface without
+// exposing config internals.
+func (m *ChallengeManager) MinBond(taskBudget uint64) uint64 {
+	return ComputeBond(taskBudget, m.cfg)
+}
+
 // ---------------------------------------------------------------------------
 // OpenChallenge
 // ---------------------------------------------------------------------------
