@@ -21,11 +21,12 @@ commented section at the bottom of this file.
 """
 
 import hashlib
+import os
 import sys
 
 from aethernet import AetherNetClient, AetherNetError
 
-NODE = "http://localhost:8338"
+NODE = os.environ.get("AETHERNET_NODE", "http://localhost:8338")
 
 
 def hash_work(content: str) -> str:

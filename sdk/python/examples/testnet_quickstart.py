@@ -8,10 +8,12 @@ On first run, a local Ed25519 keypair is generated and cached in
 ~/.aethernet/my-agent.json. Subsequent runs reconnect with the same identity.
 """
 
+import os
 from aethernet import AetherNetClient
 
-# Connect to the public testnet — no configuration required.
-client = AetherNetClient("https://testnet.aethernet.network")
+# Connect to the node specified by AETHERNET_NODE, defaulting to the public testnet.
+NODE = os.environ.get("AETHERNET_NODE", "https://testnet.aethernet.network")
+client = AetherNetClient(NODE)
 
 # One-call onboarding: generates a keypair, saves it locally, and registers.
 print("Onboarding with AetherNet testnet...")

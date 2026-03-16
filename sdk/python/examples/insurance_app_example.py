@@ -13,9 +13,10 @@ The insurance app:
 This is NOT part of AetherNet — it's an independent application
 that uses AetherNet as its data and settlement layer.
 """
+import os
 from aethernet.platform import AetherNetPlatform
 
-TESTNET = "https://testnet.aethernet.network"
+TESTNET = os.environ.get("AETHERNET_NODE", "https://testnet.aethernet.network")
 
 
 def calculate_premium(reputation, task_budget):

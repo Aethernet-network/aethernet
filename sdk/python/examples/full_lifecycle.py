@@ -31,6 +31,7 @@ Or from the sdk/python directory::
 """
 
 import hashlib
+import os
 import sys
 import time
 
@@ -39,7 +40,7 @@ sys.path.insert(0, ".")
 
 from aethernet import AetherNetClient, AetherNetError
 
-NODE_URL = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8338"
+NODE_URL = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("AETHERNET_NODE", "http://localhost:8338")
 
 
 def main() -> None:

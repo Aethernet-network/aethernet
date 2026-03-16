@@ -318,7 +318,7 @@ if HAS_LANGCHAIN:
 def get_aethernet_tools(
     client=None,
     *,
-    node_url: str = "http://localhost:8338",
+    node_url: str = None,
     agent_id: str = "",
 ) -> list:
     """Create all AetherNet LangChain tools.
@@ -346,6 +346,9 @@ def get_aethernet_tools(
     """
     _require_langchain()
     if client is None:
+        if node_url is None:
+            import os
+            node_url = os.environ.get("AETHERNET_NODE", "http://localhost:8338")
         client = AetherNetClient(node_url, agent_id=agent_id)
     return [
         AetherNetTransferTool(client=client),

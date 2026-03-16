@@ -7,9 +7,10 @@ Shows how an organisation registers and manages a fleet of agents.
     pip install aethernet-sdk
     python enterprise_example.py
 """
+import os
 from aethernet.enterprise import Fleet
 
-TESTNET = "https://testnet.aethernet.network"
+TESTNET = os.environ.get("AETHERNET_NODE", "https://testnet.aethernet.network")
 
 
 def main():

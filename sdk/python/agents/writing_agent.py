@@ -19,7 +19,7 @@ from aethernet.client import AetherNetClient, Evidence
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [writing] %(message)s")
 log = logging.getLogger("writing")
 
-TESTNET = "https://testnet.aethernet.network"
+TESTNET = os.environ.get("AETHERNET_NODE", "https://testnet.aethernet.network")
 AGENT_ID = "writing-worker-01"
 CATEGORIES = ["writing", "translation", "documentation"]
 POLL_INTERVAL = 20

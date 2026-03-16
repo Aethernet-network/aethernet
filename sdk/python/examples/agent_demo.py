@@ -14,6 +14,7 @@ The demo shows the full happy path:
 
 import argparse
 import hashlib
+import os
 import time
 
 from aethernet import AetherNetClient, AetherNetError
@@ -24,8 +25,9 @@ def sha256(text: str) -> str:
 
 
 def main() -> None:
+    default_node = os.environ.get("AETHERNET_NODE", "http://localhost:8338")
     parser = argparse.ArgumentParser(description="AetherNet two-agent demo")
-    parser.add_argument("--node", default="http://localhost:8338", help="Node URL")
+    parser.add_argument("--node", default=default_node, help="Node URL")
     args = parser.parse_args()
 
     print(f"Connecting to AetherNet node at {args.node}\n")

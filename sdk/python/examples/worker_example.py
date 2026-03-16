@@ -9,6 +9,7 @@ It runs continuously, earning AET for each completed task.
     python worker_example.py
 """
 import logging
+import os
 from aethernet.worker import AgentWorker
 
 logging.basicConfig(
@@ -65,8 +66,9 @@ def main():
     print("  Press Ctrl+C to stop")
     print()
 
+    node = os.environ.get("AETHERNET_NODE", "https://testnet.aethernet.network")
     worker = AgentWorker(
-        base_url="https://testnet.aethernet.network",
+        base_url=node,
         agent_id="example-worker-agent",
         categories=["research", "writing", "summarization", "data-analysis"],
         work_function=do_work,

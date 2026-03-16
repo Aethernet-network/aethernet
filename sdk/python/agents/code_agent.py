@@ -19,7 +19,7 @@ from aethernet.client import AetherNetClient, Evidence
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [code] %(message)s")
 log = logging.getLogger("code")
 
-TESTNET = "https://testnet.aethernet.network"
+TESTNET = os.environ.get("AETHERNET_NODE", "https://testnet.aethernet.network")
 AGENT_ID = "code-worker-01"
 CATEGORIES = ["code-review", "code", "technical", "testing"]
 POLL_INTERVAL = 20

@@ -19,7 +19,7 @@ from aethernet.client import AetherNetClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [poster] %(message)s")
 log = logging.getLogger("poster")
 
-TESTNET = "https://testnet.aethernet.network"
+TESTNET = os.environ.get("AETHERNET_NODE", "https://testnet.aethernet.network")
 POSTER_ID = "task-poster-main"
 
 # Tier-1 onboarding: 50 AET = 50_000_000 µAET, half auto-staked → 25 AET spendable.

@@ -14,6 +14,7 @@ Quick start::
     print(f"Balance: {balance['balance']} {balance['currency']}")
 """
 
+import os
 from typing import Any, Dict, List, Optional, Union
 
 import requests
@@ -117,7 +118,9 @@ class AetherNetClient:
             May be set after construction by assigning ``client.agent_id``.
     """
 
-    def __init__(self, node_url: str = "http://localhost:8338", agent_id: str = ""):
+    def __init__(self, node_url: str = None, agent_id: str = ""):
+        if node_url is None:
+            node_url = os.environ.get("AETHERNET_NODE", "http://localhost:8338")
         self.node_url = node_url.rstrip("/")
         self.agent_id = agent_id
         self.session = requests.Session()

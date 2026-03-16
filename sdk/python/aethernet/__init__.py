@@ -1,5 +1,7 @@
 """AetherNet Python SDK."""
 
+import os
+
 from .client import AetherNetClient, AetherNetError, Evidence
 from .platform import AetherNetPlatform
 from .worker import AgentWorker
@@ -7,7 +9,7 @@ from .enterprise import Fleet
 
 
 def quick_start(
-    node_url: str = "https://testnet.aethernet.network",
+    node_url: str = None,
     agent_name: str = None,
 ) -> AetherNetClient:
     """Zero-config onboarding shortcut.
@@ -24,12 +26,15 @@ def quick_start(
         print(client.balance())
 
     Args:
-        node_url: AetherNet node URL. Defaults to the public testnet.
+        node_url: AetherNet node URL. Reads ``AETHERNET_NODE`` env var,
+            falls back to the public testnet.
         agent_name: Key file label (see :meth:`~AetherNetClient.quick_start`).
 
     Returns:
         A connected :class:`AetherNetClient` with ``agent_id`` set.
     """
+    if node_url is None:
+        node_url = os.environ.get("AETHERNET_NODE", "https://testnet.aethernet.network")
     client = AetherNetClient(node_url)
     client.quick_start(agent_name)
     return client

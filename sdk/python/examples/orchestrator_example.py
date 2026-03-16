@@ -9,12 +9,13 @@ hires specialists for each, and assembles the final result.
     python orchestrator_example.py
 """
 import logging
+import os
 import time
 from aethernet import AetherNetClient
 
 logging.basicConfig(level=logging.INFO)
 
-TESTNET = "https://testnet.aethernet.network"
+TESTNET = os.environ.get("AETHERNET_NODE", "https://testnet.aethernet.network")
 
 
 def main():

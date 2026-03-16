@@ -254,7 +254,7 @@ if HAS_AGENTS_SDK:
             return f"Submit result failed: {e}"
 
     def get_aethernet_openai_tools(
-        node_url: str = "http://localhost:8338",
+        node_url: str = None,
         agent_id: str = "",
     ) -> list:
         """Get all AetherNet tools for the OpenAI Agents SDK.
@@ -269,6 +269,9 @@ if HAS_AGENTS_SDK:
         Returns:
             List of function tools for use with the OpenAI Agents SDK.
         """
+        if node_url is None:
+            import os
+            node_url = os.environ.get("AETHERNET_NODE", "http://localhost:8338")
         _holder.client = AetherNetClient(node_url, agent_id=agent_id)
         return [
             aethernet_transfer,

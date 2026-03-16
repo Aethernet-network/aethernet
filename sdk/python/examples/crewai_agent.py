@@ -6,12 +6,14 @@ Requires::
     pip install aethernet-sdk[crewai] crewai
 """
 
+import os
 from aethernet.crewai_tools import get_aethernet_crewai_tools
 
 
 def main():
+    node = os.environ.get("AETHERNET_NODE", "http://localhost:8338")
     tools = get_aethernet_crewai_tools(
-        node_url="http://localhost:8338",
+        node_url=node,
         agent_id="crewai-agent-001",
     )
 

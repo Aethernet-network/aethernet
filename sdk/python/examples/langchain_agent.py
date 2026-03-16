@@ -6,12 +6,14 @@ Requires::
     pip install aethernet-sdk[langchain] langchain-openai
 """
 
+import os
 from aethernet.langchain_tools import get_aethernet_tools
 
 
 def main():
+    node = os.environ.get("AETHERNET_NODE", "http://localhost:8338")
     tools = get_aethernet_tools(
-        node_url="http://localhost:8338",
+        node_url=node,
         agent_id="langchain-agent-001",
     )
 

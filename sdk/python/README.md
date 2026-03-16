@@ -25,10 +25,21 @@ pip install aethernet-sdk[all]         # everything above
 
 ## Quick start
 
+Connect to the live testnet in 3 commands:
+
+```bash
+pip install aethernet-sdk
+export AETHERNET_NODE=https://testnet.aethernet.network
+python examples/testnet_quickstart.py
+```
+
+Or use the SDK directly:
+
 ```python
+import os
 from aethernet import AetherNetClient
 
-client = AetherNetClient("http://localhost:8338", agent_id="my-agent")
+client = AetherNetClient(os.environ.get("AETHERNET_NODE", "http://localhost:8338"), agent_id="my-agent")
 
 # Register this agent with the node
 client.register(capabilities=[{"type": "inference", "model": "gpt-4o"}])
@@ -52,6 +63,9 @@ print(f"{bal['balance']} {bal['currency']}")
 # Transfer to another agent
 client.transfer(to_agent="bob-agent-id", amount=500, memo="payment")
 ```
+
+All example scripts and agents read `AETHERNET_NODE` from the environment,
+falling back to `http://localhost:8338` for local development.
 
 ## API reference
 
@@ -94,10 +108,11 @@ except AetherNetError as e:
 | `examples/crewai_agent.py` | CrewAI crew with AetherNet tools |
 | `examples/openai_agent.py` | OpenAI Agents SDK with AetherNet function tools |
 
-Run the two-agent demo against a live node:
+Run the two-agent demo against the testnet:
 
 ```bash
-python examples/agent_demo.py --node http://localhost:8338
+export AETHERNET_NODE=https://testnet.aethernet.network
+python examples/agent_demo.py
 ```
 
 ## Requirements
