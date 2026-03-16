@@ -19,7 +19,9 @@ import (
 	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/api"
+	"github.com/Aethernet-network/aethernet/internal/assurance"
 	"github.com/Aethernet-network/aethernet/internal/autovalidator"
+	"github.com/Aethernet-network/aethernet/internal/config"
 	"github.com/Aethernet-network/aethernet/internal/consensus"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
@@ -32,9 +34,11 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/platform"
+	"github.com/Aethernet-network/aethernet/internal/replay"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
+	"github.com/Aethernet-network/aethernet/internal/validator"
 )
 
 // ─── Supply invariant tracker ────────────────────────────────────────────────
@@ -1222,4 +1226,597 @@ func Solve(input string) (string, error) {
 
 	// CRITICAL: supply invariant after all settlements.
 	st.check(t, "after multi-agent economics")
+}
+
+// ─── Test-only adapters ──────────────────────────────────────────────────────
+
+// memReplayStore satisfies the unexported replay.replayStore interface for
+// in-process testing without Badger.
+type memReplayStore struct {
+	jobs     map[string][]byte
+	outcomes map[string][]byte
+}
+
+func newMemReplayStore() *memReplayStore {
+	return &memReplayStore{
+		jobs:     make(map[string][]byte),
+		outcomes: make(map[string][]byte),
+	}
+}
+
+func (s *memReplayStore) PutReplayJob(id string, data []byte) error {
+	s.jobs[id] = append([]byte{}, data...)
+	return nil
+}
+
+func (s *memReplayStore) GetReplayJob(id string) ([]byte, error) {
+	d, ok := s.jobs[id]
+	if !ok {
+		return nil, fmt.Errorf("replay job %q not found", id)
+	}
+	return d, nil
+}
+
+func (s *memReplayStore) AllReplayJobs() (map[string][]byte, error) {
+	cp := make(map[string][]byte, len(s.jobs))
+	for k, v := range s.jobs {
+		cp[k] = v
+	}
+	return cp, nil
+}
+
+func (s *memReplayStore) PutReplayOutcome(id string, data []byte) error {
+	s.outcomes[id] = append([]byte{}, data...)
+	return nil
+}
+
+func (s *memReplayStore) GetReplayOutcome(id string) ([]byte, error) {
+	d, ok := s.outcomes[id]
+	if !ok {
+		return nil, fmt.Errorf("replay outcome %q not found", id)
+	}
+	return d, nil
+}
+
+func (s *memReplayStore) AllReplayOutcomes() (map[string][]byte, error) {
+	cp := make(map[string][]byte, len(s.outcomes))
+	for k, v := range s.outcomes {
+		cp[k] = v
+	}
+	return cp, nil
+}
+
+// ─── Test 8: Fraudulent Approval → Replay → Slash/Suspend ───────────────────
+
+// TestE2E_FraudulentApprovalReplaySlash exercises the adversarial path where a
+// task is approved fraudulently, a replay detects the mismatch, and the
+// approving validator is slashed and suspended.
+//
+//  1. Task lifecycle: post → hold → claim → submit → approve
+//  2. Replay produces a "mismatch" outcome with anomaly flags → severity ≥ 0.9
+//  3. ReplayResolver evaluates to "slash_recommended"
+//  4. Task marked "replay_disputed", generation denied
+//  5. Validator slashed 30% (OffenseFraudulentApproval), suspended 30 days
+//  6. Slash proceeds split to challenger (50%) and reserve (50%)
+//  7. CRITICAL: supply invariant preserved
+func TestE2E_FraudulentApprovalReplaySlash(t *testing.T) {
+	tl := ledger.NewTransferLedger()
+	reg := identity.NewRegistry()
+	st := initGenesis(t, tl)
+
+	// ── Agents ──────────────────────────────────────────────────────────────
+	posterKP, _ := crypto.GenerateKeyPair()
+	workerKP, _ := crypto.GenerateKeyPair()
+	validatorKP, _ := crypto.GenerateKeyPair()
+	posterID := posterKP.AgentID()
+	workerID := workerKP.AgentID()
+	validatorID := validatorKP.AgentID()
+
+	for i, kp := range []*crypto.KeyPair{posterKP, workerKP, validatorKP} {
+		if _, err := onboardAgent(tl, reg, kp.AgentID(), kp.PublicKey, uint64(i)); err != nil {
+			t.Fatalf("onboard[%d]: %v", i, err)
+		}
+		st.track(kp.AgentID())
+	}
+	st.track("staking-pool")
+
+	// Stake the validator (must meet validator registry minimum of 10 AET).
+	sm := staking.NewStakeManager()
+	sm.SetTransferLedger(tl)
+	const stakeAmt uint64 = 25_000_000_000 // 25 AET
+	if err := sm.Stake(validatorID, stakeAmt); err != nil {
+		t.Fatalf("Stake: %v", err)
+	}
+
+	// ── Task lifecycle (fraudulently approved) ──────────────────────────────
+	tm := tasks.NewTaskManager()
+	esc := escrowpkg.New(tl)
+	const budget uint64 = 2_000_000
+	task, err := tm.PostTask(string(posterID), "Suspect task", "desc", "code", budget)
+	if err != nil {
+		t.Fatalf("PostTask: %v", err)
+	}
+	taskID := task.ID
+	st.track(crypto.AgentID("escrow:" + taskID))
+
+	if err := esc.Hold(taskID, posterID, budget); err != nil {
+		t.Fatalf("Hold: %v", err)
+	}
+	if err := tm.ClaimTask(taskID, workerID); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	resultHash := "sha256:fraudulent-output"
+	if err := tm.SubmitResult(taskID, workerID, resultHash, "fake output", ""); err != nil {
+		t.Fatalf("SubmitResult: %v", err)
+	}
+	if err := tm.ApproveTask(taskID, posterID); err != nil {
+		t.Fatalf("ApproveTask: %v", err)
+	}
+
+	// Settle escrow manually (no autovalidator in adversarial path).
+	fee := fees.CalculateFee(budget)
+	netAmt := budget - fee
+	valFee := fee * fees.ValidatorShare / 100
+	treaFee := fee * fees.TreasuryShare / 100
+	treasuryID := crypto.AgentID(genesis.BucketTreasury)
+	if err := esc.ReleaseNet(taskID, workerID, netAmt, validatorID, valFee, treasuryID, treaFee); err != nil {
+		t.Fatalf("ReleaseNet: %v", err)
+	}
+
+	st.check(t, "after fraudulent task settlement")
+
+	// ── Replay detects fraud ────────────────────────────────────────────────
+	ms := newMemReplayStore()
+	coord := replay.NewReplayCoordinator(replay.DefaultReplayPolicy(), ms)
+	resolver := replay.NewReplayResolver(ms)
+
+	job, err := coord.ScheduleReplay(taskID, resultHash, "code", "v1", nil, "dispute", string(workerID))
+	if err != nil {
+		t.Fatalf("ScheduleReplay: %v", err)
+	}
+
+	// Mismatch outcome with 2 anomaly flags → severity 0.8+0.2 = 1.0 ≥ 0.9.
+	outcome := &replay.ReplayOutcome{
+		JobID:  job.ID,
+		TaskID: taskID,
+		Status: "mismatch",
+		Comparisons: []replay.CheckComparison{{
+			CheckType:    "code_verify",
+			OriginalHash: "sha256:original",
+			ReplayedHash: "sha256:different",
+			Match:        false,
+			ScoreDelta:   0.8,
+		}},
+		AnomalyFlags: []string{"timing_anomaly", "environment_drift"},
+		ReplayedAt:   time.Now(),
+		ReplayerID:   "replay-agent",
+	}
+
+	if err := resolver.RecordOutcome(outcome); err != nil {
+		t.Fatalf("RecordOutcome: %v", err)
+	}
+	verdict := resolver.EvaluateOutcome(outcome)
+	if verdict.Action != "slash_recommended" {
+		t.Errorf("verdict.Action = %q; want slash_recommended", verdict.Action)
+	}
+	if verdict.SeverityScore < 0.9 {
+		t.Errorf("verdict.SeverityScore = %.2f; want >= 0.9", verdict.SeverityScore)
+	}
+
+	// Mark task as disputed and deny generation credit.
+	if err := tm.SetReplayStatus(taskID, "replay_disputed", job.ID); err != nil {
+		t.Fatalf("SetReplayStatus: %v", err)
+	}
+	if err := tm.SetGenerationStatus(taskID, "denied"); err != nil {
+		t.Fatalf("SetGenerationStatus: %v", err)
+	}
+
+	tk, _ := tm.Get(taskID)
+	if tk.ReplayStatus != "replay_disputed" {
+		t.Errorf("task.ReplayStatus = %q; want replay_disputed", tk.ReplayStatus)
+	}
+	if tk.GenerationStatus != "denied" {
+		t.Errorf("task.GenerationStatus = %q; want denied", tk.GenerationStatus)
+	}
+
+	// ── Slash validator ─────────────────────────────────────────────────────
+	cfg := config.DefaultConfig()
+	cfg.Validator.CapEnforcementMinValidators = 100 // disable for test
+	valReg := validator.NewValidatorRegistry(&cfg.Validator, nil)
+	val, err := valReg.Register(string(validatorID), stakeAmt, []string{"code"}, true)
+	if err != nil {
+		t.Fatalf("validator register: %v", err)
+	}
+
+	slashEng := validator.NewSlashEngine(valReg, &cfg.Validator)
+	result, err := slashEng.Slash(val.ID, validator.OffenseFraudulentApproval)
+	if err != nil {
+		t.Fatalf("Slash: %v", err)
+	}
+
+	// Assert slash economics.
+	expectedSlash := uint64(float64(stakeAmt) * 0.30)
+	if result.SlashPercentage != 0.30 {
+		t.Errorf("SlashPercentage = %.2f; want 0.30", result.SlashPercentage)
+	}
+	if result.SlashAmount != expectedSlash {
+		t.Errorf("SlashAmount = %d; want %d", result.SlashAmount, expectedSlash)
+	}
+	if result.RemainingStake != stakeAmt-expectedSlash {
+		t.Errorf("RemainingStake = %d; want %d", result.RemainingStake, stakeAmt-expectedSlash)
+	}
+	if result.CooldownDays != 30 {
+		t.Errorf("CooldownDays = %d; want 30", result.CooldownDays)
+	}
+	if result.PermanentExclusion {
+		t.Error("PermanentExclusion should be false for fraudulent_approval")
+	}
+
+	// Validator must be suspended — resume blocked.
+	if err := slashEng.Resume(val.ID); !errors.Is(err, validator.ErrSlashInCooldown) {
+		t.Errorf("Resume during cooldown: want ErrSlashInCooldown, got %v", err)
+	}
+
+	// Execute slash token flows: staking-pool → challenger + reserve.
+	challengerID := crypto.AgentID("fraud-challenger")
+	reserveID := crypto.AgentID("dispute-reserve")
+	st.track(challengerID, reserveID)
+
+	if err := tl.TransferFromBucket("staking-pool", challengerID, result.ChallengerShare); err != nil {
+		t.Fatalf("transfer ChallengerShare: %v", err)
+	}
+	if err := tl.TransferFromBucket("staking-pool", reserveID, result.ReserveShare); err != nil {
+		t.Fatalf("transfer ReserveShare: %v", err)
+	}
+
+	// CRITICAL: supply invariant.
+	st.check(t, "after fraudulent approval slash")
+}
+
+// ─── Test 9: Challenge Succeeds → Validator Slashed ──────────────────────────
+
+// TestE2E_ChallengeSucceeds exercises the path where a replay produces a
+// material discrepancy, a challenge is opened, and the challenge succeeds:
+//
+//  1. Replay produces "partial_match" with multiple mismatches → "open_challenge"
+//  2. Challenger posts bond and opens challenge
+//  3. Challenge resolved as "succeeded" → bond refunded, fraud bounty awarded
+//  4. Validator slashed for OffenseDishonestReplay (40%, 60-day cooldown)
+//  5. CRITICAL: supply invariant preserved across bond + slash flows
+func TestE2E_ChallengeSucceeds(t *testing.T) {
+	tl := ledger.NewTransferLedger()
+	reg := identity.NewRegistry()
+	st := initGenesis(t, tl)
+
+	challengerKP, _ := crypto.GenerateKeyPair()
+	validatorKP, _ := crypto.GenerateKeyPair()
+	challengerID := challengerKP.AgentID()
+	validatorID := validatorKP.AgentID()
+
+	for i, kp := range []*crypto.KeyPair{challengerKP, validatorKP} {
+		if _, err := onboardAgent(tl, reg, kp.AgentID(), kp.PublicKey, uint64(i)); err != nil {
+			t.Fatalf("onboard[%d]: %v", i, err)
+		}
+		st.track(kp.AgentID())
+	}
+	st.track("staking-pool")
+
+	// Stake the validator (must meet validator registry minimum of 10 AET).
+	sm := staking.NewStakeManager()
+	sm.SetTransferLedger(tl)
+	const stakeAmt uint64 = 25_000_000_000 // 25 AET
+	if err := sm.Stake(validatorID, stakeAmt); err != nil {
+		t.Fatalf("Stake: %v", err)
+	}
+
+	st.check(t, "after staking")
+
+	// ── Replay produces open_challenge verdict ──────────────────────────────
+	ms := newMemReplayStore()
+	coord := replay.NewReplayCoordinator(replay.DefaultReplayPolicy(), ms)
+	resolver := replay.NewReplayResolver(ms)
+
+	const taskID = "disputed-task-001"
+	job, err := coord.ScheduleReplay(taskID, "sha256:evidence", "code", "v1", nil, "spot-check", "worker-001")
+	if err != nil {
+		t.Fatalf("ScheduleReplay: %v", err)
+	}
+
+	// Partial match with 2 mismatches + ScoreDelta > 0.3 → "open_challenge" (severity 0.6).
+	outcome := &replay.ReplayOutcome{
+		JobID:  job.ID,
+		TaskID: taskID,
+		Status: "partial_match",
+		Comparisons: []replay.CheckComparison{
+			{CheckType: "lint", OriginalHash: "sha256:a1", ReplayedHash: "sha256:b1", Match: false, ScoreDelta: 0.4},
+			{CheckType: "test", OriginalHash: "sha256:a2", ReplayedHash: "sha256:b2", Match: false, ScoreDelta: 0.5},
+		},
+		ReplayedAt: time.Now(),
+		ReplayerID: "replay-agent",
+	}
+
+	if err := resolver.RecordOutcome(outcome); err != nil {
+		t.Fatalf("RecordOutcome: %v", err)
+	}
+	verdict := resolver.EvaluateOutcome(outcome)
+	if verdict.Action != "open_challenge" {
+		t.Errorf("verdict.Action = %q; want open_challenge", verdict.Action)
+	}
+
+	// ── Challenge lifecycle ─────────────────────────────────────────────────
+	cfg := config.DefaultConfig()
+	chalMgr := assurance.NewChallengeManager(&cfg.Assurance, nil)
+
+	const taskBudget uint64 = 2_000_000
+	bond := assurance.ComputeBond(taskBudget, &cfg.Assurance)
+
+	// Challenger posts bond — transfer to bond escrow.
+	bondBucket := crypto.AgentID("challenge-bond:" + taskID)
+	st.track(bondBucket)
+	if err := tl.TransferFromBucket(challengerID, bondBucket, bond); err != nil {
+		t.Fatalf("post bond: %v", err)
+	}
+
+	st.check(t, "after bond posted")
+
+	chal, err := chalMgr.OpenChallenge(taskID, string(challengerID), string(validatorID), bond)
+	if err != nil {
+		t.Fatalf("OpenChallenge: %v", err)
+	}
+	if chal.Status != assurance.ChallengeOpen {
+		t.Errorf("challenge status = %q; want %q", chal.Status, assurance.ChallengeOpen)
+	}
+
+	// Slash the validator (dishonest replay — 40%, 60 days).
+	cfg.Validator.CapEnforcementMinValidators = 100 // disable for test
+	valReg := validator.NewValidatorRegistry(&cfg.Validator, nil)
+	val, err := valReg.Register(string(validatorID), stakeAmt, []string{"code"}, true)
+	if err != nil {
+		t.Fatalf("validator register: %v", err)
+	}
+
+	slashEng := validator.NewSlashEngine(valReg, &cfg.Validator)
+	slashResult, err := slashEng.Slash(val.ID, validator.OffenseDishonestReplay)
+	if err != nil {
+		t.Fatalf("Slash: %v", err)
+	}
+
+	if slashResult.SlashPercentage != 0.40 {
+		t.Errorf("SlashPercentage = %.2f; want 0.40", slashResult.SlashPercentage)
+	}
+	if slashResult.CooldownDays != 60 {
+		t.Errorf("CooldownDays = %d; want 60", slashResult.CooldownDays)
+	}
+
+	// Resolve challenge as succeeded — bond refunded, fraud bounty awarded.
+	resolution, err := chalMgr.ResolveChallenge(chal.ID, assurance.ChallengeSucceeded, slashResult.ChallengerShare)
+	if err != nil {
+		t.Fatalf("ResolveChallenge: %v", err)
+	}
+	if resolution.Outcome != assurance.ChallengeSucceeded {
+		t.Errorf("resolution.Outcome = %q; want %q", resolution.Outcome, assurance.ChallengeSucceeded)
+	}
+	if resolution.RefundedBond != bond {
+		t.Errorf("RefundedBond = %d; want %d (full bond)", resolution.RefundedBond, bond)
+	}
+	if resolution.ForfeitAmount != 0 {
+		t.Errorf("ForfeitAmount = %d; want 0 on success", resolution.ForfeitAmount)
+	}
+
+	// Execute token flows: return bond, distribute slash proceeds.
+	if err := tl.TransferFromBucket(bondBucket, challengerID, resolution.RefundedBond); err != nil {
+		t.Fatalf("refund bond: %v", err)
+	}
+
+	reserveID := crypto.AgentID("dispute-reserve")
+	st.track(reserveID)
+	if err := tl.TransferFromBucket("staking-pool", challengerID, slashResult.ChallengerShare); err != nil {
+		t.Fatalf("slash ChallengerShare: %v", err)
+	}
+	if err := tl.TransferFromBucket("staking-pool", reserveID, slashResult.ReserveShare); err != nil {
+		t.Fatalf("slash ReserveShare: %v", err)
+	}
+
+	// Validator must be suspended.
+	if err := slashEng.Resume(val.ID); !errors.Is(err, validator.ErrSlashInCooldown) {
+		t.Errorf("Resume during cooldown: want ErrSlashInCooldown, got %v", err)
+	}
+
+	// CRITICAL: supply invariant.
+	st.check(t, "after challenge success + slash")
+}
+
+// ─── Test 10: Challenge Fails → Bond Forfeiture ─────────────────────────────
+
+// TestE2E_ChallengeFails_BondForfeit exercises the path where a frivolous
+// challenge is opened and fails:
+//
+//  1. Challenger posts bond and opens challenge
+//  2. Challenge resolved as "failed"
+//  3. Bond forfeited: 50% to falsely accused validator, 50% to dispute reserve
+//  4. CRITICAL: supply invariant preserved
+func TestE2E_ChallengeFails_BondForfeit(t *testing.T) {
+	tl := ledger.NewTransferLedger()
+	reg := identity.NewRegistry()
+	st := initGenesis(t, tl)
+
+	challengerKP, _ := crypto.GenerateKeyPair()
+	accusedKP, _ := crypto.GenerateKeyPair()
+	challengerID := challengerKP.AgentID()
+	accusedID := accusedKP.AgentID()
+
+	for i, kp := range []*crypto.KeyPair{challengerKP, accusedKP} {
+		if _, err := onboardAgent(tl, reg, kp.AgentID(), kp.PublicKey, uint64(i)); err != nil {
+			t.Fatalf("onboard[%d]: %v", i, err)
+		}
+		st.track(kp.AgentID())
+	}
+
+	// Record initial balances.
+	challengerBalBefore, _ := tl.Balance(challengerID)
+	accusedBalBefore, _ := tl.Balance(accusedID)
+
+	// ── Challenge lifecycle ─────────────────────────────────────────────────
+	cfg := config.DefaultConfig()
+	chalMgr := assurance.NewChallengeManager(&cfg.Assurance, nil)
+
+	const taskBudget uint64 = 5_000_000
+	bond := assurance.ComputeBond(taskBudget, &cfg.Assurance)
+
+	// Challenger posts bond — transfer to bond escrow.
+	const taskID = "frivolous-challenge-task"
+	bondBucket := crypto.AgentID("challenge-bond:" + taskID)
+	st.track(bondBucket)
+
+	if err := tl.TransferFromBucket(challengerID, bondBucket, bond); err != nil {
+		t.Fatalf("post bond: %v", err)
+	}
+
+	st.check(t, "after bond posted")
+
+	chal, err := chalMgr.OpenChallenge(taskID, string(challengerID), string(accusedID), bond)
+	if err != nil {
+		t.Fatalf("OpenChallenge: %v", err)
+	}
+
+	// Resolve as failed — validator was honest.
+	resolution, err := chalMgr.ResolveChallenge(chal.ID, assurance.ChallengeFailed, 0)
+	if err != nil {
+		t.Fatalf("ResolveChallenge: %v", err)
+	}
+
+	if resolution.Outcome != assurance.ChallengeFailed {
+		t.Errorf("resolution.Outcome = %q; want %q", resolution.Outcome, assurance.ChallengeFailed)
+	}
+	if resolution.ForfeitAmount != bond {
+		t.Errorf("ForfeitAmount = %d; want %d (full bond)", resolution.ForfeitAmount, bond)
+	}
+	if resolution.RefundedBond != 0 {
+		t.Errorf("RefundedBond = %d; want 0 on failure", resolution.RefundedBond)
+	}
+
+	// Bond split: 50% to falsely accused, 50% to dispute reserve.
+	expectedAccusedShare := bond / 2
+	expectedReserve := bond - expectedAccusedShare
+	if resolution.AccusedShare != expectedAccusedShare {
+		t.Errorf("AccusedShare = %d; want %d", resolution.AccusedShare, expectedAccusedShare)
+	}
+	if resolution.ReserveSplit != expectedReserve {
+		t.Errorf("ReserveSplit = %d; want %d", resolution.ReserveSplit, expectedReserve)
+	}
+
+	// Execute forfeiture token flows.
+	reserveID := crypto.AgentID("dispute-reserve")
+	st.track(reserveID)
+
+	if err := tl.TransferFromBucket(bondBucket, accusedID, resolution.AccusedShare); err != nil {
+		t.Fatalf("transfer AccusedShare: %v", err)
+	}
+	if err := tl.TransferFromBucket(bondBucket, reserveID, resolution.ReserveSplit); err != nil {
+		t.Fatalf("transfer ReserveSplit: %v", err)
+	}
+
+	// Challenger lost bond — balance reduced by exactly bond.
+	challengerBalAfter, _ := tl.Balance(challengerID)
+	if challengerBalAfter != challengerBalBefore-bond {
+		t.Errorf("challenger balance = %d; want %d (lost bond %d)",
+			challengerBalAfter, challengerBalBefore-bond, bond)
+	}
+
+	// Accused gained their share — balance increased by AccusedShare.
+	accusedBalAfter, _ := tl.Balance(accusedID)
+	if accusedBalAfter != accusedBalBefore+resolution.AccusedShare {
+		t.Errorf("accused balance = %d; want %d (gained %d)",
+			accusedBalAfter, accusedBalBefore+resolution.AccusedShare, resolution.AccusedShare)
+	}
+
+	// CRITICAL: supply invariant.
+	st.check(t, "after challenge bond forfeiture")
+}
+
+// ─── Test 11: Slash → Cooldown → Blocked Resume → Successful Resume ─────────
+
+// TestE2E_SlashCooldownResume verifies the full suspension lifecycle:
+//
+//  1. Slash sets validator to "suspended" with a cooldown period
+//  2. Resume during cooldown fails with ErrSlashInCooldown
+//  3. After cooldown expires, Resume succeeds and restores "active" status
+func TestE2E_SlashCooldownResume(t *testing.T) {
+	t.Run("blocked_during_cooldown", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.Validator.CapEnforcementMinValidators = 100
+		valReg := validator.NewValidatorRegistry(&cfg.Validator, nil)
+
+		const stakeAmt uint64 = 100_000_000_000 // 100 AET
+		v, err := valReg.Register("val-cooldown-1", stakeAmt, []string{"code"}, true)
+		if err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+
+		slashEng := validator.NewSlashEngine(valReg, &cfg.Validator)
+		result, err := slashEng.Slash(v.ID, validator.OffenseFraudulentApproval)
+		if err != nil {
+			t.Fatalf("Slash: %v", err)
+		}
+
+		// CooldownUntil must be ~30 days in the future.
+		if result.CooldownDays != 30 {
+			t.Errorf("CooldownDays = %d; want 30", result.CooldownDays)
+		}
+		if result.CooldownUntil.Before(time.Now().Add(29 * 24 * time.Hour)) {
+			t.Error("CooldownUntil is less than 29 days from now")
+		}
+
+		// Resume must fail during cooldown.
+		err = slashEng.Resume(v.ID)
+		if !errors.Is(err, validator.ErrSlashInCooldown) {
+			t.Errorf("Resume during cooldown: want ErrSlashInCooldown, got %v", err)
+		}
+
+		// CanResume must return false.
+		canResume, until := slashEng.CanResume(v.ID)
+		if canResume {
+			t.Error("CanResume should return false during cooldown")
+		}
+		if until.IsZero() {
+			t.Error("CanResume should return non-zero until time during cooldown")
+		}
+	})
+
+	t.Run("resumes_after_cooldown", func(t *testing.T) {
+		// Use 0-day cooldown so the cooldown expires immediately.
+		cfg := config.DefaultConfig()
+		cfg.Validator.CooldownTier1Days = 0
+		cfg.Validator.CapEnforcementMinValidators = 100
+		valReg := validator.NewValidatorRegistry(&cfg.Validator, nil)
+
+		const stakeAmt uint64 = 100_000_000_000
+		v, err := valReg.Register("val-cooldown-2", stakeAmt, []string{"code"}, true)
+		if err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+
+		slashEng := validator.NewSlashEngine(valReg, &cfg.Validator)
+		result, err := slashEng.Slash(v.ID, validator.OffenseFraudulentApproval)
+		if err != nil {
+			t.Fatalf("Slash: %v", err)
+		}
+
+		if result.CooldownDays != 0 {
+			t.Errorf("CooldownDays = %d; want 0", result.CooldownDays)
+		}
+
+		// With 0-day cooldown, the suspension expires immediately.
+		time.Sleep(time.Millisecond) // ensure wall clock advances past SuspendedUntil
+		err = slashEng.Resume(v.ID)
+		if err != nil {
+			t.Errorf("Resume after 0-day cooldown: unexpected error: %v", err)
+		}
+
+		// After resume, a second slash should succeed (validator is active again).
+		_, err = slashEng.Slash(v.ID, validator.OffenseFraudulentApproval)
+		if err != nil {
+			t.Errorf("re-slash after resume: unexpected error: %v", err)
+		}
+	})
 }

@@ -2250,3 +2250,127 @@ func TestTaskResultDelivery_NotFound(t *testing.T) {
 		t.Errorf("GET .../result for missing task: got %d; want 404", resp.StatusCode)
 	}
 }
+
+// TestRecentEvents_SettlementStateOverlay verifies that GET /v1/events/recent
+// returns the live settlement state from the ledger after verification, not the
+// immutable Optimistic state stored in the DAG.
+func TestRecentEvents_SettlementStateOverlay(t *testing.T) {
+	setup := newTestSetup(t)
+
+	// Fund the agent so the transfer reservation succeeds.
+	if err := setup.tl.FundAgent(setup.kp.AgentID(), 1_000_000); err != nil {
+		t.Fatalf("fund agent: %v", err)
+	}
+
+	// Submit a transfer event.
+	resp := post(t, setup.ts, "/v1/transfer", map[string]any{
+		"to_agent":     string(setup.kp.AgentID()),
+		"amount":       500,
+		"currency":     "AET",
+		"stake_amount": 1000,
+	})
+	if resp.StatusCode != http.StatusCreated {
+		var e map[string]string
+		decodeJSON(t, resp, &e)
+		t.Fatalf("transfer: want 201, got %d: %v", resp.StatusCode, e)
+	}
+	var created struct {
+		EventID string `json:"event_id"`
+	}
+	decodeJSON(t, resp, &created)
+
+	// Before verification: recent events should show Optimistic.
+	recentResp := get(t, setup.ts, "/v1/events/recent?limit=10")
+	if recentResp.StatusCode != http.StatusOK {
+		t.Fatalf("recent events: want 200, got %d", recentResp.StatusCode)
+	}
+	var before []map[string]any
+	decodeJSON(t, recentResp, &before)
+	found := false
+	for _, item := range before {
+		if item["id"] == created.EventID {
+			found = true
+			if item["settlement_state"] != "Optimistic" {
+				t.Errorf("before verify: want Optimistic, got %v", item["settlement_state"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("event %s not found in recent events", created.EventID)
+	}
+
+	// Settle via an independent validator.
+	verifier := newVerifierServer(t, setup)
+	vResp := post(t, verifier, "/v1/verify", map[string]any{
+		"event_id":       created.EventID,
+		"verdict":        true,
+		"verified_value": 500,
+	})
+	if vResp.StatusCode != http.StatusOK {
+		var e map[string]string
+		decodeJSON(t, vResp, &e)
+		t.Fatalf("verify: want 200, got %d: %v", vResp.StatusCode, e)
+	}
+	vResp.Body.Close()
+
+	// After verification: recent events should show Settled.
+	recentResp2 := get(t, setup.ts, "/v1/events/recent?limit=10")
+	if recentResp2.StatusCode != http.StatusOK {
+		t.Fatalf("recent events after verify: want 200, got %d", recentResp2.StatusCode)
+	}
+	var after []map[string]any
+	decodeJSON(t, recentResp2, &after)
+	for _, item := range after {
+		if item["id"] == created.EventID {
+			if item["settlement_state"] != "Settled" {
+				t.Errorf("after verify: want Settled, got %v", item["settlement_state"])
+			}
+			return
+		}
+	}
+	t.Fatalf("event %s not found in recent events after verify", created.EventID)
+}
+
+// TestGetTask_StatusAfterApproval verifies that the polling path
+// GET /v1/tasks/{id} returns the updated "completed" status after approval,
+// confirming the task lifecycle is not affected by DAG immutability.
+func TestGetTask_StatusAfterApproval(t *testing.T) {
+	setup := newTestSetup(t)
+
+	agentID := setup.kp.AgentID()
+	if err := setup.tl.FundAgent(agentID, 200_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
+	// Create → Claim → Submit → Approve.
+	postResp := postJSON(t, setup.ts, "/v1/tasks", map[string]any{
+		"title":  "Settlement polling regression",
+		"budget": uint64(100_000),
+	})
+	var task struct{ ID string `json:"id"` }
+	decodeJSON(t, postResp, &task)
+
+	postJSON(t, setup.ts, "/v1/tasks/"+task.ID+"/claim", map[string]any{"claimer_id": "poll-worker"})
+	postJSON(t, setup.ts, "/v1/tasks/"+task.ID+"/submit", map[string]any{
+		"claimer_id":  "poll-worker",
+		"result_hash": "sha256:poll-test",
+	})
+	approveResp := postJSON(t, setup.ts, "/v1/tasks/"+task.ID+"/approve", map[string]any{})
+	if approveResp.StatusCode != http.StatusOK {
+		t.Fatalf("approve: got %d; want 200", approveResp.StatusCode)
+	}
+	approveResp.Body.Close()
+
+	// The polling path: GET /v1/tasks/{id} must return the live status.
+	getResp := get(t, setup.ts, "/v1/tasks/"+task.ID)
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET task: got %d; want 200", getResp.StatusCode)
+	}
+	var polled struct {
+		Status string `json:"status"`
+	}
+	decodeJSON(t, getResp, &polled)
+	if polled.Status != "completed" {
+		t.Errorf("GET /v1/tasks/%s after approval: Status = %q; want %q", task.ID, polled.Status, "completed")
+	}
+}
