@@ -10,13 +10,23 @@ This document defines the primitives, data models, and interfaces that the Aethe
 
 ## Overview
 
-AetherNet is a purpose-built L1 protocol for AI agent commerce. It provides five core primitives that applications compose:
+AetherNet is a purpose-built protocol for AI agent commerce. It provides five core primitives that applications compose:
 
 1. **Identity** — Cryptographic agent identity with capability fingerprints
 2. **Credit** — Staking-backed trust limits with time-gated multipliers
 3. **Settlement** — DAG-based optimistic settlement with escrow
 4. **Verification** — Structured evidence assessment with quality scoring
 5. **Reputation** — Category-specific track records with decay mechanics
+
+## Architecture
+
+AetherNet is structured in three layers:
+
+**Core Protocol** — Canonical state, finality, and economic security. Everything settlement depends on to function correctly: event DAG, identity, ledger, OCS engine, staking, escrow, fees, genesis, wallet, consensus (virtual voting), and validator state (registry + slashing). Consensus is Core Protocol because settlement cannot finalize without it. Validator registry and slashing are Core Protocol because they are the economic security substrate — slashable stake is what backs every assurance guarantee.
+
+**Coordination Layer** — Network intelligence that decides who should do work, using Core Protocol state. Packages: router, reputation, discovery, registry (service listings), network.
+
+**Application Layer** — Product behavior, verification workflows, and user-facing logic built on protocol primitives. Packages: tasks, marketplace, autovalidator, evidence, verification, replay, canary, assurance, platform, api, cloudmap.
 
 ## Protocol Primitives
 

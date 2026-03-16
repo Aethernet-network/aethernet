@@ -4,9 +4,9 @@
 
 AetherNet is a three-layer protocol. Never cross layer boundaries in imports.
 
-- **L1 Protocol** (internal/crypto, event, dag, ledger, ocs, identity, staking, genesis, fees, escrow, wallet): Core chain primitives. No L2 or L3 imports.
-- **L2 Network** (internal/registry, discovery, router, reputation, network, validator, consensus): Coordination layer. May import L1. Never imports L3.
-- **L3 Applications** (internal/tasks, platform, autovalidator, demo, evidence, verification): Services built on the protocol. May import L1 and L2.
+- **Core Protocol** (internal/crypto, event, dag, ledger, ocs, identity, staking, genesis, fees, escrow, wallet, consensus, validator): Canonical state, finality, and economic security. Cannot import Coordination or Application packages.
+- **Coordination Layer** (internal/registry, discovery, router, reputation, network): Network intelligence for routing and scheduling. May import Core Protocol. Cannot import Application packages.
+- **Application Layer** (internal/tasks, platform, autovalidator, demo, evidence, verification, replay, canary, assurance): Product behavior and user-facing logic. May import Core Protocol and Coordination.
 - **Infrastructure** (internal/store, metrics, ratelimit, eventbus, config, cloudmap): Shared utilities. Any layer may import these.
 
 ## Error Handling
@@ -71,7 +71,7 @@ AetherNet is a three-layer protocol. Never cross layer boundaries in imports.
 - **Persist before mutating in-memory state.** If the persist fails, abort the in-memory change.
 - **New interfaces must have at least one test.** New public types and methods require tests.
 - **Do not remove or rename existing public APIs** unless the prompt explicitly requests it. Other code may depend on them.
-- **When adding a new package, check imports don't violate layer boundaries.** L1 cannot import L2 or L3. L2 cannot import L3.
+- **When adding a new package, check imports don't violate layer boundaries.** Core Protocol cannot import Coordination or Application packages. Coordination cannot import Application packages.
 
 ## Deployment
 

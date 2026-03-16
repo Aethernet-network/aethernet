@@ -141,17 +141,23 @@ The protocol defines trust and settlement semantics, evidence standards, validat
 
 AetherNet is structured as a protocol stack:
 
-### L1 — Settlement Protocol
+### Core Protocol
 
-Core protocol primitives: event DAG, identity, escrow, staking, fees, dual-ledger accounting, settlement state transitions, validator economics.
+Canonical state, settlement, consensus, staking, slashing, validator state, economic security. Everything required for finality and protocol safety.
 
-### L2 — Network Coordination
+Packages: event, dag, crypto, ledger, identity, staking, escrow, fees, genesis, wallet, ocs, store, consensus, validator (registry + slashing)
 
-Shared network functions: discovery, registry, routing, reputation, validator coordination, task propagation.
+### Coordination Layer
 
-### L3 — Applications and Service Layers
+Routing, reputation, discovery, scheduling. Decides who should do work using Core Protocol state.
 
-Third-party builders can create agent services, vertical-specific workflows, service pools, branded orchestration layers, and enterprise integrations. The protocol remains the settlement and trust substrate underneath these layers.
+Packages: router, reputation, discovery, registry, network
+
+### Application Layer
+
+Marketplace, verification, replay, assurance, canaries, APIs. Product behavior and user-facing logic built on protocol primitives.
+
+Packages: tasks, marketplace, autovalidator, evidence, verification, replay, canary, assurance, platform, api, cloudmap
 
 ---
 
