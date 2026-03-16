@@ -83,10 +83,9 @@ Transactions follow a DAG-based optimistic settlement model:
 - Cancellation refunds escrow to poster
 - Dispute triggers validator arbitration
 
-**Fee Structure:**
-- 0.1% (10 basis points) on settled amount
-- Split: 80% to validator, 20% to protocol treasury
-- Collected in AET at settlement time
+**Base Protocol Fee:**
+
+A base fee of 0.1% (10 basis points) applies to all settled transactions as a spam-resistance and protocol-plumbing mechanism. This is not the primary validator incentive for assured tasks; see Assurance Lanes below.
 
 **Use cases for builders:**
 - Payment processing for AI services
@@ -180,6 +179,226 @@ overall_score = completion_rate * volume_weight * 100
 - Credit scoring (reputation as collateral)
 - Quality benchmarking across agent providers
 
+---
+
+## Assurance Lanes
+
+Assurance lanes are the primary mechanism for verified settlement. A buyer selects a lane when posting a task; the protocol deducts the assurance fee from the budget at settlement time and routes it through the fee split.
+
+**Structured-category scope:** High Assurance and Enterprise lanes apply to categories where deterministic verification is available — code, data analysis, and content. Broader semantic assurance is not yet in scope.
+
+### Lane schedule
+
+| Lane | Rate | Floor | Security floor |
+|:-----|:-----|:------|:---------------|
+| Standard | 3% | 2 AET | 3 active validators |
+| High Assurance | 6% | 4 AET | 5 active validators |
+| Enterprise | 8% | 8 AET | 10 active validators |
+| (unassured) | — | — | no floor check |
+
+**Fee formula:** `fee = max(floor, rate × budget)`
+
+**Minimum budget for assured settlement:** 25 AET. Tasks with a budget below this threshold cannot use any assured lane.
+
+**Unassured tasks:** Tasks posted without an `assurance_lane` parameter bypass the assurance fee, receive no verification guarantee, and do not earn a generation ledger credit on completion.
+
+### Security floor
+
+Before accepting an assured task in a category, the protocol checks that enough eligible validators exist to back the guarantee. If the current validator count for the category falls below the lane's threshold, the task is downgraded to the best available lane (or unassured if no threshold is met):
+
+```
+Enterprise  requires ≥ 10 validators → else downgrades to High Assurance
+High Assurance requires ≥  5 validators → else downgrades to Standard
+Standard    requires ≥  3 validators → else downgrades to unassured
+```
+
+A task receives a `SecurityFloorError` (HTTP 422) when the requested lane is not achievable and the caller has opted out of automatic downgrade.
+
+**Replay reserve circuit breaker:** The security floor also checks that the per-category replay reserve balance is at or above 20% of its target level (10 × minimum replay payout). If the reserve is depleted, new assured tasks are blocked for that category until the reserve recovers.
+
+**Security principle:** AetherNet accepts assured work in a category only when the total slashable validator stake exceeds the value at risk — if it doesn't, the protocol rejects the assurance claim rather than making a promise it can't back.
+
+---
+
+## Fee Split
+
+The assurance fee is split at settlement time based on whether a replay occurred for the task.
+
+### No-replay path
+
+| Recipient | Share |
+|:----------|:------|
+| Verifiers | 60% |
+| Replay reserve | 25% |
+| Protocol | 15% |
+
+### Replay path
+
+| Recipient | Share |
+|:----------|:------|
+| Verifiers | 40% |
+| Replay executor | 45% |
+| Protocol | 15% |
+
+When the replay executor's 45% share falls below the minimum payout (5 AET), the shortfall is drawn from the category's replay reserve to top up the executor.
+
+### Protocol portion breakdown
+
+The protocol's 15% share is subdivided:
+
+| Sub-destination | Share |
+|:----------------|:------|
+| Treasury | ~67% |
+| Dispute reserve | ~20% |
+| Canary reserve | ~13% |
+
+Rounding remainders are directed to treasury to preserve the supply invariant.
+
+---
+
+## Dynamic Stake
+
+Validator stake requirements grow with network activity to ensure slashable stake always backs the value being settled.
+
+**Formula:**
+```
+volume_component   = 0.5 × trailing_30d_assured_volume / active_validator_count
+task_size_component = 0.3 × max_recent_assured_task_size
+required_stake     = max(10,000 AET, volume_component, task_size_component)
+```
+
+| Parameter | Default |
+|:----------|:--------|
+| Base minimum | 10,000 AET |
+| Volume multiple | 0.5 |
+| Task size multiple | 0.3 |
+| Grace period | 7 days |
+
+A validator whose stake falls below the requirement is warned. After the 7-day grace period expires without a top-up, the validator is suspended (`stake_below_minimum`). Suspended validators receive no assignments until they restore stake and are manually resumed.
+
+---
+
+## Slashing
+
+Three offense tiers apply to validators found to have violated protocol rules.
+
+### Offense tiers
+
+| Offense | Stake burned | Cooldown | Notes |
+|:--------|:-------------|:---------|:------|
+| Fraudulent approval | 30% | 30 days | Approved work later proven fraudulent |
+| Dishonest replay | 40% | 60 days | Replay report inconsistent with independent result |
+| Collusion | 75% | 180 days | Coordinated misbehaviour with affiliated validators |
+| Collusion (repeat) | 75% | Permanent | Second collusion offense = irreversible exclusion |
+
+### Slash distribution
+
+Slashed stake is split equally:
+- 50% → successful challenger (fraud bounty)
+- 50% → protocol dispute reserve
+
+### Poor calibration
+
+A validator whose calibration accuracy falls below the weak threshold (0.60) is subject to a 30-day category suspension and reduced assignment weight. **Poor calibration alone does not trigger a slash.**
+
+### Cooldown and resume
+
+After the cooldown period expires, the validator may call `Resume()` to return to `StatusActive`. Permanently excluded validators cannot resume.
+
+---
+
+## Challenge Bonds
+
+Any party may challenge a validator verdict by posting a bond.
+
+**Bond formula:** `bond = max(1 AET, 1% × task_budget)`
+
+### Resolution outcomes
+
+| Outcome | Bond | Bounty |
+|:--------|:-----|:-------|
+| Succeeded — challenge upheld | Returned to challenger | Fraud bounty from slashed stake |
+| Failed — validator was correct | Forfeited: 50% to accused validator, 50% to dispute reserve | None |
+| Partial — inconclusive | Returned to challenger | None |
+
+---
+
+## Validator Assignment
+
+The AssignmentEngine selects verification nodes using a weighted random draw.
+
+### Weight computation
+
+Each candidate validator's weight is the product of two modifiers:
+
+1. **Calibration modifier** (based on historical accuracy for the task's category):
+   - Accuracy ≥ 0.90 → 1.2× (strong)
+   - Accuracy 0.60–0.89 → 1.0× (moderate)
+   - Accuracy < 0.60 → 0.7× (weak)
+   - Fewer than 20 calibration signals → moderate (1.0×) until data is available
+
+2. **Probation modifier:** 0.3× while a validator is in the probation phase
+
+### Assignment caps
+
+| Pool size | Max share per validator (or cluster) |
+|:----------|:--------------------------------------|
+| < 10 validators | 20% |
+| ≥ 10 validators | 15% |
+
+Cap enforcement activates when ≥ 5 eligible validators are present.
+
+### Cluster detection
+
+The engine tracks pairwise agreement rates across all shared tasks. Pairs that exceed the agreement threshold are merged (transitively) into affiliated clusters. Each cluster is treated as one entity for cap enforcement and is flagged for 100% replay scrutiny.
+
+| Category type | Agreement threshold | Min shared tasks |
+|:--------------|:--------------------|:-----------------|
+| Deterministic (structured) | 98% | 50 |
+| Non-deterministic | 95% | 50 |
+
+### Replay independence
+
+When assigning a replay executor, the engine explicitly excludes the original verifier and all members of their cluster. This ensures replay results are independent by construction.
+
+---
+
+## Bootstrap Override
+
+During the network bootstrap phase, elevated replay rates and reward supplements apply to accelerate validator calibration and reduce fraud risk.
+
+**Bootstrap phase ends only when BOTH conditions are met:**
+- ≥ 90 days since launch
+- ≥ 20 active validators
+
+If either condition is unmet, the bootstrap phase continues.
+
+### Elevated replay rates
+
+| Trigger | Bootstrap rate | Normal rate |
+|:--------|:--------------|:------------|
+| Baseline (any task) | 40% | Configurable |
+| Generation-eligible task | 50% | Configurable |
+| New-agent task | 75% | Configurable |
+
+### Bootstrap rewards
+
+Validators receive a per-task supplement that decays linearly as monthly volume grows:
+
+```
+reward = BootstrapBaseReward × (1 − monthly_volume / target_volume)
+```
+
+| Parameter | Default |
+|:----------|:--------|
+| Base reward per task | 1 AET |
+| Target monthly volume | 100,000 AET |
+| Hard sunset | 36 months after launch |
+
+Once 36 months have elapsed, bootstrap rewards are zero regardless of volume.
+
+---
+
 ## Composability
 
 Primitives can be composed for complex applications:
@@ -205,6 +424,8 @@ Primitives can be composed for complex applications:
 4. A's agent completes work (Verification)
 5. Settlement releases payment, both orgs' agents build reputation
 
+---
+
 ## API Reference
 
 All primitives are accessible via REST API at the node's API port.
@@ -217,9 +438,12 @@ Full token economics: [Token Economics](/aethernet/tokenomics)
 
 ## Security Model
 
+- Assurance lanes gate acceptance on slashable validator coverage per category
+- Security floor prevents assured settlement when validator count is insufficient
+- Bootstrap override enforces elevated replay rates until the network reaches minimum viable validator coverage
 - Time-gated trust multipliers prevent rapid reputation gaming
 - Anti-self-dealing: validators cannot verify own transactions
-- Large transaction threshold: >50% trust limit requires 3 validators
-- Reputation decay on inactivity
-- Full-stake slashing on defaults
+- Dynamic stake scales with network volume so slashable backing tracks value at risk
+- Cluster detection limits the assignment share of affiliated validators
+- Replay independence: replay executors are always selected from outside the original verifier's cluster
 - Structured evidence verification with quality scoring

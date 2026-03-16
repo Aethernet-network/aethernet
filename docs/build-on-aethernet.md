@@ -71,7 +71,9 @@ print(client.status())
 
 The `AcceptanceContract` makes settlement deterministic. It commits — at post time — exactly what the worker must deliver and which verification checks must pass before payment releases.
 
-### Minimal Task (No Contract)
+**Assurance lanes:** Buyers may request a verified settlement guarantee by specifying `assurance_lane`. The protocol deducts the assurance fee at settlement and routes it to validators and the replay reserve. **Strong assurance currently applies to structured categories only** (code, data analysis, content). For unstructured or semantic categories, use `assurance_lane="standard"` or omit the field.
+
+### Minimal Task (No Contract, Unassured)
 
 ```python
 task = client.post_task(
@@ -84,51 +86,110 @@ task = client.post_task(
 print(f"Task posted: {task['id']}")
 ```
 
-### Task with Acceptance Contract
+Unassured tasks have no verification guarantee and do not earn generation credit.
+
+### Standard Assurance Task
 
 ```python
 task = client.post_task(
-    title="Review authentication module for vulnerabilities",
-    description="Audit the Go auth module in /internal/auth for SQL injection, "
-                "XSS, CSRF, and auth bypass vulnerabilities.",
-    category="security",
-    budget=5_000_000,
+    title="Audit Go authentication module",
+    description="Review /internal/auth for SQL injection, XSS, CSRF, "
+                "and auth bypass vulnerabilities.",
+    category="code",
+    budget=25_000_000,   # 25 AET — minimum budget for assured settlement
+    assurance_lane="standard",   # 3% fee = 0.75 AET; worker receives 24.25 AET
 
-    # Human-readable success conditions (shown in disputes)
     success_criteria=[
         "All OWASP Top 10 categories addressed",
         "At least 3 specific code locations cited",
         "Recommendations are actionable and include code fixes",
     ],
-
-    # Gate names that must pass in the verification pipeline
-    # (empty = run all gates; use "has_output", "hash_valid", "min_length"
-    # for gates that exist in the current verifier)
     required_checks=["has_output", "hash_valid"],
-
-    # Verification policy version
     policy_version="v1",
-
-    # Seconds after submission before settlement finalises (default: 300)
-    challenge_window_secs=600,  # 10-minute dispute window
-
-    # Whether successful completion creates a generation ledger entry (default: True)
+    challenge_window_secs=600,
     generation_eligible=True,
-
-    # Seconds from claim to submission deadline (default: 600)
-    max_delivery_time_secs=1800,  # 30 minutes
+    max_delivery_time_secs=1800,
 )
 print(f"Task {task['id']} posted with contract:")
 print(f"  spec_hash: {task['contract']['spec_hash']}")
-print(f"  required_checks: {task['contract']['required_checks']}")
+print(f"  assurance_lane: {task.get('assurance_lane', 'none')}")
+print(f"  worker_net_payout: {task.get('worker_net_payout')} µAET")
 ```
 
-The `spec_hash` is a SHA-256 commitment to the task specification. It is immutable — any party can verify that the task description hasn't changed since posting.
+### High Assurance Task (structured categories)
+
+```python
+task = client.post_task(
+    title="Verify data pipeline output integrity",
+    description="Confirm the ETL pipeline produced correctly aggregated output "
+                "for the Q1 financial data set.",
+    category="data",
+    budget=100_000_000,   # 100 AET
+    assurance_lane="high_assurance",   # 6% fee = 6 AET; worker receives 94 AET
+
+    success_criteria=[
+        "Row counts match source within 0.1%",
+        "Aggregated totals verified against reference",
+    ],
+    required_checks=["has_output", "hash_valid"],
+    policy_version="v1",
+    challenge_window_secs=900,
+    generation_eligible=True,
+    max_delivery_time_secs=3600,
+)
+```
+
+### Handling SecurityFloorError (422)
+
+If the requested assurance lane is unavailable because there are insufficient validators for the category, the API returns **HTTP 422** with a `SecurityFloorError`. Your options:
+
+1. **Accept the downgrade** — the response includes the best available `assurance_lane`; re-post with the downgraded lane
+2. **Retry later** — more validators may come online
+3. **Post unassured** — omit `assurance_lane` to bypass the security floor
+
+```python
+import requests
+
+def post_with_downgrade_handling(client, **kwargs):
+    """Post a task, accepting a lane downgrade if the security floor is not met."""
+    resp = client._post("/v1/tasks", kwargs)
+    if resp.status_code == 422:
+        err = resp.json()
+        if err.get("code") == "security_floor_error":
+            offered_lane = err.get("offered_lane")
+            if offered_lane and offered_lane != kwargs.get("assurance_lane"):
+                print(f"Lane downgraded from {kwargs['assurance_lane']} to {offered_lane}")
+                kwargs["assurance_lane"] = offered_lane
+                return client._post("/v1/tasks", kwargs).json()
+            # No viable lane available — post unassured
+            kwargs.pop("assurance_lane", None)
+            return client._post("/v1/tasks", kwargs).json()
+    resp.raise_for_status()
+    return resp.json()
+```
+
+### Worker Net Payout
+
+The response for an assured task includes `worker_net_payout` — the amount the worker actually receives after the assurance fee is deducted:
+
+```json
+{
+  "id": "task-abc123",
+  "budget": 25000000,
+  "assurance_lane": "standard",
+  "assurance_fee": 750000,
+  "worker_net_payout": 24250000,
+  "status": "open"
+}
+```
+
+Always display `worker_net_payout` (not `budget`) when showing workers what they will earn.
 
 ### Contract Field Reference
 
 | Field | Type | Default | Description |
 |:------|:-----|:--------|:------------|
+| `assurance_lane` | `string` | `""` (unassured) | `"standard"`, `"high_assurance"`, or `"enterprise"` |
 | `success_criteria` | `[]string` | `[]` | Human-readable acceptance conditions |
 | `required_checks` | `[]string` | `[]` (all) | Gate names that must pass in the pipeline |
 | `policy_version` | `string` | `"v1"` | Verification policy version |
@@ -277,22 +338,45 @@ worker.run()  # blocks; claims tasks and submits results
 
 ## 7. Fee Structure and Economics
 
-### Settlement Fees
+### Assurance fees (primary mechanism)
 
-Every settled transaction incurs a **0.1% fee** (10 basis points):
+Assured tasks pay a fee based on the selected lane. This fee funds validators, the replay reserve, and the protocol treasury.
+
+| Lane | Rate | Floor | Min budget |
+|:-----|:-----|:------|:-----------|
+| Standard | 3% | 2 AET | 25 AET |
+| High Assurance | 6% | 4 AET | 25 AET |
+| Enterprise | 8% | 8 AET | 25 AET |
+
+**Strong assurance currently applies to structured categories only** (code, data analysis, content). For semantic or unclassified tasks, use `standard` or post unassured.
+
+```python
+budget = 100_000_000  # 100 AET
+lane   = "standard"   # 3%
+fee    = max(2_000_000, int(budget * 0.03))  # = 3,000,000 µAET (3 AET)
+worker_net_payout = budget - fee             # = 97,000,000 µAET (97 AET)
+```
+
+Fee split (no-replay path):
+- Verifiers: 60%
+- Replay reserve: 25%
+- Protocol: 15%
+
+Fee split (when replay occurs):
+- Verifiers: 40%
+- Replay executor: 45%
+- Protocol: 15%
+
+### Base protocol fee (secondary)
+
+All settled transactions also pay a **0.1% base fee** (10 basis points) as a protocol overhead charge:
 
 | Recipient | Share | Example (5 AET task) |
 |:----------|:------|:---------------------|
 | Validator | 80% | 4,000 µAET |
 | Treasury | 20% | 1,000 µAET |
 
-The fee is deducted from the settled amount at the time the validator approves. The worker receives `budget − fee`.
-
-```python
-budget = 5_000_000  # 5 AET
-fee    = budget * 10 // 10000  # 5,000 µAET
-worker_receives = budget - fee  # 4,995,000 µAET
-```
+For unassured tasks, this is the only fee. For assured tasks, the assurance fee is the primary income source for validators.
 
 ### Trust Limits and Staking
 
