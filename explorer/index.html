@@ -6,124 +6,167 @@
   <title>AetherNet Explorer</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
-      --bg: #09090b; --surface: #18181b; --border: #27272a;
-      --text-1: #fafafa; --text-2: #a1a1aa; --text-3: #71717a;
-      --accent: #10b981; --warn: #f59e0b; --err: #ef4444; --blue: #3b82f6;
-      --sans: 'Inter', -apple-system, system-ui, sans-serif;
-      --mono: 'JetBrains Mono', 'SF Mono', monospace;
+      --bg: hsl(220, 52%, 9%);
+      --fg: hsl(216, 43%, 93%);
+      --primary: hsl(220, 100%, 59%);
+      --secondary: hsl(207, 100%, 62%);
+      --card: hsl(220, 48%, 13%);
+      --muted: hsl(218, 37%, 16%);
+      --muted-fg: hsl(216, 15%, 49%);
+      --border: hsl(218, 37%, 16%);
+      --destructive: hsl(0, 84%, 60%);
+      --success: #10b981;
+      --warn: #f59e0b;
+      --heading: 'Space Grotesk', sans-serif;
+      --body: 'Inter', -apple-system, system-ui, sans-serif;
+      --mono: 'IBM Plex Mono', monospace;
+      --radius: 8px;
     }
-    body { background: var(--bg); color: var(--text-1); font-family: var(--sans); font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+    body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 3px; }
     .mono { font-family: var(--mono); font-feature-settings: 'tnum'; }
+    .heading { font-family: var(--heading); }
 
     /* Header */
-    .header { position: sticky; top: 0; z-index: 30; border-bottom: 1px solid var(--border); background: rgba(9,9,11,0.92); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
-    .header-inner { display: grid; grid-template-columns: auto 1fr auto; align-items: center; max-width: 1200px; margin: 0 auto; padding: 0 24px; height: 52px; }
-    .logo-btn { display: flex; align-items: center; gap: 8px; background: none; border: none; cursor: pointer; color: var(--text-1); font-weight: 600; font-size: 15px; font-family: var(--sans); padding: 0; }
+    .header { position: sticky; top: 0; z-index: 30; border-bottom: 1px solid var(--border); background: hsla(220, 52%, 9%, 0.92); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+    .header-inner { display: grid; grid-template-columns: auto 1fr auto; align-items: center; max-width: 1400px; margin: 0 auto; padding: 0 2rem; height: 56px; }
+    .logo-btn { display: flex; align-items: center; gap: 10px; background: none; border: none; cursor: pointer; color: var(--fg); font-weight: 600; font-size: 16px; font-family: var(--heading); padding: 0; letter-spacing: -0.01em; }
     .header-nav { display: flex; align-items: center; justify-content: center; height: 100%; }
-    .nav-link { background: none; border: none; border-bottom: 2px solid transparent; cursor: pointer; padding: 0 16px; height: 100%; display: flex; align-items: center; font-size: 14px; font-weight: 400; color: var(--text-3); font-family: var(--sans); transition: color 0.15s; }
-    .nav-link:hover { color: var(--text-2); }
-    .nav-link.active { color: var(--text-1); font-weight: 500; border-bottom-color: var(--accent); }
+    .nav-link { background: none; border: none; border-bottom: 2px solid transparent; cursor: pointer; padding: 0 18px; height: 100%; display: flex; align-items: center; font-size: 14px; font-weight: 400; color: var(--muted-fg); font-family: var(--body); transition: color 0.15s; }
+    .nav-link:hover { color: var(--fg); }
+    .nav-link.active { color: var(--fg); font-weight: 500; border-bottom-color: var(--primary); }
 
     /* Layout */
-    .page-wrap { max-width: 1200px; margin: 0 auto; padding: 32px 24px; }
-    .surface { background: var(--surface); border-radius: 6px; }
+    .container { max-width: 1400px; margin: 0 auto; padding: 0 2rem; width: 100%; }
+    .page-wrap { padding: 2rem 0; flex: 1; }
+
+    /* Cards */
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); }
 
     /* Tables */
     table { border-collapse: collapse; width: 100%; }
-    th { text-align: left; padding: 10px 16px; font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-3); border-bottom: 1px solid var(--border); white-space: nowrap; }
-    td { padding: 0 16px; font-size: 13px; color: var(--text-2); border-bottom: 1px solid rgba(39,39,42,0.4); height: 48px; vertical-align: middle; }
+    th { text-align: left; padding: 10px 16px; font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted-fg); border-bottom: 1px solid var(--border); white-space: nowrap; font-family: var(--body); }
+    td { padding: 0 16px; font-size: 13px; color: var(--fg); border-bottom: 1px solid hsla(218, 37%, 16%, 0.5); height: 46px; vertical-align: middle; }
     tr:last-child td { border-bottom: none; }
-    tbody tr:nth-child(even) td { background: rgba(255,255,255,0.012); }
     tbody tr { transition: background 0.1s; }
-    tbody tr:hover td { background: rgba(255,255,255,0.03); }
+    tbody tr:hover td { background: hsla(220, 48%, 13%, 0.5); }
 
     /* Forms */
-    .input { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text-1); padding: 8px 12px; width: 100%; font-size: 14px; font-family: var(--sans); outline: none; transition: border-color 0.15s; }
-    .input:focus { border-color: var(--accent); }
-    .input::placeholder { color: var(--text-3); }
+    .input { background: var(--muted); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); padding: 8px 12px; width: 100%; font-size: 14px; font-family: var(--body); outline: none; transition: border-color 0.15s; }
+    .input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 1px var(--primary); }
+    .input::placeholder { color: var(--muted-fg); }
     textarea.input { resize: vertical; }
     select.input { appearance: none; cursor: pointer; }
-    .field-label { font-size: 12px; font-weight: 500; color: var(--text-3); display: block; margin-bottom: 6px; }
+    .field-label { font-size: 12px; font-weight: 500; color: var(--muted-fg); display: block; margin-bottom: 6px; }
 
     /* Buttons */
-    .btn-primary { background: var(--accent); color: #000; font-weight: 600; padding: 8px 16px; border-radius: 6px; font-size: 14px; cursor: pointer; border: none; font-family: var(--sans); transition: opacity 0.15s; display: inline-flex; align-items: center; justify-content: center; }
-    .btn-primary:hover:not(:disabled) { opacity: 0.85; }
+    .btn-primary { background: var(--primary); color: #fff; font-weight: 600; padding: 8px 16px; border-radius: 6px; font-size: 14px; cursor: pointer; border: none; font-family: var(--body); transition: filter 0.15s; display: inline-flex; align-items: center; justify-content: center; height: 40px; }
+    .btn-primary:hover:not(:disabled) { filter: brightness(1.1); }
     .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
-    .btn-ghost { background: transparent; color: var(--text-2); font-weight: 500; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; border: 1px solid var(--border); font-family: var(--sans); transition: all 0.15s; display: inline-flex; align-items: center; justify-content: center; }
-    .btn-ghost:hover { color: var(--text-1); border-color: var(--text-3); }
-    .btn-danger { background: transparent; color: var(--err); font-weight: 500; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; border: 1px solid rgba(239,68,68,0.3); font-family: var(--sans); transition: all 0.15s; display: inline-flex; align-items: center; justify-content: center; }
-    .btn-danger:hover { background: rgba(239,68,68,0.08); }
-    .btn-accent { background: transparent; color: var(--accent); font-weight: 500; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; border: 1px solid rgba(16,185,129,0.3); font-family: var(--sans); transition: all 0.15s; display: inline-flex; align-items: center; justify-content: center; }
-    .btn-accent:hover { background: rgba(16,185,129,0.08); }
+    .btn-ghost { background: transparent; color: var(--fg); font-weight: 500; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; border: 1px solid var(--border); font-family: var(--body); transition: all 0.15s; display: inline-flex; align-items: center; justify-content: center; }
+    .btn-ghost:hover { background: var(--muted); border-color: var(--muted-fg); }
+    .btn-outline { background: transparent; color: var(--primary); font-weight: 500; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; border: 1px solid var(--primary); font-family: var(--body); transition: all 0.15s; display: inline-flex; align-items: center; justify-content: center; }
+    .btn-outline:hover { background: hsla(220, 100%, 59%, 0.1); }
+    .btn-danger { background: transparent; color: var(--destructive); font-weight: 500; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; border: 1px solid hsla(0, 84%, 60%, 0.3); font-family: var(--body); transition: all 0.15s; display: inline-flex; align-items: center; justify-content: center; }
+    .btn-danger:hover { background: hsla(0, 84%, 60%, 0.08); }
 
     /* Status dots */
-    .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
-    .dot-green { background: var(--accent); }
-    .dot-blue { background: var(--blue); }
+    .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+    .dot-green { background: var(--success); }
+    .dot-blue { background: var(--primary); }
     .dot-amber { background: var(--warn); }
-    .dot-red { background: var(--err); }
-    .dot-gray { background: var(--text-3); }
+    .dot-red { background: var(--destructive); }
+    .dot-gray { background: var(--muted-fg); }
+
+    /* Status pills */
+    .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; padding: 3px 10px; border-radius: 100px; }
+    .pill-green { background: hsla(160, 84%, 39%, 0.12); color: var(--success); }
+    .pill-blue { background: hsla(220, 100%, 59%, 0.12); color: var(--secondary); }
+    .pill-amber { background: hsla(38, 92%, 50%, 0.12); color: var(--warn); }
+    .pill-red { background: hsla(0, 84%, 60%, 0.12); color: var(--destructive); }
+    .pill-gray { background: hsla(216, 15%, 49%, 0.12); color: var(--muted-fg); }
+
+    /* Lane badges */
+    .lane-badge { display: inline-flex; align-items: center; font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 4px; letter-spacing: 0.02em; }
+    .lane-std { background: hsla(220, 100%, 59%, 0.1); color: var(--secondary); }
+    .lane-high { background: hsla(160, 84%, 39%, 0.1); color: var(--success); }
+    .lane-ent { background: hsla(270, 76%, 65%, 0.1); color: #a78bfa; }
+    .lane-none { background: hsla(216, 15%, 49%, 0.08); color: var(--muted-fg); }
 
     /* Wallet drawer */
-    .wallet-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 40; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
+    .wallet-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 40; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
     .wallet-overlay.open { opacity: 1; pointer-events: auto; }
-    .wallet-drawer { position: fixed; top: 0; right: 0; width: 360px; height: 100%; background: var(--surface); border-left: 1px solid var(--border); z-index: 50; transform: translateX(100%); transition: transform 0.2s ease; display: flex; flex-direction: column; overflow: hidden; }
+    .wallet-drawer { position: fixed; top: 0; right: 0; width: 360px; height: 100%; background: var(--card); border-left: 1px solid var(--border); z-index: 50; transform: translateX(100%); transition: transform 0.2s ease; display: flex; flex-direction: column; overflow: hidden; }
     .wallet-drawer.open { transform: translateX(0); }
-    .wtab { flex: 1; text-align: center; font-size: 12px; font-weight: 500; padding: 10px 4px; cursor: pointer; color: var(--text-3); border-bottom: 2px solid transparent; background: none; border-top: none; border-left: none; border-right: none; font-family: var(--sans); transition: color 0.15s; }
-    .wtab:hover { color: var(--text-2); }
-    .wtab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .wtab { flex: 1; text-align: center; font-size: 12px; font-weight: 500; padding: 10px 4px; cursor: pointer; color: var(--muted-fg); border-bottom: 2px solid transparent; background: none; border-top: none; border-left: none; border-right: none; font-family: var(--body); transition: color 0.15s; }
+    .wtab:hover { color: var(--fg); }
+    .wtab.active { color: var(--primary); border-bottom-color: var(--primary); }
 
     /* Toast */
     .toast-wrap { position: fixed; bottom: 16px; right: 16px; z-index: 60; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; pointer-events: none; }
-    .toast { background: var(--surface); border-left: 2px solid var(--border); border-radius: 0 6px 6px 0; padding: 10px 14px; font-size: 13px; max-width: 300px; color: var(--text-2); }
-    .toast-s { border-left-color: var(--accent); }
-    .toast-e { border-left-color: var(--err); }
-    .toast-i { border-left-color: var(--blue); }
+    .toast { background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--border); border-radius: var(--radius); padding: 10px 14px; font-size: 13px; max-width: 320px; color: var(--fg); }
+    .toast-s { border-left-color: var(--success); }
+    .toast-e { border-left-color: var(--destructive); }
+    .toast-i { border-left-color: var(--primary); }
 
     /* Skeleton */
-    .skel { background: linear-gradient(90deg, var(--surface) 25%, #222225 50%, var(--surface) 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 4px; }
+    .skel { background: linear-gradient(90deg, var(--muted) 25%, hsl(218, 37%, 20%) 50%, var(--muted) 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 4px; }
     @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
     /* Filter bar */
-    .filter-bar { display: flex; align-items: center; gap: 12px; background: var(--surface); border-radius: 6px; padding: 8px 16px; }
-    .filter-bar input { background: none; border: none; color: var(--text-1); font-size: 14px; font-family: var(--sans); outline: none; flex: 1; min-width: 0; }
-    .filter-bar input::placeholder { color: var(--text-3); }
-    .filter-pill { background: none; border: none; cursor: pointer; font-size: 12px; font-weight: 500; color: var(--text-3); padding: 4px 10px; border-radius: 4px; font-family: var(--sans); transition: all 0.15s; white-space: nowrap; }
-    .filter-pill:hover { color: var(--text-2); }
-    .filter-pill.active { color: var(--accent); background: rgba(16,185,129,0.1); }
+    .filter-bar { display: flex; align-items: center; gap: 12px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 16px; }
+    .filter-bar input { background: none; border: none; color: var(--fg); font-size: 14px; font-family: var(--body); outline: none; flex: 1; min-width: 0; }
+    .filter-bar input::placeholder { color: var(--muted-fg); }
+    .filter-pill { background: none; border: none; cursor: pointer; font-size: 12px; font-weight: 500; color: var(--muted-fg); padding: 4px 10px; border-radius: 4px; font-family: var(--body); transition: all 0.15s; white-space: nowrap; }
+    .filter-pill:hover { color: var(--fg); }
+    .filter-pill.active { color: var(--primary); background: hsla(220, 100%, 59%, 0.1); }
 
     /* Notice */
-    .notice { font-size: 12px; color: var(--warn); padding: 10px 14px; background: rgba(245,158,11,0.06); border-radius: 6px; border-left: 2px solid var(--warn); line-height: 1.5; }
-    .notice-info { font-size: 12px; color: var(--text-3); padding: 10px 14px; background: rgba(59,130,246,0.06); border-radius: 6px; border-left: 2px solid var(--blue); line-height: 1.5; }
+    .notice { font-size: 13px; color: var(--warn); padding: 12px 16px; background: hsla(38, 92%, 50%, 0.06); border-radius: var(--radius); border: 1px solid hsla(38, 92%, 50%, 0.15); line-height: 1.5; }
+    .notice-info { font-size: 13px; color: var(--muted-fg); padding: 12px 16px; background: hsla(220, 100%, 59%, 0.06); border-radius: var(--radius); border: 1px solid hsla(220, 100%, 59%, 0.12); line-height: 1.5; }
 
     /* KV list */
-    .kv { display: flex; justify-content: space-between; align-items: baseline; padding: 8px 0; border-bottom: 1px solid rgba(39,39,42,0.3); }
+    .kv { display: flex; justify-content: space-between; align-items: baseline; padding: 9px 0; border-bottom: 1px solid hsla(218, 37%, 16%, 0.6); }
     .kv:last-child { border-bottom: none; }
+
+    /* Hero */
+    .hero { position: relative; padding: 3rem 0 2.5rem; border-bottom: 1px solid var(--border); overflow: hidden; }
+    .hero-grid { position: absolute; inset: 0; background-image: linear-gradient(rgba(47,107,255,.03) 1px, transparent 1px), linear-gradient(90deg, rgba(47,107,255,.03) 1px, transparent 1px); background-size: 60px 60px; pointer-events: none; }
+
+    /* Stat cards */
+    .stat-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 16px; }
+    .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+    .stat-value { font-family: var(--mono); font-feature-settings: 'tnum'; font-size: 22px; font-weight: 500; color: var(--fg); line-height: 1.2; }
+    .stat-label { font-size: 12px; font-weight: 500; color: var(--muted-fg); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+
+    /* Section headers */
+    .section-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 20px; border-bottom: 1px solid var(--border); }
+    .section-title { font-size: 14px; font-weight: 600; color: var(--fg); font-family: var(--heading); }
 
     /* Responsive */
     @media (max-width: 1024px) {
-      .metrics-grid { grid-template-columns: repeat(3, 1fr) !important; }
+      .stat-grid { grid-template-columns: repeat(3, 1fr); }
       .two-col, .col-2-1 { grid-template-columns: 1fr !important; }
     }
     @media (max-width: 640px) {
-      .metrics-grid { grid-template-columns: repeat(2, 1fr) !important; }
-      .page-wrap { padding: 24px 16px; }
-      .header-inner { padding: 0 16px; }
+      .stat-grid { grid-template-columns: repeat(2, 1fr); }
+      .container { padding: 0 1rem; }
+      .header-inner { padding: 0 1rem; }
       .header-nav { overflow-x: auto; scrollbar-width: none; justify-content: flex-start; }
       .header-nav::-webkit-scrollbar { display: none; }
-      .nav-link { padding: 0 10px; font-size: 13px; flex-shrink: 0; }
+      .nav-link { padding: 0 12px; font-size: 13px; flex-shrink: 0; }
       .wallet-drawer { width: 100%; }
       .filter-bar { flex-wrap: wrap; }
+      .hero { padding: 2rem 0 1.5rem; }
     }
     @media (prefers-reduced-motion: reduce) {
       .skel { animation: none; }
@@ -177,13 +220,17 @@ function dotClass(s) {
   return ({ open: 'dot-gray', claimed: 'dot-blue', submitted: 'dot-amber', completed: 'dot-green', disputed: 'dot-red', cancelled: 'dot-gray' })[s?.toLowerCase()] || 'dot-gray';
 }
 
+function pillClass(s) {
+  return ({ open: 'pill-gray', claimed: 'pill-blue', submitted: 'pill-amber', completed: 'pill-green', disputed: 'pill-red', cancelled: 'pill-gray' })[s?.toLowerCase()] || 'pill-gray';
+}
+
 function statusLabel(s) {
   return ({ open: 'Open', claimed: 'In Progress', submitted: 'Review', completed: 'Settled', disputed: 'Disputed', cancelled: 'Cancelled' })[s?.toLowerCase()] || s || '\u2014';
 }
 
-function laneText(l) {
-  if (!l) return '\u2014';
-  return ({ standard: 'Standard', high_assurance: 'High', enterprise: 'Enterprise' })[l] || l;
+function laneBadge(l) {
+  if (!l) return { text: 'Unassured', cls: 'lane-none' };
+  return ({ standard: { text: 'Standard', cls: 'lane-std' }, high_assurance: { text: 'High', cls: 'lane-high' }, enterprise: { text: 'Enterprise', cls: 'lane-ent' } })[l] || { text: l, cls: 'lane-none' };
 }
 
 function useToasts() {
@@ -217,8 +264,8 @@ function CopyId({ id, chars = 10 }) {
   }
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-      <span className="mono" style={{ fontSize: 13, color: 'var(--text-2)' }}>{truncate(id, chars)}</span>
-      <button onClick={copy} style={{ background: 'none', border: 'none', cursor: 'pointer', color: ok ? 'var(--accent)' : 'var(--text-3)', padding: 2, display: 'inline-flex' }} title="Copy full ID" aria-label="Copy agent ID">
+      <span className="mono" style={{ fontSize: 13, color: 'var(--fg)' }}>{truncate(id, chars)}</span>
+      <button onClick={copy} style={{ background: 'none', border: 'none', cursor: 'pointer', color: ok ? 'var(--success)' : 'var(--muted-fg)', padding: 2, display: 'inline-flex' }} title="Copy full ID" aria-label="Copy agent ID">
         {ok ? (
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="20 6 9 17 4 12" /></svg>
         ) : (
@@ -229,13 +276,11 @@ function CopyId({ id, chars = 10 }) {
   );
 }
 
-function Metric({ value, label }) {
+function StatCard({ value, label }) {
   return (
-    <div>
-      <div className="mono" style={{ fontSize: 20, fontWeight: 500, color: 'var(--text-1)', lineHeight: 1.3 }}>
-        {value ?? <Skel w={60} h={24} />}
-      </div>
-      <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.06em', marginTop: 2 }}>{label}</div>
+    <div className="stat-card">
+      <div className="stat-value">{value ?? <Skel w={60} h={26} />}</div>
+      <div className="stat-label">{label}</div>
     </div>
   );
 }
@@ -250,9 +295,9 @@ function BalanceWidget({ agentId, refresh }) {
   }, [agentId, refresh]);
   if (bal === null) return null;
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg)', borderRadius: 6, padding: '8px 12px' }}>
-      <span style={{ fontSize: 12, color: 'var(--text-3)' }}>Balance</span>
-      <span className="mono" style={{ color: 'var(--accent)', fontWeight: 500, fontSize: 14 }}>{fmtAET(bal)}</span>
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg)', borderRadius: 6, padding: '10px 14px' }}>
+      <span style={{ fontSize: 12, color: 'var(--muted-fg)' }}>Balance</span>
+      <span className="mono" style={{ color: 'var(--primary)', fontWeight: 500, fontSize: 14 }}>{fmtAET(bal)}</span>
     </div>
   );
 }
@@ -286,11 +331,11 @@ function IdentityPanel({ agent, setAgent, addToast }) {
   if (agent) {
     return (
       <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Your Identity</div>
-        <div style={{ background: 'var(--bg)', borderRadius: 6, padding: 12 }}>
-          <div style={{ fontSize: 11, color: 'var(--text-3)', marginBottom: 4 }}>Agent ID</div>
-          <div className="mono" style={{ fontSize: 12, color: 'var(--accent)', wordBreak: 'break-all', lineHeight: 1.5 }}>{agent.agent_id}</div>
-          {agent.name && <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 6 }}>Name: <span style={{ color: 'var(--text-1)' }}>{agent.name}</span></div>}
+        <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--muted-fg)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Your Identity</div>
+        <div style={{ background: 'var(--bg)', borderRadius: 6, padding: 14 }}>
+          <div style={{ fontSize: 11, color: 'var(--muted-fg)', marginBottom: 4 }}>Agent ID</div>
+          <div className="mono" style={{ fontSize: 12, color: 'var(--primary)', wordBreak: 'break-all', lineHeight: 1.5 }}>{agent.agent_id}</div>
+          {agent.name && <div style={{ fontSize: 12, color: 'var(--muted-fg)', marginTop: 6 }}>Name: <span style={{ color: 'var(--fg)' }}>{agent.name}</span></div>}
         </div>
         <BalanceWidget agentId={agent.agent_id} refresh={balRef} />
         <button className="btn-ghost" style={{ width: '100%' }} onClick={() => setBalRef(n => n + 1)}>Refresh Balance</button>
@@ -302,12 +347,12 @@ function IdentityPanel({ agent, setAgent, addToast }) {
 
   return (
     <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Register on Testnet</div>
+      <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--muted-fg)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Register on Testnet</div>
       <div className="notice-info">A 32-byte keypair is generated in your browser. Your public key becomes your identity on the testnet.</div>
       <div>
         <label className="field-label">Display name (optional)</label>
         <input className="input" placeholder="e.g. my-research-agent" value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === 'Enter' && register()} />
-        <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 4 }}>Leave blank to use hex(pubkey) as ID.</div>
+        <div style={{ fontSize: 11, color: 'var(--muted-fg)', marginTop: 4 }}>Leave blank to use hex(pubkey) as ID.</div>
       </div>
       <button className="btn-primary" style={{ width: '100%' }} onClick={register} disabled={loading}>{loading ? 'Registering\u2026' : 'Generate Keypair & Register'}</button>
     </div>
@@ -354,7 +399,7 @@ function PostTaskPanel({ agent, addToast }) {
       <div>
         <label className="field-label">Budget (\u00b5AET, minimum 100,000)</label>
         <input className="input" type="number" min="100000" placeholder="100000" value={budget} onChange={e => setBudget(e.target.value)} />
-        {budget && <div className="mono" style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 4 }}>= {fmtAET(parseInt(budget) || 0)}</div>}
+        {budget && <div className="mono" style={{ fontSize: 12, color: 'var(--muted-fg)', marginTop: 4 }}>= {fmtAET(parseInt(budget) || 0)}</div>}
       </div>
       <button className="btn-primary" style={{ width: '100%' }} onClick={postTask} disabled={posting || !agent}>{posting ? 'Posting\u2026' : 'Post Task'}</button>
     </div>
@@ -396,7 +441,7 @@ function MyTasksPanel({ agent, addToast }) {
     } catch (e) { addToast(`Submit failed: ${e.message}`, 'error'); }
   }
 
-  if (!agent) return <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-3)', fontSize: 13 }}>Register an agent to track your tasks.</div>;
+  if (!agent) return <div style={{ padding: 40, textAlign: 'center', color: 'var(--muted-fg)', fontSize: 13 }}>Register an agent to track your tasks.</div>;
 
   const posted = tasks.filter(t => t.poster_id === agent.agent_id);
   const claimed = tasks.filter(t => t.claimer_id === agent.agent_id);
@@ -411,11 +456,11 @@ function MyTasksPanel({ agent, addToast }) {
       </div>
       {submitId && (
         <div style={{ padding: 12, borderBottom: '1px solid var(--border)', background: 'var(--bg)', flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-1)' }}>Submit result for {truncate(submitId, 10)}</div>
+          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--fg)' }}>Submit result for {truncate(submitId, 10)}</div>
           <input className="input" placeholder="Result URI (https://... or ipfs://...)" value={resultUri} onChange={e => setResultUri(e.target.value)} />
           <input className="input" placeholder="Result hash (sha256:...)" value={resultHash} onChange={e => setResultHash(e.target.value)} />
           <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn-primary" style={{ flex: 1 }} onClick={() => submit(submitId)}>Submit</button>
+            <button className="btn-primary" style={{ flex: 1, height: 36 }} onClick={() => submit(submitId)}>Submit</button>
             <button className="btn-ghost" onClick={() => setSubmitId(null)}>Cancel</button>
           </div>
         </div>
@@ -425,27 +470,27 @@ function MyTasksPanel({ agent, addToast }) {
           <button className="btn-ghost" onClick={load}>Refresh</button>
         </div>
         {loading ? <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>{[...Array(3)].map((_, i) => <Skel key={i} h={56} />)}</div>
-         : list.length === 0 ? <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-3)', fontSize: 13 }}>No {tab} tasks yet.</div>
+         : list.length === 0 ? <div style={{ padding: 32, textAlign: 'center', color: 'var(--muted-fg)', fontSize: 13 }}>No {tab} tasks yet.</div>
          : list.map(task => (
-          <div key={task.id} style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, padding: 12, marginBottom: 8 }}>
-            <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-1)', marginBottom: 6, lineHeight: 1.4 }}>{task.title}</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-2)' }}>
+          <div key={task.id} style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 14, marginBottom: 8 }}>
+            <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--fg)', marginBottom: 8, lineHeight: 1.4 }}>{task.title}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+              <span className={`pill ${pillClass(task.status)}`}>
                 <span className={`dot ${dotClass(task.status)}`} />
                 {statusLabel(task.status)}
               </span>
-              <span className="mono" style={{ fontSize: 12, color: 'var(--accent)' }}>{fmtAET(task.budget)}</span>
-              {task.claimer_id && tab === 'posted' && <span style={{ fontSize: 11, color: 'var(--text-3)' }}>claimer: {truncate(task.claimer_id, 8)}</span>}
+              <span className="mono" style={{ fontSize: 12, color: 'var(--primary)' }}>{fmtAET(task.budget)}</span>
+              {task.claimer_id && tab === 'posted' && <span className="mono" style={{ fontSize: 11, color: 'var(--muted-fg)' }}>claimer: {truncate(task.claimer_id, 8)}</span>}
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               {tab === 'posted' && task.status === 'Submitted' && (
                 <>
-                  <button className="btn-accent" style={{ flex: 1 }} onClick={() => approve(task.id)}>Approve</button>
+                  <button className="btn-outline" style={{ flex: 1 }} onClick={() => approve(task.id)}>Approve</button>
                   <button className="btn-danger" style={{ flex: 1 }} onClick={() => dispute(task.id)}>Dispute</button>
                 </>
               )}
               {tab === 'claimed' && task.status === 'Claimed' && (
-                <button className="btn-primary" style={{ width: '100%' }} onClick={() => { setSubmitId(task.id); setResultUri(''); setResultHash(''); }}>Submit Result</button>
+                <button className="btn-primary" style={{ width: '100%', height: 36 }} onClick={() => { setSubmitId(task.id); setResultUri(''); setResultHash(''); }}>Submit Result</button>
               )}
             </div>
           </div>
@@ -489,7 +534,7 @@ function SendPanel({ agent, addToast, initialTo = '' }) {
       <div>
         <label className="field-label">Amount (\u00b5AET) *</label>
         <input className="input" type="number" min="1" placeholder="1000000" value={amount} onChange={e => setAmount(e.target.value)} />
-        {amount && <div className="mono" style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 4 }}>= {fmtAET(parseInt(amount) || 0)}</div>}
+        {amount && <div className="mono" style={{ fontSize: 12, color: 'var(--muted-fg)', marginTop: 4 }}>= {fmtAET(parseInt(amount) || 0)}</div>}
       </div>
       <div><label className="field-label">Memo</label><input className="input" placeholder="Optional description" value={memo} onChange={e => setMemo(e.target.value)} /></div>
       <button className="btn-primary" style={{ width: '100%' }} onClick={send} disabled={sending}>{sending ? 'Sending\u2026' : 'Send AET'}</button>
@@ -506,9 +551,9 @@ function WalletDrawer({ open, onClose, initialTab, agent, setAgent, addToast }) 
     <>
       <div className={`wallet-overlay ${open ? 'open' : ''}`} onClick={onClose} />
       <div className={`wallet-drawer ${open ? 'open' : ''}`}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0, background: 'var(--bg)' }}>
-          <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-1)' }}>Wallet</span>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', fontSize: 18, lineHeight: 1, padding: 4 }} aria-label="Close wallet">{'\u2715'}</button>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0, background: 'var(--bg)' }}>
+          <span className="heading" style={{ fontSize: 15, fontWeight: 600, color: 'var(--fg)' }}>Wallet</span>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-fg)', fontSize: 18, lineHeight: 1, padding: 4 }} aria-label="Close wallet">{'\u2715'}</button>
         </div>
         <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
           {tabs.map(t => <button key={t.id} className={`wtab ${tab === t.id ? 'active' : ''}`} onClick={() => setTab(t.id)}>{t.l}</button>)}
@@ -526,92 +571,121 @@ function WalletDrawer({ open, onClose, initialTab, agent, setAgent, addToast }) 
 
 /* ── Pages ──────────────────────────────────────────────────────── */
 
-function OverviewPage({ status, econ, taskStats, agents, events, dagStats, loading, recentTasks, onNav, onOpenWallet }) {
+function OverviewPage({ status, econ, taskStats, agents, events, dagStats, loading, recentTasks, networkState, onNav, onOpenWallet }) {
   const validators = useMemo(() => agents.filter(a => a.staked_amount > 0), [agents]);
   const totalStaked = useMemo(() => validators.reduce((s, v) => s + (v.staked_amount || 0), 0), [validators]);
   const bootstrapMode = validators.length < 20;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-      {/* Bootstrap notice */}
-      {bootstrapMode && status && (
-        <div className="notice">
-          <strong>Bootstrap Mode</strong> \u2014 Elevated replay rates active. Phase ends when {'\u2265'} 90 days have passed and {'\u2265'} 20 validators are registered.
+    <div>
+      {/* Hero */}
+      <div className="hero">
+        <div className="hero-grid" />
+        <div className="container" style={{ position: 'relative', zIndex: 1 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--primary)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12, fontFamily: 'var(--heading)' }}>AetherNet Testnet</div>
+          <h1 className="heading" style={{ fontSize: 'clamp(28px, 4vw, 48px)', fontWeight: 700, color: 'var(--fg)', lineHeight: 1, letterSpacing: '-0.03em', marginBottom: 14, maxWidth: 640 }}>
+            Verifiable AI Work Settlement
+          </h1>
+          <p style={{ fontSize: 15, color: 'var(--muted-fg)', lineHeight: 1.6, maxWidth: 560, marginBottom: 24 }}>
+            AI work settles when it is sufficiently evidenced, independently reviewable, and accepted under explicit rules.
+          </p>
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button className="btn-primary" onClick={() => onNav('tasks')} style={{ height: 40, padding: '0 20px' }}>View Open Tasks</button>
+            <a href="/docs/" className="btn-outline" style={{ textDecoration: 'none', height: 36, padding: '0 16px' }}>Documentation</a>
+            <button className="btn-ghost" onClick={() => onOpenWallet('identity')} style={{ height: 36 }}>Register Agent</button>
+            {status && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-fg)', marginLeft: 8 }}>
+                <span className="dot dot-green" style={{ width: 6, height: 6 }} />
+                <span className="mono" style={{ color: 'var(--success)' }}>Live</span>
+                <span className="mono">{'\u00b7'} {status.peers} peers {'\u00b7'} {fmtNum(status.dag_size)} events</span>
+              </span>
+            )}
+          </div>
         </div>
-      )}
-
-      {/* Metrics strip */}
-      <div className="metrics-grid surface" style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', padding: '24px 28px', gap: 0 }}>
-        <Metric value={taskStats ? fmtNum(taskStats.open_tasks) : (loading ? null : '0')} label="Open Tasks" />
-        <Metric value={taskStats ? fmtNum(taskStats.completed_tasks) : (loading ? null : '0')} label="Settled" />
-        <Metric value={status ? fmtNum(agents.length) : null} label="Agents" />
-        <Metric value={status ? fmtNum(validators.length) : null} label="Validators" />
-        <Metric value={status ? fmtNum(status.dag_size) : null} label="DAG Events" />
-        <Metric value={status ? String(status.peers) : null} label="Peers" />
       </div>
 
-      {/* Two columns: Recent Tasks + Network Health */}
-      <div className="two-col" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
-        {/* Left: Recent Tasks */}
-        <div className="surface" style={{ overflow: 'hidden' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 20px', borderBottom: '1px solid var(--border)' }}>
-            <span style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-1)' }}>Recent Tasks</span>
-            <button onClick={() => onNav('tasks')} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: 'var(--text-3)', fontFamily: 'var(--sans)' }}>View all</button>
-          </div>
-          {loading && !recentTasks.length ? (
-            <div style={{ padding: 20 }}>{[...Array(5)].map((_, i) => <div key={i} style={{ marginBottom: 8 }}><Skel h={20} /></div>)}</div>
-          ) : recentTasks.length === 0 ? (
-            <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-3)', fontSize: 13 }}>No tasks yet.</div>
-          ) : (
-            <table>
-              <thead><tr><th>Task</th><th>Budget</th><th>Status</th></tr></thead>
-              <tbody>
-                {recentTasks.slice(0, 10).map(t => (
-                  <tr key={t.id}>
-                    <td style={{ maxWidth: 300 }}>
-                      <div style={{ fontSize: 13, color: 'var(--text-1)', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</div>
-                    </td>
-                    <td><span className="mono" style={{ fontSize: 13, color: 'var(--text-2)' }}>{fmtAET(t.budget)}</span></td>
-                    <td>
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-2)' }}>
-                        <span className={`dot ${dotClass(t.status)}`} />
-                        {statusLabel(t.status)}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      <div className="container" style={{ paddingTop: 28, paddingBottom: 32 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+          {/* Bootstrap notice */}
+          {bootstrapMode && status && (
+            <div className="notice">
+              <strong>Bootstrap Mode Active</strong> \u2014 Elevated replay rates (40\u201375%) reduce fraud risk while the validator set grows. Phase ends when {'\u2265'} 90 days have passed and {'\u2265'} 20 validators are registered.
+            </div>
           )}
-        </div>
 
-        {/* Right: Network Health */}
-        <div className="surface" style={{ padding: 20 }}>
-          <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-1)', marginBottom: 16 }}>Network Health</div>
-          <div style={{ display: 'flex', flexDirection: 'column' }}>
-            <div className="kv"><span style={{ fontSize: 13, color: 'var(--text-3)' }}>Phase</span><span className="mono" style={{ fontSize: 13, color: bootstrapMode ? 'var(--warn)' : 'var(--accent)' }}>{bootstrapMode ? 'Bootstrap' : 'Normal'}</span></div>
-            <div className="kv"><span style={{ fontSize: 13, color: 'var(--text-3)' }}>Active Validators</span><span className="mono" style={{ fontSize: 13, color: 'var(--text-2)' }}>{validators.length}</span></div>
-            <div className="kv"><span style={{ fontSize: 13, color: 'var(--text-3)' }}>Total Staked</span><span className="mono" style={{ fontSize: 13, color: 'var(--text-2)' }}>{fmtAET(totalStaked)}</span></div>
-            {econ && <div className="kv"><span style={{ fontSize: 13, color: 'var(--text-3)' }}>Treasury</span><span className="mono" style={{ fontSize: 13, color: 'var(--text-2)' }}>{fmtAET(econ.treasury_balance ?? econ.treasury_accrued)}</span></div>}
-            {econ && <div className="kv"><span style={{ fontSize: 13, color: 'var(--text-3)' }}>Total Supply</span><span className="mono" style={{ fontSize: 13, color: 'var(--text-2)' }}>{fmtAET(econ.total_supply)}</span></div>}
-            <div className="kv"><span style={{ fontSize: 13, color: 'var(--text-3)' }}>Peers</span><span className="mono" style={{ fontSize: 13, color: 'var(--text-2)' }}>{status?.peers ?? '\u2014'}</span></div>
+          {/* Stat cards */}
+          <div className="stat-grid">
+            <StatCard value={taskStats ? fmtNum(taskStats.open_tasks) : (loading ? null : '0')} label="Open Tasks" />
+            <StatCard value={taskStats ? fmtNum(taskStats.completed_tasks) : (loading ? null : '0')} label="Settled" />
+            <StatCard value={status ? fmtNum(agents.length) : null} label="Agents" />
+            <StatCard value={status ? fmtNum(validators.length) : null} label="Validators" />
+            <StatCard value={status ? fmtNum(status.dag_size) : null} label="DAG Events" />
+            <StatCard value={status ? String(status.peers) : null} label="Peers" />
           </div>
 
-          {/* Security floor */}
-          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.05em', marginTop: 20, marginBottom: 10 }}>Security Floor</div>
-          {[
-            { lane: 'Standard', req: 3 },
-            { lane: 'High', req: 5 },
-            { lane: 'Enterprise', req: 10 },
-          ].map(f => {
-            const met = validators.length >= f.req;
-            return (
-              <div key={f.lane} className="kv">
-                <span style={{ fontSize: 13, color: 'var(--text-3)' }}>{f.lane}</span>
-                <span className="mono" style={{ fontSize: 13, color: met ? 'var(--accent)' : 'var(--text-3)' }}>{validators.length}/{f.req} {met ? 'met' : 'not met'}</span>
+          {/* Two columns: Recent Tasks + Network Health */}
+          <div className="two-col" style={{ display: 'grid', gridTemplateColumns: '3fr 2fr', gap: 20 }}>
+            {/* Left: Recent Tasks */}
+            <div className="card" style={{ overflow: 'hidden' }}>
+              <div className="section-header">
+                <span className="section-title">Recent Tasks</span>
+                <button onClick={() => onNav('tasks')} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: 'var(--primary)', fontFamily: 'var(--body)' }}>View all</button>
               </div>
-            );
-          })}
+              {loading && !recentTasks.length ? (
+                <div style={{ padding: 20 }}>{[...Array(5)].map((_, i) => <div key={i} style={{ marginBottom: 10 }}><Skel h={20} /></div>)}</div>
+              ) : recentTasks.length === 0 ? (
+                <div style={{ padding: 48, textAlign: 'center', color: 'var(--muted-fg)', fontSize: 13 }}>No tasks yet.</div>
+              ) : (
+                <table>
+                  <thead><tr><th>Task</th><th>Budget</th><th>Status</th></tr></thead>
+                  <tbody>
+                    {recentTasks.slice(0, 10).map(t => (
+                      <tr key={t.id}>
+                        <td style={{ maxWidth: 300 }}>
+                          <div style={{ fontSize: 13, color: 'var(--fg)', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</div>
+                        </td>
+                        <td><span className="mono" style={{ fontSize: 13 }}>{fmtAET(t.budget)}</span></td>
+                        <td>
+                          <span className={`pill ${pillClass(t.status)}`}>
+                            <span className={`dot ${dotClass(t.status)}`} />
+                            {statusLabel(t.status)}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            {/* Right: Network Health */}
+            <div className="card" style={{ padding: 20 }}>
+              <div className="heading" style={{ fontSize: 14, fontWeight: 600, color: 'var(--fg)', marginBottom: 16 }}>Network Health</div>
+              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                <div className="kv"><span style={{ fontSize: 13, color: 'var(--muted-fg)' }}>Phase</span><span className="mono" style={{ fontSize: 13, color: bootstrapMode ? 'var(--warn)' : 'var(--success)' }}>{bootstrapMode ? 'Bootstrap' : 'Normal'}</span></div>
+                <div className="kv"><span style={{ fontSize: 13, color: 'var(--muted-fg)' }}>Active Validators</span><span className="mono" style={{ fontSize: 13 }}>{validators.length}</span></div>
+                <div className="kv"><span style={{ fontSize: 13, color: 'var(--muted-fg)' }}>Total Staked</span><span className="mono" style={{ fontSize: 13 }}>{fmtAET(totalStaked)}</span></div>
+                {econ && <div className="kv"><span style={{ fontSize: 13, color: 'var(--muted-fg)' }}>Treasury</span><span className="mono" style={{ fontSize: 13 }}>{fmtAET(econ.treasury_balance ?? econ.treasury_accrued)}</span></div>}
+                {econ && <div className="kv"><span style={{ fontSize: 13, color: 'var(--muted-fg)' }}>Total Supply</span><span className="mono" style={{ fontSize: 13 }}>{fmtAET(econ.total_supply)}</span></div>}
+                <div className="kv"><span style={{ fontSize: 13, color: 'var(--muted-fg)' }}>Peers</span><span className="mono" style={{ fontSize: 13 }}>{status?.peers ?? '\u2014'}</span></div>
+              </div>
+
+              <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-fg)', textTransform: 'uppercase', letterSpacing: '0.05em', marginTop: 20, marginBottom: 10, fontFamily: 'var(--heading)' }}>Security Floor</div>
+              {[
+                { lane: 'Standard', req: 3 },
+                { lane: 'High', req: 5 },
+                { lane: 'Enterprise', req: 10 },
+              ].map(f => {
+                const met = validators.length >= f.req;
+                return (
+                  <div key={f.lane} className="kv">
+                    <span style={{ fontSize: 13, color: 'var(--muted-fg)' }}>{f.lane}</span>
+                    <span className="mono" style={{ fontSize: 13, color: met ? 'var(--success)' : 'var(--muted-fg)' }}>{validators.length}/{f.req} {met ? 'met' : 'not met'}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -664,87 +738,90 @@ function TasksPage({ agent, addToast, onOpenWallet }) {
   }, [tasks, filter, search]);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h2 style={{ fontSize: 24, fontWeight: 600 }}>Tasks</h2>
-        <button className="btn-primary" onClick={() => onOpenWallet && onOpenWallet('post')}>Post Task</button>
-      </div>
+    <div className="container" style={{ paddingTop: 28, paddingBottom: 32 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h2 className="heading" style={{ fontSize: 24, fontWeight: 600 }}>Tasks</h2>
+          <button className="btn-primary" onClick={() => onOpenWallet && onOpenWallet('post')} style={{ height: 40 }}>Post Task</button>
+        </div>
 
-      {error ? (
-        <div className="surface" style={{ padding: 40, textAlign: 'center', color: 'var(--text-3)', fontSize: 13 }}>{error}</div>
-      ) : (
-        <>
-          {/* Filter bar */}
-          <div className="filter-bar">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-3)" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
-            <input placeholder="Search tasks\u2026" value={search} onChange={e => setSearch(e.target.value)} />
-            <div style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
-              {FILTERS.map(f => (
-                <button key={f} className={`filter-pill ${filter === f ? 'active' : ''}`} onClick={() => setFilter(f)}>
-                  {f === 'all' ? 'All' : statusLabel(f)} {counts[f] != null ? counts[f] : ''}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Table */}
-          <div className="surface" style={{ overflow: 'hidden' }}>
-            <div style={{ overflowX: 'auto' }}>
-              <table>
-                <thead>
-                  <tr>
-                    <th style={{ minWidth: 200, paddingLeft: 20 }}>Task</th>
-                    <th>Category</th>
-                    <th>Budget</th>
-                    <th>Assurance</th>
-                    <th>Status</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {loading && !tasks.length ? (
-                    [...Array(5)].map((_, i) => (
-                      <tr key={i}><td style={{ paddingLeft: 20 }}><Skel w={180} h={14} /></td><td><Skel w={70} h={14} /></td><td><Skel w={60} h={14} /></td><td><Skel w={60} h={14} /></td><td><Skel w={50} h={14} /></td><td></td></tr>
-                    ))
-                  ) : filtered.length === 0 ? (
-                    <tr><td colSpan={6} style={{ padding: 48, textAlign: 'center' }}>
-                      <span style={{ color: 'var(--text-3)', fontSize: 13 }}>
-                        {filter === 'open' && tasks.length === 0 ? 'No tasks yet. Post one to get started.' : `No ${statusLabel(filter).toLowerCase()} tasks.`}
-                      </span>
-                    </td></tr>
-                  ) : filtered.map(task => (
-                    <tr key={task.id}>
-                      <td style={{ paddingLeft: 20 }}>
-                        <div style={{ fontSize: 13, color: 'var(--text-1)', fontWeight: 500, lineHeight: 1.4 }}>{task.title}</div>
-                        <div className="mono" style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2 }}>{truncate(task.poster_id, 10)}</div>
-                      </td>
-                      <td><span style={{ fontSize: 12, color: 'var(--text-3)' }}>{task.category || '\u2014'}</span></td>
-                      <td><span className="mono" style={{ fontSize: 13, color: 'var(--text-2)' }}>{fmtAET(task.budget)}</span></td>
-                      <td><span style={{ fontSize: 12, color: 'var(--text-3)' }}>{laneText(task.contract?.assurance_lane)}</span></td>
-                      <td>
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-2)' }}>
-                          <span className={`dot ${dotClass(task.status)}`} />
-                          {statusLabel(task.status)}
-                        </span>
-                      </td>
-                      <td>
-                        {task.status?.toLowerCase() === 'open' && (
-                          <button className="btn-accent" style={{ fontSize: 12, padding: '4px 10px' }} onClick={() => claim(task.id)}>Claim</button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            {filtered.length > 0 && !loading && (
-              <div style={{ padding: '8px 20px', fontSize: 12, color: 'var(--text-3)', borderTop: '1px solid var(--border)' }}>
-                {filtered.length} task{filtered.length !== 1 ? 's' : ''}{filter !== 'all' ? ` \u00b7 ${statusLabel(filter)}` : ''}
+        {error ? (
+          <div className="card" style={{ padding: 48, textAlign: 'center', color: 'var(--muted-fg)', fontSize: 13 }}>{error}</div>
+        ) : (
+          <>
+            <div className="filter-bar">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--muted-fg)" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
+              <input placeholder="Search tasks\u2026" value={search} onChange={e => setSearch(e.target.value)} />
+              <div style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
+                {FILTERS.map(f => (
+                  <button key={f} className={`filter-pill ${filter === f ? 'active' : ''}`} onClick={() => setFilter(f)}>
+                    {f === 'all' ? 'All' : statusLabel(f)} {counts[f] != null ? counts[f] : ''}
+                  </button>
+                ))}
               </div>
-            )}
-          </div>
-        </>
-      )}
+            </div>
+
+            <div className="card" style={{ overflow: 'hidden' }}>
+              <div style={{ overflowX: 'auto' }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th style={{ minWidth: 220, paddingLeft: 20 }}>Task</th>
+                      <th>Category</th>
+                      <th>Budget</th>
+                      <th>Assurance</th>
+                      <th>Status</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {loading && !tasks.length ? (
+                      [...Array(5)].map((_, i) => (
+                        <tr key={i}><td style={{ paddingLeft: 20 }}><Skel w={180} h={14} /></td><td><Skel w={70} h={14} /></td><td><Skel w={60} h={14} /></td><td><Skel w={60} h={14} /></td><td><Skel w={50} h={14} /></td><td></td></tr>
+                      ))
+                    ) : filtered.length === 0 ? (
+                      <tr><td colSpan={6} style={{ padding: 48, textAlign: 'center' }}>
+                        <span style={{ color: 'var(--muted-fg)', fontSize: 13 }}>
+                          {filter === 'open' && tasks.length === 0 ? 'No tasks yet. Post one to get started.' : `No ${statusLabel(filter).toLowerCase()} tasks.`}
+                        </span>
+                      </td></tr>
+                    ) : filtered.map(task => {
+                      const lb = laneBadge(task.contract?.assurance_lane);
+                      return (
+                        <tr key={task.id}>
+                          <td style={{ paddingLeft: 20 }}>
+                            <div style={{ fontSize: 13, color: 'var(--fg)', fontWeight: 500, lineHeight: 1.4 }}>{task.title}</div>
+                            <div className="mono" style={{ fontSize: 11, color: 'var(--muted-fg)', marginTop: 2 }}>{truncate(task.poster_id, 10)}</div>
+                          </td>
+                          <td><span style={{ fontSize: 12, color: 'var(--muted-fg)' }}>{task.category || '\u2014'}</span></td>
+                          <td><span className="mono" style={{ fontSize: 13 }}>{fmtAET(task.budget)}</span></td>
+                          <td><span className={`lane-badge ${lb.cls}`}>{lb.text}</span></td>
+                          <td>
+                            <span className={`pill ${pillClass(task.status)}`}>
+                              <span className={`dot ${dotClass(task.status)}`} />
+                              {statusLabel(task.status)}
+                            </span>
+                          </td>
+                          <td>
+                            {task.status?.toLowerCase() === 'open' && (
+                              <button className="btn-outline" style={{ fontSize: 12, padding: '4px 12px', height: 28 }} onClick={() => claim(task.id)}>Claim</button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              {filtered.length > 0 && !loading && (
+                <div style={{ padding: '8px 20px', fontSize: 12, color: 'var(--muted-fg)', borderTop: '1px solid var(--border)' }}>
+                  {filtered.length} task{filtered.length !== 1 ? 's' : ''}{filter !== 'all' ? ` \u00b7 ${statusLabel(filter)}` : ''}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -755,122 +832,123 @@ function ValidatorsPage({ agents, loading }) {
   const bootstrapMode = validators.length < 20;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-      <div>
-        <h2 style={{ fontSize: 24, fontWeight: 600 }}>Validators</h2>
-        <p style={{ fontSize: 13, color: 'var(--text-3)', marginTop: 6, maxWidth: 640, lineHeight: 1.6 }}>
-          Validators stake AET to back settlement guarantees. Their slashable stake is the economic security of every assured task.
-        </p>
-      </div>
-
-      {/* Summary metrics */}
-      <div className="metrics-grid surface" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', padding: '20px 24px' }}>
-        <Metric value={loading && !agents.length ? null : String(validators.length)} label="Active" />
-        <Metric value={totalStaked ? fmtAET(totalStaked) : '\u2014'} label="Total Staked" />
-        <Metric value="10,000" label="Min Stake (AET)" />
-        <Metric value={bootstrapMode ? 'Bootstrap' : 'Normal'} label="Phase" />
-      </div>
-
-      {bootstrapMode && (
-        <div className="notice">
-          <strong>Bootstrap Mode</strong> \u2014 Elevated replay rates (40\u201375%) reduce fraud risk while the validator set grows. Bootstrap rewards supplement income. Phase ends when {'\u2265'} 90 days and {'\u2265'} 20 validators.
+    <div className="container" style={{ paddingTop: 28, paddingBottom: 32 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+        <div>
+          <h2 className="heading" style={{ fontSize: 24, fontWeight: 600 }}>Validators</h2>
+          <p style={{ fontSize: 14, color: 'var(--muted-fg)', marginTop: 6, maxWidth: 640, lineHeight: 1.6 }}>
+            Validators stake AET to back settlement guarantees. Their slashable stake is the economic security of every assured task.
+          </p>
         </div>
-      )}
 
-      {/* Security floor */}
-      <div className="surface" style={{ overflow: 'hidden' }}>
-        <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)' }}>
-          <span style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-1)' }}>Security Floor</span>
+        <div className="stat-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
+          <StatCard value={loading && !agents.length ? null : String(validators.length)} label="Active" />
+          <StatCard value={totalStaked ? fmtAET(totalStaked) : '\u2014'} label="Total Staked" />
+          <StatCard value="10,000" label="Min Stake (AET)" />
+          <StatCard value={bootstrapMode ? 'Bootstrap' : 'Normal'} label="Phase" />
         </div>
-        <table>
-          <thead><tr><th>Lane</th><th>Fee Rate</th><th>Floor</th><th>Min Validators</th><th>Min Budget</th></tr></thead>
-          <tbody>
-            {[
-              { lane: 'Standard', fee: '3%', floor: '2 AET', req: 3, budget: '25 AET' },
-              { lane: 'High', fee: '6%', floor: '4 AET', req: 5, budget: '25 AET' },
-              { lane: 'Enterprise', fee: '8%', floor: '8 AET', req: 10, budget: '25 AET' },
-              { lane: 'Unassured', fee: '\u2014', floor: '\u2014', req: 0, budget: 'None' },
-            ].map(r => (
-              <tr key={r.lane}>
-                <td style={{ color: 'var(--text-1)', fontWeight: 500, fontSize: 13 }}>{r.lane}</td>
-                <td>{r.fee}</td>
-                <td>{r.floor}</td>
-                <td>
-                  {r.req > 0 ? (
-                    <span className="mono" style={{ fontSize: 13, color: validators.length >= r.req ? 'var(--accent)' : 'var(--text-3)' }}>
-                      {validators.length}/{r.req} {validators.length >= r.req ? 'met' : 'not met'}
-                    </span>
-                  ) : <span style={{ color: 'var(--text-3)' }}>\u2014</span>}
-                </td>
-                <td>{r.budget}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
 
-      {/* Validator table */}
-      <div className="surface" style={{ overflow: 'hidden' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 20px', borderBottom: '1px solid var(--border)' }}>
-          <span style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-1)' }}>Staked Validators</span>
-          <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{validators.length} of {agents.length} agents</span>
-        </div>
-        <div style={{ overflowX: 'auto' }}>
+        {bootstrapMode && (
+          <div className="notice">
+            <strong>Bootstrap Mode</strong> \u2014 Elevated replay rates (40\u201375%) reduce fraud risk while the validator set grows. Bootstrap rewards supplement income. Phase ends when {'\u2265'} 90 days and {'\u2265'} 20 validators.
+          </div>
+        )}
+
+        {/* Security floor */}
+        <div className="card" style={{ overflow: 'hidden' }}>
+          <div className="section-header">
+            <span className="section-title">Security Floor</span>
+          </div>
           <table>
-            <thead><tr><th>#</th><th>Agent ID</th><th>Staked</th><th>Trust Limit</th><th>Reputation</th><th>Tasks</th></tr></thead>
+            <thead><tr><th>Lane</th><th>Fee Rate</th><th>Floor</th><th>Min Validators</th><th>Min Budget</th></tr></thead>
             <tbody>
-              {loading && !agents.length ? (
-                [...Array(3)].map((_, i) => <tr key={i}>{[...Array(6)].map((_, j) => <td key={j}><Skel w={60} h={14} /></td>)}</tr>)
-              ) : validators.length === 0 ? (
-                <tr><td colSpan={6} style={{ padding: 48, textAlign: 'center' }}><span style={{ color: 'var(--text-3)', fontSize: 13 }}>No validators have staked yet.</span></td></tr>
-              ) : validators.map((v, i) => (
-                <tr key={v.agent_id}>
-                  <td className="mono" style={{ color: 'var(--text-3)', fontSize: 13 }}>{i + 1}</td>
+              {[
+                { lane: 'Standard', fee: '3%', floor: '2 AET', req: 3, budget: '25 AET', cls: 'lane-std' },
+                { lane: 'High', fee: '6%', floor: '4 AET', req: 5, budget: '25 AET', cls: 'lane-high' },
+                { lane: 'Enterprise', fee: '8%', floor: '8 AET', req: 10, budget: '25 AET', cls: 'lane-ent' },
+                { lane: 'Unassured', fee: '\u2014', floor: '\u2014', req: 0, budget: 'None', cls: 'lane-none' },
+              ].map(r => (
+                <tr key={r.lane}>
+                  <td><span className={`lane-badge ${r.cls}`}>{r.lane}</span></td>
+                  <td className="mono" style={{ fontSize: 13 }}>{r.fee}</td>
+                  <td className="mono" style={{ fontSize: 13 }}>{r.floor}</td>
                   <td>
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                      <span className="dot dot-green" />
-                      <CopyId id={v.agent_id} />
-                    </span>
+                    {r.req > 0 ? (
+                      <span className="mono" style={{ fontSize: 13, color: validators.length >= r.req ? 'var(--success)' : 'var(--muted-fg)' }}>
+                        {validators.length}/{r.req} {validators.length >= r.req ? 'met' : 'not met'}
+                      </span>
+                    ) : <span style={{ color: 'var(--muted-fg)' }}>\u2014</span>}
                   </td>
-                  <td><span className="mono" style={{ color: 'var(--accent)', fontSize: 13 }}>{fmtAET(v.staked_amount)}</span></td>
-                  <td><span className="mono" style={{ fontSize: 13 }}>{fmtAET(v.trust_limit)}</span></td>
-                  <td><span className="mono" style={{ fontSize: 13 }}>{fmtNum(v.reputation_score)}</span></td>
-                  <td><span className="mono" style={{ fontSize: 13 }}>{fmtNum(v.tasks_completed)}</span></td>
+                  <td className="mono" style={{ fontSize: 13 }}>{r.budget}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-      </div>
 
-      {/* All agents */}
-      {agents.length > 0 && (
-        <div className="surface" style={{ overflow: 'hidden' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 20px', borderBottom: '1px solid var(--border)' }}>
-            <span style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-1)' }}>All Agents</span>
-            <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{agents.length} registered</span>
+        {/* Validator table */}
+        <div className="card" style={{ overflow: 'hidden' }}>
+          <div className="section-header">
+            <span className="section-title">Staked Validators</span>
+            <span style={{ fontSize: 12, color: 'var(--muted-fg)' }}>{validators.length} of {agents.length} agents</span>
           </div>
           <div style={{ overflowX: 'auto' }}>
             <table>
-              <thead><tr><th>#</th><th>Agent ID</th><th>Balance</th><th>Reputation</th><th>Tasks</th></tr></thead>
+              <thead><tr><th>#</th><th>Agent ID</th><th>Staked</th><th>Trust Limit</th><th>Reputation</th><th>Tasks</th></tr></thead>
               <tbody>
-                {agents.map(a => (
-                  <tr key={a.agent_id}>
-                    <td className="mono" style={{ color: 'var(--text-3)', fontSize: 13 }}>{a.rank}</td>
+                {loading && !agents.length ? (
+                  [...Array(3)].map((_, i) => <tr key={i}>{[...Array(6)].map((_, j) => <td key={j}><Skel w={60} h={14} /></td>)}</tr>)
+                ) : validators.length === 0 ? (
+                  <tr><td colSpan={6} style={{ padding: 48, textAlign: 'center' }}><span style={{ color: 'var(--muted-fg)', fontSize: 13 }}>No validators have staked yet.</span></td></tr>
+                ) : validators.map((v, i) => (
+                  <tr key={v.agent_id}>
+                    <td className="mono" style={{ color: 'var(--muted-fg)', fontSize: 13 }}>{i + 1}</td>
                     <td>
-                      <CopyId id={a.agent_id} />
-                      {a.staked_amount > 0 && <div style={{ fontSize: 11, color: 'var(--accent)', marginTop: 2, opacity: 0.7 }}>Validator</div>}
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                        <span className="dot dot-green" />
+                        <CopyId id={v.agent_id} />
+                      </span>
                     </td>
-                    <td><span className="mono" style={{ fontSize: 13 }}>{fmtAET(a.balance)}</span></td>
-                    <td><span className="mono" style={{ fontSize: 13 }}>{fmtNum(a.reputation_score)}</span></td>
-                    <td><span className="mono" style={{ fontSize: 13 }}>{fmtNum(a.tasks_completed)}</span></td>
+                    <td><span className="mono" style={{ color: 'var(--primary)', fontSize: 13 }}>{fmtAET(v.staked_amount)}</span></td>
+                    <td><span className="mono" style={{ fontSize: 13 }}>{fmtAET(v.trust_limit)}</span></td>
+                    <td><span className="mono" style={{ fontSize: 13 }}>{fmtNum(v.reputation_score)}</span></td>
+                    <td><span className="mono" style={{ fontSize: 13 }}>{fmtNum(v.tasks_completed)}</span></td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         </div>
-      )}
+
+        {/* All agents */}
+        {agents.length > 0 && (
+          <div className="card" style={{ overflow: 'hidden' }}>
+            <div className="section-header">
+              <span className="section-title">All Agents</span>
+              <span style={{ fontSize: 12, color: 'var(--muted-fg)' }}>{agents.length} registered</span>
+            </div>
+            <div style={{ overflowX: 'auto' }}>
+              <table>
+                <thead><tr><th>#</th><th>Agent ID</th><th>Balance</th><th>Reputation</th><th>Tasks</th></tr></thead>
+                <tbody>
+                  {agents.map(a => (
+                    <tr key={a.agent_id}>
+                      <td className="mono" style={{ color: 'var(--muted-fg)', fontSize: 13 }}>{a.rank}</td>
+                      <td>
+                        <CopyId id={a.agent_id} />
+                        {a.staked_amount > 0 && <div style={{ fontSize: 11, color: 'var(--primary)', marginTop: 2, opacity: 0.7 }}>Validator</div>}
+                      </td>
+                      <td><span className="mono" style={{ fontSize: 13 }}>{fmtAET(a.balance)}</span></td>
+                      <td><span className="mono" style={{ fontSize: 13 }}>{fmtNum(a.reputation_score)}</span></td>
+                      <td><span className="mono" style={{ fontSize: 13 }}>{fmtNum(a.tasks_completed)}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -880,106 +958,104 @@ function NetworkPage({ events, dagStats, econ, status, loading }) {
   const byType = dagStats?.events_by_type || {};
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-      <h2 style={{ fontSize: 24, fontWeight: 600 }}>Network</h2>
+    <div className="container" style={{ paddingTop: 28, paddingBottom: 32 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+        <h2 className="heading" style={{ fontSize: 24, fontWeight: 600 }}>Network</h2>
 
-      {/* Stats strip */}
-      <div className="metrics-grid surface" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', padding: '20px 24px' }}>
-        <Metric value={status ? fmtNum(total) : null} label="Total Events" />
-        <Metric value={dagStats ? String(dagStats.tips_count ?? 0) : null} label="Tips" />
-        <Metric value={dagStats ? String(dagStats.max_depth ?? 0) : null} label="Max Depth" />
-        <Metric value={status ? String(status.peers) : null} label="Peers" />
-      </div>
-
-      {/* Two columns: Event log + Sidebar */}
-      <div className="col-2-1" style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 24 }}>
-        {/* Event log */}
-        <div className="surface" style={{ overflow: 'hidden' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 20px', borderBottom: '1px solid var(--border)' }}>
-            <span style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-1)' }}>Event Log</span>
-            <span style={{ fontSize: 12, color: 'var(--text-3)' }}>Last 50</span>
-          </div>
-          <div style={{ overflowY: 'auto', maxHeight: 600 }}>
-            {loading && !events.length ? (
-              <div style={{ padding: 20 }}>{[...Array(8)].map((_, i) => <div key={i} style={{ marginBottom: 8 }}><Skel h={20} /></div>)}</div>
-            ) : events.length === 0 ? (
-              <div style={{ padding: 48, textAlign: 'center', color: 'var(--text-3)', fontSize: 13 }}>No events yet.</div>
-            ) : (
-              <table>
-                <thead><tr><th>ID</th><th>Type</th><th>Details</th><th>State</th></tr></thead>
-                <tbody>
-                  {events.map(ev => (
-                    <tr key={ev.id}>
-                      <td><span className="mono" style={{ fontSize: 12, color: 'var(--text-3)' }}>{truncate(ev.id, 8)}</span></td>
-                      <td><span style={{ fontSize: 12, color: 'var(--text-2)' }}>{ev.type || 'Unknown'}</span></td>
-                      <td>
-                        {ev.type === 'Transfer' && ev.from ? (
-                          <span className="mono" style={{ fontSize: 12, color: 'var(--text-3)' }}>
-                            {truncate(ev.from, 6)} {'\u2192'} {truncate(ev.to, 6)} {ev.amount > 0 ? ` ${fmtAET(ev.amount)}` : ''}
-                          </span>
-                        ) : (
-                          <span className="mono" style={{ fontSize: 12, color: 'var(--text-3)' }}>
-                            {truncate(ev.agent_id, 8)} {ev.causal_timestamp != null ? `ts ${ev.causal_timestamp}` : ''}
-                          </span>
-                        )}
-                      </td>
-                      <td>
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-                          <span className={`dot ${ev.settlement_state === 'Settled' ? 'dot-green' : ev.settlement_state === 'Adjusted' ? 'dot-red' : 'dot-amber'}`} />
-                          <span style={{ color: 'var(--text-3)' }}>{ev.settlement_state}</span>
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
+        <div className="stat-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
+          <StatCard value={status ? fmtNum(total) : null} label="Total Events" />
+          <StatCard value={dagStats ? String(dagStats.tips_count ?? 0) : null} label="Tips" />
+          <StatCard value={dagStats ? String(dagStats.max_depth ?? 0) : null} label="Max Depth" />
+          <StatCard value={status ? String(status.peers) : null} label="Peers" />
         </div>
 
-        {/* Sidebar */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-          {/* DAG Breakdown */}
-          <div className="surface" style={{ padding: 20 }}>
-            <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-1)', marginBottom: 16 }}>DAG Breakdown</div>
-            {Object.keys(byType).length === 0 ? (
-              <div style={{ fontSize: 13, color: 'var(--text-3)' }}>No events in DAG yet.</div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column' }}>
-                {Object.entries(byType).map(([type, n]) => (
-                  <div key={type} className="kv">
-                    <span style={{ fontSize: 13, color: 'var(--text-2)' }}>{type}</span>
-                    <span className="mono" style={{ fontSize: 13, color: 'var(--text-1)' }}>{n}</span>
+        <div className="col-2-1" style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 20 }}>
+          {/* Event log */}
+          <div className="card" style={{ overflow: 'hidden' }}>
+            <div className="section-header">
+              <span className="section-title">Event Log</span>
+              <span style={{ fontSize: 12, color: 'var(--muted-fg)' }}>Last 50</span>
+            </div>
+            <div style={{ overflowY: 'auto', maxHeight: 600 }}>
+              {loading && !events.length ? (
+                <div style={{ padding: 20 }}>{[...Array(8)].map((_, i) => <div key={i} style={{ marginBottom: 10 }}><Skel h={20} /></div>)}</div>
+              ) : events.length === 0 ? (
+                <div style={{ padding: 48, textAlign: 'center', color: 'var(--muted-fg)', fontSize: 13 }}>No events yet.</div>
+              ) : (
+                <table>
+                  <thead><tr><th>ID</th><th>Type</th><th>Details</th><th>State</th></tr></thead>
+                  <tbody>
+                    {events.map(ev => (
+                      <tr key={ev.id}>
+                        <td><span className="mono" style={{ fontSize: 12, color: 'var(--muted-fg)' }}>{truncate(ev.id, 8)}</span></td>
+                        <td><span style={{ fontSize: 12 }}>{ev.type || 'Unknown'}</span></td>
+                        <td>
+                          {ev.type === 'Transfer' && ev.from ? (
+                            <span className="mono" style={{ fontSize: 12, color: 'var(--muted-fg)' }}>
+                              {truncate(ev.from, 6)} {'\u2192'} {truncate(ev.to, 6)} {ev.amount > 0 ? ` ${fmtAET(ev.amount)}` : ''}
+                            </span>
+                          ) : (
+                            <span className="mono" style={{ fontSize: 12, color: 'var(--muted-fg)' }}>
+                              {truncate(ev.agent_id, 8)} {ev.causal_timestamp != null ? `ts ${ev.causal_timestamp}` : ''}
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          <span className={`pill ${ev.settlement_state === 'Settled' ? 'pill-green' : ev.settlement_state === 'Adjusted' ? 'pill-red' : 'pill-amber'}`}>
+                            <span className={`dot ${ev.settlement_state === 'Settled' ? 'dot-green' : ev.settlement_state === 'Adjusted' ? 'dot-red' : 'dot-amber'}`} />
+                            {ev.settlement_state}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+
+          {/* Sidebar */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+            <div className="card" style={{ padding: 20 }}>
+              <div className="heading" style={{ fontSize: 14, fontWeight: 600, color: 'var(--fg)', marginBottom: 16 }}>DAG Breakdown</div>
+              {Object.keys(byType).length === 0 ? (
+                <div style={{ fontSize: 13, color: 'var(--muted-fg)' }}>No events in DAG yet.</div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  {Object.entries(byType).map(([type, n]) => (
+                    <div key={type} className="kv">
+                      <span style={{ fontSize: 13, color: 'var(--fg)' }}>{type}</span>
+                      <span className="mono" style={{ fontSize: 13, color: 'var(--fg)', fontWeight: 500 }}>{n}</span>
+                    </div>
+                  ))}
+                  <div className="kv" style={{ marginTop: 4 }}>
+                    <span style={{ fontSize: 13, color: 'var(--muted-fg)', fontWeight: 500 }}>Total</span>
+                    <span className="mono" style={{ fontSize: 13, color: 'var(--fg)', fontWeight: 500 }}>{total}</span>
                   </div>
-                ))}
-                <div className="kv" style={{ marginTop: 4 }}>
-                  <span style={{ fontSize: 13, color: 'var(--text-3)', fontWeight: 500 }}>Total</span>
-                  <span className="mono" style={{ fontSize: 13, color: 'var(--text-1)', fontWeight: 500 }}>{total}</span>
+                </div>
+              )}
+            </div>
+
+            {econ && (
+              <div className="card" style={{ padding: 20 }}>
+                <div className="heading" style={{ fontSize: 14, fontWeight: 600, color: 'var(--fg)', marginBottom: 16 }}>Token Economics</div>
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  {[
+                    { k: 'Total Supply', v: fmtAET(econ.total_supply) },
+                    { k: 'Circulating', v: fmtAET(econ.circulating_supply) },
+                    { k: 'Treasury', v: fmtAET(econ.treasury_balance ?? econ.treasury_accrued) },
+                    { k: 'Generated Value', v: fmtAET(econ.total_generated_value) },
+                    { k: 'Fee Rate', v: `${econ.fee_basis_points ?? 10} bps` },
+                  ].map(row => (
+                    <div key={row.k} className="kv">
+                      <span style={{ fontSize: 13, color: 'var(--muted-fg)' }}>{row.k}</span>
+                      <span className="mono" style={{ fontSize: 13 }}>{row.v}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
           </div>
-
-          {/* Economics */}
-          {econ && (
-            <div className="surface" style={{ padding: 20 }}>
-              <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-1)', marginBottom: 16 }}>Economics</div>
-              <div style={{ display: 'flex', flexDirection: 'column' }}>
-                {[
-                  { k: 'Total Supply', v: fmtAET(econ.total_supply) },
-                  { k: 'Circulating', v: fmtAET(econ.circulating_supply) },
-                  { k: 'Treasury', v: fmtAET(econ.treasury_balance ?? econ.treasury_accrued) },
-                  { k: 'Generated Value', v: fmtAET(econ.total_generated_value) },
-                  { k: 'Fee Rate', v: `${econ.fee_basis_points ?? 10} bps` },
-                ].map(row => (
-                  <div key={row.k} className="kv">
-                    <span style={{ fontSize: 13, color: 'var(--text-3)' }}>{row.k}</span>
-                    <span className="mono" style={{ fontSize: 13, color: 'var(--text-2)' }}>{row.v}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
       </div>
     </div>
@@ -999,20 +1075,21 @@ function Header({ activePage, onNav, status, agent, onOpenWallet, loading }) {
   return (
     <header className="header">
       <div className="header-inner">
-        <button className="logo-btn" onClick={() => onNav('overview')}>AetherNet</button>
+        <button className="logo-btn" onClick={() => onNav('overview')}>
+          <svg width="22" height="22" viewBox="0 0 32 32" fill="none">
+            <rect width="32" height="32" rx="6" fill="var(--primary)" />
+            <path d="M10 22L16 10L22 22H10Z" fill="white" fillOpacity="0.9" />
+          </svg>
+          AetherNet
+          <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--muted-fg)', fontFamily: 'var(--body)' }}>Explorer</span>
+        </button>
         <nav className="header-nav">
           {pages.map(p => (
             <button key={p.id} className={`nav-link ${activePage === p.id ? 'active' : ''}`} onClick={() => onNav(p.id)}>{p.l}</button>
           ))}
         </nav>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          {status && (
-            <span className="mono" style={{ fontSize: 12, color: 'var(--text-3)', display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span className="dot dot-green" />
-              <span style={{ color: 'var(--accent)' }}>Live</span>
-            </span>
-          )}
-          {!status && !loading && <span style={{ fontSize: 12, color: 'var(--err)' }}>Offline</span>}
+          {!status && !loading && <span style={{ fontSize: 12, color: 'var(--destructive)' }}>Offline</span>}
           <button className="btn-ghost" onClick={() => onOpenWallet('identity')} style={{ gap: 6 }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><rect x="2" y="6" width="20" height="14" rx="2" /><path d="M2 10h20" /><circle cx="17" cy="14" r="1.5" fill="currentColor" stroke="none" /></svg>
             Wallet
@@ -1035,6 +1112,7 @@ function App() {
   const [econ, setEcon] = useState(null);
   const [taskStats, setTaskStats] = useState(null);
   const [recentTasks, setRecentTasks] = useState([]);
+  const [networkState, setNetworkState] = useState(null);
   const [loading, setLoading] = useState(true);
 
   const [walletOpen, setWalletOpen] = useState(false);
@@ -1060,6 +1138,7 @@ function App() {
       setEcon(ec);
       apiFetch('/v1/tasks/stats').then(setTaskStats).catch(() => {});
       apiFetch('/v1/tasks?limit=10').then(d => setRecentTasks(Array.isArray(d) ? d.slice(0, 10) : (d.tasks || []).slice(0, 10))).catch(() => {});
+      apiFetch('/v1/network/state').then(setNetworkState).catch(() => {});
     } catch (e) {
       console.error('Refresh error:', e);
     } finally {
@@ -1079,23 +1158,25 @@ function App() {
       <Header activePage={page} onNav={setPage} status={status} agent={agent} onOpenWallet={openWallet} loading={loading && !status} />
 
       {!status && !loading && (
-        <div style={{ maxWidth: 1200, margin: '16px auto 0', padding: '0 24px', width: '100%' }}>
-          <div style={{ fontSize: 13, color: 'var(--err)', padding: '10px 14px', background: 'rgba(239,68,68,0.06)', borderRadius: 6, borderLeft: '2px solid var(--err)' }}>
+        <div className="container" style={{ paddingTop: 16 }}>
+          <div style={{ fontSize: 13, color: 'var(--destructive)', padding: '12px 16px', background: 'hsla(0, 84%, 60%, 0.06)', borderRadius: 'var(--radius)', border: '1px solid hsla(0, 84%, 60%, 0.15)' }}>
             Cannot reach node at <span className="mono">{API}</span>. Is the node running?
           </div>
         </div>
       )}
 
-      <main className="page-wrap" style={{ flex: 1 }}>
-        {page === 'overview' && <OverviewPage status={status} econ={econ} taskStats={taskStats} agents={agents} events={events} dagStats={dagStats} loading={loading} recentTasks={recentTasks} onNav={setPage} onOpenWallet={openWallet} />}
+      <main className="page-wrap">
+        {page === 'overview' && <OverviewPage status={status} econ={econ} taskStats={taskStats} agents={agents} events={events} dagStats={dagStats} loading={loading} recentTasks={recentTasks} networkState={networkState} onNav={setPage} onOpenWallet={openWallet} />}
         {page === 'tasks' && <TasksPage agent={agent} addToast={addToast} onOpenWallet={openWallet} />}
         {page === 'validators' && <ValidatorsPage agents={agents} loading={loading && !agents.length} />}
         {page === 'network' && <NetworkPage events={events} dagStats={dagStats} econ={econ} status={status} loading={loading} />}
       </main>
 
-      <footer style={{ padding: '12px 24px', borderTop: '1px solid var(--border)', fontSize: 12, color: 'var(--text-3)', maxWidth: 1200, margin: '0 auto', width: '100%', display: 'flex', justifyContent: 'space-between' }}>
-        <span>AetherNet v0.1.0-testnet{' \u00b7 '}<a href="/docs/" style={{ color: 'var(--text-3)', textDecoration: 'none', transition: 'color 0.15s' }} onMouseEnter={e => e.target.style.color = 'var(--text-2)'} onMouseLeave={e => e.target.style.color = 'var(--text-3)'}>Documentation</a></span>
-        <span>Auto-refresh 5s</span>
+      <footer style={{ borderTop: '1px solid var(--border)' }}>
+        <div className="container" style={{ padding: '14px 2rem', fontSize: 12, color: 'var(--muted-fg)', display: 'flex', justifyContent: 'space-between' }}>
+          <span>AetherNet v0.1.0-testnet{' \u00b7 '}<a href="/docs/" style={{ color: 'var(--muted-fg)', textDecoration: 'none', transition: 'color 0.15s' }} onMouseEnter={e => e.target.style.color = 'var(--fg)'} onMouseLeave={e => e.target.style.color = 'var(--muted-fg)'}>Documentation</a></span>
+          <span>Auto-refresh 5s</span>
+        </div>
       </footer>
     </div>
   );
