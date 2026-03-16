@@ -12,49 +12,78 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <style>
     body { background-color: #0A1220; color: #e2e8f0; font-family: 'Inter', 'Segoe UI', sans-serif; }
+
+    /* ── Cards & Layout ────────────────────────────────────────────────────── */
     .card { background-color: #1E2D40; border: 1px solid #2d4a6b; border-radius: 0.75rem; }
-    .accent { color: #00D4AA; }
-    .accent-bg { background-color: #00D4AA; }
-    .badge-transfer   { background: #1e3a5f; color: #60a5fa; }
-    .badge-generation { background: #1a3d2e; color: #34d399; }
+    .hero-section { background: linear-gradient(135deg, rgba(0,212,170,0.06) 0%, transparent 70%);
+                    border: 1px solid rgba(0,212,170,0.18); border-radius: 1rem; padding: 2rem; }
+    .pillar-card { background: #1E2D40; border: 1px solid #2d4a6b; border-left: 3px solid #00D4AA;
+                   border-radius: 0.75rem; padding: 1.25rem; }
+
+    /* ── Wallet Drawer ─────────────────────────────────────────────────────── */
+    .wallet-drawer { position: fixed; top: 0; right: 0; width: 380px; height: 100%;
+                     background: #15202E; border-left: 1px solid #2d4a6b; z-index: 40;
+                     transform: translateX(100%); transition: transform 0.25s cubic-bezier(0.4,0,0.2,1);
+                     display: flex; flex-direction: column; overflow: hidden; }
+    .wallet-drawer.open { transform: translateX(0); }
+    .drawer-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+                      backdrop-filter: blur(2px); z-index: 39; }
+
+    /* ── Badges & Status ───────────────────────────────────────────────────── */
+    .status-open       { background: rgba(52,211,153,0.15); color: #34d399; }
+    .status-claimed    { background: rgba(96,165,250,0.15); color: #60a5fa; }
+    .status-submitted  { background: rgba(251,191,36,0.15); color: #fbbf24; }
+    .status-completed  { background: rgba(0,212,170,0.15); color: #00D4AA; }
+    .status-disputed   { background: rgba(248,113,113,0.15); color: #f87171; }
+    .status-cancelled  { background: rgba(100,116,139,0.15); color: #64748b; }
+    .status-other      { background: rgba(100,116,139,0.15); color: #64748b; }
+    .lane-unassured    { background: rgba(100,116,139,0.2);  color: #64748b; }
+    .lane-standard     { background: rgba(96,165,250,0.15);  color: #60a5fa; }
+    .lane-high         { background: rgba(0,212,170,0.15);   color: #00D4AA; }
+    .lane-enterprise   { background: rgba(192,132,252,0.15); color: #c084fc; }
+    .badge-transfer    { background: #1e3a5f; color: #60a5fa; }
+    .badge-generation  { background: #1a3d2e; color: #34d399; }
     .badge-verification { background: #3d2a1a; color: #fb923c; }
     .badge-attestation  { background: #3d1a3d; color: #c084fc; }
     .badge-delegation   { background: #3d2a1a; color: #fbbf24; }
     .badge-other        { background: #2a2a3d; color: #94a3b8; }
-    .skeleton { background: linear-gradient(90deg, #1E2D40 25%, #243547 50%, #1E2D40 75%);
+
+    /* ── Skeleton & Animations ─────────────────────────────────────────────── */
+    .skeleton { background: linear-gradient(90deg,#1E2D40 25%,#243547 50%,#1E2D40 75%);
                 background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 0.375rem; }
-    @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-    .fade-in { animation: fadeIn 0.4s ease-in; }
-    @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
-    .slide-in { animation: slideIn 0.22s cubic-bezier(0.25, 0.46, 0.45, 0.94); }
-    @keyframes slideIn { from { transform: translateX(-100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+    .fade-in { animation: fadeIn 0.35s ease-in; }
+    @keyframes fadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
     .toast-in { animation: toastIn 0.28s ease-out; }
-    @keyframes toastIn { from { transform: translateX(120%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
-    ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: #0A1220; }
+    @keyframes toastIn { from{transform:translateX(120%);opacity:0} to{transform:translateX(0);opacity:1} }
+
+    /* ── Scrollbar ─────────────────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: #0A1220; }
     ::-webkit-scrollbar-thumb { background: #2d4a6b; border-radius: 3px; }
+
+    /* ── Table ─────────────────────────────────────────────────────────────── */
     table { border-collapse: collapse; width: 100%; }
-    th { text-align: left; padding: 0.625rem 1rem; font-size: 0.75rem; text-transform: uppercase;
-         letter-spacing: 0.05em; color: #64748b; border-bottom: 1px solid #2d4a6b; }
+    th { text-align: left; padding: 0.6rem 1rem; font-size: 0.7rem; text-transform: uppercase;
+         letter-spacing: 0.06em; color: #64748b; border-bottom: 1px solid #2d4a6b; white-space: nowrap; }
     td { padding: 0.625rem 1rem; font-size: 0.8125rem; border-bottom: 1px solid #1a2535; }
-    tr:hover td { background: #243547; }
-    .stat-value { font-size: 1.5rem; font-weight: 700; color: #00D4AA; }
-    .stat-label { font-size: 0.75rem; color: #64748b; margin-top: 0.125rem; }
-    /* Sidebar */
-    .sidebar-container { flex-shrink: 0; overflow: hidden; transition: width 0.25s cubic-bezier(0.4,0,0.2,1); width: 320px; }
-    .sidebar-container.sidebar-closed { width: 0; }
-    .sidebar { background: #15202E; border-right: 1px solid #2d4a6b; width: 320px; height: 100%; }
-    select.ifield { appearance: none; cursor: pointer; }
-    /* Form controls */
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #1a2535; }
+
+    /* ── Form Controls ─────────────────────────────────────────────────────── */
     .ifield { background: #0A1220; border: 1px solid #2d4a6b; border-radius: 0.5rem;
               color: #e2e8f0; padding: 0.5rem 0.75rem; width: 100%; font-size: 0.875rem;
               outline: none; transition: border-color 0.15s; box-sizing: border-box; }
     .ifield:focus { border-color: #00D4AA; }
     .ifield::placeholder { color: #475569; }
     textarea.ifield { resize: vertical; }
-    /* Buttons */
+    select.ifield { appearance: none; cursor: pointer; }
+    .label { font-size: 0.75rem; color: #64748b; display: block; margin-bottom: 0.25rem; }
+
+    /* ── Buttons ───────────────────────────────────────────────────────────── */
     .btn-p { background: #00D4AA; color: #000; font-weight: 600; padding: 0.5rem 1rem;
               border-radius: 0.5rem; font-size: 0.875rem; cursor: pointer; border: none;
-              transition: opacity 0.15s; width: 100%; }
+              transition: opacity 0.15s; }
     .btn-p:hover:not(:disabled) { opacity: 0.85; }
     .btn-p:disabled { opacity: 0.4; cursor: not-allowed; }
     .btn-s { background: transparent; color: #00D4AA; font-weight: 500; padding: 0.375rem 0.75rem;
@@ -67,51 +96,43 @@
     .btn-d:hover { background: rgba(248,113,113,0.1); }
     .btn-sm { background: transparent; color: #64748b; font-size: 0.8125rem; cursor: pointer;
                border: 1px solid #2d4a6b; border-radius: 0.375rem; padding: 0.25rem 0.625rem;
-               transition: all 0.15s; }
+               transition: all 0.15s; white-space: nowrap; }
     .btn-sm:hover { color: #e2e8f0; border-color: #475569; }
-    /* Task cards */
-    .task-card { background: #162030; border: 1px solid #253a52; border-radius: 0.5rem;
-                  padding: 0.875rem; margin-bottom: 0.5rem; transition: border-color 0.15s; }
-    .task-card:hover { border-color: rgba(0,212,170,0.3); }
-    /* Toasts */
+
+    /* ── Nav & Panel Tabs ──────────────────────────────────────────────────── */
+    .ptab { flex: 1; text-align: center; font-size: 0.8125rem; padding: 0.6rem 0.25rem;
+             cursor: pointer; transition: all 0.15s; color: #64748b; border-bottom: 2px solid transparent; }
+    .ptab:hover { color: #e2e8f0; }
+    .ptab.active { color: #00D4AA; border-bottom-color: #00D4AA; font-weight: 600; }
+
+    /* ── Toast ─────────────────────────────────────────────────────────────── */
     .toast { background: #1E2D40; border-left: 3px solid #2d4a6b; border-radius: 0 0.5rem 0.5rem 0;
               padding: 0.75rem 1rem; font-size: 0.8125rem; max-width: 320px;
               box-shadow: 0 4px 24px rgba(0,0,0,0.5); }
     .toast-s { border-left-color: #34d399; }
     .toast-e { border-left-color: #f87171; }
     .toast-i { border-left-color: #60a5fa; }
-    .overlay { background: rgba(0,0,0,0.65); backdrop-filter: blur(3px); }
-    /* Panel tabs */
-    .ptab { flex: 1; text-align: center; font-size: 0.8125rem; padding: 0.6rem 0.25rem;
-             cursor: pointer; transition: all 0.15s; color: #64748b; border-bottom: 2px solid transparent; }
-    .ptab:hover { color: #e2e8f0; }
-    .ptab.active { color: #00D4AA; border-bottom-color: #00D4AA; font-weight: 600; }
-    .subtab { font-size: 0.75rem; padding: 0.375rem 0.75rem; cursor: pointer;
-               border-radius: 0.375rem; transition: all 0.15s; }
-    .subtab.active { background: rgba(0,212,170,0.15); color: #00D4AA; font-weight: 600; }
-    .subtab:not(.active) { color: #64748b; }
-    .subtab:not(.active):hover { color: #e2e8f0; background: #1E2D40; }
+
+    /* ── Info/Warn boxes ───────────────────────────────────────────────────── */
     .warn-box { background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.3);
                 border-radius: 0.5rem; padding: 0.5rem 0.75rem; color: #fbbf24; font-size: 0.75rem; }
     .info-box { background: rgba(96,165,250,0.08); border: 1px solid rgba(96,165,250,0.3);
                 border-radius: 0.5rem; padding: 0.5rem 0.75rem; color: #93c5fd; font-size: 0.75rem; }
-    .label { font-size: 0.75rem; color: #64748b; display: block; margin-bottom: 0.25rem; }
-    .status-open       { background: rgba(52,211,153,0.15); color: #34d399; }
-    .status-claimed    { background: rgba(96,165,250,0.15); color: #60a5fa; }
-    .status-submitted  { background: rgba(251,191,36,0.15); color: #fbbf24; }
-    .status-completed  { background: rgba(0,212,170,0.15); color: #00D4AA; }
-    .status-disputed   { background: rgba(248,113,113,0.15); color: #f87171; }
-    .status-cancelled  { background: rgba(100,116,139,0.15); color: #64748b; }
+
+    /* ── Utilities ─────────────────────────────────────────────────────────── */
+    .line-clamp-1 { overflow:hidden; display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; }
+    .line-clamp-2 { overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
   </style>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useEffect, useRef, useCallback } = React;
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } = window.Recharts || {};
 
 const API = window.location.origin;
 
+// ─── API Helpers ──────────────────────────────────────────────────────────────
 async function apiFetch(path) {
   const r = await fetch(API + path);
   if (!r.ok) throw new Error(`${r.status}`);
@@ -120,13 +141,28 @@ async function apiFetch(path) {
 
 async function apiPost(path, body) {
   const r = await fetch(API + path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || data.message || `${r.status}`);
   return data;
+}
+
+// ─── Formatters ───────────────────────────────────────────────────────────────
+function fmtNum(n) {
+  if (n == null) return '—';
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+
+function fmtAET(µAET) {
+  if (!µAET) return '0 AET';
+  const aet = µAET / 1e6;
+  if (aet >= 1e6) return (aet / 1e6).toFixed(2) + 'M AET';
+  if (aet >= 1e3) return (aet / 1e3).toFixed(2) + 'K AET';
+  return aet.toFixed(aet < 1 ? 4 : 2) + ' AET';
 }
 
 function truncate(s, n = 12) {
@@ -134,30 +170,31 @@ function truncate(s, n = 12) {
   return s.length > n * 2 ? s.slice(0, n) + '…' + s.slice(-6) : s;
 }
 
-function fmtNum(n) {
-  if (n === undefined || n === null) return '—';
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
-  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-  return String(n);
-}
-
-function fmtAET(microAET) {
-  if (!microAET) return '0 AET';
-  const aet = microAET / 1e6;
-  if (aet >= 1e6) return (aet / 1e6).toFixed(2) + 'M AET';
-  if (aet >= 1e3) return (aet / 1e3).toFixed(2) + 'K AET';
-  return aet.toFixed(2) + ' AET';
-}
-
-function statusClass(s) {
+function statusLabel(s) {
   return ({
-    Open: 'status-open', Claimed: 'status-claimed', Submitted: 'status-submitted',
-    Completed: 'status-completed', Disputed: 'status-disputed', Cancelled: 'status-cancelled',
-  })[s] || 'bg-slate-700/40 text-slate-400';
+    open: 'Open', claimed: 'In Progress', submitted: 'Review',
+    completed: 'Settled', disputed: 'Disputed', cancelled: 'Cancelled',
+  })[s?.toLowerCase()] || s || '—';
 }
 
-// ─── Toast Notification System ─────────────────────────────────────────────
+function statusStyle(s) {
+  return ({
+    open: 'status-open', claimed: 'status-claimed', submitted: 'status-submitted',
+    completed: 'status-completed', disputed: 'status-disputed', cancelled: 'status-cancelled',
+  })[s?.toLowerCase()] || 'status-other';
+}
+
+function laneLabel(lane) {
+  if (!lane) return 'Unassured';
+  return ({ standard: 'Standard', high_assurance: 'High Assurance', enterprise: 'Enterprise' })[lane] || lane;
+}
+
+function laneStyle(lane) {
+  if (!lane) return 'lane-unassured';
+  return ({ standard: 'lane-standard', high_assurance: 'lane-high', enterprise: 'lane-enterprise' })[lane] || 'lane-unassured';
+}
+
+// ─── Toast System ─────────────────────────────────────────────────────────────
 function useToasts() {
   const [toasts, setToasts] = useState([]);
   const addToast = useCallback((msg, type = 'success') => {
@@ -170,7 +207,7 @@ function useToasts() {
 
 function ToastContainer({ toasts }) {
   return (
-    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 items-end">
+    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 items-end" style={{pointerEvents:'none'}}>
       {toasts.map(t => (
         <div key={t.id} className={`toast toast-in ${t.type === 'success' ? 'toast-s' : t.type === 'error' ? 'toast-e' : 'toast-i'}`}>
           <span className={t.type === 'success' ? 'text-green-400' : t.type === 'error' ? 'text-red-400' : 'text-blue-400'}>
@@ -183,24 +220,66 @@ function ToastContainer({ toasts }) {
   );
 }
 
-// ─── Balance Widget ─────────────────────────────────────────────────────────
+// ─── Base Components ──────────────────────────────────────────────────────────
+function Skeleton({ w = 'w-full', h = 'h-4' }) {
+  return <div className={`skeleton ${w} ${h}`} />;
+}
+
+function StatCard({ label, value, sub, dim }) {
+  return (
+    <div className="card p-4">
+      <div className={`text-2xl font-bold ${dim ? 'text-slate-300' : 'text-[#00D4AA]'}`}>
+        {value ?? <Skeleton w="w-20" h="h-7" />}
+      </div>
+      <div className="text-xs text-slate-400 mt-1">{label}</div>
+      {sub && <div className="text-xs text-slate-500 mt-0.5">{sub}</div>}
+    </div>
+  );
+}
+
+function StatusChip({ status }) {
+  return (
+    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusStyle(status)}`}>
+      {statusLabel(status)}
+    </span>
+  );
+}
+
+function LaneBadge({ lane }) {
+  return (
+    <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${laneStyle(lane)}`}>
+      {laneLabel(lane)}
+    </span>
+  );
+}
+
+function EventBadge({ type }) {
+  const cls = ({
+    Transfer: 'badge-transfer', Generation: 'badge-generation',
+    Verification: 'badge-verification', Attestation: 'badge-attestation',
+    Delegation: 'badge-delegation',
+  })[type] || 'badge-other';
+  return <span className={`${cls} px-2 py-0.5 rounded text-xs font-medium`}>{type || 'Unknown'}</span>;
+}
+
+// ─── Wallet: Identity Panel ───────────────────────────────────────────────────
 function BalanceWidget({ agentId, refresh }) {
   const [bal, setBal] = useState(null);
   useEffect(() => {
     if (!agentId) return;
-    apiFetch(`/v1/agents/${encodeURIComponent(agentId)}/balance`).then(d => setBal(d.balance ?? d)).catch(() => {});
+    apiFetch(`/v1/agents/${encodeURIComponent(agentId)}/balance`)
+      .then(d => setBal(d.balance ?? d)).catch(() => {});
   }, [agentId, refresh]);
   if (bal === null) return null;
   return (
     <div className="flex items-center justify-between bg-[#0A1220] rounded-lg px-3 py-2">
       <span className="text-xs text-slate-400">Balance</span>
-      <span className="accent font-semibold text-sm">{fmtAET(bal)}</span>
+      <span className="text-[#00D4AA] font-semibold text-sm">{fmtAET(bal)}</span>
     </div>
   );
 }
 
-// ─── Register Panel ─────────────────────────────────────────────────────────
-function RegisterPanel({ agent, setAgent, addToast }) {
+function IdentityPanel({ agent, setAgent, addToast }) {
   const [name, setName] = useState('');
   const [loading, setLoading] = useState(false);
   const [balRefresh, setBalRefresh] = useState(0);
@@ -226,110 +305,69 @@ function RegisterPanel({ agent, setAgent, addToast }) {
     }
   }
 
-  function clearAgent() {
-    localStorage.removeItem('aethernet_agent');
-    setAgent(null);
-    addToast('Identity cleared', 'info');
-  }
-
   if (agent) {
     return (
-      <div className="p-4 space-y-3 overflow-y-auto flex-1">
-        <div className="label uppercase tracking-wider">Your Identity</div>
+      <div className="p-4 space-y-3">
+        <div className="label uppercase tracking-wider text-slate-500">Your Identity</div>
         <div className="bg-[#0A1220] rounded-lg p-3 space-y-1.5">
-          <div className="label">Agent ID</div>
+          <div className="text-xs text-slate-500">Agent ID</div>
           <div className="font-mono text-xs text-green-400 break-all leading-relaxed">{agent.agent_id}</div>
           {agent.name && <div className="text-xs text-slate-400 mt-1">Name: <span className="text-white">{agent.name}</span></div>}
         </div>
         <BalanceWidget agentId={agent.agent_id} refresh={balRefresh} />
         <button className="btn-sm w-full" onClick={() => setBalRefresh(n => n+1)}>↻ Refresh Balance</button>
-        <div className="pt-2">
-          <button className="btn-d w-full" onClick={clearAgent}>Clear Identity</button>
-        </div>
+        <button className="btn-d w-full" onClick={() => {
+          localStorage.removeItem('aethernet_agent');
+          setAgent(null);
+          addToast('Identity cleared', 'info');
+        }}>Clear Identity</button>
         <div className="info-box">
-          Your identity is stored in browser localStorage. Copy your Agent ID to use it in SDK calls.
+          Identity is stored in browser localStorage. Copy your Agent ID to use with the SDK.
         </div>
       </div>
     );
   }
 
   return (
-    <div className="p-4 space-y-3 overflow-y-auto flex-1">
-      <div className="label uppercase tracking-wider">Register Agent</div>
+    <div className="p-4 space-y-3">
+      <div className="label uppercase tracking-wider text-slate-500">Register on Testnet</div>
       <div className="info-box">
-        A 32-byte keypair is auto-generated in your browser and used to create a unique identity on the testnet.
+        A 32-byte keypair is generated in your browser. Your public key becomes your identity on the testnet.
       </div>
       <div>
         <label className="label">Display name (optional)</label>
-        <input
-          className="ifield"
-          placeholder="e.g. my-research-agent"
-          value={name}
-          onChange={e => setName(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && register()}
-        />
+        <input className="ifield" placeholder="e.g. my-research-agent" value={name}
+          onChange={e => setName(e.target.value)} onKeyDown={e => e.key === 'Enter' && register()} />
         <div className="text-xs text-slate-500 mt-1">Leave blank to use hex(pubkey) as ID.</div>
       </div>
-      <button className="btn-p" onClick={register} disabled={loading}>
+      <button className="btn-p w-full" onClick={register} disabled={loading}>
         {loading ? 'Registering…' : 'Generate Keypair & Register'}
       </button>
     </div>
   );
 }
 
-// ─── Task Board Panel ────────────────────────────────────────────────────────
-function TaskBoardPanel({ agent, addToast }) {
-  const [tab, setTab] = useState('browse');
-  const [tasks, setTasks] = useState([]);
-  const [loadingTasks, setLoadingTasks] = useState(false);
-  const [filter, setFilter] = useState('');
-  // Post form
-  const [title, setTitle] = useState('');
-  const [desc, setDesc] = useState('');
+// ─── Wallet: Post Task Panel ──────────────────────────────────────────────────
+function PostTaskPanel({ agent, addToast }) {
+  const [title, setTitle]       = useState('');
+  const [desc, setDesc]         = useState('');
   const [category, setCategory] = useState('');
-  const [budget, setBudget] = useState('');
-  const [posting, setPosting] = useState(false);
-
-  const loadTasks = useCallback(async () => {
-    setLoadingTasks(true);
-    try {
-      const data = await apiFetch('/v1/tasks?status=open&limit=100');
-      setTasks(Array.isArray(data) ? data : (data.tasks || []));
-    } catch {
-      addToast('Failed to load tasks', 'error');
-    } finally {
-      setLoadingTasks(false);
-    }
-  }, [addToast]);
-
-  useEffect(() => { if (tab === 'browse') loadTasks(); }, [tab, loadTasks]);
-
-  async function claimTask(taskId) {
-    if (!agent) return addToast('Register an agent first', 'error');
-    try {
-      await apiPost(`/v1/tasks/${taskId}/claim`, { claimer_id: agent.agent_id });
-      addToast('Task claimed!', 'success');
-      loadTasks();
-    } catch(e) {
-      addToast(`Claim failed: ${e.message}`, 'error');
-    }
-  }
+  const [budget, setBudget]     = useState('');
+  const [posting, setPosting]   = useState(false);
 
   async function postTask() {
     if (!agent) return addToast('Register an agent first', 'error');
     if (!title.trim()) return addToast('Title is required', 'error');
+    const amt = parseInt(budget) || 100000;
+    if (amt < 100000) return addToast('Minimum budget: 100,000 µAET (0.1 AET)', 'error');
     setPosting(true);
     try {
       await apiPost('/v1/tasks', {
-        poster_id: agent.agent_id,
-        title: title.trim(),
-        description: desc.trim(),
-        category: category || 'general',
-        budget: parseInt(budget) || 10_000,
+        poster_id: agent.agent_id, title: title.trim(),
+        description: desc.trim(), category: category || 'general', budget: amt,
       });
       addToast('Task posted!', 'success');
       setTitle(''); setDesc(''); setCategory(''); setBudget('');
-      setTab('browse');
     } catch(e) {
       addToast(`Post failed: ${e.message}`, 'error');
     } finally {
@@ -337,99 +375,51 @@ function TaskBoardPanel({ agent, addToast }) {
     }
   }
 
-  const filtered = tasks.filter(t =>
-    !filter ||
-    t.title?.toLowerCase().includes(filter.toLowerCase()) ||
-    t.description?.toLowerCase().includes(filter.toLowerCase())
-  );
-
   return (
-    <div className="flex flex-col overflow-hidden flex-1">
-      <div className="flex border-b border-slate-700/50 flex-shrink-0">
-        {['browse','post'].map(t => (
-          <button key={t} className={`ptab ${tab === t ? 'active' : ''}`} onClick={() => setTab(t)}>
-            {t === 'browse' ? 'Browse Tasks' : 'Post Task'}
-          </button>
-        ))}
+    <div className="p-4 space-y-3">
+      {!agent && <div className="warn-box">Register an agent (Identity tab) to post tasks.</div>}
+      <div>
+        <label className="label">Title *</label>
+        <input className="ifield" placeholder="e.g. Summarise Q3 earnings report"
+          value={title} onChange={e => setTitle(e.target.value)} />
       </div>
-
-      {tab === 'browse' && (
-        <div className="flex flex-col flex-1 overflow-hidden">
-          <div className="flex gap-2 p-3 flex-shrink-0">
-            <input className="ifield flex-1" placeholder="Search tasks…" value={filter} onChange={e => setFilter(e.target.value)} />
-            <button className="btn-sm" onClick={loadTasks}>↻</button>
-          </div>
-          <div className="flex-1 overflow-y-auto px-3 pb-3">
-            {loadingTasks ? (
-              <div className="space-y-2">{[...Array(4)].map((_,i) => <div key={i} className="skeleton h-20 w-full" />)}</div>
-            ) : filtered.length === 0 ? (
-              <div className="text-center text-slate-500 text-sm py-10">No open tasks found</div>
-            ) : filtered.map(task => (
-              <div key={task.id} className="task-card">
-                <div className="flex items-start gap-2">
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-white leading-snug">{task.title}</div>
-                    {task.description && (
-                      <div className="text-xs text-slate-400 mt-1 line-clamp-2 leading-relaxed">{task.description}</div>
-                    )}
-                    <div className="flex items-center gap-3 mt-2 flex-wrap">
-                      <span className="accent text-xs font-medium">{fmtAET(task.budget)}</span>
-                      {task.category && <span className="text-xs text-slate-400 bg-slate-700/40 px-1.5 py-0.5 rounded">{task.category}</span>}
-                      <span className="text-xs text-slate-500">by {truncate(task.poster_id, 8)}</span>
-                    </div>
-                  </div>
-                  <button className="btn-s flex-shrink-0" onClick={() => claimTask(task.id)}>Claim</button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {tab === 'post' && (
-        <div className="flex-1 overflow-y-auto p-3 space-y-3">
-          {!agent && <div className="warn-box">Register an agent first to post tasks.</div>}
-          <div>
-            <label className="label">Title *</label>
-            <input className="ifield" placeholder="e.g. Summarise Q3 earnings report" value={title} onChange={e => setTitle(e.target.value)} />
-          </div>
-          <div>
-            <label className="label">Description</label>
-            <textarea className="ifield" rows={4} placeholder="Describe the task, deliverables, and acceptance criteria…" value={desc} onChange={e => setDesc(e.target.value)} />
-          </div>
-          <div>
-            <label className="label">Category</label>
-            <select className="ifield" value={category} onChange={e => setCategory(e.target.value)}>
-              <option value="">General</option>
-              <option value="research">Research</option>
-              <option value="writing">Writing</option>
-              <option value="summarization">Summarization</option>
-              <option value="code-review">Code Review</option>
-              <option value="data-analysis">Data Analysis</option>
-            </select>
-          </div>
-          <div>
-            <label className="label">Budget (micro-AET)</label>
-            <input className="ifield" type="number" min="1000" placeholder="10000" value={budget} onChange={e => setBudget(e.target.value)} />
-            {budget && <div className="text-xs text-slate-500 mt-1">= {fmtAET(parseInt(budget)||0)}</div>}
-          </div>
-          <button className="btn-p" onClick={postTask} disabled={posting || !agent}>
-            {posting ? 'Posting…' : 'Post Task'}
-          </button>
-        </div>
-      )}
+      <div>
+        <label className="label">Description</label>
+        <textarea className="ifield" rows={3}
+          placeholder="Describe the task, deliverables, and acceptance criteria…"
+          value={desc} onChange={e => setDesc(e.target.value)} />
+      </div>
+      <div>
+        <label className="label">Category</label>
+        <select className="ifield" value={category} onChange={e => setCategory(e.target.value)}>
+          <option value="">General</option>
+          <option value="research">Research</option>
+          <option value="writing">Writing</option>
+          <option value="summarization">Summarization</option>
+          <option value="code-review">Code Review</option>
+          <option value="data-analysis">Data Analysis</option>
+        </select>
+      </div>
+      <div>
+        <label className="label">Budget (µAET, minimum 100,000)</label>
+        <input className="ifield" type="number" min="100000" placeholder="100000"
+          value={budget} onChange={e => setBudget(e.target.value)} />
+        {budget && <div className="text-xs text-slate-500 mt-1">= {fmtAET(parseInt(budget)||0)}</div>}
+      </div>
+      <button className="btn-p w-full" onClick={postTask} disabled={posting || !agent}>
+        {posting ? 'Posting…' : 'Post Task'}
+      </button>
     </div>
   );
 }
 
-// ─── My Tasks Panel ──────────────────────────────────────────────────────────
+// ─── Wallet: My Tasks Panel ───────────────────────────────────────────────────
 function MyTasksPanel({ agent, addToast }) {
-  const [tab, setTab] = useState('posted');
-  const [tasks, setTasks] = useState([]);
-  const [loading, setLoading] = useState(false);
-  // Submit result state
+  const [tab, setTab]           = useState('posted');
+  const [tasks, setTasks]       = useState([]);
+  const [loading, setLoading]   = useState(false);
   const [submitId, setSubmitId] = useState(null);
-  const [resultUri, setResultUri] = useState('');
+  const [resultUri, setResultUri]   = useState('');
   const [resultHash, setResultHash] = useState('');
 
   const loadMyTasks = useCallback(async () => {
@@ -450,11 +440,9 @@ function MyTasksPanel({ agent, addToast }) {
   async function approveTask(id) {
     try {
       await apiPost(`/v1/tasks/${id}/approve`, { poster_id: agent.agent_id });
-      addToast('Task approved — payment released!', 'success');
+      addToast('Approved — payment released!', 'success');
       loadMyTasks();
-    } catch(e) {
-      addToast(`Approve failed: ${e.message}`, 'error');
-    }
+    } catch(e) { addToast(`Approve failed: ${e.message}`, 'error'); }
   }
 
   async function disputeTask(id) {
@@ -462,9 +450,7 @@ function MyTasksPanel({ agent, addToast }) {
       await apiPost(`/v1/tasks/${id}/dispute`, { poster_id: agent.agent_id });
       addToast('Task disputed.', 'info');
       loadMyTasks();
-    } catch(e) {
-      addToast(`Dispute failed: ${e.message}`, 'error');
-    }
+    } catch(e) { addToast(`Dispute failed: ${e.message}`, 'error'); }
   }
 
   async function submitResult(id) {
@@ -474,18 +460,16 @@ function MyTasksPanel({ agent, addToast }) {
         result_uri: resultUri || 'ipfs://placeholder',
         result_hash: resultHash || `sha256:${Date.now().toString(16)}`,
       });
-      addToast('Result submitted! Awaiting poster approval.', 'success');
+      addToast('Result submitted!', 'success');
       setSubmitId(null); setResultUri(''); setResultHash('');
       loadMyTasks();
-    } catch(e) {
-      addToast(`Submit failed: ${e.message}`, 'error');
-    }
+    } catch(e) { addToast(`Submit failed: ${e.message}`, 'error'); }
   }
 
   if (!agent) {
     return (
-      <div className="flex-1 flex items-center justify-center p-4">
-        <div className="text-center text-slate-500 text-sm">Register an agent to track your tasks.</div>
+      <div className="flex-1 flex items-center justify-center p-6">
+        <div className="text-center text-slate-500 text-sm">Register an agent (Identity tab) to track your tasks.</div>
       </div>
     );
   }
@@ -504,11 +488,13 @@ function MyTasksPanel({ agent, addToast }) {
 
       {submitId && (
         <div className="p-3 border-b border-slate-700/50 bg-[#0d1926] flex-shrink-0 space-y-2">
-          <div className="text-xs font-medium text-white">Submit result for task {truncate(submitId, 10)}</div>
-          <input className="ifield" placeholder="Result URI (https://... or ipfs://...)" value={resultUri} onChange={e => setResultUri(e.target.value)} />
-          <input className="ifield" placeholder="Result hash (sha256:...)" value={resultHash} onChange={e => setResultHash(e.target.value)} />
+          <div className="text-xs font-medium text-white">Submit result for {truncate(submitId, 10)}</div>
+          <input className="ifield" placeholder="Result URI (https://... or ipfs://...)"
+            value={resultUri} onChange={e => setResultUri(e.target.value)} />
+          <input className="ifield" placeholder="Result hash (sha256:...)"
+            value={resultHash} onChange={e => setResultHash(e.target.value)} />
           <div className="flex gap-2">
-            <button className="btn-p" style={{flex:1}} onClick={() => submitResult(submitId)}>Submit</button>
+            <button className="btn-p flex-1" onClick={() => submitResult(submitId)}>Submit</button>
             <button className="btn-sm" onClick={() => setSubmitId(null)}>Cancel</button>
           </div>
         </div>
@@ -516,31 +502,31 @@ function MyTasksPanel({ agent, addToast }) {
 
       <div className="flex-1 overflow-y-auto p-3">
         <div className="flex justify-end mb-2">
-          <button className="btn-sm text-xs" onClick={loadMyTasks}>↻ Refresh</button>
+          <button className="btn-sm" onClick={loadMyTasks}>↻ Refresh</button>
         </div>
         {loading ? (
-          <div className="space-y-2">{[...Array(3)].map((_,i) => <div key={i} className="skeleton h-20 w-full" />)}</div>
+          <div className="space-y-2">{[...Array(3)].map((_, i) => <div key={i} className="skeleton h-16 w-full" />)}</div>
         ) : list.length === 0 ? (
           <div className="text-center text-slate-500 text-sm py-8">No {tab} tasks yet.</div>
         ) : list.map(task => (
-          <div key={task.id} className="task-card">
+          <div key={task.id} className="bg-[#162030] border border-[#253a52] rounded-lg p-3 mb-2">
             <div className="text-sm font-medium text-white mb-1 leading-snug">{task.title}</div>
             <div className="flex items-center gap-2 mb-2 flex-wrap">
-              <span className={`text-xs px-1.5 py-0.5 rounded ${statusClass(task.status)}`}>{task.status}</span>
-              <span className="accent text-xs">{fmtAET(task.budget)}</span>
+              <StatusChip status={task.status} />
+              <span className="text-[#00D4AA] text-xs font-medium">{fmtAET(task.budget)}</span>
               {task.claimer_id && tab === 'posted' && (
                 <span className="text-xs text-slate-500">claimer: {truncate(task.claimer_id, 8)}</span>
               )}
             </div>
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
               {tab === 'posted' && task.status === 'Submitted' && (
                 <>
-                  <button className="btn-s" style={{flex:1}} onClick={() => approveTask(task.id)}>Approve</button>
-                  <button className="btn-d" style={{flex:1}} onClick={() => disputeTask(task.id)}>Dispute</button>
+                  <button className="btn-s flex-1" onClick={() => approveTask(task.id)}>Approve</button>
+                  <button className="btn-d flex-1" onClick={() => disputeTask(task.id)}>Dispute</button>
                 </>
               )}
               {tab === 'claimed' && task.status === 'Claimed' && (
-                <button className="btn-p" onClick={() => { setSubmitId(task.id); setResultUri(''); setResultHash(''); }}>
+                <button className="btn-p w-full" onClick={() => { setSubmitId(task.id); setResultUri(''); setResultHash(''); }}>
                   Submit Result
                 </button>
               )}
@@ -552,12 +538,12 @@ function MyTasksPanel({ agent, addToast }) {
   );
 }
 
-// ─── Transfer Panel ──────────────────────────────────────────────────────────
-function TransferPanel({ agent, addToast, initialTo = '' }) {
-  const [toAgent, setToAgent]   = useState(initialTo);
-  const [amount,  setAmount]    = useState('');
-  const [memo,    setMemo]      = useState('');
-  const [sending, setSending]   = useState(false);
+// ─── Wallet: Send Panel ───────────────────────────────────────────────────────
+function SendPanel({ agent, addToast, initialTo = '' }) {
+  const [toAgent, setToAgent] = useState(initialTo);
+  const [amount, setAmount]   = useState('');
+  const [memo, setMemo]       = useState('');
+  const [sending, setSending] = useState(false);
   const prevInit = useRef(initialTo);
 
   useEffect(() => {
@@ -587,276 +573,84 @@ function TransferPanel({ agent, addToast, initialTo = '' }) {
   }
 
   return (
-    <div className="p-4 space-y-3 overflow-y-auto flex-1">
+    <div className="p-4 space-y-3">
       {agent && <BalanceWidget agentId={agent.agent_id} />}
-      {!agent && <div className="warn-box">Register an agent to set yourself as sender (optional).</div>}
+      {!agent && <div className="warn-box">Register an agent to set yourself as sender.</div>}
       <div>
         <label className="label">Recipient Agent ID *</label>
-        <input className="ifield" placeholder="Agent ID or name" value={toAgent} onChange={e => setToAgent(e.target.value)} />
+        <input className="ifield" placeholder="Agent ID or name" value={toAgent}
+          onChange={e => setToAgent(e.target.value)} />
       </div>
       <div>
-        <label className="label">Amount (micro-AET) *</label>
-        <input className="ifield" type="number" min="1" placeholder="1000000" value={amount} onChange={e => setAmount(e.target.value)} />
+        <label className="label">Amount (µAET) *</label>
+        <input className="ifield" type="number" min="1" placeholder="1000000"
+          value={amount} onChange={e => setAmount(e.target.value)} />
         {amount && <div className="text-xs text-slate-500 mt-1">= {fmtAET(parseInt(amount)||0)}</div>}
       </div>
       <div>
         <label className="label">Memo</label>
-        <input className="ifield" placeholder="Optional description" value={memo} onChange={e => setMemo(e.target.value)} />
+        <input className="ifield" placeholder="Optional description"
+          value={memo} onChange={e => setMemo(e.target.value)} />
       </div>
-      <button className="btn-p" onClick={sendTransfer} disabled={sending}>
+      <button className="btn-p w-full" onClick={sendTransfer} disabled={sending}>
         {sending ? 'Sending…' : 'Send AET'}
       </button>
     </div>
   );
 }
 
-// ─── Agent Directory Panel ───────────────────────────────────────────────────
-function AgentDirectoryPanel({ addToast, onHire }) {
-  const [agents, setAgents] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState('');
+// ─── Wallet Drawer ────────────────────────────────────────────────────────────
+function WalletDrawer({ open, onClose, initialTab, agent, setAgent, addToast }) {
+  const [tab, setTab] = useState(initialTab || 'identity');
 
   useEffect(() => {
-    apiFetch('/v1/agents/leaderboard?sort=reputation&limit=100')
-      .then(data => setAgents(Array.isArray(data) ? data : []))
-      .catch(() => addToast('Failed to load agents', 'error'))
-      .finally(() => setLoading(false));
-  }, [addToast]);
-
-  const filtered = agents.filter(a =>
-    !filter ||
-    a.agent_id?.toLowerCase().includes(filter.toLowerCase()) ||
-    a.name?.toLowerCase().includes(filter.toLowerCase())
-  );
-
-  return (
-    <div className="flex flex-col overflow-hidden flex-1">
-      <div className="p-3 flex-shrink-0">
-        <input className="ifield" placeholder="Search agents…" value={filter} onChange={e => setFilter(e.target.value)} />
-      </div>
-      <div className="flex-1 overflow-y-auto px-3 pb-3">
-        {loading ? (
-          <div className="space-y-2">{[...Array(6)].map((_,i) => <div key={i} className="skeleton h-14 w-full" />)}</div>
-        ) : filtered.length === 0 ? (
-          <div className="text-center text-slate-500 text-sm py-8">No agents registered yet</div>
-        ) : filtered.map(a => (
-          <div key={a.agent_id} className="task-card flex items-center gap-3">
-            <div className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0"
-                 style={{background: 'rgba(0,212,170,0.12)', border: '1px solid rgba(0,212,170,0.2)'}}>
-              <span className="text-sm font-bold accent">
-                {(a.name || a.agent_id || '?').charAt(0).toUpperCase()}
-              </span>
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-sm font-medium text-white truncate">{a.name || truncate(a.agent_id, 12)}</div>
-              <div className="flex items-center gap-3 mt-0.5 flex-wrap">
-                <span className="text-xs text-slate-400">Rep <span className="text-white">{fmtNum(a.reputation_score)}</span></span>
-                <span className="text-xs text-slate-400">Tasks <span className="text-white">{a.tasks_completed||0}</span></span>
-                <span className="accent text-xs">{fmtAET(a.balance)}</span>
-              </div>
-            </div>
-            <button className="btn-s flex-shrink-0" onClick={() => onHire(a.agent_id)}>Hire</button>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ─── Sidebar ─────────────────────────────────────────────────────────────────
-function Sidebar({ open, onClose, agent, setAgent, addToast }) {
-  const [panel, setPanel] = useState('tasks');
-  const [hireTarget, setHireTarget] = useState('');
-
-  function handleHire(agentId) {
-    setHireTarget(agentId);
-    setPanel('transfer');
-  }
-
-  function switchPanel(p) {
-    if (p !== 'transfer') setHireTarget('');
-    setPanel(p);
-  }
+    if (open && initialTab) setTab(initialTab);
+  }, [open, initialTab]);
 
   const tabs = [
-    { id: 'register', label: 'Identity' },
-    { id: 'tasks',    label: 'Tasks' },
-    { id: 'mytasks',  label: 'Mine' },
-    { id: 'transfer', label: 'Send' },
-    { id: 'agents',   label: 'Agents' },
+    { id: 'identity', label: 'Identity' },
+    { id: 'post',     label: 'Post Task' },
+    { id: 'mine',     label: 'My Tasks' },
+    { id: 'send',     label: 'Send AET' },
   ];
 
   return (
-    <div className={`sidebar-container${open ? '' : ' sidebar-closed'}`}>
-      <div className="sidebar flex flex-col overflow-hidden">
-        {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700/50 flex-shrink-0"
-             style={{background:'#0A1220'}}>
+    <>
+      {open && <div className="drawer-overlay" onClick={onClose} />}
+      <div className={`wallet-drawer ${open ? 'open' : ''}`}>
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700/50 flex-shrink-0 bg-[#0A1220]">
           <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded accent-bg flex items-center justify-center text-black text-xs font-bold">AE</div>
-            <span className="text-sm font-semibold">AetherNet Panel</span>
+            <div className="w-6 h-6 rounded bg-[#00D4AA] flex items-center justify-center text-black text-xs font-bold">AE</div>
+            <span className="text-sm font-semibold">Wallet</span>
+            {agent && (
+              <span className="text-xs font-mono bg-[#00D4AA]/10 text-[#00D4AA] px-1.5 py-0.5 rounded truncate max-w-32">
+                {truncate(agent.agent_id, 6)}{agent.name ? ` · ${agent.name}` : ''}
+              </span>
+            )}
           </div>
-          {agent && (
-            <span className="text-xs font-mono bg-[#00D4AA15] text-[#00D4AA] px-2 py-0.5 rounded truncate max-w-28">
-              {truncate(agent.agent_id, 6)}{agent.name ? ` (${agent.name})` : ''}
-            </span>
-          )}
-          <button onClick={onClose} className="text-slate-500 hover:text-white ml-2 text-xl leading-none">✕</button>
+          <button onClick={onClose} className="text-slate-500 hover:text-white text-xl leading-none ml-2">✕</button>
         </div>
-
-        {/* Panel tabs */}
-        <div className="flex border-b border-slate-700/50 flex-shrink-0" style={{background:'#0f1923'}}>
+        <div className="flex border-b border-slate-700/50 flex-shrink-0 bg-[#0f1923]">
           {tabs.map(t => (
-            <button
-              key={t.id}
-              onClick={() => switchPanel(t.id)}
-              className={`ptab ${panel === t.id ? 'active' : ''}`}
-            >
+            <button key={t.id} onClick={() => setTab(t.id)} className={`ptab ${tab === t.id ? 'active' : ''}`}>
               {t.label}
             </button>
           ))}
         </div>
-
-        {/* Content */}
-        <div className="flex-1 overflow-hidden flex flex-col">
-          {panel === 'register' && <RegisterPanel agent={agent} setAgent={setAgent} addToast={addToast} />}
-          {panel === 'tasks'    && <TaskBoardPanel agent={agent} addToast={addToast} />}
-          {panel === 'mytasks'  && <MyTasksPanel agent={agent} addToast={addToast} />}
-          {panel === 'transfer' && <TransferPanel agent={agent} addToast={addToast} initialTo={hireTarget} />}
-          {panel === 'agents'   && <AgentDirectoryPanel addToast={addToast} onHire={handleHire} />}
+        <div className="flex-1 overflow-y-auto">
+          {tab === 'identity' && <IdentityPanel agent={agent} setAgent={setAgent} addToast={addToast} />}
+          {tab === 'post'     && <PostTaskPanel agent={agent} addToast={addToast} />}
+          {tab === 'mine'     && <MyTasksPanel  agent={agent} addToast={addToast} />}
+          {tab === 'send'     && <SendPanel     agent={agent} addToast={addToast} />}
         </div>
       </div>
-    </div>
-  );
-}
-
-// ─── Event Badge ─────────────────────────────────────────────────────────────
-function EventBadge({ type }) {
-  const cls = {
-    Transfer:     'badge-transfer',
-    Generation:   'badge-generation',
-    Verification: 'badge-verification',
-    Attestation:  'badge-attestation',
-    Delegation:   'badge-delegation',
-  }[type] || 'badge-other';
-  return (
-    <span className={`${cls} px-2 py-0.5 rounded text-xs font-medium`}>{type || 'Unknown'}</span>
-  );
-}
-
-function Skeleton({ w = 'w-full', h = 'h-4' }) {
-  return <div className={`skeleton ${w} ${h}`} />;
-}
-
-function StatCard({ label, value, sub }) {
-  return (
-    <div className="card p-4">
-      <div className="stat-value">{value ?? <Skeleton w="w-24" h="h-7" />}</div>
-      <div className="stat-label">{label}</div>
-      {sub && <div className="text-xs text-slate-500 mt-1">{sub}</div>}
-    </div>
-  );
-}
-
-// ─── Header ──────────────────────────────────────────────────────────────────
-function Header({ status, loading, onOpenSidebar, agent }) {
-  return (
-    <header className="border-b border-slate-700/50 px-4 py-4 flex items-center gap-3 flex-shrink-0">
-      <button
-        onClick={onOpenSidebar}
-        className="p-1.5 rounded hover:bg-[#1E2D40] text-slate-400 hover:text-white transition-colors flex-shrink-0"
-        title="Open AetherNet Panel"
-      >
-        <svg width="18" height="18" viewBox="0 0 18 18" fill="currentColor">
-          <rect y="2" width="18" height="2" rx="1"/>
-          <rect y="8" width="18" height="2" rx="1"/>
-          <rect y="14" width="18" height="2" rx="1"/>
-        </svg>
-      </button>
-      <div className="w-8 h-8 rounded-lg accent-bg flex items-center justify-center font-bold text-black text-sm flex-shrink-0">AE</div>
-      <span className="font-semibold text-lg tracking-tight">AetherNet Explorer</span>
-      <span className="text-xs text-slate-500 hidden sm:inline">Decentralised AI Economy</span>
-      {agent && (
-        <span className="text-xs font-mono bg-[#00D4AA15] text-[#00D4AA] px-2 py-0.5 rounded hidden md:inline-block">
-          {truncate(agent.agent_id, 8)}{agent.name ? ` · ${agent.name}` : ''}
-        </span>
-      )}
-      <div className="ml-auto flex items-center gap-4 text-sm">
-        {loading ? (
-          <Skeleton w="w-48" h="h-4" />
-        ) : status ? (
-          <>
-            <span className="text-slate-400 hidden sm:inline">Peers <span className="text-white font-medium">{status.peers}</span></span>
-            <span className="text-slate-400">DAG <span className="text-white font-medium">{fmtNum(status.dag_size)}</span></span>
-            <span className="text-slate-400">Pending <span className="accent font-medium">{status.ocs_pending}</span></span>
-            <span className="text-slate-400 hidden lg:inline">Supply <span className="text-white font-medium">{status.supply_ratio?.toFixed(2)}x</span></span>
-            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse flex-shrink-0" title="Live" />
-          </>
-        ) : (
-          <span className="text-red-400 text-xs">Node unreachable</span>
-        )}
-      </div>
-    </header>
-  );
-}
-
-// ─── Activity Feed ────────────────────────────────────────────────────────────
-function ActivityFeed({ events, loading }) {
-  return (
-    <div className="card flex flex-col h-full">
-      <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between">
-        <span className="font-medium text-sm">Live Activity</span>
-        <span className="text-xs text-slate-500">last 50 events · auto-refresh 5s</span>
-      </div>
-      <div className="overflow-y-auto flex-1" style={{ maxHeight: '420px' }}>
-        {loading && !events.length ? (
-          <div className="p-4 space-y-3">
-            {[...Array(6)].map((_, i) => (
-              <div key={i} className="flex gap-3 items-start">
-                <Skeleton w="w-20" h="h-5" />
-                <div className="flex-1 space-y-1">
-                  <Skeleton w="w-48" h="h-3" />
-                  <Skeleton w="w-32" h="h-3" />
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : events.length === 0 ? (
-          <div className="p-8 text-center text-slate-500 text-sm">No events yet. Submit a generation or transfer.</div>
-        ) : (
-          <div className="divide-y divide-slate-700/30">
-            {events.map((ev, i) => (
-              <div key={ev.id} className={`px-4 py-2.5 flex items-start gap-3 ${i === 0 ? 'fade-in' : ''}`}>
-                <EventBadge type={ev.type} />
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs font-mono text-slate-300 truncate">{truncate(ev.id, 16)}</div>
-                  {ev.type === 'Transfer' && ev.from ? (
-                    <div className="text-xs text-slate-500 mt-0.5">
-                      {truncate(ev.from, 10)} → {truncate(ev.to, 10)} · {fmtAET(ev.amount)}{ev.memo ? ` · ${ev.memo}` : ''}
-                    </div>
-                  ) : (
-                    <div className="text-xs text-slate-500 mt-0.5">
-                      agent {truncate(ev.agent_id)} · ts {ev.causal_timestamp} · stake {fmtAET(ev.stake_amount)}
-                    </div>
-                  )}
-                </div>
-                <span className={`text-xs px-1.5 py-0.5 rounded ${
-                  ev.settlement_state === 'Settled' ? 'bg-green-900/50 text-green-400' :
-                  ev.settlement_state === 'Adjusted' ? 'bg-red-900/50 text-red-400' :
-                  'bg-yellow-900/50 text-yellow-400'
-                }`}>{ev.settlement_state}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
+    </>
   );
 }
 
 // ─── Volume Chart ─────────────────────────────────────────────────────────────
 function VolumeChart({ activity, loading }) {
-  if (loading) return (
+  if (loading && !activity) return (
     <div className="card p-4">
       <div className="font-medium text-sm mb-3">24h Transaction Volume</div>
       <Skeleton w="w-full" h="h-32" />
@@ -866,8 +660,7 @@ function VolumeChart({ activity, loading }) {
   const data = activity
     ? [...activity.buckets].reverse().map((b, i) => ({
         h: i === activity.buckets.length - 1 ? 'Now' : `-${activity.buckets.length - 1 - i}h`,
-        volume: b.volume,
-        count: b.count,
+        volume: b.volume, count: b.count,
       }))
     : [];
 
@@ -875,7 +668,7 @@ function VolumeChart({ activity, loading }) {
     <div className="card p-4">
       <div className="flex items-center justify-between mb-3">
         <span className="font-medium text-sm">24h Transaction Volume</span>
-        <span className="text-xs text-slate-500">stake-weighted (micro-AET)</span>
+        <span className="text-xs text-slate-500">stake-weighted</span>
       </div>
       {data.length === 0 || data.every(d => d.volume === 0) ? (
         <div className="h-32 flex items-center justify-center text-slate-500 text-sm">No activity in the last 24h</div>
@@ -890,7 +683,7 @@ function VolumeChart({ activity, loading }) {
                 <stop offset="95%" stopColor="#00D4AA" stopOpacity={0.02} />
               </linearGradient>
             </defs>
-            <XAxis dataKey="h" tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} />
+            <XAxis dataKey="h" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} />
             <YAxis hide />
             <Tooltip
               contentStyle={{ background: '#1E2D40', border: '1px solid #2d4a6b', borderRadius: 8, fontSize: 12 }}
@@ -905,166 +698,741 @@ function VolumeChart({ activity, loading }) {
   );
 }
 
-// ─── DAG Stats ────────────────────────────────────────────────────────────────
-function DagStatsPanel({ stats, fees, loading }) {
-  if (loading && !stats) return (
-    <div className="card p-4 space-y-3">
-      <Skeleton w="w-32" h="h-4" />
-      <Skeleton w="w-full" h="h-3" />
-      <Skeleton w="w-full" h="h-3" />
-    </div>
-  );
-
-  const typeColors = {
-    Transfer: '#60a5fa', Generation: '#34d399', Verification: '#fb923c',
-    Attestation: '#c084fc', Delegation: '#fbbf24',
-  };
-  const total = stats?.total_events || 0;
-  const byType = stats?.events_by_type || {};
+// ─── Page: Overview ───────────────────────────────────────────────────────────
+function OverviewPage({ status, econ, taskStats, agents, events, activity, dagStats, loading, onNav, onOpenWallet }) {
+  const validators = agents.filter(a => a.staked_amount > 0);
+  const bootstrapMode = validators.length < 20;
 
   return (
-    <div className="card p-4">
-      <div className="font-medium text-sm mb-3">DAG Breakdown</div>
-      <div className="space-y-2">
-        {Object.entries(byType).map(([t, n]) => (
-          <div key={t} className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: typeColors[t] || '#94a3b8' }} />
-            <span className="text-xs text-slate-400 w-24 flex-shrink-0">{t}</span>
-            <div className="flex-1 bg-slate-700/40 rounded-full h-1.5 overflow-hidden">
-              <div className="h-full rounded-full transition-all" style={{
-                width: total > 0 ? `${(n / total) * 100}%` : '0%',
-                background: typeColors[t] || '#94a3b8',
-              }} />
-            </div>
-            <span className="text-xs text-slate-300 w-8 text-right">{n}</span>
+    <div className="space-y-6 fade-in">
+      {/* Bootstrap banner */}
+      {bootstrapMode && status && (
+        <div className="bg-amber-900/20 border border-amber-700/40 rounded-xl px-4 py-3 flex items-start gap-3">
+          <div className="flex-1">
+            <span className="text-amber-300 font-semibold text-sm">Bootstrap Mode Active</span>
+            <p className="text-amber-400/80 text-xs mt-1">
+              Elevated replay rates (40–75%) are active. Validator bootstrap rewards supplement income. Phase ends when ≥ 90 days have passed <em>and</em> ≥ 20 active validators are registered.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Hero */}
+      <div className="hero-section">
+        <div className="text-xs font-semibold tracking-widest uppercase text-[#00D4AA] mb-3">AetherNet Testnet</div>
+        <h1 className="text-2xl sm:text-3xl font-bold text-white leading-tight mb-3">
+          Verifiable AI Work Settlement
+        </h1>
+        <p className="text-slate-400 text-sm leading-relaxed max-w-2xl mb-5">
+          AI work should not settle because someone says it was completed. It should settle because it was
+          sufficiently evidenced, independently reviewable, and accepted under explicit rules.
+          AetherNet is the protocol layer that makes that possible.
+        </p>
+        <div className="flex gap-3 flex-wrap">
+          <button
+            onClick={() => onNav('tasks')}
+            className="btn-p"
+            style={{width:'auto',padding:'0.5rem 1.25rem'}}
+          >
+            View Open Tasks →
+          </button>
+          <a href="/docs/" className="btn-s" style={{display:'inline-flex',alignItems:'center',textDecoration:'none'}}>
+            Documentation
+          </a>
+          <button onClick={() => onOpenWallet('identity')} className="btn-sm">
+            Register Agent
+          </button>
+        </div>
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        <StatCard label="Open Tasks"    value={taskStats ? fmtNum(taskStats.open_tasks)      : null} />
+        <StatCard label="Total Settled" value={taskStats ? fmtNum(taskStats.completed_tasks) : null} />
+        <StatCard label="Agents"        value={status    ? fmtNum(agents.length)             : null} />
+        <StatCard label="Validators"    value={status    ? fmtNum(validators.length)         : null} />
+        <StatCard label="DAG Events"    value={status    ? fmtNum(status.dag_size)           : null} dim />
+        <StatCard label="Peers"         value={status    ? String(status.peers)              : null} dim />
+      </div>
+
+      {/* Volume + Recent Events */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
+        <div className="lg:col-span-3">
+          <VolumeChart activity={activity} loading={loading && !activity} />
+        </div>
+        <div className="lg:col-span-2 card flex flex-col" style={{minHeight:'200px'}}>
+          <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between flex-shrink-0">
+            <span className="font-medium text-sm">Recent Events</span>
+            <button onClick={() => onNav('activity')} className="text-xs text-[#00D4AA] hover:underline">
+              View all →
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto divide-y divide-slate-700/30">
+            {loading && !events.length
+              ? [...Array(6)].map((_, i) => (
+                  <div key={i} className="px-4 py-2.5 flex items-center gap-3">
+                    <Skeleton w="w-16" h="h-5" />
+                    <Skeleton w="w-32" h="h-3" />
+                  </div>
+                ))
+              : events.length === 0
+              ? <div className="p-8 text-center text-slate-500 text-sm">No events yet.</div>
+              : events.slice(0, 10).map((ev, i) => (
+                  <div key={ev.id} className={`px-4 py-2.5 flex items-center gap-3 ${i === 0 ? 'fade-in' : ''}`}>
+                    <EventBadge type={ev.type} />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-mono text-slate-400 truncate">{truncate(ev.id, 14)}</div>
+                      {ev.type === 'Transfer' && ev.amount > 0 && (
+                        <div className="text-xs text-slate-500">{fmtAET(ev.amount)}</div>
+                      )}
+                    </div>
+                    <span className={`text-xs flex-shrink-0 ${
+                      ev.settlement_state === 'Settled'  ? 'text-green-400' :
+                      ev.settlement_state === 'Adjusted' ? 'text-red-400' : 'text-yellow-400'
+                    }`}>{ev.settlement_state}</span>
+                  </div>
+                ))
+            }
+          </div>
+        </div>
+      </div>
+
+      {/* Protocol Pillars */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        {[
+          {
+            num: '01', title: 'Legible',
+            desc: 'Every task carries an explicit acceptance contract: what was requested, what checks are required, and how long the challenge window stays open.',
+          },
+          {
+            num: '02', title: 'Auditable',
+            desc: 'Work is submitted with structured evidence packets — machine-readable, replayable, and challengeable by any party at any time.',
+          },
+          {
+            num: '03', title: 'Settleable',
+            desc: 'Payment releases only when evidence satisfies the acceptance contract and survives the challenge window — not because someone claims it is done.',
+          },
+        ].map(p => (
+          <div key={p.num} className="pillar-card">
+            <div className="text-xs font-mono text-[#00D4AA]/50 mb-2">{p.num}</div>
+            <div className="font-semibold text-white mb-2">{p.title}</div>
+            <div className="text-xs text-slate-400 leading-relaxed">{p.desc}</div>
           </div>
         ))}
-        {Object.keys(byType).length === 0 && (
-          <div className="text-xs text-slate-500">No events in DAG yet</div>
-        )}
       </div>
-      <div className="mt-3 pt-3 border-t border-slate-700/40 flex justify-between text-xs text-slate-500">
-        <span>Tips: <span className="text-slate-300">{stats?.tips_count ?? '—'}</span></span>
-        <span>Max depth: <span className="text-slate-300">{stats?.max_depth ?? '—'}</span></span>
-      </div>
-      {fees && (
-        <div className="mt-2 flex justify-between text-xs text-slate-500">
-          <span>Fees today: <span className="text-slate-300">{fmtAET(fees.total_collected)}</span></span>
-          <span>Treasury: <span className="text-slate-300">{fmtAET(fees.treasury_balance ?? fees.treasury_accrued)}</span></span>
+
+      {/* Economics row */}
+      {econ && (
+        <div className="card px-5 py-4">
+          <div className="font-medium text-sm mb-3">Token Economics</div>
+          <div className="flex flex-wrap gap-6 text-sm">
+            {[
+              { label: 'Total Supply',    value: fmtAET(econ.total_supply) },
+              { label: 'Circulating',     value: fmtAET(econ.circulating_supply) },
+              { label: 'Treasury',        value: fmtAET(econ.treasury_balance ?? econ.treasury_accrued) },
+              { label: 'Generated Value', value: fmtAET(econ.total_generated_value) },
+              { label: 'Fee Rate',        value: `${econ.fee_basis_points ?? 10} bps` },
+            ].map(it => (
+              <div key={it.label}>
+                <div className="text-white font-semibold">{it.value}</div>
+                <div className="text-xs text-slate-500">{it.label}</div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
   );
 }
 
-// ─── Leaderboard ──────────────────────────────────────────────────────────────
-function Leaderboard({ agents, sortField, onSort, loading }) {
-  const cols = [
-    { key: 'rank',             label: '#' },
-    { key: 'agent_id',         label: 'Agent' },
-    { key: 'reputation_score', label: 'Reputation' },
-    { key: 'tasks_completed',  label: 'Tasks' },
-    { key: 'balance',          label: 'Balance' },
-    { key: 'trust_limit',      label: 'Trust Limit' },
-    { key: 'staked_amount',    label: 'Staked' },
-  ];
+// ─── Page: Tasks ──────────────────────────────────────────────────────────────
+function TasksPage({ agent, addToast, onOpenWallet }) {
+  const [tasks, setTasks]     = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]     = useState(null);
+  const [filter, setFilter]   = useState('open');
+  const [search, setSearch]   = useState('');
+
+  const loadTasks = useCallback(async () => {
+    setLoading(true); setError(null);
+    try {
+      const data = await apiFetch('/v1/tasks?limit=200');
+      setTasks(Array.isArray(data) ? data : (data.tasks || []));
+    } catch(e) {
+      if (e.message === '501') {
+        setError('Task marketplace is not enabled on this node.');
+      } else {
+        addToast('Failed to load tasks', 'error');
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [addToast]);
+
+  useEffect(() => { loadTasks(); }, [loadTasks]);
+
+  async function claimTask(taskId) {
+    if (!agent) {
+      addToast('Open Wallet → Identity to register an agent first', 'info');
+      onOpenWallet && onOpenWallet('identity');
+      return;
+    }
+    try {
+      await apiPost(`/v1/tasks/${taskId}/claim`, { claimer_id: agent.agent_id });
+      addToast('Task claimed!', 'success');
+      loadTasks();
+    } catch(e) { addToast(`Claim failed: ${e.message}`, 'error'); }
+  }
+
+  const STATUS_FILTERS = ['all', 'open', 'claimed', 'submitted', 'completed', 'disputed'];
+
+  const filtered = useMemo(() => {
+    return tasks.filter(t => {
+      if (filter !== 'all' && t.status?.toLowerCase() !== filter) return false;
+      if (search) {
+        const s = search.toLowerCase();
+        return t.title?.toLowerCase().includes(s) ||
+               t.category?.toLowerCase().includes(s) ||
+               t.poster_id?.toLowerCase().includes(s);
+      }
+      return true;
+    });
+  }, [tasks, filter, search]);
+
+  const counts = useMemo(() => {
+    const c = { all: tasks.length };
+    tasks.forEach(t => { const k = t.status?.toLowerCase(); if (k) c[k] = (c[k] || 0) + 1; });
+    return c;
+  }, [tasks]);
 
   return (
-    <div className="card overflow-hidden">
-      <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between">
-        <span className="font-medium text-sm">Agent Leaderboard</span>
-        <div className="flex gap-2 text-xs">
-          {['reputation', 'balance', 'tasks'].map(s => (
-            <button key={s}
-              onClick={() => onSort(s)}
-              className={`px-2 py-1 rounded transition-colors ${
-                sortField === s ? 'accent-bg text-black font-semibold' : 'text-slate-400 hover:text-white'
-              }`}
-            >{s.charAt(0).toUpperCase() + s.slice(1)}</button>
-          ))}
+    <div className="space-y-4 fade-in">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <h2 className="text-lg font-semibold text-white">Tasks</h2>
+        <div className="flex gap-2">
+          <button onClick={() => onOpenWallet && onOpenWallet('post')} className="btn-s">+ Post Task</button>
+          <button onClick={loadTasks} className="btn-sm">↻ Refresh</button>
         </div>
       </div>
-      <div className="overflow-x-auto">
-        <table>
-          <thead>
-            <tr>{cols.map(c => <th key={c.key}>{c.label}</th>)}</tr>
-          </thead>
-          <tbody>
-            {loading && !agents.length
-              ? [...Array(5)].map((_, i) => (
-                  <tr key={i}>
-                    {cols.map(c => <td key={c.key}><Skeleton w="w-20" h="h-3" /></td>)}
+
+      {error ? (
+        <div className="card p-8 text-center">
+          <div className="text-slate-500 text-sm">{error}</div>
+        </div>
+      ) : (
+        <>
+          {/* Status filter pills */}
+          <div className="flex flex-wrap gap-1.5">
+            {STATUS_FILTERS.map(f => (
+              <button key={f} onClick={() => setFilter(f)}
+                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                  filter === f
+                    ? 'bg-[#00D4AA]/20 text-[#00D4AA] border border-[#00D4AA]/40'
+                    : 'text-slate-400 hover:text-white border border-transparent hover:border-slate-600'
+                }`}>
+                {f === 'all' ? 'All' : statusLabel(f)}
+                {counts[f] != null ? ` (${counts[f]})` : ''}
+              </button>
+            ))}
+          </div>
+
+          {/* Search */}
+          <input className="ifield" placeholder="Search by title, category, or poster…"
+            value={search} onChange={e => setSearch(e.target.value)} />
+
+          {/* Task table */}
+          <div className="card overflow-hidden">
+            <div className="overflow-x-auto">
+              <table>
+                <thead>
+                  <tr>
+                    <th style={{minWidth:'200px'}}>Task</th>
+                    <th>Category</th>
+                    <th>Budget</th>
+                    <th>Assurance Lane</th>
+                    <th>Status</th>
+                    <th></th>
                   </tr>
-                ))
-              : agents.length === 0
-              ? <tr><td colSpan={cols.length} className="text-center text-slate-500 py-8">No agents registered yet</td></tr>
-              : agents.map(a => (
-                  <tr key={a.agent_id} className="fade-in">
-                    <td className="text-slate-500 font-mono">{a.rank}</td>
-                    <td className="font-mono text-slate-300">{truncate(a.agent_id, 14)}</td>
-                    <td className="accent">{fmtNum(a.reputation_score)}</td>
-                    <td>{fmtNum(a.tasks_completed)}</td>
+                </thead>
+                <tbody>
+                  {loading && !tasks.length
+                    ? [...Array(5)].map((_, i) => (
+                        <tr key={i}>
+                          <td><Skeleton w="w-48" h="h-3" /></td>
+                          <td><Skeleton w="w-20" h="h-3" /></td>
+                          <td><Skeleton w="w-16" h="h-3" /></td>
+                          <td><Skeleton w="w-24" h="h-3" /></td>
+                          <td><Skeleton w="w-16" h="h-3" /></td>
+                          <td></td>
+                        </tr>
+                      ))
+                    : filtered.length === 0
+                    ? (
+                        <tr>
+                          <td colSpan={6} className="py-12 text-center">
+                            <div className="text-slate-500 text-sm">
+                              {filter === 'open' && tasks.length === 0
+                                ? 'No tasks found. Click "Post Task" to be the first!'
+                                : filter === 'open'
+                                ? 'No open tasks right now.'
+                                : `No ${statusLabel(filter).toLowerCase()} tasks.`}
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    : filtered.map(task => {
+                        const lane = task.contract?.assurance_lane;
+                        return (
+                          <tr key={task.id} className="fade-in">
+                            <td>
+                              <div className="text-sm text-white font-medium leading-snug">{task.title}</div>
+                              {task.description && (
+                                <div className="text-xs text-slate-500 line-clamp-1 mt-0.5">{task.description}</div>
+                              )}
+                              <div className="text-xs text-slate-600 mt-0.5 font-mono">
+                                by {truncate(task.poster_id, 10)}
+                              </div>
+                            </td>
+                            <td>
+                              {task.category && (
+                                <span className="text-xs bg-slate-700/40 text-slate-400 px-1.5 py-0.5 rounded">
+                                  {task.category}
+                                </span>
+                              )}
+                            </td>
+                            <td className="text-[#00D4AA] font-medium">{fmtAET(task.budget)}</td>
+                            <td><LaneBadge lane={lane} /></td>
+                            <td><StatusChip status={task.status} /></td>
+                            <td>
+                              {task.status?.toLowerCase() === 'open' && (
+                                <button className="btn-s text-xs py-0.5 px-2"
+                                  onClick={() => claimTask(task.id)}>
+                                  Claim
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })
+                  }
+                </tbody>
+              </table>
+            </div>
+            {filtered.length > 0 && !loading && (
+              <div className="px-4 py-2 text-xs text-slate-600 border-t border-slate-700/30">
+                {filtered.length} task{filtered.length !== 1 ? 's' : ''}
+                {filter !== 'all' ? ` · filter: ${statusLabel(filter)}` : ''}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── Page: Validators ─────────────────────────────────────────────────────────
+function ValidatorsPage({ agents, loading }) {
+  const validators = useMemo(() =>
+    [...agents].filter(a => a.staked_amount > 0).sort((a, b) => b.staked_amount - a.staked_amount),
+  [agents]);
+
+  const totalStaked = useMemo(() =>
+    validators.reduce((sum, v) => sum + (v.staked_amount || 0), 0),
+  [validators]);
+
+  const bootstrapMode = validators.length < 20;
+
+  return (
+    <div className="space-y-5 fade-in">
+      <div>
+        <h2 className="text-lg font-semibold text-white">Validators</h2>
+        <p className="text-sm text-slate-400 mt-1 max-w-2xl">
+          Validators stake AET to back settlement guarantees. Their slashable stake is the economic security
+          of every assured task — the protocol accepts assured work only when total staked coverage exceeds the value at risk.
+        </p>
+      </div>
+
+      {/* Summary */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <StatCard label="Active Validators" value={loading && !agents.length ? null : String(validators.length)} />
+        <StatCard label="Total Staked"      value={totalStaked ? fmtAET(totalStaked) : '—'} />
+        <StatCard label="Min Stake Required" value="10,000 AET" dim />
+        <StatCard label="Network Phase"     value={bootstrapMode ? 'Bootstrap' : 'Normal'} dim />
+      </div>
+
+      {bootstrapMode && (
+        <div className="bg-amber-900/20 border border-amber-700/40 rounded-xl px-4 py-3">
+          <div className="text-amber-300 font-semibold text-sm mb-1">Bootstrap Mode Active</div>
+          <p className="text-amber-400/80 text-xs leading-relaxed">
+            The network is building validator coverage. Elevated replay rates (40% baseline, 50% for generation tasks, 75% for new-agent tasks) reduce fraud risk while the validator set grows.
+            Bootstrap rewards supplement income with up to 1 AET per task, declining as monthly volume grows.
+            Phase ends when ≥ 90 days have passed <em>and</em> ≥ 20 validators are active.
+          </p>
+        </div>
+      )}
+
+      {/* Assurance lanes reference */}
+      <div className="card p-4">
+        <div className="font-medium text-sm mb-3">Assurance Lanes</div>
+        <div className="overflow-x-auto">
+          <table>
+            <thead>
+              <tr>
+                <th>Lane</th>
+                <th>Fee Rate</th>
+                <th>Floor</th>
+                <th>Min Validators</th>
+                <th>Min Budget</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                { lane: 'standard',      fee: '3%', floor: '2 AET',  minVal: '3', minBudget: '25 AET' },
+                { lane: 'high_assurance', fee: '6%', floor: '4 AET', minVal: '5', minBudget: '25 AET' },
+                { lane: 'enterprise',    fee: '8%', floor: '8 AET',  minVal: '10', minBudget: '25 AET' },
+              ].map(row => (
+                <tr key={row.lane}>
+                  <td><LaneBadge lane={row.lane} /></td>
+                  <td className="text-slate-300">{row.fee}</td>
+                  <td className="text-slate-300">{row.floor}</td>
+                  <td>
+                    <span className={`text-xs font-medium ${
+                      validators.length >= parseInt(row.minVal) ? 'text-green-400' : 'text-red-400'
+                    }`}>
+                      {validators.length}/{row.minVal}
+                      {validators.length >= parseInt(row.minVal) ? ' ✓' : ' — not met'}
+                    </span>
+                  </td>
+                  <td className="text-slate-300">{row.minBudget}</td>
+                </tr>
+              ))}
+              <tr>
+                <td><LaneBadge lane={null} /></td>
+                <td className="text-slate-500">—</td>
+                <td className="text-slate-500">—</td>
+                <td className="text-slate-500">—</td>
+                <td className="text-slate-500">No minimum</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Validator table */}
+      <div className="card overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between">
+          <span className="font-medium text-sm">Staked Validators</span>
+          <span className="text-xs text-slate-500">{validators.length} of {agents.length} agents staked</span>
+        </div>
+        <div className="overflow-x-auto">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Agent ID</th>
+                <th>Staked</th>
+                <th>Trust Limit</th>
+                <th>Reputation</th>
+                <th>Tasks</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading && !agents.length
+                ? [...Array(3)].map((_, i) => (
+                    <tr key={i}>
+                      {[...Array(6)].map((_, j) => <td key={j}><Skeleton w="w-20" h="h-3" /></td>)}
+                    </tr>
+                  ))
+                : validators.length === 0
+                ? (
+                    <tr>
+                      <td colSpan={6} className="py-12 text-center">
+                        <div className="text-slate-500 text-sm mb-2">No validators have staked yet.</div>
+                        <div className="text-slate-600 text-xs">Any agent can become a validator by staking AET via the CLI or SDK.</div>
+                      </td>
+                    </tr>
+                  )
+                : validators.map((v, i) => (
+                    <tr key={v.agent_id}>
+                      <td className="text-slate-500 font-mono text-sm">{i + 1}</td>
+                      <td className="font-mono text-slate-300 text-sm">{truncate(v.agent_id, 18)}</td>
+                      <td className="text-[#00D4AA] font-medium">{fmtAET(v.staked_amount)}</td>
+                      <td>{fmtAET(v.trust_limit)}</td>
+                      <td>{fmtNum(v.reputation_score)}</td>
+                      <td>{fmtNum(v.tasks_completed)}</td>
+                    </tr>
+                  ))
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* All agents */}
+      {agents.length > 0 && (
+        <div className="card overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between">
+            <span className="font-medium text-sm">All Agents</span>
+            <span className="text-xs text-slate-500">{agents.length} registered</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Agent ID</th>
+                  <th>Balance</th>
+                  <th>Reputation</th>
+                  <th>Tasks</th>
+                </tr>
+              </thead>
+              <tbody>
+                {agents.map(a => (
+                  <tr key={a.agent_id}>
+                    <td className="text-slate-500 font-mono text-sm">{a.rank}</td>
+                    <td>
+                      <div className="font-mono text-slate-300 text-sm">{truncate(a.agent_id, 18)}</div>
+                      {a.staked_amount > 0 && (
+                        <div className="text-xs text-[#00D4AA]/70 mt-0.5">
+                          Validator · {fmtAET(a.staked_amount)} staked
+                        </div>
+                      )}
+                    </td>
                     <td>{fmtAET(a.balance)}</td>
-                    <td>{fmtAET(a.trust_limit)}</td>
-                    <td>{fmtAET(a.staked_amount)}</td>
+                    <td>{fmtNum(a.reputation_score)}</td>
+                    <td>{fmtNum(a.tasks_completed)}</td>
                   </tr>
-                ))
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Page: Activity ───────────────────────────────────────────────────────────
+function ActivityPage({ events, dagStats, econ, loading }) {
+  const typeColors = {
+    Transfer: '#60a5fa', Generation: '#34d399', Verification: '#fb923c',
+    Attestation: '#c084fc', Delegation: '#fbbf24',
+  };
+  const total  = dagStats?.total_events || 0;
+  const byType = dagStats?.events_by_type || {};
+
+  return (
+    <div className="space-y-5 fade-in">
+      <h2 className="text-lg font-semibold text-white">Activity</h2>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        {/* Event feed */}
+        <div className="lg:col-span-2 card flex flex-col">
+          <div className="px-4 py-3 border-b border-slate-700/50 flex items-center justify-between flex-shrink-0">
+            <span className="font-medium text-sm">Live Event Feed</span>
+            <span className="text-xs text-slate-500">Last 50 · auto-refresh 5s</span>
+          </div>
+          <div className="overflow-y-auto" style={{maxHeight: '560px'}}>
+            {loading && !events.length
+              ? (
+                  <div className="p-4 space-y-3">
+                    {[...Array(8)].map((_, i) => (
+                      <div key={i} className="flex gap-3">
+                        <Skeleton w="w-20" h="h-5" />
+                        <div className="flex-1 space-y-1.5">
+                          <Skeleton w="w-48" h="h-3" />
+                          <Skeleton w="w-32" h="h-3" />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )
+              : events.length === 0
+              ? (
+                  <div className="p-10 text-center">
+                    <div className="text-slate-500 text-sm">No events yet.</div>
+                    <div className="text-slate-600 text-xs mt-2">Submit a generation or transfer to see activity here.</div>
+                  </div>
+                )
+              : (
+                  <div className="divide-y divide-slate-700/30">
+                    {events.map((ev, i) => (
+                      <div key={ev.id} className={`px-4 py-3 flex items-start gap-3 ${i === 0 ? 'fade-in' : ''}`}>
+                        <EventBadge type={ev.type} />
+                        <div className="flex-1 min-w-0">
+                          <div className="text-xs font-mono text-slate-300 truncate">{truncate(ev.id, 20)}</div>
+                          {ev.type === 'Transfer' && ev.from ? (
+                            <div className="text-xs text-slate-500 mt-0.5">
+                              {truncate(ev.from, 10)} → {truncate(ev.to, 10)} · {fmtAET(ev.amount)}
+                              {ev.memo ? ` · ${ev.memo}` : ''}
+                            </div>
+                          ) : (
+                            <div className="text-xs text-slate-500 mt-0.5">
+                              agent {truncate(ev.agent_id)} · ts {ev.causal_timestamp}
+                            </div>
+                          )}
+                        </div>
+                        <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${
+                          ev.settlement_state === 'Settled'  ? 'bg-green-900/40 text-green-400' :
+                          ev.settlement_state === 'Adjusted' ? 'bg-red-900/40 text-red-400' :
+                          'bg-yellow-900/40 text-yellow-400'
+                        }`}>{ev.settlement_state}</span>
+                      </div>
+                    ))}
+                  </div>
+                )
             }
-          </tbody>
-        </table>
+          </div>
+        </div>
+
+        {/* Sidebar: DAG + economics */}
+        <div className="space-y-4">
+          <div className="card p-4">
+            <div className="font-medium text-sm mb-3">DAG Breakdown</div>
+            {Object.keys(byType).length === 0
+              ? <div className="text-xs text-slate-500">No events in DAG yet</div>
+              : (
+                  <div className="space-y-2.5">
+                    {Object.entries(byType).map(([type, n]) => (
+                      <div key={type} className="flex items-center gap-2">
+                        <div className="w-2 h-2 rounded-full flex-shrink-0"
+                          style={{background: typeColors[type] || '#94a3b8'}} />
+                        <span className="text-xs text-slate-400 w-24 flex-shrink-0">{type}</span>
+                        <div className="flex-1 bg-slate-700/40 rounded-full h-1.5 overflow-hidden">
+                          <div className="h-full rounded-full transition-all"
+                            style={{
+                              width: total > 0 ? `${(n / total) * 100}%` : '0%',
+                              background: typeColors[type] || '#94a3b8',
+                            }} />
+                        </div>
+                        <span className="text-xs text-slate-300 w-8 text-right">{n}</span>
+                      </div>
+                    ))}
+                  </div>
+                )
+            }
+            <div className="mt-3 pt-3 border-t border-slate-700/40 flex justify-between text-xs text-slate-500">
+              <span>Tips: <span className="text-slate-300">{dagStats?.tips_count ?? '—'}</span></span>
+              <span>Max depth: <span className="text-slate-300">{dagStats?.max_depth ?? '—'}</span></span>
+            </div>
+          </div>
+
+          {econ && (
+            <div className="card p-4">
+              <div className="font-medium text-sm mb-3">Settlement Economics</div>
+              <div className="space-y-2">
+                {[
+                  { label: 'Total Supply',    value: fmtAET(econ.total_supply) },
+                  { label: 'Circulating',     value: fmtAET(econ.circulating_supply) },
+                  { label: 'Treasury',        value: fmtAET(econ.treasury_balance ?? econ.treasury_accrued) },
+                  { label: 'Generated Value', value: fmtAET(econ.total_generated_value) },
+                  { label: 'Fee Rate',        value: `${econ.fee_basis_points ?? 10} bps (0.1%)` },
+                  { label: 'Onboarding Pool', value: fmtAET(econ.onboarding_pool_total) },
+                ].map(it => (
+                  <div key={it.label} className="flex justify-between text-xs">
+                    <span className="text-slate-400">{it.label}</span>
+                    <span className="text-slate-300">{it.value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
-// ─── Economics Bar ────────────────────────────────────────────────────────────
-function EconomicsBar({ econ, loading }) {
-  if (loading && !econ) return (
-    <div className="card p-3 flex gap-8">
-      {[...Array(4)].map((_, i) => <Skeleton key={i} w="w-32" h="h-8" />)}
-    </div>
-  );
-  if (!econ) return null;
-
-  const items = [
-    { label: 'Total Supply',    value: fmtAET(econ.total_supply) },
-    { label: 'Circulating',     value: fmtAET(econ.circulating_supply) },
-    { label: 'Onboarding Pool', value: fmtAET(econ.onboarding_pool_total) },
-    { label: 'Allocated',       value: fmtAET(econ.onboarding_allocated) },
-    { label: 'Treasury',        value: fmtAET(econ.treasury_balance ?? econ.treasury_accrued) },
-    { label: 'Fee (bps)',       value: econ.fee_basis_points },
+// ─── Header ───────────────────────────────────────────────────────────────────
+function Header({ activePage, onNav, status, agent, onOpenWallet, loading }) {
+  const pages = [
+    { id: 'overview',   label: 'Overview' },
+    { id: 'tasks',      label: 'Tasks' },
+    { id: 'validators', label: 'Validators' },
+    { id: 'activity',   label: 'Activity' },
   ];
 
   return (
-    <div className="card px-4 py-3 flex flex-wrap gap-6">
-      {items.map(it => (
-        <div key={it.label}>
-          <div className="text-sm font-medium text-white">{it.value}</div>
-          <div className="text-xs text-slate-500">{it.label}</div>
-        </div>
-      ))}
-    </div>
+    <header className="sticky top-0 z-30 border-b border-slate-700/50 px-4"
+      style={{background: 'rgba(10,18,32,0.96)', backdropFilter: 'blur(8px)'}}>
+      <div className="flex items-center gap-2 h-14 max-w-7xl mx-auto w-full">
+        {/* Logo */}
+        <button onClick={() => onNav('overview')} className="flex items-center gap-2 flex-shrink-0 mr-2">
+          <div className="w-7 h-7 rounded bg-[#00D4AA] flex items-center justify-center font-bold text-black text-xs">
+            AE
+          </div>
+          <span className="font-semibold text-sm text-white hidden sm:block tracking-tight">AetherNet</span>
+          <span className="text-xs text-slate-500 hidden lg:block">Explorer</span>
+        </button>
+
+        {/* Nav */}
+        <nav className="flex items-center gap-0.5">
+          {pages.map(p => (
+            <button key={p.id} onClick={() => onNav(p.id)}
+              className={`px-3 py-1.5 rounded text-sm transition-colors ${
+                activePage === p.id
+                  ? 'bg-[#00D4AA]/15 text-[#00D4AA] font-medium'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-700/40'
+              }`}>
+              {p.label}
+            </button>
+          ))}
+        </nav>
+
+        <div className="flex-1" />
+
+        {/* Live status */}
+        {status ? (
+          <div className="hidden md:flex items-center gap-3 text-xs text-slate-400 mr-1">
+            <span><span className="text-white font-medium">{status.peers}</span> peers</span>
+            <span><span className="text-white font-medium">{fmtNum(status.dag_size)}</span> events</span>
+            {status.ocs_pending > 0 && (
+              <span><span className="text-[#00D4AA] font-medium">{status.ocs_pending}</span> pending</span>
+            )}
+            <span className="flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse inline-block" />
+              <span className="text-green-400">Live</span>
+            </span>
+          </div>
+        ) : loading ? (
+          <Skeleton w="w-28" h="h-4" />
+        ) : (
+          <span className="text-red-400 text-xs">Node unreachable</span>
+        )}
+
+        {/* Wallet button */}
+        <button onClick={() => onOpenWallet('identity')}
+          className="btn-s flex items-center gap-1.5 ml-1">
+          <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+            <rect x="1.5" y="3.5" width="11" height="8" rx="1.5"/>
+            <path d="M1.5 6h11"/>
+            <circle cx="10" cy="9" r="1" fill="currentColor" stroke="none"/>
+          </svg>
+          Wallet
+          {agent && <span className="w-1.5 h-1.5 rounded-full bg-[#00D4AA] flex-shrink-0" />}
+        </button>
+      </div>
+    </header>
   );
 }
 
 // ─── App Root ─────────────────────────────────────────────────────────────────
 function App() {
-  const [status,    setStatus]    = useState(null);
-  const [events,    setEvents]    = useState([]);
-  const [activity,  setActivity]  = useState(null);
-  const [stats,     setStats]     = useState(null);
-  const [agents,    setAgents]    = useState([]);
-  const [econ,      setEcon]      = useState(null);
+  const [page,      setPage]     = useState('overview');
+  const [status,    setStatus]   = useState(null);
+  const [events,    setEvents]   = useState([]);
+  const [activity,  setActivity] = useState(null);
+  const [dagStats,  setDagStats] = useState(null);
+  const [agents,    setAgents]   = useState([]);
+  const [econ,      setEcon]     = useState(null);
   const [taskStats, setTaskStats] = useState(null);
-  const [sortField, setSortField] = useState('reputation');
-  const [loading,   setLoading]   = useState(true);
-  const [error,     setError]     = useState(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [agent,     setAgent]     = useState(() => {
-    try {
-      const s = localStorage.getItem('aethernet_agent');
-      return s ? JSON.parse(s) : null;
-    } catch { return null; }
+  const [loading,   setLoading]  = useState(true);
+
+  const [walletOpen, setWalletOpen] = useState(false);
+  const [walletTab,  setWalletTab]  = useState('identity');
+  const [agent, setAgent] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('aethernet_agent')); } catch { return null; }
   });
   const [toasts, addToast] = useToasts();
 
@@ -1075,26 +1443,23 @@ function App() {
         apiFetch('/v1/events/recent?limit=50'),
         apiFetch('/v1/network/activity?hours=24'),
         apiFetch('/v1/dag/stats'),
-        apiFetch(`/v1/agents/leaderboard?sort=${sortField}&limit=20`),
+        apiFetch('/v1/agents/leaderboard?sort=reputation&limit=50'),
         apiFetch('/v1/economics'),
       ]);
       setStatus(s);
-      setEvents(ev);
+      setEvents(Array.isArray(ev) ? ev : []);
       setActivity(act);
-      setStats(st);
-      setAgents(lb);
+      setDagStats(st);
+      setAgents(Array.isArray(lb) ? lb : []);
       setEcon(ec);
-      setError(null);
-      // Task stats are fetched separately — the endpoint returns 501 when the
-      // marketplace is not enabled, and we don't want that to break the rest
-      // of the dashboard.
+      // Task stats: 501 when marketplace disabled — don't fail hard
       apiFetch('/v1/tasks/stats').then(setTaskStats).catch(() => {});
-    } catch (e) {
-      setError(e.message);
+    } catch(e) {
+      console.error('Refresh error:', e);
     } finally {
       setLoading(false);
     }
-  }, [sortField]);
+  }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
   useEffect(() => {
@@ -1102,58 +1467,64 @@ function App() {
     return () => clearInterval(id);
   }, [refresh]);
 
+  function openWallet(tab = 'identity') {
+    setWalletTab(tab);
+    setWalletOpen(true);
+  }
+
   return (
     <div className="min-h-screen flex flex-col">
       <ToastContainer toasts={toasts} />
-      <Header status={status} loading={loading && !status} onOpenSidebar={() => setSidebarOpen(true)} agent={agent} />
-      <div className="flex flex-1 overflow-hidden">
-        <Sidebar
-          open={sidebarOpen}
-          onClose={() => setSidebarOpen(false)}
-          agent={agent}
-          setAgent={setAgent}
-          addToast={addToast}
-        />
-        <div className="flex-1 flex flex-col overflow-auto">
-          {error && !status && (
-            <div className="mx-6 mt-4 p-3 bg-red-900/30 border border-red-700/50 rounded-lg text-red-300 text-sm">
-              Cannot reach node at <code>{API}</code>: {error}
-            </div>
-          )}
+      <WalletDrawer
+        open={walletOpen}
+        onClose={() => setWalletOpen(false)}
+        initialTab={walletTab}
+        agent={agent}
+        setAgent={setAgent}
+        addToast={addToast}
+      />
+      <Header
+        activePage={page}
+        onNav={setPage}
+        status={status}
+        agent={agent}
+        onOpenWallet={openWallet}
+        loading={loading && !status}
+      />
 
-          <main className="flex-1 px-6 py-5 space-y-5">
-        {/* Top stat cards */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          <StatCard label="Open Tasks"    value={taskStats ? fmtNum(taskStats.open_tasks)      : null} />
-          <StatCard label="Active Agents" value={status    ? fmtNum(agents.length)             : null} />
-          <StatCard label="Completed"     value={taskStats ? fmtNum(taskStats.completed_tasks) : null} />
-          <StatCard label="Supply Ratio"  value={status    ? `${status.supply_ratio?.toFixed(2)}×` : null} />
+      {!status && !loading && (
+        <div className="mx-6 mt-4 p-3 bg-red-900/30 border border-red-700/50 rounded-lg text-red-300 text-sm">
+          Cannot reach node at <code className="font-mono">{API}</code>. Is the node running?
         </div>
+      )}
 
-        {/* Main panels */}
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
-          <div className="lg:col-span-3">
-            <ActivityFeed events={events} loading={loading} />
-          </div>
-          <div className="lg:col-span-2 flex flex-col gap-4">
-            <VolumeChart activity={activity} loading={loading && !activity} />
-            <DagStatsPanel stats={stats} fees={econ} loading={loading && !stats} />
-          </div>
-        </div>
+      <main className="flex-1 px-4 sm:px-6 py-6 max-w-7xl w-full mx-auto">
+        {page === 'overview'   && (
+          <OverviewPage
+            status={status} econ={econ} taskStats={taskStats}
+            agents={agents} events={events} activity={activity}
+            dagStats={dagStats} loading={loading}
+            onNav={setPage} onOpenWallet={openWallet}
+          />
+        )}
+        {page === 'tasks'      && (
+          <TasksPage agent={agent} addToast={addToast} onOpenWallet={openWallet} />
+        )}
+        {page === 'validators' && (
+          <ValidatorsPage agents={agents} loading={loading && !agents.length} />
+        )}
+        {page === 'activity'   && (
+          <ActivityPage events={events} dagStats={dagStats} econ={econ} loading={loading} />
+        )}
+      </main>
 
-        {/* Leaderboard */}
-        <Leaderboard agents={agents} sortField={sortField} onSort={setSortField} loading={loading} />
-
-        {/* Economics bar */}
-        <EconomicsBar econ={econ} loading={loading && !econ} />
-          </main>
-
-          <footer className="px-6 py-3 border-t border-slate-700/30 text-xs text-slate-600 flex justify-between">
-            <span>AetherNet v0.1.0-testnet · <button className="hover:text-slate-400 transition-colors" onClick={() => setSidebarOpen(true)}>Open Panel ☰</button></span>
-            <span>Auto-refresh every 5s · {new Date().toLocaleTimeString()}</span>
-          </footer>
-        </div>
-      </div>
+      <footer className="px-6 py-3 border-t border-slate-700/30 text-xs text-slate-600 flex items-center justify-between">
+        <span>
+          AetherNet v0.1.0-testnet ·{' '}
+          <a href="/docs/" className="hover:text-slate-400 transition-colors">Documentation</a>
+        </span>
+        <span>Auto-refresh every 5s</span>
+      </footer>
     </div>
   );
 }
