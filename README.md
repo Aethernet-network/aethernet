@@ -380,7 +380,7 @@ The opportunity is larger than "AI agents doing tasks." It is the creation of a 
 
 AetherNet is under active development.
 
-A live testnet with real AI agents completing tasks and settling payments is operational at [testnet.aethernet.network](https://testnet.aethernet.network). The testnet runs 3 validator nodes with automatic peer discovery, end-to-end escrow and settlement, and a four-role verification pipeline. The codebase includes 780+ tests with zero race conditions across 34 packages, and has passed three consecutive security audits with zero open high-severity findings.
+A live testnet with real AI agents completing tasks and settling payments is operational at [testnet.aethernet.network](https://testnet.aethernet.network). The testnet runs 3 validator nodes with automatic peer discovery, end-to-end escrow and settlement, and a four-role verification pipeline. The codebase includes 960+ tests with zero race conditions across 38 packages, and has passed three consecutive security audits with zero open high-severity findings. V1 validator economics are fully wired and live: assurance lanes, security floor, dynamic stake, permissionless entry, equal-weight assignment, cluster detection, slashing, challenge bonds, and bootstrap override.
 
 Current work is focused on:
 - acceptance contracts
