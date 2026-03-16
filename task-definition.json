@@ -1,0 +1,49 @@
+{
+  "family": "aethernet-node",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::435998721364:role/aethernet-ecs-execution",
+  "taskRoleArn": "arn:aws:iam::435998721364:role/aethernet-ecs-task",
+  "containerDefinitions": [
+    {
+      "name": "aethernet-node",
+      "image": "435998721364.dkr.ecr.us-east-1.amazonaws.com/aethernet:latest",
+      "essential": true,
+      "portMappings": [
+        {"containerPort": 8337, "protocol": "tcp"},
+        {"containerPort": 8338, "protocol": "tcp"}
+      ],
+      "environment": [
+        {"name": "AETHERNET_DATA", "value": "/data"},
+        {"name": "AETHERNET_LISTEN", "value": "0.0.0.0:8337"},
+        {"name": "AETHERNET_API", "value": "0.0.0.0:8338"}
+      ],
+      "mountPoints": [
+        {
+          "sourceVolume": "aethernet-data",
+          "containerPath": "/data",
+          "readOnly": false
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/aethernet",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "node"
+        }
+      }
+    }
+  ],
+  "volumes": [
+    {
+      "name": "aethernet-data",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "fs-0bd3a463a25a5632b",
+        "transitEncryption": "ENABLED"
+      }
+    }
+  ]
+}
