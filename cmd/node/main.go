@@ -306,6 +306,7 @@ type nodeStack struct {
 	slashEng        *validator.SlashEngine
 	challengeMgr    *assurance.ChallengeManager
 	bootstrapOvr    *assurance.BootstrapOverride
+	replayReserve   *assurance.ReplayReserve
 }
 
 // taskManagerSource adapts *tasks.TaskManager to the router.TaskSource interface,
@@ -394,6 +395,81 @@ func (a *taskReplayDetailsAdapter) GetReplayDetails(taskID string) (agentID, res
 		verifiedValue = uint64(float64(task.Budget) * task.VerificationScore.Overall)
 	}
 	return task.ClaimerID, task.ResultHash, task.Title, verifiedValue, task.Contract.GenerationEligible, nil
+}
+
+// replayAssignerAdapter bridges *validator.AssignmentEngine (L2) to the
+// replay.replayAssigner interface (L3) in cmd/node — where both layers are
+// already imported. SelectReplayExecutor returns the selected validator's ID.
+type replayAssignerAdapter struct {
+	eng *validator.AssignmentEngine
+}
+
+func (a *replayAssignerAdapter) SelectReplayExecutor(category, originalVerifierID, originalVerifierCluster string) (string, error) {
+	v, err := a.eng.SelectReplayExecutor(category, originalVerifierID, originalVerifierCluster)
+	if err != nil {
+		return "", err
+	}
+	return v.ID, nil
+}
+
+// slashEngineAdapter bridges *validator.SlashEngine (L2) to the
+// replay.slashExecutor interface (L3). Translates offense string to
+// validator.SlashOffense and extracts SlashAmount from the result.
+type slashEngineAdapter struct {
+	eng *validator.SlashEngine
+}
+
+func (a *slashEngineAdapter) Slash(validatorID string, offense string) (uint64, error) {
+	result, err := a.eng.Slash(validatorID, validator.SlashOffense(offense))
+	if err != nil {
+		return 0, err
+	}
+	return result.SlashAmount, nil
+}
+
+// challengeManagerAdapter bridges *assurance.ChallengeManager (L3) to the
+// api.challengeSource interface (also L3). The api package uses primitive
+// return types to avoid an assurance import; this adapter converts between
+// the two representations.
+type challengeManagerAdapter struct {
+	mgr *assurance.ChallengeManager
+}
+
+func (a *challengeManagerAdapter) OpenChallenge(taskID, challengerID, targetID string, bond uint64) (string, string, error) {
+	c, err := a.mgr.OpenChallenge(taskID, challengerID, targetID, bond)
+	if err != nil {
+		return "", "", err
+	}
+	return c.ID, c.CreatedAt.Format(time.RFC3339), nil
+}
+
+func (a *challengeManagerAdapter) ResolveChallenge(challengeID string, outcome string, fraudBounty uint64) (uint64, uint64, error) {
+	res, err := a.mgr.ResolveChallenge(challengeID, assurance.ChallengeStatus(outcome), fraudBounty)
+	if err != nil {
+		return 0, 0, err
+	}
+	return res.RefundedBond, res.ForfeitAmount, nil
+}
+
+func (a *challengeManagerAdapter) ChallengesForTask(taskID string) []api.ChallengeRecord {
+	challenges := a.mgr.ChallengesForTask(taskID)
+	out := make([]api.ChallengeRecord, 0, len(challenges))
+	for _, c := range challenges {
+		rec := api.ChallengeRecord{
+			ID:           c.ID,
+			TaskID:       c.TaskID,
+			ChallengerID: c.ChallengerID,
+			TargetID:     c.TargetID,
+			Bond:         c.Bond,
+			Status:       string(c.Status),
+			CreatedAt:    c.CreatedAt.Format(time.RFC3339),
+		}
+		if !c.ResolvedAt.IsZero() {
+			rec.ResolvedAt = c.ResolvedAt.Format(time.RFC3339)
+		}
+		out = append(out, rec)
+	}
+	return out
 }
 
 // buildStack wires all internal packages together and returns a ready-to-start
@@ -655,6 +731,10 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 	}
 	bootstrapOvr := assurance.NewBootstrapOverride(&cfg.Assurance, validatorReg, launchTime, normalReplRates)
 
+	// ReplayReserve: per-category pool that funds replay-executor minimum payouts.
+	// Persisted to store; balances survive node restarts.
+	replayReserve := assurance.NewReplayReserve(&cfg.Assurance, s)
+
 	return &nodeStack{
 		dag:          d,
 		transfer:     tl,
@@ -679,6 +759,7 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 		slashEng:        slashEng,
 		challengeMgr:    challengeMgr,
 		bootstrapOvr:    bootstrapOvr,
+		replayReserve:   replayReserve,
 	}
 }
 
@@ -804,6 +885,24 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		}
 	}
 
+	// SecurityFloor: enforce minimum validator coverage before accepting assured tasks.
+	// The floor checks both validator count (from ValidatorRegistry) and replay-reserve
+	// health (circuit-breaker). Coverage counts are refreshed every 10 s in the metrics
+	// goroutine; the initial population happens here so the first tasks are not
+	// spuriously rejected due to a zero count.
+	secFloor := assurance.NewSecurityFloor(&cfg.Assurance)
+	secFloor.SetReplayReserve(stack.replayReserve)
+	if stack.validatorReg != nil {
+		for _, cat := range cfg.Assurance.StructuredCategories {
+			count := stack.validatorReg.ActiveCountForCategory(cat)
+			secFloor.SetState(assurance.CategorySecurityState{
+				Category:       cat,
+				ValidatorCount: float64(count),
+			})
+		}
+	}
+	stack.taskMgr.SetSecurityFloor(secFloor)
+
 	av := autovalidator.NewAutoValidator(stack.engine, testnetValidatorID, 5*time.Second)
 	av.SetFeeCollector(stack.feeCollector, crypto.AgentID(genesis.BucketTreasury))
 	av.SetGenerationLedger(stack.generation)
@@ -823,6 +922,11 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	var canaryMgr *canary.CanaryManager
 	if stack.store != nil {
 		replayCoord := replay.NewReplayCoordinator(replay.DefaultReplayPolicy(), stack.store)
+		// Bootstrap overlay: replaces the hardcoded policy sample rates with the
+		// lifecycle-aware rates from BootstrapOverride. Elevated rates (40/50/75%)
+		// during bootstrap phase; normal rates (20/35/50%) once both exit conditions
+		// (duration + validator count) are met.
+		replayCoord.SetBootstrapRateSource(stack.bootstrapOvr)
 		av.SetReplayCoordinator(replayCoord)
 
 		// ReplayEnforcer maps completed outcomes to task state changes.
@@ -842,6 +946,16 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			replayDetails,
 			30*time.Second, // poll every 30 seconds
 		)
+		// Wire assignment engine so each replay job is assigned to an
+		// independent validator before the InspectionExecutor processes it.
+		if stack.assignmentEng != nil {
+			stack.replayRunner.SetReplayAssigner(&replayAssignerAdapter{eng: stack.assignmentEng})
+		}
+		// Wire slash engine so "slash_recommended" verdicts apply an economic
+		// penalty to the original worker immediately.
+		if stack.slashEng != nil {
+			replayEnforcer.SetSlashExecutor(&slashEngineAdapter{eng: stack.slashEng})
+		}
 		stack.replayRunner.Start()
 
 		// SubmissionProcessor handles POST /v1/replay/submit: external replay
@@ -900,6 +1014,10 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			stack.assignmentEng.SetCalibrationSource(&validatorCalibrationAdapter{mgr: canaryMgr})
 		}
 	}
+
+	// ReplayReserve: accrue a fraction of each assured task's assurance fee into
+	// the per-category pool that funds replay-executor minimum payouts.
+	av.SetReplayReserve(stack.replayReserve, cfg.Assurance.ReplayReserveShare)
 
 	// Task marketplace integration is conditional on --marketplace flag.
 	if enableMarketplace {
@@ -980,6 +1098,12 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		if submissionProc != nil {
 			apiSrv.SetSubmissionProcessor(submissionProc)
 		}
+		// Wire the challenge manager so the challenge bond lifecycle endpoints
+		// are active (POST /v1/challenges, POST /v1/challenges/{id}/resolve,
+		// GET /v1/challenges/{task_id}).
+		if stack.challengeMgr != nil {
+			apiSrv.SetChallengeManager(&challengeManagerAdapter{mgr: stack.challengeMgr})
+		}
 	}
 	apiSrv.SetEconomics(stack.walletMgr, stack.stakeManager, stack.feeCollector)
 	apiSrv.SetMinTaskBudget(cfg.Tasks.MinTaskBudget)
@@ -1047,6 +1171,17 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 				nodeMetrics.DAGTips.Set(int64(len(stack.dag.Tips())))
 				nodeMetrics.PeerCount.Set(int64(node.PeerCount()))
 				nodeMetrics.UptimeSeconds.Set(int64(time.Since(nodeStart).Seconds()))
+				// Refresh SecurityFloor per-category validator counts so PostTask
+				// uses live coverage data for assured-lane enforcement.
+				if stack.validatorReg != nil {
+					for _, cat := range cfg.Assurance.StructuredCategories {
+						count := stack.validatorReg.ActiveCountForCategory(cat)
+						secFloor.SetState(assurance.CategorySecurityState{
+							Category:       cat,
+							ValidatorCount: float64(count),
+						})
+					}
+				}
 			}
 		}
 	}()

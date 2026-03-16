@@ -18,6 +18,16 @@ type calibrationSource interface {
 	CategoryCalibrationForActor(actorID string, category string) (*canary.CategoryCalibration, error)
 }
 
+// bootstrapRateSource is satisfied by *assurance.BootstrapOverride. Defined
+// locally so the replay package does not import the assurance package.
+// EffectiveRates returns (baseline, generation, newAgent) sample rates
+// representing the full lifecycle rate schedule: elevated during the bootstrap
+// phase, normal rates once the phase ends.
+type bootstrapRateSource interface {
+	IsBootstrapActive() bool
+	EffectiveRates() (float64, float64, float64)
+}
+
 // CalibrationDecision records the calibration-aware scrutiny adjustment made
 // during a ShouldReplay call. It is stored in memory (not persisted) for
 // inspection and logging.
@@ -101,6 +111,10 @@ type ReplayCoordinator struct {
 	calibration         calibrationSource    // optional; nil = no calibration-aware adjustments
 	calibrationEnabled  bool                 // gates calibration adjustment; default false (opt-in)
 	lastCalibDecision   *CalibrationDecision // most recent calibration decision (in-memory only)
+	// bootstrap is the optional bootstrap rate source. When set, ShouldReplay
+	// derives its sample rates from this source rather than the static policy
+	// fields, honouring elevated bootstrap rates and post-bootstrap normal rates.
+	bootstrap bootstrapRateSource
 }
 
 // NewReplayCoordinator returns a ReplayCoordinator configured with policy and
@@ -136,6 +150,18 @@ func (c *ReplayCoordinator) SetCalibrationSource(src calibrationSource) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calibration = src
+}
+
+// SetBootstrapRateSource wires a bootstrap rate source. When set, ShouldReplay
+// uses the rates returned by EffectiveRates() instead of the ReplayPolicy
+// field values, giving the bootstrap phase its elevated replay coverage and
+// restoring normal rates once both exit conditions are met.
+// Call before Start. If not called (default), the ReplayPolicy fields govern —
+// fully backward compatible.
+func (c *ReplayCoordinator) SetBootstrapRateSource(src bootstrapRateSource) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.bootstrap = src
 }
 
 // LastCalibrationDecision returns the most recent CalibrationDecision computed
@@ -192,9 +218,21 @@ func (c *ReplayCoordinator) ShouldReplay(
 		return true, "low_confidence"
 	}
 
+	// Resolve effective sample rates. A wired bootstrap source overrides the
+	// static ReplayPolicy values, encoding the full lifecycle rate schedule:
+	// elevated during the bootstrap phase, normal rates once both exit
+	// conditions (duration + validator count) are met. Falls back to the
+	// ReplayPolicy field values when no bootstrap source is wired.
+	sampleRate := c.policy.SampleRate
+	newAgentRate := c.policy.NewAgentSampleRate
+	generationRate := c.policy.GenerationSampleRate
+	if c.bootstrap != nil {
+		sampleRate, generationRate, newAgentRate = c.bootstrap.EffectiveRates()
+	}
+
 	// e. New-agent probationary sampling (elevated rate for agents with < 10 tasks).
 	if agentTaskCount < 10 {
-		if c.rng.Float64() < c.policy.NewAgentSampleRate {
+		if c.rng.Float64() < newAgentRate {
 			return true, "probation"
 		}
 	}
@@ -202,7 +240,7 @@ func (c *ReplayCoordinator) ShouldReplay(
 	// f. Generation-eligible tasks are sampled at an elevated rate because their
 	// outputs may seed future model training.
 	if generationEligible {
-		if c.rng.Float64() < c.policy.GenerationSampleRate {
+		if c.rng.Float64() < generationRate {
 			return true, "sampled"
 		}
 	}
@@ -212,9 +250,9 @@ func (c *ReplayCoordinator) ShouldReplay(
 	// Only applies when both a calibration source is configured AND
 	// calibrationEnabled is true; records a CalibrationDecision in all cases
 	// when source is set (even when disabled, for explainability).
-	effectiveRate := c.policy.SampleRate
+	effectiveRate := sampleRate
 	if c.calibration != nil {
-		effectiveRate = c.applyCalibrationAdjustment(agentID, category, c.policy.SampleRate)
+		effectiveRate = c.applyCalibrationAdjustment(agentID, category, sampleRate)
 	}
 
 	// h. Baseline random sample of ordinary tasks (calibration-adjusted rate).

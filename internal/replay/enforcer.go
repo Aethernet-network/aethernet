@@ -8,6 +8,16 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/verification"
 )
 
+// slashExecutor applies an economic penalty to a validator identified by ID.
+// *validator.SlashEngine satisfies this interface via an adapter in cmd/node
+// — keeping the replay package free of the validator package import.
+type slashExecutor interface {
+	// Slash applies the named offense to the validator. Returns the slash
+	// amount (µAET) and any error. Errors are logged but non-fatal — the
+	// replay outcome state change has already been committed.
+	Slash(validatorID string, offense string) (slashAmount uint64, err error)
+}
+
 // canaryEvalSource is the interface for canary task lookup by protocol task ID.
 // *canary.CanaryManager satisfies this interface without importing the canary
 // package back into replay (the import goes one-way: replay → canary).
@@ -52,6 +62,7 @@ type ReplayEnforcer struct {
 	taskMgr    taskReplayInterface
 	resolver   *ReplayResolver
 	genTrigger generationTrigger // optional; nil when generation hold not in use
+	slashExec  slashExecutor     // optional; nil when slashing not configured
 
 	// canaryLookup and canaryEval are optional. When both are non-nil, replay
 	// outcomes for canary tasks emit a CalibrationSignal with
@@ -84,6 +95,15 @@ func NewReplayEnforcer(
 func (e *ReplayEnforcer) SetCanaryEvaluator(src canaryEvalSource, rec canaryEvalRecorder) {
 	e.canaryLookup = src
 	e.canaryEval = rec
+}
+
+// SetSlashExecutor wires a SlashEngine adapter so the enforcer applies an
+// economic penalty to the original worker when a "slash_recommended" verdict
+// is reached. Slash errors are logged but non-fatal — the task state change
+// has already been committed before Slash is called.
+// When not called (default), no slashing occurs — backward compatible.
+func (e *ReplayEnforcer) SetSlashExecutor(se slashExecutor) {
+	e.slashExec = se
 }
 
 // ProcessReplayOutcome records outcome, evaluates the verdict, and applies the
@@ -137,6 +157,26 @@ func (e *ReplayEnforcer) ProcessReplayOutcome(
 	if err := e.taskMgr.SetReplayStatus(outcome.TaskID, newStatus, outcome.JobID); err != nil {
 		slog.Error("enforcer: set replay status", "task_id", outcome.TaskID, "status", newStatus, "err", err)
 		return verdict, err
+	}
+
+	// Apply economic consequences for adversarial outcomes.
+	// "slash_recommended": execute slash immediately (fraudulent approval).
+	// "open_challenge":    slash is deferred pending dispute resolution.
+	switch verdict.Action {
+	case "slash_recommended":
+		if e.slashExec != nil && outcome.ReplayerID != "" {
+			slashAmt, slashErr := e.slashExec.Slash(outcome.ReplayerID, "fraudulent_approval")
+			if slashErr != nil {
+				slog.Error("enforcer: slash failed",
+					"task_id", outcome.TaskID, "agent_id", outcome.ReplayerID, "err", slashErr)
+			} else {
+				slog.Info("enforcer: slash applied",
+					"task_id", outcome.TaskID, "agent_id", outcome.ReplayerID, "slash_amount", slashAmt)
+			}
+		}
+	case "open_challenge":
+		slog.Info("enforcer: challenge opened, slash deferred pending dispute resolution",
+			"task_id", outcome.TaskID, "agent_id", outcome.ReplayerID)
 	}
 
 	// Canary calibration: if this task is a protocol-internal canary, emit a

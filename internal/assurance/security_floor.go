@@ -1,6 +1,7 @@
 package assurance
 
 import (
+	"log/slog"
 	"sync"
 
 	"github.com/Aethernet-network/aethernet/internal/config"
@@ -21,9 +22,10 @@ type CategorySecurityState struct {
 // Callers record live coverage via SetState; PostTask (or the API layer)
 // calls CheckLane before accepting a task in an assured lane.
 type SecurityFloor struct {
-	mu     sync.RWMutex
-	states map[string]float64 // category → validatorCount
-	cfg    *config.AssuranceConfig
+	mu            sync.RWMutex
+	states        map[string]float64 // category → validatorCount
+	cfg           *config.AssuranceConfig
+	replayReserve *ReplayReserve // optional; nil disables the circuit-breaker
 }
 
 // NewSecurityFloor creates a SecurityFloor wired to the given AssuranceConfig.
@@ -32,6 +34,18 @@ func NewSecurityFloor(cfg *config.AssuranceConfig) *SecurityFloor {
 		states: make(map[string]float64),
 		cfg:    cfg,
 	}
+}
+
+// SetReplayReserve wires the replay reserve. When set, CheckLane applies the
+// reserve circuit-breaker: if the category's reserve balance is below the
+// minimum safe level, the requested lane is downgraded to LaneNone regardless
+// of the validator count. This prevents new assured tasks from being accepted
+// while the category's replay funding is depleted.
+// Call before any concurrent requests arrive (i.e., before node Start).
+func (sf *SecurityFloor) SetReplayReserve(rr *ReplayReserve) {
+	sf.mu.Lock()
+	defer sf.mu.Unlock()
+	sf.replayReserve = rr
 }
 
 // SetState records the current validator coverage for a category. Subsequent
@@ -62,6 +76,18 @@ func (sf *SecurityFloor) CheckLane(category string, lane AssuranceLane) *Assuran
 
 	required := sf.floorForLane(lane)
 	if count >= required {
+		// Security: replay-reserve circuit-breaker.
+		// If the per-category reserve is below the minimum safe level, reject
+		// the assured lane. Accepting new assured work while the reserve is
+		// depleted would consume replay-executor funds that do not exist.
+		rr := sf.replayReserve
+		if rr != nil && !rr.CategoryHealthy(category) {
+			slog.Warn("assurance: security-floor circuit-breaker: replay reserve depleted — downgrading lane",
+				"category", category,
+				"requested_lane", lane,
+			)
+			return &AssuranceFeeResult{Lane: LaneNone}
+		}
 		return &AssuranceFeeResult{Lane: lane}
 	}
 	// Floor not met — return the best available downgraded lane.

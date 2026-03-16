@@ -7,6 +7,15 @@ import (
 	"time"
 )
 
+// replayAssigner selects an independent validator to execute a replay job.
+// *validator.AssignmentEngine satisfies this interface via an adapter in
+// cmd/node — keeping the replay package free of the validator package import.
+type replayAssigner interface {
+	// SelectReplayExecutor returns the validator ID of the selected executor,
+	// or an error when no eligible validator exists.
+	SelectReplayExecutor(category, originalVerifierID, originalVerifierCluster string) (validatorID string, err error)
+}
+
 // ReplayRunner polls for pending replay jobs on a fixed interval, executes each
 // through a ReplayExecutor, and submits the resulting outcome to a
 // ReplayEnforcer. It is safe to start and stop once; subsequent Start calls are
@@ -16,6 +25,7 @@ type ReplayRunner struct {
 	executor    ReplayExecutor
 	enforcer    *ReplayEnforcer
 	taskDetails TaskDetailsProvider // optional; zero values used when nil
+	assigner    replayAssigner      // optional; executor independence when set
 	interval    time.Duration
 	stop        chan struct{}
 	once        sync.Once
@@ -39,6 +49,16 @@ func NewReplayRunner(
 		interval:    interval,
 		stop:        make(chan struct{}),
 	}
+}
+
+// SetReplayAssigner wires an AssignmentEngine adapter so the runner selects an
+// independent validator before dispatching each job. When called, the selected
+// validator ID is stamped onto the job's AssignedExecutorID field so that
+// POST /v1/replay/submit can enforce executor independence. When not called
+// (default), no assignment is performed and any authenticated submitter is
+// accepted — backward compatible.
+func (r *ReplayRunner) SetReplayAssigner(ra replayAssigner) {
+	r.assigner = ra
 }
 
 // Start launches the polling goroutine. Safe to call once.
@@ -94,6 +114,21 @@ func (r *ReplayRunner) processJob(job *ReplayJob) {
 			"deadline", job.SubmissionDeadline.Format(time.RFC3339),
 		)
 		return
+	}
+
+	// Assign an independent executor when an AssignmentEngine is wired.
+	// The assigned validator ID is stored on the job so SubmissionProcessor
+	// can enforce that only the assigned executor may submit results.
+	if r.assigner != nil {
+		executorID, assignErr := r.assigner.SelectReplayExecutor(job.Category, job.AgentID, "")
+		if assignErr != nil {
+			slog.Warn("replay-runner: could not assign executor, falling back to InspectionExecutor",
+				"job_id", job.ID, "task_id", job.TaskID, "err", assignErr)
+		} else {
+			job.AssignedExecutorID = executorID
+			slog.Info("replay-runner: executor assigned",
+				"job_id", job.ID, "task_id", job.TaskID, "executor_id", executorID)
+		}
 	}
 
 	ctx := context.Background()

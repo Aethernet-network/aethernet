@@ -567,6 +567,38 @@ func (r *ValidatorRegistry) ActiveEligibleCount() int {
 	return count
 }
 
+// ActiveCountForCategory returns the number of active/probationary validators
+// that are eligible for the given category. A validator qualifies if:
+//   - its Status is StatusActive or StatusProbationary, AND
+//   - its Categories slice is empty (meaning all categories), OR the slice
+//     explicitly contains category.
+//
+// Empty-categories validators are counted for every category because they
+// declared no category restriction at registration time.
+// Used by SecurityFloor to supply live validator coverage counts.
+func (r *ValidatorRegistry) ActiveCountForCategory(category string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	count := 0
+	for _, v := range r.validators {
+		if v.Status != StatusActive && v.Status != StatusProbationary {
+			continue
+		}
+		if len(v.Categories) == 0 {
+			// All-category validator: eligible for any category.
+			count++
+			continue
+		}
+		for _, c := range v.Categories {
+			if c == category {
+				count++
+				break
+			}
+		}
+	}
+	return count
+}
+
 // Get returns the validator record for the given validator ID. Returns
 // ErrRegistryValidatorNotFound if not present.
 func (r *ValidatorRegistry) Get(validatorID string) (*Validator, error) {

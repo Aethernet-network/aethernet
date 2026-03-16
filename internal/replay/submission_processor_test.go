@@ -539,3 +539,95 @@ func TestCoordinatedFraudBlindSpot_AuthenticatedSubmitterConfirmsFalseClaims(t *
 			outcome.AnomalyFlags)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Executor independence (AssignedExecutorID) tests
+// ---------------------------------------------------------------------------
+
+// TestSubmissionProcessor_WrongExecutor_Rejected verifies that when a job has
+// an AssignedExecutorID and the submission comes from a different submitter,
+// ErrUnauthorizedExecutor is returned.
+func TestSubmissionProcessor_WrongExecutor_Rejected(t *testing.T) {
+	proc, ms, _ := newProcessor(t)
+
+	job := minJobForSubmission("job-exec-wrong", "task-exec-wrong", "code", nil)
+	job.AssignedExecutorID = "validator-assigned"
+	storeJob(t, ms, job)
+
+	sub := &ReplaySubmission{
+		JobID:       "job-exec-wrong",
+		TaskID:      "task-exec-wrong",
+		Category:    "code",
+		SubmitterID: "validator-different", // not the assigned executor
+	}
+	_, _, err := proc.Process(sub)
+	if err == nil {
+		t.Fatal("expected ErrUnauthorizedExecutor for wrong submitter")
+	}
+	if !errors.Is(err, ErrUnauthorizedExecutor) {
+		t.Errorf("error = %v; want ErrUnauthorizedExecutor", err)
+	}
+}
+
+// TestSubmissionProcessor_CorrectExecutor_Accepted verifies that when the
+// submitter matches the AssignedExecutorID, the submission proceeds normally.
+func TestSubmissionProcessor_CorrectExecutor_Accepted(t *testing.T) {
+	ms := newMemStore()
+	resolver := NewReplayResolver(ms)
+	tm := newFakeTaskMgr()
+	gen := &fakeGenTrigger{}
+	enforcer := NewReplayEnforcer(tm, resolver, gen)
+	proc := NewSubmissionProcessor(ms, enforcer, nil)
+
+	job := minJobForSubmission("job-exec-ok", "task-exec-ok", "code", []string{"go_test"})
+	job.AssignedExecutorID = "validator-assigned"
+	storeJob(t, ms, job)
+
+	sub := &ReplaySubmission{
+		JobID:       "job-exec-ok",
+		TaskID:      "task-exec-ok",
+		Category:    "code",
+		SubmitterID: "validator-assigned", // matches
+		CheckResults: []SubmittedCheckResult{
+			{CheckType: "go_test", Pass: true},
+		},
+		SubmittedAt: time.Now(),
+	}
+	_, verdict, err := proc.Process(sub)
+	if err != nil {
+		t.Fatalf("Process: unexpected error for correct executor: %v", err)
+	}
+	if verdict == nil {
+		t.Fatal("verdict must not be nil when correct executor submits")
+	}
+}
+
+// TestSubmissionProcessor_NoAssignedExecutor_AnySubmitterAccepted verifies that
+// when AssignedExecutorID is empty, any SubmitterID is accepted — backward
+// compatible with the pre-assignment-engine path.
+func TestSubmissionProcessor_NoAssignedExecutor_AnySubmitterAccepted(t *testing.T) {
+	ms := newMemStore()
+	resolver := NewReplayResolver(ms)
+	tm := newFakeTaskMgr()
+	enforcer := NewReplayEnforcer(tm, resolver, nil)
+	proc := NewSubmissionProcessor(ms, enforcer, nil)
+
+	job := minJobForSubmission("job-exec-any", "task-exec-any", "code", []string{"go_test"})
+	// AssignedExecutorID is empty — any submitter is accepted.
+	storeJob(t, ms, job)
+
+	sub := &ReplaySubmission{
+		JobID:       "job-exec-any",
+		TaskID:      "task-exec-any",
+		Category:    "code",
+		SubmitterID: "any-random-submitter",
+		CheckResults: []SubmittedCheckResult{
+			{CheckType: "go_test", Pass: true},
+		},
+		SubmittedAt: time.Now(),
+	}
+	_, _, err := proc.Process(sub)
+	if errors.Is(err, ErrUnauthorizedExecutor) {
+		t.Errorf("empty AssignedExecutorID must accept any submitter; got %v", err)
+	}
+}

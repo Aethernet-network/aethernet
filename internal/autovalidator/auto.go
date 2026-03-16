@@ -47,6 +47,13 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/verification"
 )
 
+// replayReserveAccruer is the minimal interface required for per-category
+// replay reserve accrual. *assurance.ReplayReserve satisfies this interface.
+// Defined locally to keep the autovalidator free of an assurance import.
+type replayReserveAccruer interface {
+	Accrue(category string, amount uint64) error
+}
+
 // canarySource is the interface satisfied by *canary.Injector. Defined locally
 // to avoid import cycles and to keep the dependency surface minimal.
 type canarySource interface {
@@ -130,6 +137,12 @@ type AutoValidator struct {
 	// alter task settlement or reputation.
 	canaryEvalStore canaryEvalSource
 	canaryEval      canaryEvalRecorder
+
+	// replayReserve is the optional per-category replay reserve. When set and a
+	// task has a non-zero AssuranceFee, settleTask accrues replayReserveShare
+	// of the fee into the category's reserve after a successful escrow release.
+	replayReserve     replayReserveAccruer
+	replayReserveShare float64 // fraction of AssuranceFee allocated to the reserve
 
 	// taskStaleness is the minimum age a submitted task must reach before the
 	// auto-validator processes it. Defaults to 10 seconds so the task poster
@@ -261,6 +274,16 @@ func (av *AutoValidator) SetCanaryEvaluator(src canaryEvalSource, rec canaryEval
 // ProcessReplayOutcome.
 func (av *AutoValidator) SetReplayCoordinator(c *replay.ReplayCoordinator) {
 	av.replayCoordinator = c
+}
+
+// SetReplayReserve wires the per-category replay reserve. When set, settleTask
+// accrues a portion of each assured task's assurance fee into the category's
+// reserve, funding future replay-executor minimum payouts. reserveShare must
+// be in [0, 1] (e.g. 0.25 for 25%). Call before Start. When not called
+// (default), no accrual occurs — backward compatible.
+func (av *AutoValidator) SetReplayReserve(rr replayReserveAccruer, reserveShare float64) {
+	av.replayReserve = rr
+	av.replayReserveShare = reserveShare
 }
 
 // SetDAG wires the causal DAG so that settled task payments are recorded as
@@ -674,6 +697,22 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score, hol
 			if av.feeCollector != nil && fee > 0 {
 				av.feeCollector.TrackFee(fee, burned, treasuryAmount)
 				slog.Info("auto-validator: collected fee", "fee", fee, "task_id", task.ID, "net_to_worker", netAmount)
+			}
+			// Accrue the replay-reserve share of the assurance fee into the
+			// per-category reserve pool. Only fires for assured tasks (AssuranceFee > 0).
+			// This funds future replay-executor minimum payouts for this category.
+			if av.replayReserve != nil && task.AssuranceFee > 0 {
+				contribution := uint64(av.replayReserveShare * float64(task.AssuranceFee))
+				if contribution > 0 {
+					if err := av.replayReserve.Accrue(task.Category, contribution); err != nil {
+						slog.Error("auto-validator: replay reserve accrual failed",
+							"task_id", task.ID,
+							"category", task.Category,
+							"contribution", contribution,
+							"err", err,
+						)
+					}
+				}
 			}
 			// Record the payout as a Transfer event in the DAG so the activity
 			// feed shows task settlements alongside peer-to-peer transfers.

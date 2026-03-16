@@ -557,3 +557,60 @@ func TestActiveValidatorsForCategory(t *testing.T) {
 		t.Errorf("expected 0 writing validators, got %d", len(writingVals))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ActiveCountForCategory
+// ---------------------------------------------------------------------------
+
+// TestActiveCountForCategory_ExplicitCategories verifies that validators whose
+// Categories slice contains the queried category are counted.
+func TestActiveCountForCategory_ExplicitCategories(t *testing.T) {
+	r := testRegistry()
+	r.Register("agent-a", sufficientStake, []string{"code"}, false)
+	r.Register("agent-b", sufficientStake, []string{"data"}, false)
+	r.Register("agent-c", sufficientStake, []string{"code", "data"}, true)
+
+	if got := r.ActiveCountForCategory("code"); got != 2 {
+		t.Errorf("ActiveCountForCategory(code): got %d, want 2", got)
+	}
+	if got := r.ActiveCountForCategory("data"); got != 2 {
+		t.Errorf("ActiveCountForCategory(data): got %d, want 2", got)
+	}
+	if got := r.ActiveCountForCategory("writing"); got != 0 {
+		t.Errorf("ActiveCountForCategory(writing): got %d, want 0", got)
+	}
+}
+
+// TestActiveCountForCategory_AllCategoryValidator verifies that a validator
+// registered with an empty Categories slice (all-category) is counted for
+// every queried category.
+func TestActiveCountForCategory_AllCategoryValidator(t *testing.T) {
+	r := testRegistry()
+	// All-category validator (empty slice).
+	r.Register("agent-all", sufficientStake, nil, true)
+	r.Register("agent-code", sufficientStake, []string{"code"}, false)
+
+	// "code" → all-category validator + explicit code validator = 2.
+	if got := r.ActiveCountForCategory("code"); got != 2 {
+		t.Errorf("ActiveCountForCategory(code): got %d, want 2", got)
+	}
+	// "data" → only all-category validator = 1.
+	if got := r.ActiveCountForCategory("data"); got != 1 {
+		t.Errorf("ActiveCountForCategory(data): got %d, want 1", got)
+	}
+}
+
+// TestActiveCountForCategory_ExcludesInactive verifies that suspended and
+// excluded validators are not counted.
+func TestActiveCountForCategory_ExcludesInactive(t *testing.T) {
+	r := testRegistry()
+	v, _ := r.Register("agent-x", sufficientStake, []string{"code"}, true)
+	// Manually suspend the validator.
+	r.mu.Lock()
+	r.validators[v.ID].Status = StatusSuspended
+	r.mu.Unlock()
+
+	if got := r.ActiveCountForCategory("code"); got != 0 {
+		t.Errorf("ActiveCountForCategory(code): got %d, want 0 (validator suspended)", got)
+	}
+}

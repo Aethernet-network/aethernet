@@ -101,6 +101,34 @@ type calibrationAgentsSource interface {
 	AllSignals() ([]*canary.CalibrationSignal, error)
 }
 
+// challengeSource is the minimal interface for challenge bond lifecycle
+// operations exposed via the API. *assurance.ChallengeManager satisfies this
+// interface via an adapter in cmd/node — the api package uses primitive types
+// only so it does not need to import the assurance package.
+type challengeSource interface {
+	// OpenChallenge records a new challenge bond. bond is the µAET amount.
+	OpenChallenge(taskID, challengerID, targetID string, bond uint64) (id string, createdAt string, err error)
+	// ResolveChallenge finalises a challenge. outcome must be "succeeded",
+	// "failed", or "partial". fraudBounty is µAET (only relevant for "succeeded").
+	ResolveChallenge(challengeID string, outcome string, fraudBounty uint64) (refundedBond, forfeitAmount uint64, err error)
+	// ChallengesForTask returns all challenges associated with a task ID.
+	ChallengesForTask(taskID string) []ChallengeRecord
+}
+
+// ChallengeRecord is the API-facing projection of a challenge bond record.
+// Exported so that cmd/node adapters can reference it without importing server
+// implementation details.
+type ChallengeRecord struct {
+	ID           string `json:"id"`
+	TaskID       string `json:"task_id"`
+	ChallengerID string `json:"challenger_id"`
+	TargetID     string `json:"target_id"`
+	Bond         uint64 `json:"bond"`
+	Status       string `json:"status"`
+	CreatedAt    string `json:"created_at"`
+	ResolvedAt   string `json:"resolved_at,omitempty"`
+}
+
 // taskRouterInterface is the subset of *router.Router used by the API server.
 // Using a local interface keeps the server testable without a real router.
 type taskRouterInterface interface {
@@ -225,6 +253,11 @@ type Server struct {
 	// When non-nil, GET /v1/admin/calibration/agents returns a list of all actors
 	// with calibration data, their per-category accuracy, and a scrutiny bucket.
 	calibrationAgentsStore calibrationAgentsSource
+
+	// challengeManager — optional; set via SetChallengeManager after construction.
+	// When non-nil, POST /v1/challenges, POST /v1/challenges/{id}/resolve, and
+	// GET /v1/challenges/{task_id} are active. When nil the endpoints return 501.
+	challengeManager challengeSource
 }
 
 // NewServer constructs an API Server backed by the provided node components.
@@ -379,6 +412,11 @@ func (s *Server) registerL3Routes(mux *http.ServeMux) {
 	// Replay submission intake — external executors submit raw check results;
 	// the protocol performs the comparison and returns the derived verdict.
 	mux.HandleFunc("POST /v1/replay/submit", s.handleReplaySubmit)
+	// Challenge bond lifecycle: open, resolve, and list per-task.
+	// Literal resolve path registered before the wildcard {id} catch-all.
+	mux.HandleFunc("POST /v1/challenges/{id}/resolve", s.handleResolveChallenge)
+	mux.HandleFunc("POST /v1/challenges", s.handleOpenChallenge)
+	mux.HandleFunc("GET /v1/challenges/{task_id}", s.handleListChallenges)
 	// Admin calibration queries — list all actors (literal beats wildcard in Go 1.22).
 	mux.HandleFunc("GET /v1/admin/calibration/agents", s.handleAdminCalibrationAgents)
 	// Admin calibration query — per-actor canary accuracy rollup.
@@ -527,6 +565,14 @@ func (s *Server) SetCalibrationStore(cs calibrationSource) {
 // classification. When nil (default), the endpoint returns 501.
 func (s *Server) SetCalibrationAgentsStore(cs calibrationAgentsSource) {
 	s.calibrationAgentsStore = cs
+}
+
+// SetChallengeManager wires the ChallengeManager into the server. When non-nil,
+// POST /v1/challenges, POST /v1/challenges/{id}/resolve, and
+// GET /v1/challenges/{task_id} are active. When nil (default) these endpoints
+// return 501. Call before Start.
+func (s *Server) SetChallengeManager(cm challengeSource) {
+	s.challengeManager = cm
 }
 
 // isAuthenticated reports whether r carries a valid X-API-Key credential.
@@ -3163,6 +3209,158 @@ func (s *Server) handleReplaySubmit(w http.ResponseWriter, r *http.Request) {
 		Outcome: outcome,
 		Verdict: verdict,
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Challenge endpoints
+// ---------------------------------------------------------------------------
+
+// handleOpenChallenge records a new challenge bond for a task. The caller
+// must have already collected the bond amount from the challenger.
+//
+//	POST /v1/challenges
+//
+//	Request body:  {"task_id":"…","challenger_id":"…","target_id":"…","bond":1000000}
+//	Response 200:  {"id":"…","task_id":"…","challenger_id":"…","target_id":"…","bond":1000000,"status":"open","created_at":"…"}
+//	Response 400:  invalid request body
+//	Response 401:  authentication required
+//	Response 501:  challenge manager not enabled
+func (s *Server) handleOpenChallenge(w http.ResponseWriter, r *http.Request) {
+	if s.challengeManager == nil {
+		writeError(w, http.StatusNotImplemented, "challenge manager not enabled")
+		return
+	}
+	if s.requireAuth && s.platformKeys != nil && !s.isAuthenticated(r) {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if s.writeLimiter != nil && !s.writeLimiter.Allow(ratelimit.ExtractIP(r)) {
+		if s.nodeMetrics != nil {
+			s.nodeMetrics.RateLimitRejects.Inc()
+		}
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var body struct {
+		TaskID       string `json:"task_id"`
+		ChallengerID string `json:"challenger_id"`
+		TargetID     string `json:"target_id"`
+		Bond         uint64 `json:"bond"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if body.TaskID == "" || body.ChallengerID == "" || body.TargetID == "" {
+		writeError(w, http.StatusBadRequest, "task_id, challenger_id, and target_id are required")
+		return
+	}
+	id, createdAt, err := s.challengeManager.OpenChallenge(body.TaskID, body.ChallengerID, body.TargetID, body.Bond)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, ChallengeRecord{
+		ID:           id,
+		TaskID:       body.TaskID,
+		ChallengerID: body.ChallengerID,
+		TargetID:     body.TargetID,
+		Bond:         body.Bond,
+		Status:       "open",
+		CreatedAt:    createdAt,
+	})
+}
+
+// handleResolveChallenge finalises a challenge with the given outcome.
+//
+//	POST /v1/challenges/{id}/resolve
+//
+//	Request body:  {"outcome":"succeeded"|"failed"|"partial","fraud_bounty":0}
+//	Response 200:  {"challenge_id":"…","outcome":"…","refunded_bond":0,"forfeit_amount":0}
+//	Response 400:  invalid body / unknown outcome
+//	Response 401:  authentication required
+//	Response 501:  challenge manager not enabled
+func (s *Server) handleResolveChallenge(w http.ResponseWriter, r *http.Request) {
+	if s.challengeManager == nil {
+		writeError(w, http.StatusNotImplemented, "challenge manager not enabled")
+		return
+	}
+	if s.requireAuth && s.platformKeys != nil && !s.isAuthenticated(r) {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if s.writeLimiter != nil && !s.writeLimiter.Allow(ratelimit.ExtractIP(r)) {
+		if s.nodeMetrics != nil {
+			s.nodeMetrics.RateLimitRejects.Inc()
+		}
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+		return
+	}
+	challengeID := r.PathValue("id")
+	if challengeID == "" {
+		writeError(w, http.StatusBadRequest, "challenge id is required")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var body struct {
+		Outcome     string `json:"outcome"`
+		FraudBounty uint64 `json:"fraud_bounty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if body.Outcome == "" {
+		writeError(w, http.StatusBadRequest, "outcome is required")
+		return
+	}
+	refundedBond, forfeitAmount, err := s.challengeManager.ResolveChallenge(challengeID, body.Outcome, body.FraudBounty)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"challenge_id":   challengeID,
+		"outcome":        body.Outcome,
+		"refunded_bond":  refundedBond,
+		"forfeit_amount": forfeitAmount,
+	})
+}
+
+// handleListChallenges returns all challenges for the given task ID.
+//
+//	GET /v1/challenges/{task_id}
+//
+//	Response 200: {"challenges":[…]}
+//	Response 401: authentication required
+//	Response 501: challenge manager not enabled
+func (s *Server) handleListChallenges(w http.ResponseWriter, r *http.Request) {
+	if s.challengeManager == nil {
+		writeError(w, http.StatusNotImplemented, "challenge manager not enabled")
+		return
+	}
+	if s.requireAuth && s.platformKeys != nil && !s.isAuthenticated(r) {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if s.readLimiter != nil && !s.readLimiter.Allow(ratelimit.ExtractIP(r)) {
+		if s.nodeMetrics != nil {
+			s.nodeMetrics.RateLimitRejects.Inc()
+		}
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+		return
+	}
+	taskID := r.PathValue("task_id")
+	if taskID == "" {
+		writeError(w, http.StatusBadRequest, "task_id is required")
+		return
+	}
+	challenges := s.challengeManager.ChallengesForTask(taskID)
+	writeJSON(w, http.StatusOK, map[string]any{"challenges": challenges})
 }
 
 // handleAdminCalibration returns the canary calibration rollup for a single

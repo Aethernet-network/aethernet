@@ -170,3 +170,65 @@ func TestSecurityFloor_ConcurrentSetAndCheck(t *testing.T) {
 	}
 	<-done
 }
+
+// ---------------------------------------------------------------------------
+// Replay-reserve circuit-breaker
+// ---------------------------------------------------------------------------
+
+// newHealthyReserve returns a ReplayReserve whose balance is well above the
+// circuit-breaker threshold for category "code" by seeding it with 10 ×
+// MinReplayPayout.
+func newHealthyReserve(cfg *config.AssuranceConfig) *ReplayReserve {
+	rr := NewReplayReserve(cfg, nil)
+	target := 10 * cfg.MinReplayPayout
+	_ = rr.Accrue("code", target)
+	return rr
+}
+
+// TestSecurityFloor_CircuitBreaker_HealthyReserve_ApprovedsLane verifies that
+// when the validator floor is met AND the reserve is healthy, the requested lane
+// is granted.
+func TestSecurityFloor_CircuitBreaker_HealthyReserve_ApprovesLane(t *testing.T) {
+	d := config.DefaultConfig()
+	sf := NewSecurityFloor(&d.Assurance)
+	sf.SetReplayReserve(newHealthyReserve(&d.Assurance))
+	// Provide enough validators to meet the LaneHighAssurance floor (5.0).
+	sf.SetState(CategorySecurityState{Category: "code", ValidatorCount: 6.0})
+
+	result := sf.CheckLane("code", LaneHighAssurance)
+	if result.Lane != LaneHighAssurance {
+		t.Errorf("CheckLane: got %q, want %q (healthy reserve should not block lane)", result.Lane, LaneHighAssurance)
+	}
+}
+
+// TestSecurityFloor_CircuitBreaker_DepletedReserve_DowngradesLane verifies that
+// when the validator floor is met but the reserve is depleted (zero balance),
+// CheckLane downgrades to LaneNone as a circuit-breaker.
+func TestSecurityFloor_CircuitBreaker_DepletedReserve_DowngradesLane(t *testing.T) {
+	d := config.DefaultConfig()
+	sf := NewSecurityFloor(&d.Assurance)
+	// Empty reserve — CategoryHealthy will return false.
+	sf.SetReplayReserve(NewReplayReserve(&d.Assurance, nil))
+	// Provide enough validators to meet LaneHighAssurance floor.
+	sf.SetState(CategorySecurityState{Category: "code", ValidatorCount: 6.0})
+
+	result := sf.CheckLane("code", LaneHighAssurance)
+	if result.Lane != LaneNone {
+		t.Errorf("CheckLane: got %q, want %q (depleted reserve must trigger circuit-breaker)", result.Lane, LaneNone)
+	}
+}
+
+// TestSecurityFloor_CircuitBreaker_NilReserve_NoEffect verifies that when no
+// replay reserve is wired, the circuit-breaker is skipped and the lane check
+// proceeds on validator count alone (backward-compatible).
+func TestSecurityFloor_CircuitBreaker_NilReserve_NoEffect(t *testing.T) {
+	d := config.DefaultConfig()
+	sf := NewSecurityFloor(&d.Assurance)
+	// No SetReplayReserve call — nil reserve.
+	sf.SetState(CategorySecurityState{Category: "code", ValidatorCount: 6.0})
+
+	result := sf.CheckLane("code", LaneHighAssurance)
+	if result.Lane != LaneHighAssurance {
+		t.Errorf("CheckLane: got %q, want %q (nil reserve must not block lane)", result.Lane, LaneHighAssurance)
+	}
+}

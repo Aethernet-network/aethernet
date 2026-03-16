@@ -104,6 +104,12 @@ type ReplayJob struct {
 	// CalibrationAccuracy is the smoothed accuracy value observed for the
 	// actor in this task's category at the time of the scrutiny decision.
 	CalibrationAccuracy float64 `json:"calibration_accuracy,omitempty"`
+
+	// AssignedExecutorID is the validator ID selected by the AssignmentEngine
+	// to perform this replay. When non-empty, only this executor may submit
+	// results via POST /v1/replay/submit. Empty means any authenticated
+	// submitter is accepted (backward compatible).
+	AssignedExecutorID string `json:"assigned_executor_id,omitempty"`
 }
 
 // NewReplayJob constructs a ReplayJob from a verification packet's replay

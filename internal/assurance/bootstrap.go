@@ -127,6 +127,23 @@ func (b *BootstrapOverride) EffectiveReplayRates() BootstrapRates {
 // ComputeBootstrapReward
 // ---------------------------------------------------------------------------
 
+// EffectiveRates returns the three effective replay sample rates as separate
+// float64 values: (baseline, generation, newAgent). This satisfies the
+// replay.bootstrapRateSource interface without changing the struct-returning
+// EffectiveReplayRates method used by existing callers.
+//
+// When the bootstrap phase is active, the returned values are the elevated
+// bootstrap rates from cfg. Once both exit conditions are met, they are the
+// normal rates supplied at construction.
+func (b *BootstrapOverride) EffectiveRates() (float64, float64, float64) {
+	r := b.EffectiveReplayRates()
+	return r.BaselineReplay, r.GenerationReplay, r.NewAgentReplay
+}
+
+// ---------------------------------------------------------------------------
+// ComputeBootstrapReward
+// ---------------------------------------------------------------------------
+
 // ComputeBootstrapReward returns the per-task bootstrap reward (µAET) for the
 // given conditions.
 //

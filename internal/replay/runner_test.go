@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 )
@@ -281,6 +282,136 @@ func TestReplayRunner_ZeroDeadline_ProcessesImmediately(t *testing.T) {
 		t.Errorf("job.Status = %q; want %q — zero-deadline job must be processed immediately",
 			updated.Status, "completed")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// replayAssigner tests
+// ---------------------------------------------------------------------------
+
+// stubAssigner is a test double for replayAssigner.
+type stubAssigner struct {
+	returnID  string
+	returnErr error
+	calls     []string // category values received
+}
+
+func (s *stubAssigner) SelectReplayExecutor(category, _, _ string) (string, error) {
+	s.calls = append(s.calls, category)
+	return s.returnID, s.returnErr
+}
+
+// TestReplayRunner_Assigner_StampsExecutorID verifies that when a replayAssigner
+// is wired, processJob stamps job.AssignedExecutorID with the selected validator
+// ID before calling the executor.
+func TestReplayRunner_Assigner_StampsExecutorID(t *testing.T) {
+	ms := newMemStore()
+	coord := NewReplayCoordinator(DefaultReplayPolicy(), ms)
+
+	job := makeCleanJob("job-assign-1", "task-assign-1")
+	job.Category = "code"
+	data, _ := json.Marshal(job)
+	_ = ms.PutReplayJob(job.ID, data)
+
+	resolver := NewReplayResolver(ms)
+	tm := newFakeTaskMgr()
+	enf := NewReplayEnforcer(tm, resolver, nil)
+
+	// Capture the job seen by the executor so we can inspect AssignedExecutorID.
+	var capturedJob *ReplayJob
+	capExec := &captureExecutor{fn: func(j *ReplayJob) { capturedJob = j }}
+
+	sa := &stubAssigner{returnID: "validator-xyz"}
+	runner := NewReplayRunner(coord, capExec, enf, nil, time.Second)
+	runner.SetReplayAssigner(sa)
+	runner.processOnce()
+
+	if capturedJob == nil {
+		t.Fatal("executor was not called")
+	}
+	if capturedJob.AssignedExecutorID != "validator-xyz" {
+		t.Errorf("AssignedExecutorID = %q; want %q", capturedJob.AssignedExecutorID, "validator-xyz")
+	}
+	if len(sa.calls) != 1 || sa.calls[0] != "code" {
+		t.Errorf("assigner calls = %v; want [code]", sa.calls)
+	}
+}
+
+// TestReplayRunner_Assigner_ErrorFallsThrough verifies that when the assigner
+// returns an error, processJob continues with AssignedExecutorID="" (falls
+// back to InspectionExecutor path — no job stall).
+func TestReplayRunner_Assigner_ErrorFallsThrough(t *testing.T) {
+	ms := newMemStore()
+	coord := NewReplayCoordinator(DefaultReplayPolicy(), ms)
+
+	job := makeCleanJob("job-assign-2", "task-assign-2")
+	data, _ := json.Marshal(job)
+	_ = ms.PutReplayJob(job.ID, data)
+
+	resolver := NewReplayResolver(ms)
+	tm := newFakeTaskMgr()
+	enf := NewReplayEnforcer(tm, resolver, nil)
+	ex := &fakeExecutor{} // returns "match" outcome
+
+	sa := &stubAssigner{returnErr: errors.New("no eligible validator")}
+	runner := NewReplayRunner(coord, ex, enf, nil, time.Second)
+	runner.SetReplayAssigner(sa)
+	runner.processOnce()
+
+	// Job must still be processed (completed), not stalled.
+	allData, _ := ms.AllReplayJobs()
+	var updated ReplayJob
+	_ = json.Unmarshal(allData[job.ID], &updated)
+	if updated.Status != "completed" {
+		t.Errorf("job.Status = %q; want %q — assigner error must not stall the job", updated.Status, "completed")
+	}
+}
+
+// TestReplayRunner_NilAssigner_NoAssignment verifies that when no assigner is
+// wired, AssignedExecutorID remains empty — backward compatible.
+func TestReplayRunner_NilAssigner_NoAssignment(t *testing.T) {
+	ms := newMemStore()
+	coord := NewReplayCoordinator(DefaultReplayPolicy(), ms)
+
+	job := makeCleanJob("job-assign-3", "task-assign-3")
+	data, _ := json.Marshal(job)
+	_ = ms.PutReplayJob(job.ID, data)
+
+	resolver := NewReplayResolver(ms)
+	tm := newFakeTaskMgr()
+	enf := NewReplayEnforcer(tm, resolver, nil)
+
+	var capturedJob *ReplayJob
+	capExec := &captureExecutor{fn: func(j *ReplayJob) { capturedJob = j }}
+
+	runner := NewReplayRunner(coord, capExec, enf, nil, time.Second)
+	// No SetReplayAssigner call.
+	runner.processOnce()
+
+	if capturedJob == nil {
+		t.Fatal("executor was not called")
+	}
+	if capturedJob.AssignedExecutorID != "" {
+		t.Errorf("AssignedExecutorID = %q; want empty (no assigner wired)", capturedJob.AssignedExecutorID)
+	}
+}
+
+// captureExecutor wraps fakeExecutor and invokes fn before returning the
+// default match outcome. Used to inspect the job as seen by the executor.
+type captureExecutor struct {
+	fn func(*ReplayJob)
+}
+
+func (c *captureExecutor) Execute(_ context.Context, job *ReplayJob) (*ReplayOutcome, error) {
+	if c.fn != nil {
+		c.fn(job)
+	}
+	return &ReplayOutcome{
+		JobID:      job.ID,
+		TaskID:     job.TaskID,
+		Status:     "match",
+		ReplayedAt: time.Now(),
+		ReplayerID: "capture-executor",
+	}, nil
 }
 
 // TestReplayRunner_StartStop verifies that Start/Stop do not deadlock or panic.

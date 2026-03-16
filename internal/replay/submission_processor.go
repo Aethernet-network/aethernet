@@ -18,6 +18,10 @@ var ErrBindingMismatch = errors.New("replay: submission binding does not match j
 // or more checks required by ReplayJob.ChecksToReplay.
 var ErrMissingRequiredChecks = errors.New("replay: submission missing required checks")
 
+// ErrUnauthorizedExecutor is returned when the job has an AssignedExecutorID
+// and the submission's SubmitterID does not match it.
+var ErrUnauthorizedExecutor = errors.New("replay: submitter is not the assigned executor")
+
 // SubmissionProcessor handles the full lifecycle of an external replay
 // submission: loading the job, validating binding, running the comparison,
 // and routing the result through the enforcer.
@@ -70,6 +74,13 @@ func (p *SubmissionProcessor) Process(sub *ReplaySubmission) (*ReplayOutcome, *v
 	// Reject submissions for jobs that have already reached a terminal state.
 	if job.Status == "completed" || job.Status == "failed" {
 		return nil, nil, fmt.Errorf("%w: job_id=%s status=%s", ErrOutcomeAlreadyTerminal, job.ID, job.Status)
+	}
+
+	// Enforce executor independence: if the job has an assigned executor,
+	// only that executor may submit results.
+	if job.AssignedExecutorID != "" && sub.SubmitterID != job.AssignedExecutorID {
+		return nil, nil, fmt.Errorf("%w: job_id=%s assigned=%q submitter=%q",
+			ErrUnauthorizedExecutor, job.ID, job.AssignedExecutorID, sub.SubmitterID)
 	}
 
 	// Validate that the submission's binding fields match the job.

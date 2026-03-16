@@ -278,6 +278,25 @@ func (m *ChallengeManager) GetChallenge(challengeID string) (*Challenge, error) 
 }
 
 // ---------------------------------------------------------------------------
+// ChallengesForTask
+// ---------------------------------------------------------------------------
+
+// ChallengesForTask returns copies of all challenges associated with the given
+// taskID. An empty slice is returned when no challenges exist for that task.
+func (m *ChallengeManager) ChallengesForTask(taskID string) []*Challenge {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []*Challenge
+	for _, c := range m.challenges {
+		if c.TaskID == taskID {
+			cp := *c
+			out = append(out, &cp)
+		}
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
