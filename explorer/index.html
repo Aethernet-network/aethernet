@@ -196,7 +196,7 @@ async function apiPost(path, body) {
 }
 
 function fmtNum(n) {
-  if (n == null) return '\u2014';
+  if (n == null) return '—';
   if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
   if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
@@ -213,7 +213,7 @@ function fmtAET(v) {
 
 function truncate(s, n = 12) {
   if (!s) return '';
-  return s.length > n * 2 ? s.slice(0, n) + '\u2026' + s.slice(-6) : s;
+  return s.length > n * 2 ? s.slice(0, n) + '…' + s.slice(-6) : s;
 }
 
 function dotClass(s) {
@@ -225,7 +225,7 @@ function pillClass(s) {
 }
 
 function statusLabel(s) {
-  return ({ open: 'Open', claimed: 'In Progress', submitted: 'Review', completed: 'Settled', disputed: 'Disputed', cancelled: 'Cancelled' })[s?.toLowerCase()] || s || '\u2014';
+  return ({ open: 'Open', claimed: 'In Progress', submitted: 'Review', completed: 'Settled', disputed: 'Disputed', cancelled: 'Cancelled' })[s?.toLowerCase()] || s || '—';
 }
 
 function laneBadge(l) {
@@ -354,7 +354,7 @@ function IdentityPanel({ agent, setAgent, addToast }) {
         <input className="input" placeholder="e.g. my-research-agent" value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === 'Enter' && register()} />
         <div style={{ fontSize: 11, color: 'var(--muted-fg)', marginTop: 4 }}>Leave blank to use hex(pubkey) as ID.</div>
       </div>
-      <button className="btn-primary" style={{ width: '100%' }} onClick={register} disabled={loading}>{loading ? 'Registering\u2026' : 'Generate Keypair & Register'}</button>
+      <button className="btn-primary" style={{ width: '100%' }} onClick={register} disabled={loading}>{loading ? 'Registering…' : 'Generate Keypair & Register'}</button>
     </div>
   );
 }
@@ -370,7 +370,7 @@ function PostTaskPanel({ agent, addToast }) {
     if (!agent) return addToast('Register an agent first', 'error');
     if (!title.trim()) return addToast('Title is required', 'error');
     const amt = parseInt(budget) || 100000;
-    if (amt < 100000) return addToast('Minimum budget: 100,000 \u00b5AET (0.1 AET)', 'error');
+    if (amt < 100000) return addToast('Minimum budget: 100,000 µAET (0.1 AET)', 'error');
     setPosting(true);
     try {
       await apiPost('/v1/tasks', { poster_id: agent.agent_id, title: title.trim(), description: desc.trim(), category: category || 'general', budget: amt });
@@ -384,7 +384,7 @@ function PostTaskPanel({ agent, addToast }) {
     <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
       {!agent && <div className="notice">Register an agent (Identity tab) to post tasks.</div>}
       <div><label className="field-label">Title *</label><input className="input" placeholder="e.g. Summarise Q3 earnings report" value={title} onChange={e => setTitle(e.target.value)} /></div>
-      <div><label className="field-label">Description</label><textarea className="input" rows={3} placeholder="Describe the task, deliverables, and acceptance criteria\u2026" value={desc} onChange={e => setDesc(e.target.value)} /></div>
+      <div><label className="field-label">Description</label><textarea className="input" rows={3} placeholder="Describe the task, deliverables, and acceptance criteria…" value={desc} onChange={e => setDesc(e.target.value)} /></div>
       <div>
         <label className="field-label">Category</label>
         <select className="input" value={category} onChange={e => setCategory(e.target.value)}>
@@ -397,11 +397,11 @@ function PostTaskPanel({ agent, addToast }) {
         </select>
       </div>
       <div>
-        <label className="field-label">Budget (\u00b5AET, minimum 100,000)</label>
+        <label className="field-label">Budget (µAET, minimum 100,000)</label>
         <input className="input" type="number" min="100000" placeholder="100000" value={budget} onChange={e => setBudget(e.target.value)} />
         {budget && <div className="mono" style={{ fontSize: 12, color: 'var(--muted-fg)', marginTop: 4 }}>= {fmtAET(parseInt(budget) || 0)}</div>}
       </div>
-      <button className="btn-primary" style={{ width: '100%' }} onClick={postTask} disabled={posting || !agent}>{posting ? 'Posting\u2026' : 'Post Task'}</button>
+      <button className="btn-primary" style={{ width: '100%' }} onClick={postTask} disabled={posting || !agent}>{posting ? 'Posting…' : 'Post Task'}</button>
     </div>
   );
 }
@@ -427,7 +427,7 @@ function MyTasksPanel({ agent, addToast }) {
   useEffect(() => { load(); }, [load]);
 
   async function approve(id) {
-    try { await apiPost(`/v1/tasks/${id}/approve`, { poster_id: agent.agent_id }); addToast('Approved \u2014 payment released!', 'success'); load(); }
+    try { await apiPost(`/v1/tasks/${id}/approve`, { poster_id: agent.agent_id }); addToast('Approved — payment released!', 'success'); load(); }
     catch (e) { addToast(`Approve failed: ${e.message}`, 'error'); }
   }
   async function dispute(id) {
@@ -520,7 +520,7 @@ function SendPanel({ agent, addToast, initialTo = '' }) {
       const body = { to_agent: toAgent.trim(), amount: amt, memo: memo.trim(), stake_amount: 1000 };
       if (agent) body.from_agent = agent.agent_id;
       const data = await apiPost('/v1/transfer', body);
-      addToast(`Sent ${fmtAET(amt)} \u2014 event ${truncate(data.event_id || data.id || '', 8)}`, 'success');
+      addToast(`Sent ${fmtAET(amt)} — event ${truncate(data.event_id || data.id || '', 8)}`, 'success');
       setToAgent(''); setAmount(''); setMemo('');
     } catch (e) { addToast(`Transfer failed: ${e.message}`, 'error'); }
     finally { setSending(false); }
@@ -532,12 +532,12 @@ function SendPanel({ agent, addToast, initialTo = '' }) {
       {!agent && <div className="notice">Register an agent to set yourself as sender.</div>}
       <div><label className="field-label">Recipient Agent ID *</label><input className="input" placeholder="Agent ID or name" value={toAgent} onChange={e => setToAgent(e.target.value)} /></div>
       <div>
-        <label className="field-label">Amount (\u00b5AET) *</label>
+        <label className="field-label">Amount (µAET) *</label>
         <input className="input" type="number" min="1" placeholder="1000000" value={amount} onChange={e => setAmount(e.target.value)} />
         {amount && <div className="mono" style={{ fontSize: 12, color: 'var(--muted-fg)', marginTop: 4 }}>= {fmtAET(parseInt(amount) || 0)}</div>}
       </div>
       <div><label className="field-label">Memo</label><input className="input" placeholder="Optional description" value={memo} onChange={e => setMemo(e.target.value)} /></div>
-      <button className="btn-primary" style={{ width: '100%' }} onClick={send} disabled={sending}>{sending ? 'Sending\u2026' : 'Send AET'}</button>
+      <button className="btn-primary" style={{ width: '100%' }} onClick={send} disabled={sending}>{sending ? 'Sending…' : 'Send AET'}</button>
     </div>
   );
 }
@@ -553,7 +553,7 @@ function WalletDrawer({ open, onClose, initialTab, agent, setAgent, addToast }) 
       <div className={`wallet-drawer ${open ? 'open' : ''}`}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0, background: 'var(--bg)' }}>
           <span className="heading" style={{ fontSize: 15, fontWeight: 600, color: 'var(--fg)' }}>Wallet</span>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-fg)', fontSize: 18, lineHeight: 1, padding: 4 }} aria-label="Close wallet">{'\u2715'}</button>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-fg)', fontSize: 18, lineHeight: 1, padding: 4 }} aria-label="Close wallet">{'✕'}</button>
         </div>
         <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
           {tabs.map(t => <button key={t.id} className={`wtab ${tab === t.id ? 'active' : ''}`} onClick={() => setTab(t.id)}>{t.l}</button>)}
@@ -597,7 +597,7 @@ function OverviewPage({ status, econ, taskStats, agents, events, dagStats, loadi
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-fg)', marginLeft: 8 }}>
                 <span className="dot dot-green" style={{ width: 6, height: 6 }} />
                 <span className="mono" style={{ color: 'var(--success)' }}>Live</span>
-                <span className="mono">{'\u00b7'} {status.peers} peers {'\u00b7'} {fmtNum(status.dag_size)} events</span>
+                <span className="mono">{'·'} {status.peers} peers {'·'} {fmtNum(status.dag_size)} events</span>
               </span>
             )}
           </div>
@@ -609,7 +609,7 @@ function OverviewPage({ status, econ, taskStats, agents, events, dagStats, loadi
           {/* Bootstrap notice */}
           {bootstrapMode && status && (
             <div className="notice">
-              <strong>Bootstrap Mode Active</strong> \u2014 Elevated replay rates (40\u201375%) reduce fraud risk while the validator set grows. Phase ends when {'\u2265'} 90 days have passed and {'\u2265'} 20 validators are registered.
+              <strong>Bootstrap Mode Active</strong> — Elevated replay rates (40–75%) reduce fraud risk while the validator set grows. Phase ends when {'≥'} 90 days have passed and {'≥'} 20 validators are registered.
             </div>
           )}
 
@@ -667,7 +667,7 @@ function OverviewPage({ status, econ, taskStats, agents, events, dagStats, loadi
                 <div className="kv"><span style={{ fontSize: 13, color: 'var(--muted-fg)' }}>Total Staked</span><span className="mono" style={{ fontSize: 13 }}>{fmtAET(totalStaked)}</span></div>
                 {econ && <div className="kv"><span style={{ fontSize: 13, color: 'var(--muted-fg)' }}>Treasury</span><span className="mono" style={{ fontSize: 13 }}>{fmtAET(econ.treasury_balance ?? econ.treasury_accrued)}</span></div>}
                 {econ && <div className="kv"><span style={{ fontSize: 13, color: 'var(--muted-fg)' }}>Total Supply</span><span className="mono" style={{ fontSize: 13 }}>{fmtAET(econ.total_supply)}</span></div>}
-                <div className="kv"><span style={{ fontSize: 13, color: 'var(--muted-fg)' }}>Peers</span><span className="mono" style={{ fontSize: 13 }}>{status?.peers ?? '\u2014'}</span></div>
+                <div className="kv"><span style={{ fontSize: 13, color: 'var(--muted-fg)' }}>Peers</span><span className="mono" style={{ fontSize: 13 }}>{status?.peers ?? '—'}</span></div>
               </div>
 
               <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-fg)', textTransform: 'uppercase', letterSpacing: '0.05em', marginTop: 20, marginBottom: 10, fontFamily: 'var(--heading)' }}>Security Floor</div>
@@ -751,7 +751,7 @@ function TasksPage({ agent, addToast, onOpenWallet }) {
           <>
             <div className="filter-bar">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--muted-fg)" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
-              <input placeholder="Search tasks\u2026" value={search} onChange={e => setSearch(e.target.value)} />
+              <input placeholder="Search tasks…" value={search} onChange={e => setSearch(e.target.value)} />
               <div style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
                 {FILTERS.map(f => (
                   <button key={f} className={`filter-pill ${filter === f ? 'active' : ''}`} onClick={() => setFilter(f)}>
@@ -793,7 +793,7 @@ function TasksPage({ agent, addToast, onOpenWallet }) {
                             <div style={{ fontSize: 13, color: 'var(--fg)', fontWeight: 500, lineHeight: 1.4 }}>{task.title}</div>
                             <div className="mono" style={{ fontSize: 11, color: 'var(--muted-fg)', marginTop: 2 }}>{truncate(task.poster_id, 10)}</div>
                           </td>
-                          <td><span style={{ fontSize: 12, color: 'var(--muted-fg)' }}>{task.category || '\u2014'}</span></td>
+                          <td><span style={{ fontSize: 12, color: 'var(--muted-fg)' }}>{task.category || '—'}</span></td>
                           <td><span className="mono" style={{ fontSize: 13 }}>{fmtAET(task.budget)}</span></td>
                           <td><span className={`lane-badge ${lb.cls}`}>{lb.text}</span></td>
                           <td>
@@ -815,7 +815,7 @@ function TasksPage({ agent, addToast, onOpenWallet }) {
               </div>
               {filtered.length > 0 && !loading && (
                 <div style={{ padding: '8px 20px', fontSize: 12, color: 'var(--muted-fg)', borderTop: '1px solid var(--border)' }}>
-                  {filtered.length} task{filtered.length !== 1 ? 's' : ''}{filter !== 'all' ? ` \u00b7 ${statusLabel(filter)}` : ''}
+                  {filtered.length} task{filtered.length !== 1 ? 's' : ''}{filter !== 'all' ? ` · ${statusLabel(filter)}` : ''}
                 </div>
               )}
             </div>
@@ -843,14 +843,14 @@ function ValidatorsPage({ agents, loading }) {
 
         <div className="stat-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
           <StatCard value={loading && !agents.length ? null : String(validators.length)} label="Active" />
-          <StatCard value={totalStaked ? fmtAET(totalStaked) : '\u2014'} label="Total Staked" />
+          <StatCard value={totalStaked ? fmtAET(totalStaked) : '—'} label="Total Staked" />
           <StatCard value="10,000" label="Min Stake (AET)" />
           <StatCard value={bootstrapMode ? 'Bootstrap' : 'Normal'} label="Phase" />
         </div>
 
         {bootstrapMode && (
           <div className="notice">
-            <strong>Bootstrap Mode</strong> \u2014 Elevated replay rates (40\u201375%) reduce fraud risk while the validator set grows. Bootstrap rewards supplement income. Phase ends when {'\u2265'} 90 days and {'\u2265'} 20 validators.
+            <strong>Bootstrap Mode</strong> — Elevated replay rates (40–75%) reduce fraud risk while the validator set grows. Bootstrap rewards supplement income. Phase ends when {'≥'} 90 days and {'≥'} 20 validators.
           </div>
         )}
 
@@ -866,7 +866,7 @@ function ValidatorsPage({ agents, loading }) {
                 { lane: 'Standard', fee: '3%', floor: '2 AET', req: 3, budget: '25 AET', cls: 'lane-std' },
                 { lane: 'High', fee: '6%', floor: '4 AET', req: 5, budget: '25 AET', cls: 'lane-high' },
                 { lane: 'Enterprise', fee: '8%', floor: '8 AET', req: 10, budget: '25 AET', cls: 'lane-ent' },
-                { lane: 'Unassured', fee: '\u2014', floor: '\u2014', req: 0, budget: 'None', cls: 'lane-none' },
+                { lane: 'Unassured', fee: '—', floor: '—', req: 0, budget: 'None', cls: 'lane-none' },
               ].map(r => (
                 <tr key={r.lane}>
                   <td><span className={`lane-badge ${r.cls}`}>{r.lane}</span></td>
@@ -877,7 +877,7 @@ function ValidatorsPage({ agents, loading }) {
                       <span className="mono" style={{ fontSize: 13, color: validators.length >= r.req ? 'var(--success)' : 'var(--muted-fg)' }}>
                         {validators.length}/{r.req} {validators.length >= r.req ? 'met' : 'not met'}
                       </span>
-                    ) : <span style={{ color: 'var(--muted-fg)' }}>\u2014</span>}
+                    ) : <span style={{ color: 'var(--muted-fg)' }}>—</span>}
                   </td>
                   <td className="mono" style={{ fontSize: 13 }}>{r.budget}</td>
                 </tr>
@@ -992,7 +992,7 @@ function NetworkPage({ events, dagStats, econ, status, loading }) {
                         <td>
                           {ev.type === 'Transfer' && ev.from ? (
                             <span className="mono" style={{ fontSize: 12, color: 'var(--muted-fg)' }}>
-                              {truncate(ev.from, 6)} {'\u2192'} {truncate(ev.to, 6)} {ev.amount > 0 ? ` ${fmtAET(ev.amount)}` : ''}
+                              {truncate(ev.from, 6)} {'→'} {truncate(ev.to, 6)} {ev.amount > 0 ? ` ${fmtAET(ev.amount)}` : ''}
                             </span>
                           ) : (
                             <span className="mono" style={{ fontSize: 12, color: 'var(--muted-fg)' }}>
@@ -1174,7 +1174,7 @@ function App() {
 
       <footer style={{ borderTop: '1px solid var(--border)' }}>
         <div className="container" style={{ padding: '14px 2rem', fontSize: 12, color: 'var(--muted-fg)', display: 'flex', justifyContent: 'space-between' }}>
-          <span>AetherNet v0.1.0-testnet{' \u00b7 '}<a href="/docs/" style={{ color: 'var(--muted-fg)', textDecoration: 'none', transition: 'color 0.15s' }} onMouseEnter={e => e.target.style.color = 'var(--fg)'} onMouseLeave={e => e.target.style.color = 'var(--muted-fg)'}>Documentation</a></span>
+          <span>AetherNet v0.1.0-testnet{' · '}<a href="/docs/" style={{ color: 'var(--muted-fg)', textDecoration: 'none', transition: 'color 0.15s' }} onMouseEnter={e => e.target.style.color = 'var(--fg)'} onMouseLeave={e => e.target.style.color = 'var(--muted-fg)'}>Documentation</a></span>
           <span>Auto-refresh 5s</span>
         </div>
       </footer>
