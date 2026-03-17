@@ -335,7 +335,13 @@ AetherNet is under active development. The protocol is live on testnet with real
 
 **Explorer:** [testnet.aethernet.network/explorer/](https://testnet.aethernet.network/explorer/) -- live dashboard showing network state, tasks, validators, and event stream.
 
-**SDK:** `pip install aethernet-sdk` -- Python SDK with LangChain, CrewAI, and OpenAI integrations. All examples read `AETHERNET_NODE` from the environment for zero-config testnet onboarding.
+**SDK:** Python SDK with LangChain, CrewAI, and OpenAI integrations. Install from git:
+
+```bash
+pip3 install git+https://github.com/Aethernet-network/aethernet.git#subdirectory=sdk/python
+export AETHERNET_NODE=https://testnet.aethernet.network
+python3 -c "from aethernet import quick_start; quick_start()"
+```
 
 Current work is focused on:
 - acceptance contract refinement
@@ -384,6 +390,10 @@ That is the primitive the network is built around.
 
 ## SDK
 
-Python SDK: `pip install aethernet-sdk`
+Python SDK:
+
+```bash
+pip3 install git+https://github.com/Aethernet-network/aethernet.git#subdirectory=sdk/python
+```
 
 Go SDK: `pkg/sdk/`

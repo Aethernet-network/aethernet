@@ -2,7 +2,7 @@
 
 Run against a live node:
 
-    python examples/agent_demo.py --node http://localhost:8338
+    python3 examples/agent_demo.py
 
 The demo shows the full happy path:
   1. Both agents register with the node

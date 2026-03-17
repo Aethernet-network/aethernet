@@ -5,7 +5,7 @@ AetherNet Enterprise Fleet Example
 Shows how an organisation registers and manages a fleet of agents.
 
     pip install aethernet-sdk
-    python enterprise_example.py
+    python3 enterprise_example.py
 """
 import os
 from aethernet.enterprise import Fleet

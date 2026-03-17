@@ -23,7 +23,7 @@ Prerequisites
 
 Run with::
 
-    python full_lifecycle.py [NODE_URL]
+    python3 full_lifecycle.py [NODE_URL]
 
 Or from the sdk/python directory::
 

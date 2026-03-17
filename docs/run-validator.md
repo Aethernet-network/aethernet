@@ -61,8 +61,8 @@ curl http://localhost:8338/health
 ### 1. Clone and Build
 
 ```bash
-git clone https://github.com/Aethernet-network/aethernet.git
-cd aethernet
+git clone https://github.com/Aethernet-network/aethernet.git aethernet-protocol
+cd aethernet-protocol
 go build -o bin/aethernet ./cmd/node/
 go build -o bin/aet ./cmd/aet/
 ```

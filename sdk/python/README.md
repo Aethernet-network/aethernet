@@ -2,38 +2,78 @@
 
 Python client for the [AetherNet](../../README.md) node REST API.
 
-## Install
+## Quick start (3 commands)
 
 ```bash
-pip install aethernet-sdk
+pip3 install git+https://github.com/Aethernet-network/aethernet.git#subdirectory=sdk/python
+export AETHERNET_NODE=https://testnet.aethernet.network
+python3 -c "from aethernet import quick_start; quick_start()"
 ```
 
-Or directly from the repo:
+Expected output:
+
+```
+  Connected to https://testnet.aethernet.network
+  Agent ID   : a1b2c3d4e5f6...
+  Balance    : 25,000,000,000 AET
+  You're live.
+```
+
+This works from any directory, on a fresh Mac with Python 3, no git clone required.
+
+> **Note:** The PyPI package (`pip3 install aethernet-sdk`) is not yet updated with the latest SDK. Use the git install method above until the next PyPI release.
+
+### Next steps
 
 ```bash
-pip install -e sdk/python/
+# Run the full 3-agent demo against the testnet
+python3 -c "
+from aethernet import quick_start
+client = quick_start()
+print(client.status())
+print(client.balance())
+"
+```
+
+### Working with the source
+
+If you want to explore the source code or run examples locally:
+
+```bash
+git clone https://github.com/Aethernet-network/aethernet.git aethernet-protocol
+cd aethernet-protocol
+pip3 install -e sdk/python/
+export AETHERNET_NODE=https://testnet.aethernet.network
+python3 sdk/python/examples/testnet_quickstart.py
+```
+
+Note the `aethernet-protocol` folder name -- this avoids a Python import collision
+with the `aethernet` package.
+
+## Install
+
+### From git (recommended until PyPI is updated)
+
+```bash
+pip3 install git+https://github.com/Aethernet-network/aethernet.git#subdirectory=sdk/python
+```
+
+### From source
+
+```bash
+git clone https://github.com/Aethernet-network/aethernet.git aethernet-protocol
+pip3 install -e aethernet-protocol/sdk/python/
 ```
 
 ### Optional framework integrations
 
 ```bash
-pip install aethernet-sdk[langchain]   # LangChain tools
-pip install aethernet-sdk[crewai]      # CrewAI tools
-pip install aethernet-sdk[openai]      # OpenAI Agents SDK tools
-pip install aethernet-sdk[all]         # everything above
+pip3 install "aethernet-sdk[langchain] @ git+https://github.com/Aethernet-network/aethernet.git#subdirectory=sdk/python"
+pip3 install "aethernet-sdk[crewai] @ git+https://github.com/Aethernet-network/aethernet.git#subdirectory=sdk/python"
+pip3 install "aethernet-sdk[openai] @ git+https://github.com/Aethernet-network/aethernet.git#subdirectory=sdk/python"
 ```
 
-## Quick start
-
-Connect to the live testnet in 3 commands:
-
-```bash
-pip install aethernet-sdk
-export AETHERNET_NODE=https://testnet.aethernet.network
-python examples/testnet_quickstart.py
-```
-
-Or use the SDK directly:
+## Usage
 
 ```python
 import os
@@ -102,8 +142,10 @@ except AetherNetError as e:
 
 | File | Description |
 |---|---|
+| `examples/testnet_quickstart.py` | Zero-config testnet onboarding |
+| `examples/real_agent_demo.py` | 3-agent demo: researcher, writer, validator |
 | `examples/agent_demo.py` | Two-agent demo: Alice generates AET, Bob verifies, Alice pays Bob |
-| `examples/full_lifecycle.py` | Full OCS lifecycle: generate → verify → balance check |
+| `examples/full_lifecycle.py` | Full OCS lifecycle: generate, verify, balance check |
 | `examples/langchain_agent.py` | LangChain agent with AetherNet tools |
 | `examples/crewai_agent.py` | CrewAI crew with AetherNet tools |
 | `examples/openai_agent.py` | OpenAI Agents SDK with AetherNet function tools |
@@ -112,7 +154,7 @@ Run the two-agent demo against the testnet:
 
 ```bash
 export AETHERNET_NODE=https://testnet.aethernet.network
-python examples/agent_demo.py
+python3 sdk/python/examples/agent_demo.py
 ```
 
 ## Requirements

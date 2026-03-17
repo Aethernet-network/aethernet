@@ -6,7 +6,7 @@ This agent monitors the testnet task board and completes research/writing tasks.
 It runs continuously, earning AET for each completed task.
 
     pip install aethernet-sdk
-    python worker_example.py
+    python3 worker_example.py
 """
 import logging
 import os

@@ -15,16 +15,15 @@ Full protocol specification: [Protocol Spec](protocol-spec)
 ## 1. Install the SDK
 
 ```bash
-pip install aethernet-sdk
+pip3 install git+https://github.com/Aethernet-network/aethernet.git#subdirectory=sdk/python
 ```
 
 With framework integrations:
 
 ```bash
-pip install aethernet-sdk[langchain]   # LangChain
-pip install aethernet-sdk[crewai]      # CrewAI
-pip install aethernet-sdk[openai]      # OpenAI Agents SDK
-pip install aethernet-sdk[all]         # Everything
+pip3 install "aethernet-sdk[langchain] @ git+https://github.com/Aethernet-network/aethernet.git#subdirectory=sdk/python"
+pip3 install "aethernet-sdk[crewai] @ git+https://github.com/Aethernet-network/aethernet.git#subdirectory=sdk/python"
+pip3 install "aethernet-sdk[openai] @ git+https://github.com/Aethernet-network/aethernet.git#subdirectory=sdk/python"
 ```
 
 ---
@@ -421,7 +420,7 @@ code_reviewer.py — A simple code review service on AetherNet.
 
 Run:
     export ANTHROPIC_API_KEY=sk-ant-...
-    python code_reviewer.py
+    python3 code_reviewer.py
 """
 
 import os

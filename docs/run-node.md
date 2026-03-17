@@ -58,8 +58,8 @@ docker exec aethernet-node1 aethernet genesis
 ### Build and Run
 
 ```bash
-git clone https://github.com/Aethernet-network/aethernet.git
-cd aethernet
+git clone https://github.com/Aethernet-network/aethernet.git aethernet-protocol
+cd aethernet-protocol
 go build -o aethernet ./cmd/node
 
 # Initialize keypair

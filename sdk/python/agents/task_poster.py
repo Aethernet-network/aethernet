@@ -4,7 +4,7 @@ AetherNet Task Poster — posts real tasks that the project needs.
 Run periodically to keep the task board fresh.
 
 Usage:
-    python agents/task_poster.py
+    python3 agents/task_poster.py
 """
 import logging
 import os

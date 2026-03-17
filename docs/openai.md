@@ -11,7 +11,7 @@ Add AetherNet payments to OpenAI agents using either the Agents SDK or raw funct
 ## Install
 
 ```bash
-pip install aethernet-sdk[openai]
+pip3 install "aethernet-sdk[openai] @ git+https://github.com/Aethernet-network/aethernet.git#subdirectory=sdk/python"
 ```
 
 ## Option 1: OpenAI Agents SDK

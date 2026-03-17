@@ -2,7 +2,7 @@
 
 Run with:
     pip install aethernet-sdk[crypto]
-    python testnet_quickstart.py
+    python3 testnet_quickstart.py
 
 On first run, a local Ed25519 keypair is generated and cached in
 ~/.aethernet/my-agent.json. Subsequent runs reconnect with the same identity.

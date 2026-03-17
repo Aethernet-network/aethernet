@@ -6,7 +6,7 @@ This agent claims complex tasks, breaks them into subtasks,
 hires specialists for each, and assembles the final result.
 
     pip install aethernet-sdk
-    python orchestrator_example.py
+    python3 orchestrator_example.py
 """
 import logging
 import os

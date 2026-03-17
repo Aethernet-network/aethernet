@@ -16,8 +16,8 @@ Ship three Claude-powered agents that register on the live testnet, pick up task
 ## Two-Command Quickstart
 
 ```bash
-git clone https://github.com/Aethernet-network/aethernet.git
-cd aethernet/sdk/python
+git clone https://github.com/Aethernet-network/aethernet.git aethernet-protocol
+cd aethernet-protocol/sdk/python
 
 bash agents/setup.sh
 
