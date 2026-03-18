@@ -534,14 +534,19 @@ func (n *Node) ListenAddr() string {
 	return n.config.ListenAddr
 }
 
-// startPeerLoops launches three goroutines for peer:
+// startPeerLoops launches four goroutines for peer:
 //
 //  1. writeLoop — drains peer.send and writes to the TCP connection.
 //  2. readLoop — reads from the TCP connection and forwards to peerIncoming.
-//  3. dispatcher — calls handleMessage for each message on peerIncoming.
+//  3. keepaliveLoop — sends MsgPing every keepaliveInterval to prevent
+//     ALB/NAT idle-timeout disconnections and ensure readLoop detects dead
+//     connections within readDeadline.
+//  4. dispatcher — calls handleMessage for each message on peerIncoming.
 //
-// When readLoop exits (remote close or error) it closes peerIncoming and removes
-// the peer from the peers map, which causes the dispatcher to exit naturally.
+// When readLoop exits (remote close, error, or read deadline timeout) it closes
+// peerIncoming and removes the peer from the peers map, which causes the
+// dispatcher to exit naturally. The keepalive goroutine exits when the context
+// is cancelled (triggered by Node.Stop or peer.Close).
 func (n *Node) startPeerLoops(peer *Peer) {
 	peerIncoming := make(chan Message, sendBufSize)
 
@@ -563,6 +568,26 @@ func (n *Node) startPeerLoops(peer *Peer) {
 		n.mu.Unlock()
 		if handler != nil {
 			handler(peer.Address)
+		}
+	}()
+
+	// Keepalive: send MsgPing periodically to keep the connection alive through
+	// ALB/NAT idle timeouts and give readLoop's deadline a heartbeat to measure.
+	n.wg.Add(1)
+	go func() {
+		defer n.wg.Done()
+		ticker := time.NewTicker(keepaliveInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-n.ctx.Done():
+				return
+			case <-ticker.C:
+				if !peer.IsConnected() {
+					return
+				}
+				_ = peer.Send(Message{Type: MsgPing})
+			}
 		}
 	}()
 

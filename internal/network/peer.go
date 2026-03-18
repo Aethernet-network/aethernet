@@ -38,6 +38,17 @@ import (
 // while writeLoop drains them to the network.
 const sendBufSize = 64
 
+// keepaliveInterval is how often a MsgPing is sent to each peer. This keeps
+// connections alive through AWS ALB/NAT idle timeouts (typically 60-350s)
+// and ensures readLoop detects dead connections within readDeadline.
+const keepaliveInterval = 15 * time.Second
+
+// readDeadline is the maximum time readLoop waits for any data before
+// treating the connection as dead. Must be > keepaliveInterval so that a
+// single missed ping does not trigger a disconnect. At 45s, a peer must
+// go three full ping cycles without responding before the deadline fires.
+const readDeadline = 45 * time.Second
+
 // PeerState is the lifecycle state of a Peer connection.
 type PeerState int
 
@@ -331,22 +342,36 @@ func (p *Peer) writeLoop(ctx context.Context) {
 	}
 }
 
+// refreshReadDeadline extends the read deadline on the underlying connection.
+// Called after every received message and at startup to ensure that silent
+// connection drops (e.g. ALB/NAT idle timeout killing the TCP session without
+// sending RST) are detected within readDeadline.
+func (p *Peer) refreshReadDeadline() {
+	p.conn.SetReadDeadline(time.Now().Add(readDeadline))
+}
+
 // readLoop continuously decodes JSON messages from the connection and forwards
 // them to incoming. It exits on any decode error (including EOF when the remote
-// side closes the connection) or when ctx is cancelled. The caller is expected
-// to close the connection to unblock Decode when ctx fires.
+// side closes the connection, or a read deadline timeout) or when ctx is
+// cancelled. The caller is expected to close the connection to unblock Decode
+// when ctx fires.
 //
 // After each successful decode, p.rl.Reset() is called to give the next message
-// a fresh per-message byte budget (CRITICAL-4: per-message size limiting).
+// a fresh per-message byte budget (CRITICAL-4: per-message size limiting) and
+// the read deadline is refreshed so the timeout applies to inter-message gaps,
+// not cumulative connection lifetime.
 func (p *Peer) readLoop(ctx context.Context, incoming chan<- Message) {
+	p.refreshReadDeadline()
 	for {
 		var msg Message
 		if err := p.dec.Decode(&msg); err != nil {
-			// EOF, connection reset, or peer closed — exit cleanly.
+			// EOF, connection reset, read deadline, or peer closed — exit.
 			return
 		}
 		// Reset per-message byte counter so the next message gets a fresh limit.
 		p.rl.Reset()
+		// Refresh read deadline — the peer is still alive.
+		p.refreshReadDeadline()
 		select {
 		case incoming <- msg:
 		case <-ctx.Done():

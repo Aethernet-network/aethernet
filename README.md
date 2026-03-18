@@ -397,3 +397,9 @@ pip3 install git+https://github.com/Aethernet-network/aethernet.git#subdirectory
 ```
 
 Go SDK: `pkg/sdk/`
+
+---
+
+## License
+
+Business Source License 1.1 — free for development and non-competing use, converts to MIT on March 18, 2030. See [LICENSE](LICENSE).
