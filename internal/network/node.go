@@ -106,6 +106,13 @@ func (c *NodeConfig) voteMaxAge() int64 {
 // expired vote is still recognised and dropped before forwarding.
 const voteSeenTTL = 90 * time.Second
 
+// syncBatchSize is the maximum number of events sent in a single MsgSyncBatch
+// message. A typical event serialises to ~1-2 KB, so 100 events ≈ 100-200 KB —
+// well within the 4 MB per-message limit. Without batching, syncing a large DAG
+// (e.g. 7000+ events after a load test) produces a single message that exceeds
+// the limit and kills the connection.
+const syncBatchSize = 100
+
 // localIPSet returns a set of all IP address strings bound to local network
 // interfaces. Used to detect self-connection attempts. Errors from the OS are
 // silently ignored — an empty set means no self-connection filtering.
@@ -829,15 +836,34 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 				"peer", peer.AgentID)
 			return
 		}
-		// Respond with ALL known events so peers can fully catch up.
-		// Sending the complete set is safe because events are append-only and
-		// the receiver deduplicates via ErrDuplicateEvent in dag.Add.
+		// Respond with all known events, batched to stay within the per-message
+		// size limit. Each batch carries at most syncBatchSize events (~100).
+		// Without batching, a 7000-event DAG serialises to ~10 MB and exceeds
+		// the 4 MB per-message limit, killing the connection on the receiver.
 		events := n.dag.All()
-		payload, err := json.Marshal(SyncBatchPayload{Events: events})
-		if err != nil {
-			return
+		sort.Slice(events, func(i, j int) bool {
+			return events[i].CausalTimestamp < events[j].CausalTimestamp
+		})
+		for i := 0; i < len(events); i += syncBatchSize {
+			end := i + syncBatchSize
+			if end > len(events) {
+				end = len(events)
+			}
+			payload, err := json.Marshal(SyncBatchPayload{Events: events[i:end]})
+			if err != nil {
+				return
+			}
+			if err := peer.Send(Message{Type: MsgSyncBatch, Payload: payload}); err != nil {
+				return // peer disconnected or buffer full — stop sending
+			}
 		}
-		_ = peer.Send(Message{Type: MsgSyncBatch, Payload: payload})
+		if len(events) > syncBatchSize {
+			slog.Debug("network: sync batch sent",
+				"peer", peer.AgentID,
+				"total_events", len(events),
+				"batches", (len(events)+syncBatchSize-1)/syncBatchSize,
+			)
+		}
 
 	case MsgSyncBatch:
 		// Sort by CausalTimestamp before inserting so parents always arrive

@@ -1467,6 +1467,7 @@ func cmdStart() {
 	_, apiPortStr, _ := net.SplitHostPort(*apiListenAddr)
 	reg := cloudmap.NewRegistrar(p2pPortStr, apiPortStr)
 	reg.Start()
+	reg.CleanupStaleInstances()
 	stack.cloudmapReg = reg
 
 	// One-time cleanup: remove ghost agents (0 balance, 0 stake, 0 tasks) that
