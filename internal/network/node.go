@@ -388,6 +388,7 @@ func (n *Node) Connect(address string) (*Peer, error) {
 	peer.mu.Lock()
 	peer.AgentID = theirHS.AgentID
 	peer.State = PeerConnected
+	peer.connectedAt = time.Now()
 	peer.mu.Unlock()
 	n.peers[theirHS.AgentID] = peer
 	n.mu.Unlock()
@@ -562,6 +563,18 @@ func (n *Node) startPeerLoops(peer *Peer) {
 		defer close(peerIncoming) // signals dispatcher to exit
 		peer.readLoop(n.ctx, peerIncoming)
 		peer.Close() // idempotent; ensures conn is closed if not already
+
+		reason := peer.DisconnectReason()
+		duration := peer.SessionDuration()
+		queueLen := peer.SendQueueLen()
+		slog.Info("network: peer disconnected",
+			"peer", peer.AgentID,
+			"address", peer.Address,
+			"reason", reason,
+			"session_duration", duration.Round(time.Second).String(),
+			"outbound_queue_depth", queueLen,
+		)
+
 		n.mu.Lock()
 		delete(n.peers, peer.AgentID)
 		handler := n.disconnectHandler
@@ -740,6 +753,7 @@ func (n *Node) handleIncomingConn(conn net.Conn) error {
 	peer.mu.Lock()
 	peer.AgentID = theirHS.AgentID
 	peer.State = PeerConnected
+	peer.connectedAt = time.Now()
 	peer.mu.Unlock()
 
 	n.mu.Lock()

@@ -2,10 +2,16 @@ package network
 
 import (
 	"log/slog"
+	"math/rand"
 	"net"
 	"sync"
 	"time"
 )
+
+// maxReconnectJitter is the maximum random delay before each reconnection
+// attempt. Prevents a thundering herd when all peers disconnect simultaneously
+// (e.g. during a load test) — each reconnect is staggered by 0-5 seconds.
+const maxReconnectJitter = 5 * time.Second
 
 // PeerDiscovery periodically resolves a DNS name and connects to any newly
 // discovered IP addresses. It is designed for service-discovery environments
@@ -26,6 +32,11 @@ type PeerDiscovery struct {
 	stopOnce   sync.Once
 	knownPeers map[string]bool
 	mu         sync.Mutex
+
+	// hasConnectedBefore is set after the first successful connection.
+	// Reconnection jitter is applied only after this flag is set, so
+	// initial boot-time discovery is fast (no jitter).
+	hasConnectedBefore bool
 
 	// resolver performs host lookup. Defaults to net.LookupHost; may be
 	// replaced in tests to inject a mock address list.
@@ -117,6 +128,17 @@ func (pd *PeerDiscovery) resolve() {
 			continue
 		}
 
+		// Stagger reconnection attempts to avoid thundering herd when all peers
+		// disconnect simultaneously under load. Only applies when we have
+		// previously connected to at least one peer (initial discovery is
+		// jitter-free so nodes boot quickly). Each reconnect gets 0-5s jitter.
+		if pd.hasConnectedBefore {
+			jitter := time.Duration(rand.Int63n(int64(maxReconnectJitter)))
+			if jitter > 0 {
+				time.Sleep(jitter)
+			}
+		}
+
 		slog.Info("peer discovery: connecting to new peer", "addr", addr)
 		if _, err := pd.node.Connect(addr); err != nil {
 			slog.Warn("peer discovery: connect failed", "addr", addr, "err", err)
@@ -124,6 +146,7 @@ func (pd *PeerDiscovery) resolve() {
 		}
 		pd.mu.Lock()
 		pd.knownPeers[addr] = true
+		pd.hasConnectedBefore = true
 		pd.mu.Unlock()
 		slog.Info("peer discovery: connected", "addr", addr)
 	}

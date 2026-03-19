@@ -34,9 +34,10 @@ import (
 )
 
 // sendBufSize is the capacity of each Peer's outbound message channel.
-// Sized to absorb a burst of outgoing messages without blocking the caller
-// while writeLoop drains them to the network.
-const sendBufSize = 64
+// Must be large enough to absorb burst traffic (sync batches, votes, events,
+// pings) during sustained load without dropping keepalive pings. 256 slots
+// handles ~2500 msg/s with 10s sync intervals and 48K-event load tests.
+const sendBufSize = 256
 
 // keepaliveInterval is how often a MsgPing is sent to each peer. This keeps
 // connections alive through AWS ALB/NAT idle timeouts (typically 60-350s)
@@ -48,6 +49,12 @@ const keepaliveInterval = 15 * time.Second
 // single missed ping does not trigger a disconnect. At 45s, a peer must
 // go three full ping cycles without responding before the deadline fires.
 const readDeadline = 45 * time.Second
+
+// writeDeadline is the maximum time writeLoop waits for a single write to
+// complete. If the remote peer's TCP receive buffer is full and the write
+// blocks longer than this, the connection is treated as stalled and closed.
+// 10 seconds is generous — a healthy peer drains its buffer much faster.
+const writeDeadline = 10 * time.Second
 
 // PeerState is the lifecycle state of a Peer connection.
 type PeerState int
@@ -204,10 +211,12 @@ type Peer struct {
 	dec  *json.Decoder     // owned by readLoop after handshake
 	rl   *resetLimitReader // per-message size limiter; Reset() called after each decode
 
-	send        chan Message
-	lastSeen    time.Time
-	lastSyncReq time.Time // tracks last MsgRequestSync for per-peer rate limiting (NEW-6)
-	mu          sync.RWMutex
+	send             chan Message
+	lastSeen         time.Time
+	lastSyncReq      time.Time // tracks last MsgRequestSync for per-peer rate limiting (NEW-6)
+	connectedAt      time.Time // when the peer entered PeerConnected state
+	disconnectReason string    // set by readLoop on exit: "read_timeout", "remote_closed", "read_error"
+	mu               sync.RWMutex
 }
 
 // NewPeer constructs a Peer for the given connection. agentID may be empty
@@ -287,6 +296,31 @@ func (p *Peer) IsConnected() bool {
 	return p.State == PeerConnected
 }
 
+// DisconnectReason returns the reason readLoop exited (set at disconnect time).
+// Returns "" if the peer has not disconnected or was closed externally.
+func (p *Peer) DisconnectReason() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.disconnectReason
+}
+
+// SessionDuration returns how long the peer was connected, or zero if it
+// never reached PeerConnected state.
+func (p *Peer) SessionDuration() time.Duration {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.connectedAt.IsZero() {
+		return 0
+	}
+	return time.Since(p.connectedAt)
+}
+
+// SendQueueLen returns the current number of messages waiting in the outbound
+// channel. Useful for backpressure diagnostics.
+func (p *Peer) SendQueueLen() int {
+	return len(p.send)
+}
+
 // LastSeen returns the wall-clock time of the most recent message received
 // from this peer.
 func (p *Peer) LastSeen() time.Time {
@@ -324,6 +358,10 @@ func (p *Peer) AllowSyncRequest() bool {
 // writeLoop drains the send channel and writes each Message as a JSON line to
 // the connection. It exits when ctx is cancelled or the send channel is closed.
 // Called as a dedicated goroutine per peer; the encoder is not shared.
+//
+// A per-write deadline prevents indefinite blocking when the remote peer's TCP
+// receive buffer is full (e.g. under sustained load). Write timeout kills the
+// connection, which readLoop detects independently via its own deadline.
 func (p *Peer) writeLoop(ctx context.Context) {
 	for {
 		select {
@@ -333,9 +371,9 @@ func (p *Peer) writeLoop(ctx context.Context) {
 			if !ok {
 				return
 			}
+			p.conn.SetWriteDeadline(time.Now().Add(writeDeadline))
 			if err := p.enc.Encode(msg); err != nil {
-				// Write error — the connection is broken; exit and let
-				// readLoop discover the same error independently.
+				// Write error or deadline — connection is broken.
 				return
 			}
 		}
@@ -360,12 +398,24 @@ func (p *Peer) refreshReadDeadline() {
 // a fresh per-message byte budget (CRITICAL-4: per-message size limiting) and
 // the read deadline is refreshed so the timeout applies to inter-message gaps,
 // not cumulative connection lifetime.
+//
+// The disconnect reason is stored in p.disconnectReason for logging by the
+// caller (startPeerLoops).
 func (p *Peer) readLoop(ctx context.Context, incoming chan<- Message) {
 	p.refreshReadDeadline()
 	for {
 		var msg Message
 		if err := p.dec.Decode(&msg); err != nil {
-			// EOF, connection reset, read deadline, or peer closed — exit.
+			// Classify the disconnect reason for instrumentation.
+			p.mu.Lock()
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				p.disconnectReason = "read_timeout"
+			} else if errors.Is(err, io.EOF) {
+				p.disconnectReason = "remote_closed"
+			} else {
+				p.disconnectReason = "read_error"
+			}
+			p.mu.Unlock()
 			return
 		}
 		// Reset per-message byte counter so the next message gets a fresh limit.
