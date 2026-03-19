@@ -1601,11 +1601,15 @@ func cmdConnect() {
 }
 
 
-// checkGenesisConsistency runs two checks against the loaded store:
+// checkGenesisConsistency verifies that the loaded store was seeded with the
+// current genesis allocation constants.
 //
-//  1. Bucket sum check: the sum of all six genesis bucket balances must equal
-//     genesis.TotalSupply. A mismatch means the store was seeded by a different
-//     binary (different allocation constants).
+//  1. Total minted check: TransferLedger.TotalMinted() must equal
+//     genesis.TotalSupply. TotalMinted tracks the cumulative µAET created by
+//     FundAgent (the only token-creation path) and is persisted to the store.
+//     Unlike summing genesis bucket balances — which decreases as tokens move
+//     to agents, staking pools, and escrow — TotalMinted is monotonic and
+//     reflects the original seeding regardless of subsequent token flows.
 //
 //  2. Zombie-agent check: if the identity registry has registered agents but the
 //     ecosystem bucket balance equals exactly genesis.EcosystemAllocation (i.e.
@@ -1614,42 +1618,20 @@ func cmdConnect() {
 //     store is stale and must be wiped so they re-register and receive funds.
 //
 // Returns true when the store is consistent, false when either check fails.
-// A zero bucket total means genesis hasn't run yet; the auto-genesis block
+// A zero TotalMinted means genesis hasn't run yet; the auto-genesis block
 // handles that case, so we return true here.
 func checkGenesisConsistency(tl *ledger.TransferLedger, reg *identity.Registry) bool {
-	buckets := []struct {
-		name string
-	}{
-		{genesis.BucketFounders},
-		{genesis.BucketInvestors},
-		{genesis.BucketEcosystem},
-		{genesis.BucketRewards},
-		{genesis.BucketTreasury},
-		{genesis.BucketPublic},
-	}
+	minted := tl.TotalMinted()
 
-	var total uint64
-	for _, b := range buckets {
-		bal, _ := tl.Balance(crypto.AgentID(b.name))
-		total += bal
-	}
-
-	// Zero total means genesis hasn't run yet; auto-genesis handles this.
-	if total == 0 {
+	// Zero minted means genesis hasn't run yet; auto-genesis handles this.
+	if minted == 0 {
 		return true
 	}
 
-	if total != genesis.TotalSupply {
-		// Total doesn't match — log each bucket for diagnosis.
-		slog.Warn("genesis consistency check failed: bucket total does not match TotalSupply",
-			"bucket_total", total,
+	if minted != genesis.TotalSupply {
+		slog.Warn("genesis consistency check failed: TotalMinted does not match TotalSupply",
+			"total_minted", minted,
 			"expected", genesis.TotalSupply,
-			genesis.BucketFounders, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketFounders)); return b }(),
-			genesis.BucketInvestors, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketInvestors)); return b }(),
-			genesis.BucketEcosystem, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketEcosystem)); return b }(),
-			genesis.BucketRewards, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketRewards)); return b }(),
-			genesis.BucketTreasury, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketTreasury)); return b }(),
-			genesis.BucketPublic, func() uint64 { b, _ := tl.Balance(crypto.AgentID(genesis.BucketPublic)); return b }(),
 		)
 		return false
 	}

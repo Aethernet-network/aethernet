@@ -121,63 +121,42 @@ func (r *Registrar) Stop() {
 }
 
 // CleanupStaleInstances lists all instances registered in the Cloud Map
-// service and deregisters any that do not respond to a TCP health check on
-// the P2P port. Call on startup to purge stale entries left by previous
-// containers that were hard-killed without calling Stop().
-//
-// The caller's own IP (r.instanceID) is always skipped — it was just
-// registered by Start().
+// service and logs their status. During simultaneous redeploy, other new
+// tasks may not yet be listening when this runs, so aggressive TCP health
+// checks would deregister peers that are still starting up. Instead, we log
+// the registered instance count and rely on PeerDiscovery to handle
+// connection failures to stale IPs gracefully (connect fails are logged,
+// skipped, and retried on the next 30-second DNS cycle).
 func (r *Registrar) CleanupStaleInstances() {
 	if r == nil || r.instanceID == "" {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	resp, err := r.client.ListInstances(ctx, &servicediscovery.ListInstancesInput{
 		ServiceId: aws.String(r.serviceID),
 	})
 	if err != nil {
-		slog.Warn("cloudmap: ListInstances failed; skipping stale cleanup", "err", err)
+		slog.Warn("cloudmap: ListInstances failed", "err", err)
 		return
 	}
 
+	var others []string
 	for _, inst := range resp.Instances {
 		instID := aws.ToString(inst.Id)
 		if instID == r.instanceID {
-			continue // skip self
+			continue
 		}
-
-		// Health check: try to open a TCP connection to the instance's P2P port.
-		ip := inst.Attributes["AWS_INSTANCE_IPV4"]
-		port := inst.Attributes["AWS_INSTANCE_PORT"]
-		if ip == "" || port == "" {
-			ip = instID // fallback: instanceID is the IP in our convention
-			port = r.p2pPort
-		}
-
-		addr := net.JoinHostPort(ip, port)
-		conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
-		if err == nil {
-			conn.Close()
-			continue // instance is alive
-		}
-
-		// Instance is unreachable — deregister it.
-		slog.Info("cloudmap: deregistering stale instance", "instance_id", instID, "addr", addr)
-		dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, derr := r.client.DeregisterInstance(dctx, &servicediscovery.DeregisterInstanceInput{
-			ServiceId:  aws.String(r.serviceID),
-			InstanceId: aws.String(instID),
-		})
-		dcancel()
-		if derr != nil {
-			slog.Warn("cloudmap: failed to deregister stale instance", "instance_id", instID, "err", derr)
-		} else {
-			slog.Info("cloudmap: deregistered stale instance", "instance_id", instID)
-		}
+		others = append(others, instID)
 	}
+
+	slog.Info("cloudmap: registered instances",
+		"self", r.instanceID,
+		"other_count", len(others),
+		"total", len(others)+1,
+	)
 }
 
 // fetchPrivateIP returns the node's private IPv4 address and a string
