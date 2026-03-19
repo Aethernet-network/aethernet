@@ -13,30 +13,31 @@ import (
 // (e.g. during a load test) — each reconnect is staggered by 0-5 seconds.
 const maxReconnectJitter = 5 * time.Second
 
-// PeerDiscovery periodically resolves a DNS name and connects to any newly
-// discovered IP addresses. It is designed for service-discovery environments
-// such as AWS Cloud Map where peer IPs change when containers restart.
+// PeerDiscovery periodically resolves a DNS name and connects to any peer
+// whose IP is not already in the node's live peer set. It is designed for
+// service-discovery environments such as AWS Cloud Map where peer IPs change
+// on every container restart.
 //
-// On each resolution cycle, addresses already present in knownPeers are
-// skipped. When a peer disconnects its address is removed from knownPeers so
-// the next cycle can reconnect if the same IP reappears in DNS.
+// Unlike a cache-based approach, PeerDiscovery checks the node's actual
+// connected peers (by IP) on every cycle. This avoids stale-cache issues
+// caused by ephemeral-port mismatches between inbound and outbound addresses
+// or Cloud Map DNS propagation lag during rolling deploys.
 //
 // Lifecycle: call Start to begin periodic resolution, Stop to shut down.
 // Stop is idempotent. PeerDiscovery is safe for concurrent use.
 type PeerDiscovery struct {
-	dnsName    string
-	port       string
-	node       *Node
-	interval   time.Duration
-	stopCh     chan struct{}
-	stopOnce   sync.Once
-	knownPeers map[string]bool
-	mu         sync.Mutex
+	dnsName  string
+	port     string
+	node     *Node
+	interval time.Duration
+	stopCh   chan struct{}
+	stopOnce sync.Once
 
-	// hasConnectedBefore is set after the first successful connection.
-	// Reconnection jitter is applied only after this flag is set, so
+	// firstResolved tracks whether we've completed at least one DNS cycle.
+	// Reconnection jitter is applied only after the first cycle so that
 	// initial boot-time discovery is fast (no jitter).
-	hasConnectedBefore bool
+	firstResolved bool
+	mu            sync.Mutex
 
 	// resolver performs host lookup. Defaults to net.LookupHost; may be
 	// replaced in tests to inject a mock address list.
@@ -44,31 +45,16 @@ type PeerDiscovery struct {
 }
 
 // NewPeerDiscovery creates a PeerDiscovery that resolves dnsName every
-// interval and dials any new IPs on port. It registers a disconnect handler
-// on node so that stale entries are cleared and reconnection is attempted
-// automatically on the next cycle.
+// interval and dials any new IPs on port.
 func NewPeerDiscovery(dnsName, port string, node *Node, interval time.Duration) *PeerDiscovery {
-	pd := &PeerDiscovery{
-		dnsName:    dnsName,
-		port:       port,
-		node:       node,
-		interval:   interval,
-		stopCh:     make(chan struct{}),
-		knownPeers: make(map[string]bool),
-		resolver:   net.LookupHost,
+	return &PeerDiscovery{
+		dnsName:  dnsName,
+		port:     port,
+		node:     node,
+		interval: interval,
+		stopCh:   make(chan struct{}),
+		resolver: net.LookupHost,
 	}
-
-	// When a peer disconnects, remove its address from knownPeers so the next
-	// DNS cycle can reconnect if the IP reappears (e.g. ECS task restart with
-	// the same subnet IP, or Cloud Map propagation lag during a rolling deploy).
-	node.SetDisconnectHandler(func(address string) {
-		pd.mu.Lock()
-		delete(pd.knownPeers, address)
-		pd.mu.Unlock()
-		slog.Debug("peer discovery: cleared disconnected peer", "address", address)
-	})
-
-	return pd
 }
 
 // Start launches the background resolution goroutine. The first DNS lookup
@@ -97,9 +83,10 @@ func (pd *PeerDiscovery) run() {
 	}
 }
 
-// resolve performs one DNS lookup and connects to any address not yet in
-// knownPeers. Failed connections are not added to knownPeers so they are
-// retried on the next cycle.
+// resolve performs one DNS lookup and connects to any address whose IP is
+// not already in the node's live peer set. This checks actual connected
+// peers — not a cache — so ephemeral-port mismatches and stale entries
+// cannot prevent reconnection.
 func (pd *PeerDiscovery) resolve() {
 	addrs, err := pd.resolver(pd.dnsName)
 	if err != nil {
@@ -109,45 +96,44 @@ func (pd *PeerDiscovery) resolve() {
 	}
 	slog.Debug("peer discovery: resolved", "name", pd.dnsName, "count", len(addrs))
 
+	// Snapshot the node's currently connected peer IPs.
+	connectedIPs := pd.node.PeerIPs()
+
 	for _, ip := range addrs {
 		addr := net.JoinHostPort(ip, pd.port)
 
-		// Skip our own address before touching knownPeers or dialling.
-		// isSelfAddr compares the IP against all local interfaces and the port
-		// against the node's own listen port, so nodes on the same machine but
-		// different ports (e.g. in tests) are not incorrectly skipped.
 		if pd.node.isSelfAddr(addr) {
-			slog.Debug("peer discovery: skipping own address", "addr", addr)
 			continue
 		}
 
+		// Check the live peer set by IP, not a cache. This handles the
+		// inbound-vs-outbound port mismatch: an inbound peer from
+		// 172.31.6.199:35014 is still recognized as "connected to 172.31.6.199".
+		if connectedIPs[ip] {
+			continue
+		}
+
+		// Stagger reconnection attempts after the first cycle to avoid
+		// thundering herd. Initial boot discovery is jitter-free.
 		pd.mu.Lock()
-		known := pd.knownPeers[addr]
+		needsJitter := pd.firstResolved
 		pd.mu.Unlock()
-		if known {
-			continue
-		}
-
-		// Stagger reconnection attempts to avoid thundering herd when all peers
-		// disconnect simultaneously under load. Only applies when we have
-		// previously connected to at least one peer (initial discovery is
-		// jitter-free so nodes boot quickly). Each reconnect gets 0-5s jitter.
-		if pd.hasConnectedBefore {
+		if needsJitter {
 			jitter := time.Duration(rand.Int63n(int64(maxReconnectJitter)))
 			if jitter > 0 {
 				time.Sleep(jitter)
 			}
 		}
 
-		slog.Info("peer discovery: connecting to new peer", "addr", addr)
+		slog.Info("peer discovery: connecting to peer", "addr", addr)
 		if _, err := pd.node.Connect(addr); err != nil {
 			slog.Warn("peer discovery: connect failed", "addr", addr, "err", err)
 			continue
 		}
-		pd.mu.Lock()
-		pd.knownPeers[addr] = true
-		pd.hasConnectedBefore = true
-		pd.mu.Unlock()
 		slog.Info("peer discovery: connected", "addr", addr)
 	}
+
+	pd.mu.Lock()
+	pd.firstResolved = true
+	pd.mu.Unlock()
 }

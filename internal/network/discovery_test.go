@@ -102,8 +102,8 @@ func TestPeerDiscovery_SkipsKnownPeers(t *testing.T) {
 }
 
 // TestPeerDiscovery_ReconnectsAfterDisconnect verifies that after a peer
-// disconnects its address is cleared from knownPeers so the next cycle
-// reconnects to it.
+// disconnects, the next DNS cycle reconnects to it. Discovery checks the
+// node's live peer set (not a cache) so there is nothing to "clear".
 func TestPeerDiscovery_ReconnectsAfterDisconnect(t *testing.T) {
 	target := newDiscoveryTestNode(t)
 	_, port, _ := net.SplitHostPort(target.ListenAddr())
@@ -132,8 +132,7 @@ func TestPeerDiscovery_ReconnectsAfterDisconnect(t *testing.T) {
 	// Stop the target node to simulate a peer disconnect.
 	target.Stop()
 
-	// Wait for the peer count to drop to zero. Under CPU load (full suite) the
-	// goroutine detecting the TCP EOF may not be scheduled for several seconds.
+	// Wait for the peer count to drop to zero.
 	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if discoverer.PeerCount() == 0 {
@@ -143,14 +142,6 @@ func TestPeerDiscovery_ReconnectsAfterDisconnect(t *testing.T) {
 	}
 	if discoverer.PeerCount() != 0 {
 		t.Fatal("peer count did not drop to 0 after target stopped")
-	}
-
-	// knownPeers should now be empty (address cleared by disconnect handler).
-	pd.mu.Lock()
-	knownCount := len(pd.knownPeers)
-	pd.mu.Unlock()
-	if knownCount != 0 {
-		t.Errorf("knownPeers should be empty after disconnect, got %d entries", knownCount)
 	}
 }
 

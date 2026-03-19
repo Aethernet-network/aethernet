@@ -529,6 +529,23 @@ func (n *Node) PeerCount() int {
 	return len(n.peers)
 }
 
+// PeerIPs returns the set of remote IP addresses (without port) for all
+// currently connected peers. Used by PeerDiscovery to check whether a
+// resolved DNS address is already connected before dialling.
+func (n *Node) PeerIPs() map[string]bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	ips := make(map[string]bool, len(n.peers))
+	for _, p := range n.peers {
+		host, _, err := net.SplitHostPort(p.Address)
+		if err != nil {
+			host = p.Address
+		}
+		ips[host] = true
+	}
+	return ips
+}
+
 // ListenAddr returns the TCP address the node is bound to.
 // When the node was started with ":0" or "127.0.0.1:0", the OS assigns a
 // random port; this method returns the actual assigned address so that
