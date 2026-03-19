@@ -1640,13 +1640,20 @@ func checkGenesisConsistency(tl *ledger.TransferLedger, reg *identity.Registry) 
 	// onboarding fix received no allocation (ecosystem balance was never drawn
 	// down). Detect this by checking whether any agents are registered while the
 	// ecosystem bucket still holds its full genesis allocation.
-	ecosystemBal, _ := tl.Balance(crypto.AgentID(genesis.BucketEcosystem))
-	if ecosystemBal == genesis.EcosystemAllocation && len(reg.All(1, 0)) > 0 {
-		slog.Warn("genesis consistency check failed: agents registered but ecosystem bucket is untouched (zombie agents from pre-onboarding-fix binary)",
-			"registered_agents", len(reg.All(0, 0)),
-			"ecosystem_balance", ecosystemBal,
-		)
-		return false
+	//
+	// Skip on testnet: the testnet-validator is registered via startStack and
+	// funded from the rewards bucket, not the ecosystem bucket. Its presence
+	// in the identity registry with an untouched ecosystem bucket is expected
+	// testnet behavior, not a zombie-agent signal.
+	if os.Getenv("AETHERNET_TESTNET") != "true" {
+		ecosystemBal, _ := tl.Balance(crypto.AgentID(genesis.BucketEcosystem))
+		if ecosystemBal == genesis.EcosystemAllocation && len(reg.All(1, 0)) > 0 {
+			slog.Warn("genesis consistency check failed: agents registered but ecosystem bucket is untouched (zombie agents from pre-onboarding-fix binary)",
+				"registered_agents", len(reg.All(0, 0)),
+				"ecosystem_balance", ecosystemBal,
+			)
+			return false
+		}
 	}
 
 	return true
