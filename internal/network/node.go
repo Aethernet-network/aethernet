@@ -284,6 +284,15 @@ func (n *Node) Connect(address string) (*Peer, error) {
 		return nil, fmt.Errorf("network: dial %s: %w", address, err)
 	}
 
+	// Enable TCP keepalive so the kernel sends probes every 30 seconds
+	// instead of the default 2 hours (tcp_keepalive_time=7200). This
+	// prevents the OS from declaring the connection dead after 2 hours
+	// of idle time even when application-level pings are flowing.
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetKeepAlive(true)
+		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+	}
+
 	// Impose a configurable deadline on the entire handshake to prevent goroutine
 	// exhaustion from peers that connect but never complete the exchange
 	// (HIGH-7.1). The deadline is cleared after a successful handshake.
@@ -681,6 +690,12 @@ func (n *Node) acceptLoop() {
 // handleIncomingConn performs the acceptor side of the challenge-response
 // handshake and, on success, registers the peer and starts its loops.
 func (n *Node) handleIncomingConn(conn net.Conn) error {
+	// Enable TCP keepalive on inbound connections (same as outbound in Connect).
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetKeepAlive(true)
+		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+	}
+
 	// Impose a configurable handshake deadline to prevent goroutine exhaustion
 	// from peers that connect but never complete the exchange (HIGH-7.1).
 	if err := conn.SetDeadline(time.Now().Add(n.config.handshakeTimeout())); err != nil {
