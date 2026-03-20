@@ -969,6 +969,19 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	}
 	stack.taskMgr.SetSecurityFloor(secFloor)
 
+	// Variables used by both the auto-validator block and the API wiring below.
+	// Declared here so they remain in scope; nil when auto-validator is disabled.
+	var replayEnforcer *replay.ReplayEnforcer
+	var submissionProc *replay.SubmissionProcessor
+	var canaryMgr *canary.CanaryManager
+
+	// AETHERNET_AUTOVALIDATOR controls whether the auto-validator starts.
+	// Default: "true" (backward compatible). Set to "false" to run a
+	// passive node that participates in P2P, DAG sync, and API serving
+	// but does not settle events locally.
+	if os.Getenv("AETHERNET_AUTOVALIDATOR") == "false" {
+		slog.Info("auto-validator disabled (AETHERNET_AUTOVALIDATOR=false)")
+	} else {
 	av := autovalidator.NewAutoValidator(stack.engine, testnetValidatorID, 5*time.Second)
 	av.SetFeeCollector(stack.feeCollector, crypto.AgentID(genesis.BucketTreasury))
 	av.SetGenerationLedger(stack.generation)
@@ -983,9 +996,6 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	// Wire the replay coordinator so the auto-validator can schedule async
 	// verification replays for selected tasks. The coordinator is backed by
 	// the node's BadgerDB store via the replayStore interface.
-	var replayEnforcer *replay.ReplayEnforcer
-	var submissionProc *replay.SubmissionProcessor
-	var canaryMgr *canary.CanaryManager
 	if stack.store != nil {
 		replayCoord := replay.NewReplayCoordinator(replay.DefaultReplayPolicy(), stack.store)
 		// Bootstrap overlay: replaces the hardcoded policy sample rates with the
@@ -1092,6 +1102,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	}
 	av.Start()
 	stack.autoVal = av
+	} // end AETHERNET_AUTOVALIDATOR gate
 
 	// Activate ledger archival: evict Settled/Adjusted entries older than the
 	// configured threshold from memory. Data is never deleted from the store —
