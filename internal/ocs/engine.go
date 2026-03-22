@@ -555,9 +555,9 @@ func (e *Engine) Submit(ev *event.Event) error {
 	return nil
 }
 
-// SubmitFromSync adds a DAG-synced event to the local pending queue so the
-// auto-validator can vote on it. Unlike Submit, it skips balance validation
-// and does NOT record the event in the transfer/generation ledger.
+// SubmitFromSync adds a DAG-synced event to the local pending queue and records
+// it in the transfer/generation ledger (without balance validation) so the
+// SettlementApplicator can later call Settle/Verify on it.
 // Idempotent: returns nil if the event is already pending or processed.
 func (e *Engine) SubmitFromSync(ev *event.Event) error {
 	if ev.Type != event.EventTypeTransfer && ev.Type != event.EventTypeGeneration && ev.Type != event.EventTypeTaskSettlement {
@@ -565,6 +565,19 @@ func (e *Engine) SubmitFromSync(ev *event.Event) error {
 	}
 	if ev.SettlementState != event.SettlementOptimistic {
 		return nil
+	}
+
+	// Record in the ledger BEFORE taking the engine lock (ledger has its own
+	// mutex). RecordFromSync skips balance validation and is idempotent.
+	switch ev.Type {
+	case event.EventTypeTransfer:
+		if err := e.transfer.RecordFromSync(ev); err != nil {
+			slog.Warn("ocs: SubmitFromSync transfer record failed", "event_id", ev.ID, "err", err)
+		}
+	case event.EventTypeGeneration:
+		if err := e.generation.RecordFromSync(ev); err != nil {
+			slog.Warn("ocs: SubmitFromSync generation record failed", "event_id", ev.ID, "err", err)
+		}
 	}
 
 	e.mu.Lock()

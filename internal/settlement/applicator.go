@@ -134,7 +134,7 @@ func (a *Applicator) applyToTarget(sp *SettlementPayload, target *event.Event) e
 
 	switch target.Type {
 	case event.EventTypeTransfer:
-		if err := a.applyTransfer(targetID, verdict); err != nil {
+		if err := a.applyTransfer(targetID, verdict, target); err != nil {
 			a.mu.Lock()
 			a.failedTotal++
 			a.mu.Unlock()
@@ -142,7 +142,7 @@ func (a *Applicator) applyToTarget(sp *SettlementPayload, target *event.Event) e
 		}
 
 	case event.EventTypeGeneration:
-		if err := a.applyGeneration(targetID, verdict, sp.VerifiedValue); err != nil {
+		if err := a.applyGeneration(targetID, verdict, sp.VerifiedValue, target); err != nil {
 			a.mu.Lock()
 			a.failedTotal++
 			a.mu.Unlock()
@@ -203,18 +203,40 @@ func (a *Applicator) applyToTarget(sp *SettlementPayload, target *event.Event) e
 	return nil
 }
 
-func (a *Applicator) applyTransfer(targetID event.EventID, verdict SettlementVerdict) error {
-	if verdict == VerdictAccepted {
-		return a.transfer.Settle(targetID, event.SettlementSettled)
+func (a *Applicator) applyTransfer(targetID event.EventID, verdict SettlementVerdict, target *event.Event) error {
+	settleState := event.SettlementSettled
+	if verdict != VerdictAccepted {
+		settleState = event.SettlementAdjusted
 	}
-	return a.transfer.Settle(targetID, event.SettlementAdjusted)
+	err := a.transfer.Settle(targetID, settleState)
+	if err != nil && a.lookup != nil {
+		// Safety net: entry may not exist in the local ledger if SubmitFromSync
+		// hasn't processed it yet. Record it from the DAG, then retry.
+		if recErr := a.transfer.RecordFromSync(target); recErr == nil {
+			err = a.transfer.Settle(targetID, settleState)
+		}
+	}
+	return err
 }
 
-func (a *Applicator) applyGeneration(targetID event.EventID, verdict SettlementVerdict, verifiedValue uint64) error {
+func (a *Applicator) applyGeneration(targetID event.EventID, verdict SettlementVerdict, verifiedValue uint64, target *event.Event) error {
+	var err error
 	if verdict == VerdictAccepted {
-		return a.generation.Verify(targetID, verifiedValue)
+		err = a.generation.Verify(targetID, verifiedValue)
+	} else {
+		err = a.generation.Reject(targetID)
 	}
-	return a.generation.Reject(targetID)
+	if err != nil && a.lookup != nil {
+		// Safety net: record from DAG if entry missing, then retry.
+		if recErr := a.generation.RecordFromSync(target); recErr == nil {
+			if verdict == VerdictAccepted {
+				err = a.generation.Verify(targetID, verifiedValue)
+			} else {
+				err = a.generation.Reject(targetID)
+			}
+		}
+	}
+	return err
 }
 
 func (a *Applicator) applyTaskSettlement(target *event.Event, verdict SettlementVerdict) error {

@@ -144,6 +144,42 @@ func (l *GenerationLedger) Record(e *event.Event) error {
 	return nil
 }
 
+// RecordFromSync records a Generation event received via DAG sync. Idempotent:
+// returns nil if the event is already recorded. Used by SubmitFromSync so the
+// SettlementApplicator can later call Verify() on the entry.
+func (l *GenerationLedger) RecordFromSync(e *event.Event) error {
+	if e.Type != event.EventTypeGeneration {
+		return fmt.Errorf("%w: got %q", ErrNotGeneration, e.Type)
+	}
+	p, err := event.GetPayload[event.GenerationPayload](e)
+	if err != nil {
+		return fmt.Errorf("ledger: Generation event %s: %w", e.ID, err)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, exists := l.entries[e.ID]; exists {
+		return nil // idempotent
+	}
+	l.entries[e.ID] = &GenerationEntry{
+		EventID:          e.ID,
+		GeneratingAgent:  crypto.AgentID(p.GeneratingAgent),
+		BeneficiaryAgent: crypto.AgentID(p.BeneficiaryAgent),
+		ClaimedValue:     p.ClaimedValue,
+		VerifiedValue:    0,
+		EvidenceHash:     p.EvidenceHash,
+		TaskDescription:  p.TaskDescription,
+		Timestamp:        e.CausalTimestamp,
+		Settlement:       event.SettlementOptimistic,
+		RecordedAt:       time.Now(),
+	}
+	if l.store != nil {
+		if err := l.store.PutGeneration(l.entries[e.ID]); err != nil {
+			slog.Error("ledger: failed to persist synced generation record", "event_id", e.ID, "err", err)
+		}
+	}
+	return nil
+}
+
 // Verify confirms a generation claim, setting the authoritative VerifiedValue
 // and advancing the entry to Settled.
 //

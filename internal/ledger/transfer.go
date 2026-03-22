@@ -220,6 +220,41 @@ func (l *TransferLedger) Record(e *event.Event) error {
 	return nil
 }
 
+// RecordFromSync records a Transfer event received via DAG sync. Unlike Record,
+// it skips the sender balance check (the originating node already validated it)
+// and is idempotent: returns nil if the event is already recorded.
+func (l *TransferLedger) RecordFromSync(e *event.Event) error {
+	if e.Type != event.EventTypeTransfer {
+		return fmt.Errorf("%w: got %q", ErrNotTransfer, e.Type)
+	}
+	p, err := event.GetPayload[event.TransferPayload](e)
+	if err != nil {
+		return fmt.Errorf("ledger: Transfer event %s: %w", e.ID, err)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, exists := l.entries[e.ID]; exists {
+		return nil // idempotent
+	}
+	l.entries[e.ID] = &TransferEntry{
+		EventID:    e.ID,
+		FromAgent:  crypto.AgentID(p.FromAgent),
+		ToAgent:    crypto.AgentID(p.ToAgent),
+		Amount:     p.Amount,
+		Currency:   p.Currency,
+		Memo:       p.Memo,
+		Timestamp:  e.CausalTimestamp,
+		Settlement: e.SettlementState,
+		RecordedAt: time.Now(),
+	}
+	if l.store != nil {
+		if err := l.store.PutTransfer(l.entries[e.ID]); err != nil {
+			slog.Error("ledger: failed to persist synced transfer record", "event_id", e.ID, "err", err)
+		}
+	}
+	return nil
+}
+
 // validLedgerTransitions mirrors the OCS lifecycle defined in event.Transition.
 // Keeping a local copy avoids mutating the live event just to validate a transition.
 var validLedgerTransitions = map[event.SettlementState]map[event.SettlementState]bool{
