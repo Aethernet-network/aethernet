@@ -960,6 +960,24 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		}
 	}
 
+	// Fund the node's own agentID from the rewards bucket so it can submit
+	// transfers during load tests. Idempotent: skips if already funded.
+	const nodeAgentFundTarget = uint64(50_000_000_000) // 50,000 AET
+	const nodeAgentMinBalance = uint64(1_000_000_000)  // 1,000 AET threshold
+	nodeAgentBal, _ := stack.transfer.Balance(agentID)
+	if nodeAgentBal < nodeAgentMinBalance {
+		topUp := nodeAgentFundTarget - nodeAgentBal
+		if err := stack.transfer.TransferFromBucket(
+			crypto.AgentID(genesis.BucketRewards), agentID, topUp,
+		); err != nil {
+			slog.Warn("startStack: failed to fund node agentID from rewards",
+				"err", err, "agent_id", agentID, "top_up", topUp)
+		} else {
+			slog.Info("startStack: funded node agentID",
+				"agent_id", agentID, "amount", topUp)
+		}
+	}
+
 	// Register this node's unique agentID in the identity registry with
 	// non-zero reputation and stake so its consensus votes carry weight.
 	if nodeFP, err := identity.NewFingerprint(agentID, stack.kp.PublicKey, nil); err == nil {

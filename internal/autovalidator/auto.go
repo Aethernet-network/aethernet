@@ -161,6 +161,10 @@ type AutoValidator struct {
 	// disputeReviewTimeout is how long after DisputedAt before the auto-validator
 	// auto-resolves a dispute. Defaults to 10 minutes (testnet).
 	disputeReviewTimeout time.Duration
+
+	// voted tracks event IDs that this auto-validator has already emitted a
+	// VerificationVote for. Prevents duplicate vote emission on every tick.
+	voted map[event.EventID]struct{}
 }
 
 // NewAutoValidator creates an AutoValidator that polls engine every interval
@@ -173,6 +177,7 @@ func NewAutoValidator(engine *ocs.Engine, validatorID crypto.AgentID, interval t
 		stop:                 make(chan struct{}),
 		taskStaleness:        10 * time.Second,
 		disputeReviewTimeout: 10 * time.Minute,
+		voted:                make(map[event.EventID]struct{}),
 	}
 }
 
@@ -835,7 +840,11 @@ func (av *AutoValidator) processPending() {
 	}
 	pending := av.engine.Pending()
 	for _, item := range pending {
+		if _, done := av.voted[item.EventID]; done {
+			continue // already voted — do not emit duplicate
+		}
 		av.emitVote(item.EventID, string(settlement.VerdictAccepted), item.Amount)
+		av.voted[item.EventID] = struct{}{}
 	}
 }
 
