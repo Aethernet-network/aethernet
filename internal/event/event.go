@@ -74,6 +74,11 @@ const (
 	// tasks. Created by the auto-validator after evidence verification passes.
 	// Contains all inputs required for deterministic settlement application.
 	EventTypeTaskSettlement EventType = "TaskSettlement"
+
+	// EventTypeGenesisFunding records a protocol-level token allocation from a
+	// genesis bucket to a validator or node agent. Applied deterministically by
+	// every node without consensus — same class as Registration events.
+	EventTypeGenesisFunding EventType = "GenesisFunding"
 )
 
 // SettlementState tracks an event's position in the Optimistic Capability Settlement
@@ -487,4 +492,14 @@ type RegistrationPayload struct {
 	PublicKey       []byte `json:"public_key"`
 	ReputationScore uint64 `json:"reputation_score"`
 	StakedAmount    uint64 `json:"staked_amount"`
+}
+
+// GenesisFundingPayload records a protocol-level token allocation from a
+// genesis bucket to a validator or node agent. Applied deterministically
+// by every node without consensus.
+type GenesisFundingPayload struct {
+	FromBucket string `json:"from_bucket"`
+	ToAgent    string `json:"to_agent"`
+	Amount     uint64 `json:"amount"`
+	Reason     string `json:"reason"`
 }

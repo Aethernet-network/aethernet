@@ -927,17 +927,16 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		nodeAgentStakeAmt   = uint64(25_000_000_000)  // 25,000 AET stake
 	)
 
-	// 1. Fund via canonical DAG Transfer event (idempotent: skips if above threshold).
-	// The event propagates to all peers and settles through consensus, ensuring
-	// every node sees every validator's funding identically.
+	// 1. Fund via canonical GenesisFunding DAG event (idempotent: skips if
+	// above threshold). The event propagates to all peers via DAG sync and
+	// is applied deterministically without consensus — same as Registration.
 	nodeAgentBal, _ := stack.transfer.Balance(agentID)
 	if nodeAgentBal < nodeAgentMinBalance {
-		fundPayload := event.TransferPayload{
-			FromAgent: genesis.BucketRewards,
-			ToAgent:   string(agentID),
-			Amount:    nodeAgentFundTarget,
-			Currency:  "AET",
-			Memo:      "node-bootstrap-funding",
+		gfPayload := event.GenesisFundingPayload{
+			FromBucket: genesis.BucketRewards,
+			ToAgent:    string(agentID),
+			Amount:     nodeAgentFundTarget,
+			Reason:     "node-bootstrap",
 		}
 		tips := stack.dag.Tips()
 		priorTS := make(map[event.EventID]uint64, len(tips))
@@ -946,19 +945,25 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 				priorTS[ref] = te.CausalTimestamp
 			}
 		}
-		fundEv, err := event.New(
-			event.EventTypeTransfer, tips, fundPayload,
-			string(agentID), priorTS, stack.engine.MinEventStake(),
+		gfEv, err := event.New(
+			event.EventTypeGenesisFunding, tips, gfPayload,
+			string(agentID), priorTS, 0,
 		)
 		if err == nil {
-			_ = crypto.SignEvent(fundEv, stack.kp)
-			if submitErr := stack.engine.Submit(fundEv); submitErr == nil {
-				_ = stack.dag.Add(fundEv)
-				slog.Info("startStack: submitted canonical funding transfer",
-					"agent_id", agentID, "amount", nodeAgentFundTarget)
-			} else {
-				slog.Warn("startStack: failed to submit funding transfer",
-					"err", submitErr, "agent_id", agentID)
+			_ = crypto.SignEvent(gfEv, stack.kp)
+			if dagErr := stack.dag.Add(gfEv); dagErr == nil {
+				// Apply locally immediately (peers apply via sync handler).
+				if err := stack.transfer.TransferFromBucket(
+					crypto.AgentID(genesis.BucketRewards), agentID, nodeAgentFundTarget,
+				); err != nil {
+					slog.Warn("startStack: genesis funding local apply failed", "err", err)
+				} else {
+					if stack.store != nil {
+						_ = stack.store.PutMeta("genesis-funding:"+string(gfEv.ID), []byte("1"))
+					}
+					slog.Info("startStack: genesis funding applied",
+						"agent_id", agentID, "amount", nodeAgentFundTarget)
+				}
 			}
 		}
 	}
@@ -1361,6 +1366,33 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			}
 			slog.Info("network: registered remote validator identity",
 				"agent_id", rp.AgentID, "staked", rp.StakedAmount)
+
+		case event.EventTypeGenesisFunding:
+			// Idempotency: skip if already applied.
+			if stack.store != nil {
+				key := "genesis-funding:" + string(ev.ID)
+				if data, _ := stack.store.GetMeta(key); len(data) > 0 {
+					return
+				}
+			}
+			gfp, err := event.GetPayload[event.GenesisFundingPayload](ev)
+			if err != nil {
+				return
+			}
+			if err := stack.transfer.TransferFromBucket(
+				crypto.AgentID(gfp.FromBucket),
+				crypto.AgentID(gfp.ToAgent),
+				gfp.Amount,
+			); err != nil {
+				slog.Warn("genesis-funding: transfer failed",
+					"to", gfp.ToAgent, "err", err)
+				return
+			}
+			if stack.store != nil {
+				_ = stack.store.PutMeta("genesis-funding:"+string(ev.ID), []byte("1"))
+			}
+			slog.Info("genesis-funding: applied",
+				"to", gfp.ToAgent, "amount", gfp.Amount, "reason", gfp.Reason)
 		}
 	})
 
