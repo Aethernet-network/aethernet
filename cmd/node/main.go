@@ -927,30 +927,39 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		nodeAgentStakeAmt   = uint64(25_000_000_000)  // 25,000 AET stake
 	)
 
-	// 1. Fund from rewards bucket (idempotent: skips if above threshold).
-	// This is genesis-equivalent local state — each node independently funds
-	// its own agentID. No DAG event — same pattern as testnet-validator funding.
+	// 1. Fund via canonical DAG Transfer event (idempotent: skips if above threshold).
+	// The event propagates to all peers and settles through consensus, ensuring
+	// every node sees every validator's funding identically.
 	nodeAgentBal, _ := stack.transfer.Balance(agentID)
 	if nodeAgentBal < nodeAgentMinBalance {
-		topUp := nodeAgentFundTarget - nodeAgentBal
-		if err := stack.transfer.TransferFromBucket(
-			crypto.AgentID(genesis.BucketRewards), agentID, topUp,
-		); err != nil {
-			slog.Warn("startStack: failed to fund node agentID", "err", err, "agent_id", agentID)
-		} else {
-			slog.Info("startStack: funded node agentID", "agent_id", agentID, "amount", topUp)
+		fundPayload := event.TransferPayload{
+			FromAgent: genesis.BucketRewards,
+			ToAgent:   string(agentID),
+			Amount:    nodeAgentFundTarget,
+			Currency:  "AET",
+			Memo:      "node-bootstrap-funding",
 		}
-	}
-
-	// Purge stale optimistic outflows that may have accumulated from a
-	// previous run's unfinished transfers (same pattern as testnet-validator).
-	nodeAgentBal, _ = stack.transfer.Balance(agentID)
-	if nodeAgentBal < nodeAgentMinBalance {
-		purged := stack.transfer.ResetOptimisticOutflows(agentID)
-		nodeAgentBal, _ = stack.transfer.Balance(agentID)
-		if purged > 0 {
-			slog.Warn("startStack: purged stale optimistic outflows for node agent",
-				"agent_id", agentID, "entries_removed", purged, "balance_after", nodeAgentBal)
+		tips := stack.dag.Tips()
+		priorTS := make(map[event.EventID]uint64, len(tips))
+		for _, ref := range tips {
+			if te, err := stack.dag.Get(ref); err == nil {
+				priorTS[ref] = te.CausalTimestamp
+			}
+		}
+		fundEv, err := event.New(
+			event.EventTypeTransfer, tips, fundPayload,
+			string(agentID), priorTS, stack.engine.MinEventStake(),
+		)
+		if err == nil {
+			_ = crypto.SignEvent(fundEv, stack.kp)
+			if submitErr := stack.engine.Submit(fundEv); submitErr == nil {
+				_ = stack.dag.Add(fundEv)
+				slog.Info("startStack: submitted canonical funding transfer",
+					"agent_id", agentID, "amount", nodeAgentFundTarget)
+			} else {
+				slog.Warn("startStack: failed to submit funding transfer",
+					"err", submitErr, "agent_id", agentID)
+			}
 		}
 	}
 
