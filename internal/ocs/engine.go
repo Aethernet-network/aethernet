@@ -38,12 +38,9 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/eventbus"
-	"github.com/Aethernet-network/aethernet/internal/fees"
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/metrics"
-	"github.com/Aethernet-network/aethernet/internal/staking"
-	"github.com/Aethernet-network/aethernet/internal/validation"
 )
 
 // ocsPersistence is the subset of store.Store used by Engine.
@@ -205,12 +202,6 @@ type Engine struct {
 	generation *ledger.GenerationLedger
 	identity   *identity.Registry
 
-	// Economics — all optional. When nil the settlement path is unchanged and
-	// all existing behaviour is preserved (backward compatible).
-	feeCollector *fees.Collector
-	stakeManager *staking.StakeManager
-	treasuryID   crypto.AgentID
-
 	// eventBus — optional. When non-nil, settlement events are published for
 	// real-time streaming. Nil-safe throughout ProcessResult.
 	eventBus *eventbus.Bus
@@ -228,10 +219,6 @@ type Engine struct {
 	// The function receives the event ID, verdict, and voter ID.
 	broadcastVote func(eventID event.EventID, verdict bool, voterID crypto.AgentID)
 
-	// eventLookup — optional. When non-nil, used to retrieve the original
-	// event from the DAG for ledger recording during settlement.
-	eventLookup func(event.EventID) (*event.Event, error)
-
 	pending      map[event.EventID]*PendingItem
 	processed    map[event.EventID]struct{}    // tracks already-settled events for idempotency
 	processedAt  map[event.EventID]time.Time   // wall-clock time each event was settled (for GC)
@@ -243,15 +230,6 @@ type Engine struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{} // closed when the background goroutine exits
-}
-
-// SetEconomics attaches optional fee collection and staking mechanics to the
-// engine. Call before Start. All three values may be nil individually; the engine
-// skips whichever components are absent so existing tests remain unaffected.
-func (e *Engine) SetEconomics(fc *fees.Collector, sm *staking.StakeManager, treasuryID crypto.AgentID) {
-	e.feeCollector = fc
-	e.stakeManager = sm
-	e.treasuryID = treasuryID
 }
 
 // MinEventStake returns the minimum StakeAmount every submitted event must
@@ -297,13 +275,6 @@ func (e *Engine) SetConsensus(vr *consensus.VotingRound) {
 // peer nodes over the P2P network. Nil-safe.
 func (e *Engine) SetVoteBroadcaster(fn func(eventID event.EventID, verdict bool, voterID crypto.AgentID)) {
 	e.broadcastVote = fn
-}
-
-// SetEventLookup wires a function to retrieve events from the DAG. Used by
-// ProcessResult to record events in the ledger before settling (since Submit
-// no longer records).
-func (e *Engine) SetEventLookup(fn func(event.EventID) (*event.Event, error)) {
-	e.eventLookup = fn
 }
 
 // ProcessVote routes a verification verdict through the consensus engine when
@@ -654,24 +625,9 @@ func (e *Engine) SubmitVerification(result VerificationResult) error {
 	}
 }
 
-// ProcessResult applies a verification verdict to the appropriate ledger and
-// updates the originating agent's identity fingerprint. It removes the event
-// from the pending map regardless of verdict.
-//
-// If Verdict is true:
-//   - Transfer events are advanced to SettlementSettled.
-//   - Generation events are advanced to SettlementSettled with VerifiedValue set.
-//   - identity.RecordTaskCompletion is called for the originating agent.
-//
-// If Verdict is false:
-//   - Transfer events are advanced to SettlementAdjusted.
-//   - Generation events are advanced to SettlementAdjusted via Reject.
-//   - identity.RecordTaskFailure is called, reducing OptimisticTrustLimit by 15%.
-//     The configured AdjustmentPenalty is available for future stake-slashing.
-//
-// Identity updates are best-effort: if the agent is not registered in the local
-// Registry the error is silently ignored rather than failing the settlement.
-// Ledger errors (e.g., invalid state transitions) are propagated to the caller.
+// ProcessResult removes the event from the pending map and publishes metrics
+// and eventBus notifications. It does NOT mutate ledger state — all canonical
+// ledger mutations are handled exclusively by the SettlementApplicator.
 //
 // Returns ErrNotPending if the event is not in the pending map.
 func (e *Engine) ProcessResult(result VerificationResult) error {
@@ -689,14 +645,6 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 		return fmt.Errorf("%w: %s", ErrNotPending, result.EventID)
 	}
 
-	// Anti-self-dealing: reject verifiers who are party to the transaction.
-	// Skip when VerifierID is empty (expiry sweep path).
-	if result.VerifierID != "" && !validation.CanValidate(result.VerifierID, item.AgentID, item.RecipientID) {
-		e.mu.Unlock()
-		return fmt.Errorf("%w: verifier=%s sender=%s recipient=%s",
-			ErrSelfDealing, result.VerifierID, item.AgentID, item.RecipientID)
-	}
-
 	delete(e.pending, result.EventID)
 	e.processed[result.EventID] = struct{}{}
 	e.processedAt[result.EventID] = time.Now()
@@ -707,170 +655,19 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 	}
 	e.mu.Unlock()
 
-	// Use the event type as the capability domain for identity updates.
-	// This is a coarse-grained domain; callers may supply finer-grained
-	// domains through richer VerificationResult metadata in future iterations.
-	domain := string(item.EventType)
-
-	// Record the event in the ledger before settling. Submit() does not
-	// record — the SettlementApplicator (or ProcessResult for expiry sweep)
-	// is the only code that creates ledger entries. RecordFromSync is
-	// idempotent, so double-calls are safe.
-	if e.eventLookup != nil {
-		if ev, err := e.eventLookup(result.EventID); err == nil {
-			switch ev.Type {
-			case event.EventTypeTransfer:
-				_ = e.transfer.RecordFromSync(ev)
-			case event.EventTypeGeneration:
-				_ = e.generation.RecordFromSync(ev)
-			}
-		}
-	}
-
-	// C3: Re-check stake at settlement time for Transfer events.
-	// An agent that unstaked after Submit to exploit the optimistic window is
-	// treated as a failed verification and their remaining stake is slashed.
-	if result.Verdict && item.EventType == event.EventTypeTransfer && e.stakeManager != nil {
-		if e.stakeManager.StakedAmount(item.AgentID) < e.config.MinStakeRequired {
-			result.Verdict = false
-			if result.Reason != "" {
-				result.Reason = "stake dropped below minimum before settlement: " + result.Reason
-			} else {
-				result.Reason = "stake dropped below minimum before settlement"
-			}
-		}
-	}
-
+	// Metrics (no ledger mutation).
 	if result.Verdict {
-		switch item.EventType {
-		case event.EventTypeTransfer:
-			if err := e.transfer.Settle(result.EventID, event.SettlementSettled); err != nil {
-				return fmt.Errorf("ocs: settle transfer %s: %w", result.EventID, err)
-			}
-			if e.eventBus != nil {
-				e.eventBus.Publish(eventbus.Event{
-					Type:      eventbus.EventTypeTransfer,
-					Timestamp: time.Now(),
-					Data:      map[string]any{"event_id": string(result.EventID), "agent_id": string(item.AgentID), "amount": item.Amount},
-				})
-			}
-		case event.EventTypeGeneration:
-			if err := e.generation.Verify(result.EventID, result.VerifiedValue); err != nil {
-				return fmt.Errorf("ocs: verify generation %s: %w", result.EventID, err)
-			}
-			if e.eventBus != nil {
-				e.eventBus.Publish(eventbus.Event{
-					Type:      eventbus.EventTypeGeneration,
-					Timestamp: time.Now(),
-					Data:      map[string]any{"event_id": string(result.EventID), "agent_id": string(item.AgentID), "amount": item.Amount, "verified_value": result.VerifiedValue},
-				})
-			}
-		}
 		if e.nodeMetrics != nil {
 			e.nodeMetrics.TransactionsSettled.Inc()
 			e.nodeMetrics.TransactionVolume.Add(item.Amount)
 		}
-		// Collect settlement fee when economics are wired in.
-		// Transfer events: deduct from recipient's settled balance (supply-safe).
-		// Generation events: stats-only — no transfer-ledger balance to deduct from.
-		if e.feeCollector != nil && item.Amount > 0 {
-			var fee, burned uint64
-			switch item.EventType {
-			case event.EventTypeTransfer:
-				fee, burned = e.feeCollector.CollectFeeFromRecipient(
-					item.RecipientID, item.Amount, result.VerifierID, e.treasuryID,
-				)
-			case event.EventTypeGeneration:
-				fee = fees.CalculateFee(item.Amount)
-				burned = fee - fee*fees.ValidatorShare/100 - fee*fees.TreasuryShare/100
-				e.feeCollector.TrackFee(fee, burned, fee*fees.TreasuryShare/100)
-			}
-			if e.nodeMetrics != nil && fee > 0 {
-				e.nodeMetrics.FeesCollected.Add(fee)
-				e.nodeMetrics.FeesBurned.Add(burned)
-				e.nodeMetrics.FeesToTreasury.Add(fee * fees.TreasuryShare / 100)
-			}
-		}
-		// Record activity for decay tracking.
-		if e.stakeManager != nil {
-			e.stakeManager.RecordActivity(item.AgentID)
-		}
-		// Best-effort: agent may not be registered on this node.
-		_ = e.identity.RecordTaskCompletion(item.AgentID, result.VerifiedValue, domain)
 	} else {
 		if e.nodeMetrics != nil {
 			e.nodeMetrics.TransactionsReversed.Inc()
 		}
-		switch item.EventType {
-		case event.EventTypeTransfer:
-			if err := e.transfer.Settle(result.EventID, event.SettlementAdjusted); err != nil {
-				return fmt.Errorf("ocs: adjust transfer %s: %w", result.EventID, err)
-			}
-		case event.EventTypeGeneration:
-			if err := e.generation.Reject(result.EventID); err != nil {
-				return fmt.Errorf("ocs: reject generation %s: %w", result.EventID, err)
-			}
-		}
-		// Slash the offending agent's stake and credit the amount to treasury.
-		// Transfer defaults (sender exploited trust) → full slash + reset timestamp.
-		// Other failures (bad generation claim) → 10% slash.
-		//
-		// Atomicity: if a treasury is configured, pre-check the staking-pool
-		// balance before slashing. If the pool is insufficient, skip the slash
-		// entirely — both operations must succeed or neither runs, so the supply
-		// invariant is preserved.
-		if e.stakeManager != nil {
-			var slashed uint64
-			skipSlash := false
-			if e.treasuryID != "" {
-				// Compute the expected slash amount from the current staked balance.
-				currentStake := e.stakeManager.StakedAmount(item.AgentID)
-				var checkAmount uint64
-				if item.EventType == event.EventTypeTransfer {
-					checkAmount = currentStake
-				} else {
-					checkAmount = currentStake * 10 / 100
-				}
-				if checkAmount > 0 {
-					if err := e.transfer.BalanceCheck(crypto.AgentID("staking-pool"), checkAmount); err != nil {
-						slog.Error("ocs: slash skipped — staking-pool insufficient, supply invariant preserved",
-							"agent", item.AgentID, "needed", checkAmount, "err", err)
-						skipSlash = true
-					}
-				}
-			}
-			if !skipSlash {
-				if item.EventType == event.EventTypeTransfer {
-					slashed = e.stakeManager.SlashDefault(item.AgentID)
-				} else {
-					slashed = e.stakeManager.Slash(item.AgentID, 10)
-				}
-			}
-			if slashed > 0 && e.treasuryID != "" {
-				// Move from staking-pool to treasury — no new tokens created.
-				if err := e.transfer.TransferFromBucket(crypto.AgentID("staking-pool"), e.treasuryID, slashed); err != nil {
-					slog.Error("ocs: slash transfer failed — supply invariant break",
-						"agent", item.AgentID, "slashed", slashed, "err", err)
-				}
-			}
-			if slashed > 0 {
-				if e.nodeMetrics != nil {
-					e.nodeMetrics.SlashEvents.Inc()
-				}
-				if e.eventBus != nil {
-					e.eventBus.Publish(eventbus.Event{
-						Type:      eventbus.EventTypeSlash,
-						Timestamp: time.Now(),
-						Data:      map[string]any{"agent_id": string(item.AgentID), "amount": slashed},
-					})
-				}
-			}
-		}
-		// RecordTaskFailure applies the 15% OptimisticTrustLimit reduction.
-		_ = e.identity.RecordTaskFailure(item.AgentID, domain)
 	}
 
-	// Publish a verification event for every settled verdict (positive or negative).
+	// EventBus notification for real-time UI streaming.
 	if e.eventBus != nil {
 		e.eventBus.Publish(eventbus.Event{
 			Type:      eventbus.EventTypeVerification,

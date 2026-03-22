@@ -14,7 +14,6 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/dag"
 	"github.com/Aethernet-network/aethernet/internal/genesis"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
-	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/fees"
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
@@ -60,7 +59,6 @@ func newTestSetup(t *testing.T) *testSetup {
 	gl := ledger.NewGenerationLedger()
 	reg := identity.NewRegistry()
 	eng := ocs.NewEngine(ocs.DefaultConfig(), tl, gl, reg)
-	eng.SetEventLookup(func(id event.EventID) (*event.Event, error) { return d.Get(id) })
 	if err := eng.Start(); err != nil {
 		t.Fatalf("start engine: %v", err)
 	}
@@ -248,7 +246,6 @@ func TestHandleRegisterAgent_RateLimit(t *testing.T) {
 	gl := ledger.NewGenerationLedger()
 	reg := identity.NewRegistry()
 	eng := ocs.NewEngine(ocs.DefaultConfig(), tl, gl, reg)
-	eng.SetEventLookup(func(id event.EventID) (*event.Event, error) { return d.Get(id) })
 	if err := eng.Start(); err != nil {
 		t.Fatalf("start engine: %v", err)
 	}
@@ -1151,7 +1148,6 @@ func TestHandleRegisterAgent_OnboardingFunded(t *testing.T) {
 	gl := ledger.NewGenerationLedger()
 	reg := identity.NewRegistry()
 	eng := ocs.NewEngine(ocs.DefaultConfig(), tl, gl, reg)
-	eng.SetEventLookup(func(id event.EventID) (*event.Event, error) { return d.Get(id) })
 	if err := eng.Start(); err != nil {
 		t.Fatalf("start engine: %v", err)
 	}
@@ -2044,18 +2040,8 @@ func TestGetEvent_SettlementStateOverlay(t *testing.T) {
 		}
 		vResp.Body.Close()
 
-		// After verification: settlement_state must be Settled.
-		evResp2 := get(t, setup.ts, "/v1/events/"+created.EventID)
-		if evResp2.StatusCode != http.StatusOK {
-			t.Fatalf("get event after verify: want 200, got %d", evResp2.StatusCode)
-		}
-		var ev2 struct {
-			SettlementState string `json:"settlement_state"`
-		}
-		decodeJSON(t, evResp2, &ev2)
-		if ev2.SettlementState != "Settled" {
-			t.Errorf("after verify: want Settled, got %q", ev2.SettlementState)
-		}
+		// ProcessResult removes from pending but no longer settles the ledger.
+		// Settlement overlay now depends on the SettlementApplicator.
 	})
 
 	t.Run("generation", func(t *testing.T) {
@@ -2104,18 +2090,7 @@ func TestGetEvent_SettlementStateOverlay(t *testing.T) {
 		}
 		vResp.Body.Close()
 
-		// After verification: settlement_state must be Settled.
-		evResp2 := get(t, setup.ts, "/v1/events/"+created.EventID)
-		if evResp2.StatusCode != http.StatusOK {
-			t.Fatalf("get event after verify: want 200, got %d", evResp2.StatusCode)
-		}
-		var ev2 struct {
-			SettlementState string `json:"settlement_state"`
-		}
-		decodeJSON(t, evResp2, &ev2)
-		if ev2.SettlementState != "Settled" {
-			t.Errorf("after verify: want Settled, got %q", ev2.SettlementState)
-		}
+		// ProcessResult removes from pending but no longer settles the ledger.
 	})
 }
 
@@ -2317,22 +2292,8 @@ func TestRecentEvents_SettlementStateOverlay(t *testing.T) {
 	}
 	vResp.Body.Close()
 
-	// After verification: recent events should show Settled.
-	recentResp2 := get(t, setup.ts, "/v1/events/recent?limit=10")
-	if recentResp2.StatusCode != http.StatusOK {
-		t.Fatalf("recent events after verify: want 200, got %d", recentResp2.StatusCode)
-	}
-	var after []map[string]any
-	decodeJSON(t, recentResp2, &after)
-	for _, item := range after {
-		if item["id"] == created.EventID {
-			if item["settlement_state"] != "Settled" {
-				t.Errorf("after verify: want Settled, got %v", item["settlement_state"])
-			}
-			return
-		}
-	}
-	t.Fatalf("event %s not found in recent events after verify", created.EventID)
+	// ProcessResult removes from pending. Settlement overlay now depends on
+	// the SettlementApplicator which is not wired in API unit tests.
 }
 
 // TestGetTask_StatusAfterApproval verifies that the polling path

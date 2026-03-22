@@ -45,7 +45,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/registry"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/router"
-	"github.com/Aethernet-network/aethernet/internal/staking"
+
 	"github.com/Aethernet-network/aethernet/internal/autovalidator"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/pkg/sdk"
@@ -162,9 +162,6 @@ func main() {
 		slog.Error("failed to start local OCS engine", "err", err)
 		os.Exit(1)
 	}
-
-	stakeMgr := staking.NewStakeManager()
-	localEngine.SetEconomics(nil, stakeMgr, "")
 
 	var autoVal *autovalidator.AutoValidator
 

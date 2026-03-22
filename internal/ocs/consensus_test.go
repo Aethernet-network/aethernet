@@ -63,7 +63,6 @@ func TestConsensus_SingleNodeBackwardCompat(t *testing.T) {
 	registerAgent(t, h.reg, "bob")
 
 	ev := newTransferEvent(t, "alice", "bob", 10_000, ocs.DefaultConfig().MinStakeRequired)
-	h.events[ev.ID] = ev
 	if err := h.eng.Submit(ev); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -87,7 +86,6 @@ func TestConsensus_SingleNodeBackwardCompat(t *testing.T) {
 	registerAgent(t, h2.reg, "validator")
 
 	ev2 := newTransferEvent(t, "alice", "bob", 10_000, ocs.DefaultConfig().MinStakeRequired)
-	h2.events[ev2.ID] = ev2
 	if err := h2.eng.Submit(ev2); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -132,7 +130,6 @@ func TestConsensus_MultiNodeSupermajority(t *testing.T) {
 	h.eng.SetConsensus(vr)
 
 	ev := newTransferEvent(t, "alice", "bob", 10_000, ocs.DefaultConfig().MinStakeRequired)
-	h.events[ev.ID] = ev
 	if err := h.eng.Submit(ev); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -200,7 +197,6 @@ func TestConsensus_TimeoutWithSingleVote(t *testing.T) {
 	defer h.eng.Stop()
 
 	ev := newTransferEvent(t, "alice", "bob", 10_000, cfg.MinStakeRequired)
-	h.events[ev.ID] = ev
 	if err := h.eng.Submit(ev); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -262,7 +258,6 @@ func TestConsensus_VotePropagation(t *testing.T) {
 		broadcasts = append(broadcasts, broadcastRecord{eventID, verdict, voterID})
 	})
 	ev := newTransferEvent(t, "alice", "bob", 10_000, ocs.DefaultConfig().MinStakeRequired)
-	h.events[ev.ID] = ev
 	if err := h.eng.Submit(ev); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -326,7 +321,6 @@ func TestConsensus_ReputationWeighting(t *testing.T) {
 	h.eng.SetConsensus(vr)
 
 	ev := newTransferEvent(t, "alice", "bob", 10_000, ocs.DefaultConfig().MinStakeRequired)
-	h.events[ev.ID] = ev
 	if err := h.eng.Submit(ev); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}

@@ -478,21 +478,10 @@ func TestE2E_TransferConsensus(t *testing.T) {
 		t.Fatalf("Stake agentA: %v", err)
 	}
 
-	// OCS engine with fee collection and stake manager.
-	fc := fees.NewCollector(tl)
+	// OCS engine — economics are now on the SettlementApplicator.
+	_ = fees.NewCollector(tl) // fc unused after OCS economics removal
 	cfg := ocs.DefaultConfig()
 	eng := ocs.NewEngine(cfg, tl, gl, reg)
-	eng.SetEconomics(fc, sm, treasuryID)
-	// Wire event lookup so ProcessResult can record events in the ledger
-	// (Submit no longer records — the applicator or ProcessResult does).
-	evStore := make(map[event.EventID]*event.Event)
-	eng.SetEventLookup(func(id event.EventID) (*event.Event, error) {
-		ev, ok := evStore[id]
-		if !ok {
-			return nil, fmt.Errorf("not found: %s", id)
-		}
-		return ev, nil
-	})
 	if err := eng.Start(); err != nil {
 		t.Fatalf("start OCS engine: %v", err)
 	}
@@ -527,7 +516,6 @@ func TestE2E_TransferConsensus(t *testing.T) {
 	balAPreSubmit, _ := tl.Balance(agentA)
 	balBPreSubmit, _ := tl.Balance(agentB)
 
-	evStore[ev.ID] = ev
 	if err := eng.Submit(ev); err != nil {
 		t.Fatalf("engine.Submit: %v", err)
 	}
@@ -545,43 +533,21 @@ func TestE2E_TransferConsensus(t *testing.T) {
 		t.Fatalf("ProcessVote: %v", err)
 	}
 
-	// Verify consensus reached: event must be settled (removed from pending).
+	// Verify consensus reached: event removed from pending.
 	if eng.IsPending(ev.ID) {
-		t.Error("event still pending after consensus supermajority — settlement did not fire")
+		t.Error("event still pending after consensus supermajority — ProcessResult did not fire")
 	}
 
-	// Fee distribution with consensus path: when the voting round finalises,
-	// ProcessResult is called with VerifierID="" (no single verifier to credit).
-	// CollectFeeFromRecipient skips the validator transfer for empty VerifierID,
-	// so only the treasury fee is deducted from the receiver.
-	fee := fees.CalculateFee(transferAmt)
-	treasuryFee := fee * fees.TreasuryShare / 100
-
+	// ProcessResult no longer does ledger mutation or fee collection.
+	// Economic assertions have moved to SettlementApplicator tests.
+	// Balances should be unchanged — no settlement until the applicator runs.
 	balAFinal, _ := tl.Balance(agentA)
 	balBFinal, _ := tl.Balance(agentB)
-
-	// Sender: debited transferAmt from pre-submit balance.
-	if balAFinal != balAPreSubmit-transferAmt {
-		t.Errorf("sender balance: want %d-%d=%d, got %d",
-			balAPreSubmit, transferAmt, balAPreSubmit-transferAmt, balAFinal)
+	if balAFinal != balAPreSubmit {
+		t.Errorf("sender balance changed without applicator: before=%d after=%d", balAPreSubmit, balAFinal)
 	}
-	// Receiver: credited transferAmt minus treasury fee (validator fee stays
-	// uncollected because consensus path uses VerifierID="").
-	expectedBFinal := balBPreSubmit + transferAmt - treasuryFee
-	if balBFinal != expectedBFinal {
-		t.Errorf("receiver balance: want %d+%d-%d=%d, got %d",
-			balBPreSubmit, transferAmt, treasuryFee, expectedBFinal, balBFinal)
-	}
-
-	// Validator: no fee in consensus path (VerifierID="" skips validator credit).
-	valBal, _ := tl.Balance(validatorID)
-	if valBal != 0 {
-		t.Errorf("validator balance = %d; want 0 (no validator credit with consensus path)", valBal)
-	}
-	// Treasury: received treasury portion.
-	treaBal, _ := tl.Balance(treasuryID)
-	if treaBal != genesis.TreasuryAllocation+treasuryFee {
-		t.Errorf("treasury balance = %d; want %d", treaBal, genesis.TreasuryAllocation+treasuryFee)
+	if balBFinal != balBPreSubmit {
+		t.Errorf("receiver balance changed without applicator: before=%d after=%d", balBPreSubmit, balBFinal)
 	}
 
 	// CRITICAL: supply invariant.

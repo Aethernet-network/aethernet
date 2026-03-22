@@ -621,9 +621,6 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 	}
 	votingRound := consensus.NewVotingRound(votingCfg, reg)
 	eng.SetConsensus(votingRound)
-	eng.SetEventLookup(func(id event.EventID) (*event.Event, error) {
-		return d.Get(id)
-	})
 	// Wire VotingRound persistence so in-flight consensus rounds survive node
 	// restarts. Votes are written to BadgerDB after each RegisterVote and
 	// reloaded on boot, preventing silent vote loss (NEW-1).
@@ -655,8 +652,6 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 		feeCollector.SetStore(s)
 	}
 	walletMgr := wallet.New()
-	treasuryID := crypto.AgentID(genesis.BucketTreasury)
-	eng.SetEconomics(feeCollector, stakeMgr, treasuryID)
 
 	svcReg := registry.New()
 	if s != nil {
@@ -1240,6 +1235,11 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	}
 	if stack.store != nil {
 		settlementApp.SetStore(stack.store)
+	}
+	settlementApp.SetFeeCollector(stack.feeCollector, crypto.AgentID(genesis.BucketTreasury))
+	settlementApp.SetStakeManager(stack.stakeManager)
+	if stack.nodeMetrics != nil {
+		settlementApp.SetMetrics(stack.nodeMetrics)
 	}
 	settlementApp.Start()
 	defer settlementApp.Stop()

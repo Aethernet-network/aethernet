@@ -20,11 +20,10 @@ import (
 
 // testHarness holds all the wired-up components for a single test.
 type testHarness struct {
-	eng    *ocs.Engine
-	tl     *ledger.TransferLedger
-	gl     *ledger.GenerationLedger
-	reg    *identity.Registry
-	events map[event.EventID]*event.Event // in-memory event store for lookups
+	eng *ocs.Engine
+	tl  *ledger.TransferLedger
+	gl  *ledger.GenerationLedger
+	reg *identity.Registry
 }
 
 // newHarness builds a fully wired engine with the given config.
@@ -38,32 +37,11 @@ func newHarness(t *testing.T, cfg *ocs.EngineConfig) *testHarness {
 	if cfg == nil {
 		cfg = ocs.DefaultConfig()
 	}
-	h := &testHarness{
-		eng:    ocs.NewEngine(cfg, tl, gl, reg),
-		tl:     tl,
-		gl:     gl,
-		reg:    reg,
-		events: make(map[event.EventID]*event.Event),
-	}
-	// Wire event lookup so ProcessResult can record events in the ledger
-	// (Submit no longer records — the applicator or ProcessResult does).
-	h.eng.SetEventLookup(func(id event.EventID) (*event.Event, error) {
-		ev, ok := h.events[id]
-		if !ok {
-			return nil, fmt.Errorf("not found: %s", id)
-		}
-		return ev, nil
-	})
-	return h
-}
-
-// submitEvent is a helper that submits an event to the engine AND stores it
-// in the harness event map for ProcessResult's event lookup.
-func submitEvent(t *testing.T, h *testHarness, ev *event.Event) {
-	t.Helper()
-	h.events[ev.ID] = ev
-	if err := h.eng.Submit(ev); err != nil {
-		t.Fatalf("Submit: %v", err)
+	return &testHarness{
+		eng: ocs.NewEngine(cfg, tl, gl, reg),
+		tl:  tl,
+		gl:  gl,
+		reg: reg,
 	}
 }
 
@@ -237,7 +215,6 @@ func TestEngine_Submit_Transfer_LandsInPending(t *testing.T) {
 	fundAgent(t, h, "alice", 100_000)
 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
 
-	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit() = %v, want nil", err)
 	}
@@ -250,7 +227,6 @@ func TestEngine_Submit_Generation_LandsInPending(t *testing.T) {
 	h := newHarness(t, nil)
 	e := newGenerationEvent(t, "gen-agent", "ben-agent", 10_000, 1000)
 
-	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit() = %v, want nil", err)
 	}
@@ -278,7 +254,6 @@ func TestEngine_Submit_Duplicate_Error(t *testing.T) {
 	fundAgent(t, h, "alice", 100_000)
 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
 
-	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("first Submit() = %v", err)
 	}
@@ -327,7 +302,6 @@ func TestEngine_PendingCount_Increments(t *testing.T) {
 	}
 
 	e1 := newTransferEvent(t, "alice", "bob", 100, 1000)
-	h.events[e1.ID] = e1
 	if err := h.eng.Submit(e1); err != nil {
 		t.Fatalf("Submit e1: %v", err)
 	}
@@ -336,7 +310,6 @@ func TestEngine_PendingCount_Increments(t *testing.T) {
 	}
 
 	e2 := newGenerationEvent(t, "gen", "ben", 500, 2000)
-	h.events[e2.ID] = e2
 	if err := h.eng.Submit(e2); err != nil {
 		t.Fatalf("Submit e2: %v", err)
 	}
@@ -353,7 +326,6 @@ func TestEngine_IsPending_TrueForSubmitted(t *testing.T) {
 	if h.eng.IsPending(e.ID) {
 		t.Error("IsPending before Submit = true, want false")
 	}
-	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -366,7 +338,7 @@ func TestEngine_IsPending_TrueForSubmitted(t *testing.T) {
 // Verification result processing (async via SubmitVerification)
 // ---------------------------------------------------------------------------
 
-func TestEngine_SubmitVerification_True_TransferSettled(t *testing.T) {
+func TestEngine_SubmitVerification_True_TransferProcessed(t *testing.T) {
 	h := newHarness(t, nil)
 	if err := h.eng.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -375,7 +347,6 @@ func TestEngine_SubmitVerification_True_TransferSettled(t *testing.T) {
 
 	fundAgent(t, h, "alice", 100_000)
 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
-	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -384,18 +355,14 @@ func TestEngine_SubmitVerification_True_TransferSettled(t *testing.T) {
 		t.Fatalf("SubmitVerification: %v", err)
 	}
 
+	// ProcessResult removes from pending — no ledger mutation.
 	waitFor(t, time.Second, func() bool { return !h.eng.IsPending(e.ID) })
-
-	history, err := h.tl.History(crypto.AgentID("alice"), 1, 0)
-	if err != nil || len(history) != 1 {
-		t.Fatalf("History: err=%v len=%d", err, len(history))
-	}
-	if history[0].Settlement != event.SettlementSettled {
-		t.Errorf("Settlement = %q, want Settled", history[0].Settlement)
+	if h.eng.IsPending(e.ID) {
+		t.Error("event should not be pending after ProcessResult")
 	}
 }
 
-func TestEngine_SubmitVerification_True_GenerationSettled(t *testing.T) {
+func TestEngine_SubmitVerification_True_GenerationProcessed(t *testing.T) {
 	h := newHarness(t, nil)
 	if err := h.eng.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -403,10 +370,9 @@ func TestEngine_SubmitVerification_True_GenerationSettled(t *testing.T) {
 	defer h.eng.Stop()
 
 	const claimed = uint64(10_000)
-	const verified = uint64(8_000) // partial but still a positive verdict
+	const verified = uint64(8_000)
 
 	e := newGenerationEvent(t, "gen-agent", "ben-agent", claimed, 1000)
-	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -416,20 +382,12 @@ func TestEngine_SubmitVerification_True_GenerationSettled(t *testing.T) {
 	}
 
 	waitFor(t, time.Second, func() bool { return !h.eng.IsPending(e.ID) })
-
-	history, err := h.gl.GenerationHistory(crypto.AgentID("gen-agent"), 1, 0)
-	if err != nil || len(history) != 1 {
-		t.Fatalf("GenerationHistory: err=%v len=%d", err, len(history))
-	}
-	if history[0].Settlement != event.SettlementSettled {
-		t.Errorf("Settlement = %q, want Settled", history[0].Settlement)
-	}
-	if history[0].VerifiedValue != verified {
-		t.Errorf("VerifiedValue = %d, want %d", history[0].VerifiedValue, verified)
+	if h.eng.IsPending(e.ID) {
+		t.Error("event should not be pending after ProcessResult")
 	}
 }
 
-func TestEngine_SubmitVerification_False_Adjusted(t *testing.T) {
+func TestEngine_SubmitVerification_False_Processed(t *testing.T) {
 	h := newHarness(t, nil)
 	if err := h.eng.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -438,7 +396,6 @@ func TestEngine_SubmitVerification_False_Adjusted(t *testing.T) {
 
 	fundAgent(t, h, "alice", 100_000)
 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
-	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -452,136 +409,30 @@ func TestEngine_SubmitVerification_False_Adjusted(t *testing.T) {
 	if h.eng.IsPending(e.ID) {
 		t.Error("event still pending after false verdict")
 	}
-
-	history, err := h.tl.History(crypto.AgentID("alice"), 1, 0)
-	if err != nil || len(history) != 1 {
-		t.Fatalf("History: err=%v len=%d", err, len(history))
-	}
-	if history[0].Settlement != event.SettlementAdjusted {
-		t.Errorf("Settlement = %q, want Adjusted", history[0].Settlement)
-	}
 }
 
 // ---------------------------------------------------------------------------
 // Verification result processing (synchronous via ProcessResult)
-// These tests call ProcessResult directly to verify its exact effects on the
-// ledger and identity registry without relying on the background goroutine.
+// ProcessResult now only manages the pending queue — no ledger mutation.
 // ---------------------------------------------------------------------------
 
-func TestEngine_ProcessResult_True_RecordsTaskCompletion(t *testing.T) {
+func TestEngine_ProcessResult_RemovesFromPending(t *testing.T) {
 	h := newHarness(t, nil)
-	registerAgent(t, h.reg, "alice")
 	fundAgent(t, h, "alice", 100_000)
 
 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
-	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
-
-	before, err := h.reg.Get(crypto.AgentID("alice"))
-	if err != nil {
-		t.Fatalf("Get before: %v", err)
+	if !h.eng.IsPending(e.ID) {
+		t.Fatal("event should be pending after Submit")
 	}
 
 	if err := h.eng.ProcessResult(verdict(e.ID, true, 0)); err != nil {
 		t.Fatalf("ProcessResult: %v", err)
 	}
-
-	after, err := h.reg.Get(crypto.AgentID("alice"))
-	if err != nil {
-		t.Fatalf("Get after: %v", err)
-	}
-
-	if after.TasksCompleted != before.TasksCompleted+1 {
-		t.Errorf("TasksCompleted: before=%d after=%d, want +1",
-			before.TasksCompleted, after.TasksCompleted)
-	}
-	if after.FingerprintVersion != before.FingerprintVersion+1 {
-		t.Errorf("FingerprintVersion: before=%d after=%d, want +1",
-			before.FingerprintVersion, after.FingerprintVersion)
-	}
-}
-
-func TestEngine_ProcessResult_False_RecordsTaskFailure(t *testing.T) {
-	h := newHarness(t, nil)
-	registerAgent(t, h.reg, "alice")
-	fundAgent(t, h, "alice", 100_000)
-
-	// First record a successful task to boost OptimisticTrustLimit above the
-	// minimum floor (1000 micro-AET), so the subsequent 15% failure reduction
-	// is visible rather than clamped back to the floor.
-	e0 := newTransferEvent(t, "alice", "carol", 100, 1000)
-	h.events[e0.ID] = e0
-	if err := h.eng.Submit(e0); err != nil {
-		t.Fatalf("Submit e0: %v", err)
-	}
-	if err := h.eng.ProcessResult(verdict(e0.ID, true, 500)); err != nil {
-		t.Fatalf("ProcessResult (success): %v", err)
-	}
-
-	boosted, err := h.reg.Get(crypto.AgentID("alice"))
-	if err != nil {
-		t.Fatalf("Get after success: %v", err)
-	}
-
-	// Now submit and fail a second event.
-	e := newTransferEvent(t, "alice", "bob", 500, 1000)
-	h.events[e.ID] = e
-	if err := h.eng.Submit(e); err != nil {
-		t.Fatalf("Submit e: %v", err)
-	}
-	if err := h.eng.ProcessResult(verdict(e.ID, false, 0)); err != nil {
-		t.Fatalf("ProcessResult (failure): %v", err)
-	}
-
-	after, err := h.reg.Get(crypto.AgentID("alice"))
-	if err != nil {
-		t.Fatalf("Get after failure: %v", err)
-	}
-
-	if after.TasksFailed != boosted.TasksFailed+1 {
-		t.Errorf("TasksFailed: before=%d after=%d, want +1",
-			boosted.TasksFailed, after.TasksFailed)
-	}
-	// With OptimisticTrustLimit above the floor, the 15% reduction must be visible.
-	if after.OptimisticTrustLimit >= boosted.OptimisticTrustLimit {
-		t.Errorf("OptimisticTrustLimit: before=%d after=%d, want decrease",
-			boosted.OptimisticTrustLimit, after.OptimisticTrustLimit)
-	}
-}
-
-func TestEngine_ProcessResult_PartialVerification(t *testing.T) {
-	h := newHarness(t, nil)
-	registerAgent(t, h.reg, "gen-agent")
-
-	const claimed = uint64(5_000)
-	const verified = uint64(3_000) // 60% verified — overclaimer pattern
-
-	e := newGenerationEvent(t, "gen-agent", "ben-agent", claimed, 1000)
-	h.events[e.ID] = e
-	if err := h.eng.Submit(e); err != nil {
-		t.Fatalf("Submit: %v", err)
-	}
-
-	// Positive verdict with VerifiedValue < ClaimedValue: still settles.
-	if err := h.eng.ProcessResult(verdict(e.ID, true, verified)); err != nil {
-		t.Fatalf("ProcessResult: %v", err)
-	}
-
-	history, err := h.gl.GenerationHistory(crypto.AgentID("gen-agent"), 1, 0)
-	if err != nil || len(history) != 1 {
-		t.Fatalf("GenerationHistory: err=%v len=%d", err, len(history))
-	}
-	entry := history[0]
-	if entry.Settlement != event.SettlementSettled {
-		t.Errorf("Settlement = %q, want Settled", entry.Settlement)
-	}
-	if entry.ClaimedValue != claimed {
-		t.Errorf("ClaimedValue = %d, want %d (unchanged)", entry.ClaimedValue, claimed)
-	}
-	if entry.VerifiedValue != verified {
-		t.Errorf("VerifiedValue = %d, want %d", entry.VerifiedValue, verified)
+	if h.eng.IsPending(e.ID) {
+		t.Error("event should not be pending after ProcessResult")
 	}
 }
 
@@ -597,10 +448,10 @@ func TestEngine_ProcessResult_NotPending_Error(t *testing.T) {
 // Expiry
 // ---------------------------------------------------------------------------
 
-func TestEngine_Expiry_AdjustsLedger(t *testing.T) {
+func TestEngine_Expiry_RemovesFromPending(t *testing.T) {
 	cfg := &ocs.EngineConfig{
-		VerificationTimeout: 50 * time.Millisecond,  // expire quickly
-		CheckInterval:       20 * time.Millisecond,  // sweep frequently
+		VerificationTimeout: 50 * time.Millisecond,
+		CheckInterval:       20 * time.Millisecond,
 		MaxPendingItems:     1000,
 		AdjustmentPenalty:   500,
 		MinStakeRequired:    1000,
@@ -609,7 +460,6 @@ func TestEngine_Expiry_AdjustsLedger(t *testing.T) {
 
 	fundAgent(t, h, "alice", 100_000)
 	e := newTransferEvent(t, "alice", "bob", 100, 1000)
-	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -618,19 +468,10 @@ func TestEngine_Expiry_AdjustsLedger(t *testing.T) {
 	}
 	defer h.eng.Stop()
 
-	// Sleep well past the deadline so the sweep is guaranteed to have fired.
 	time.Sleep(200 * time.Millisecond)
 
 	if h.eng.IsPending(e.ID) {
 		t.Error("event still pending after timeout, want swept")
-	}
-
-	history, err := h.tl.History(crypto.AgentID("alice"), 1, 0)
-	if err != nil || len(history) != 1 {
-		t.Fatalf("History: err=%v len=%d", err, len(history))
-	}
-	if history[0].Settlement != event.SettlementAdjusted {
-		t.Errorf("Settlement = %q, want Adjusted (expired)", history[0].Settlement)
 	}
 }
 
@@ -696,7 +537,6 @@ func TestEngine_ConcurrentVerification(t *testing.T) {
 		from := fmt.Sprintf("verif-sender-%d", i)
 		fundAgent(t, h, from, 100_000)
 		e := newTransferEvent(t, from, "verif-sink", uint64(i+1)*100, 1000)
-		h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 			t.Fatalf("Submit %d: %v", i, err)
 		}
@@ -737,7 +577,6 @@ func TestDoubleSettlement_IsIdempotent(t *testing.T) {
 	fundAgent(t, h, "alice", 100_000)
 
 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
-	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -747,21 +586,14 @@ func TestDoubleSettlement_IsIdempotent(t *testing.T) {
 		t.Fatalf("ProcessResult (true): %v", err)
 	}
 
-	// Now simulate the expiry sweep also trying to process the same event.
-	// This must not overwrite the Settled state with Adjusted.
+	// Simulate the expiry sweep trying the same event — must be idempotent.
 	err := h.eng.ProcessResult(verdict(e.ID, false, 0))
-	// The second call must be silently idempotent (no error, no state change).
 	if err != nil {
 		t.Fatalf("second ProcessResult should be idempotent, got: %v", err)
 	}
-
-	// The entry must be Settled, not Adjusted.
-	history, err := h.tl.History(crypto.AgentID("alice"), 1, 0)
-	if err != nil || len(history) == 0 {
-		t.Fatalf("History: err=%v len=%d", err, len(history))
-	}
-	if history[0].Settlement != event.SettlementSettled {
-		t.Errorf("Settlement = %q, want Settled (first-write-wins idempotency)", history[0].Settlement)
+	// Event must remain not-pending (first ProcessResult already removed it).
+	if h.eng.IsPending(e.ID) {
+		t.Error("event should not be pending after double ProcessResult")
 	}
 }
 

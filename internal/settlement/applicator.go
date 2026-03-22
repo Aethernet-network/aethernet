@@ -10,8 +10,11 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/eventbus"
+	"github.com/Aethernet-network/aethernet/internal/fees"
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
+	"github.com/Aethernet-network/aethernet/internal/metrics"
+	"github.com/Aethernet-network/aethernet/internal/staking"
 )
 
 // appliedStore persists the set of applied target event IDs so the applicator
@@ -47,6 +50,12 @@ type Applicator struct {
 	// taskSettlerFn is injected by the Application layer to handle task-
 	// specific settlement (escrow release, reputation, generation ledger).
 	taskSettlerFn taskSettler
+
+	// Economics — all optional, nil-safe.
+	feeCollector *fees.Collector
+	treasuryID   crypto.AgentID
+	stakeManager *staking.StakeManager
+	nodeMetrics  *metrics.AetherNetMetrics
 
 	// applied tracks TargetEventIDs that have been settled.
 	applied map[event.EventID]struct{}
@@ -91,6 +100,18 @@ func (a *Applicator) SetEventBus(bus *eventbus.Bus) { a.eventBus = bus }
 
 // SetTaskSettler wires the Application-layer task settlement handler.
 func (a *Applicator) SetTaskSettler(fn taskSettler) { a.taskSettlerFn = fn }
+
+// SetFeeCollector wires fee collection into the settlement pipeline.
+func (a *Applicator) SetFeeCollector(fc *fees.Collector, treasuryID crypto.AgentID) {
+	a.feeCollector = fc
+	a.treasuryID = treasuryID
+}
+
+// SetStakeManager wires staking activity recording.
+func (a *Applicator) SetStakeManager(sm *staking.StakeManager) { a.stakeManager = sm }
+
+// SetMetrics wires metrics counters.
+func (a *Applicator) SetMetrics(m *metrics.AetherNetMetrics) { a.nodeMetrics = m }
 
 // Apply processes a consensus-finalized SettlementPayload. It is the ONLY
 // entry point for ledger mutation in response to consensus.
@@ -170,6 +191,49 @@ func (a *Applicator) applyToTarget(sp *SettlementPayload, target *event.Event) e
 		_ = a.identity.RecordTaskCompletion(agentID, sp.VerifiedValue, domain)
 	} else {
 		_ = a.identity.RecordTaskFailure(agentID, domain)
+	}
+
+	// Economic side effects — single authority for fee collection, staking,
+	// and metrics across all nodes.
+	if verdict == VerdictAccepted {
+		// Fee collection.
+		if a.feeCollector != nil && sp.VerifiedValue > 0 {
+			switch target.Type {
+			case event.EventTypeTransfer:
+				if tp, err := event.GetPayload[event.TransferPayload](target); err == nil {
+					fee, burned := a.feeCollector.CollectFeeFromRecipient(
+						crypto.AgentID(tp.ToAgent), tp.Amount, "", a.treasuryID,
+					)
+					if a.nodeMetrics != nil && fee > 0 {
+						a.nodeMetrics.FeesCollected.Add(fee)
+						a.nodeMetrics.FeesBurned.Add(burned)
+						a.nodeMetrics.FeesToTreasury.Add(fee * fees.TreasuryShare / 100)
+					}
+				}
+			case event.EventTypeGeneration:
+				fee := fees.CalculateFee(sp.VerifiedValue)
+				burned := fee - fee*fees.ValidatorShare/100 - fee*fees.TreasuryShare/100
+				a.feeCollector.TrackFee(fee, burned, fee*fees.TreasuryShare/100)
+				if a.nodeMetrics != nil && fee > 0 {
+					a.nodeMetrics.FeesCollected.Add(fee)
+					a.nodeMetrics.FeesBurned.Add(burned)
+					a.nodeMetrics.FeesToTreasury.Add(fee * fees.TreasuryShare / 100)
+				}
+			}
+		}
+		// Staking activity.
+		if a.stakeManager != nil {
+			a.stakeManager.RecordActivity(agentID)
+		}
+		// Metrics.
+		if a.nodeMetrics != nil {
+			a.nodeMetrics.TransactionsSettled.Inc()
+			a.nodeMetrics.TransactionVolume.Add(sp.VerifiedValue)
+		}
+	} else {
+		if a.nodeMetrics != nil {
+			a.nodeMetrics.TransactionsReversed.Inc()
+		}
 	}
 
 	// EventBus notification.
