@@ -780,11 +780,11 @@ func TestSupplyManager_CurrentSupply_NoGeneration(t *testing.T) {
 	}
 }
 
-func TestSupplyManager_CurrentSupply_WithGeneration(t *testing.T) {
+func TestSupplyManager_CurrentSupply_FixedWithGeneration(t *testing.T) {
 	gl := ledger.NewGenerationLedger()
 	sm := ledger.NewSupplyManager(ledger.NewTransferLedger(), gl)
 
-	const verified = uint64(500_000_000) // 500 AET worth of verified work
+	const verified = uint64(500_000_000)
 
 	e := newGenerationEvent(t, "gen-agent", "ben-agent", verified, nil, nil)
 	if err := gl.Record(e); err != nil {
@@ -794,44 +794,17 @@ func TestSupplyManager_CurrentSupply_WithGeneration(t *testing.T) {
 		t.Fatalf("Verify() error: %v", err)
 	}
 
+	// Fixed supply: CurrentSupply is always BaseSupply regardless of generation.
 	supply, err := sm.CurrentSupply()
 	if err != nil {
 		t.Fatalf("CurrentSupply() error: %v", err)
 	}
-	want := ledger.BaseSupply + verified
-	if supply != want {
-		t.Errorf("CurrentSupply = %d, want %d (base + verified generation)", supply, want)
+	if supply != ledger.BaseSupply {
+		t.Errorf("CurrentSupply = %d, want %d (fixed supply)", supply, ledger.BaseSupply)
 	}
 }
 
-func TestSupplyManager_CurrentSupply_NeverExceedsCap(t *testing.T) {
-	gl := ledger.NewGenerationLedger()
-	sm := ledger.NewSupplyManager(ledger.NewTransferLedger(), gl)
-
-	// Verified generation large enough to saturate the expansion cap.
-	huge := ledger.BaseSupply * ledger.MaxSupplyMultiplier
-	e := newGenerationEvent(t, "gen-agent", "ben-agent", huge, nil, nil)
-	if err := gl.Record(e); err != nil {
-		t.Fatalf("Record() error: %v", err)
-	}
-	if err := gl.Verify(e.ID, huge); err != nil {
-		t.Fatalf("Verify() error: %v", err)
-	}
-
-	supply, err := sm.CurrentSupply()
-	if err != nil {
-		t.Fatalf("CurrentSupply() error: %v", err)
-	}
-	maxSupply := ledger.BaseSupply * ledger.MaxSupplyMultiplier
-	if supply != maxSupply {
-		t.Errorf("CurrentSupply = %d, want capped value %d", supply, maxSupply)
-	}
-	if supply > maxSupply {
-		t.Errorf("CurrentSupply %d exceeds hard cap %d", supply, maxSupply)
-	}
-}
-
-func TestSupplyManager_SupplyRatio_AtBase(t *testing.T) {
+func TestSupplyManager_SupplyRatio_AlwaysOne(t *testing.T) {
 	sm := ledger.NewSupplyManager(ledger.NewTransferLedger(), ledger.NewGenerationLedger())
 
 	ratio, err := sm.SupplyRatio()
@@ -839,11 +812,11 @@ func TestSupplyManager_SupplyRatio_AtBase(t *testing.T) {
 		t.Fatalf("SupplyRatio() error: %v", err)
 	}
 	if ratio != 1.0 {
-		t.Errorf("SupplyRatio = %f, want 1.0 (no expansion)", ratio)
+		t.Errorf("SupplyRatio = %f, want 1.0 (fixed supply)", ratio)
 	}
 }
 
-func TestSupplyManager_HealthMetrics_NotAtCap(t *testing.T) {
+func TestSupplyManager_HealthMetrics_FixedSupply(t *testing.T) {
 	sm := ledger.NewSupplyManager(ledger.NewTransferLedger(), ledger.NewGenerationLedger())
 
 	h, err := sm.HealthMetrics()
@@ -851,13 +824,10 @@ func TestSupplyManager_HealthMetrics_NotAtCap(t *testing.T) {
 		t.Fatalf("HealthMetrics() error: %v", err)
 	}
 	if h.AtCap {
-		t.Error("HealthMetrics.AtCap = true, want false (no generation)")
+		t.Error("AtCap = true, want false (no cap in fixed supply)")
 	}
 	if h.CurrentSupply != ledger.BaseSupply {
 		t.Errorf("CurrentSupply = %d, want %d", h.CurrentSupply, ledger.BaseSupply)
-	}
-	if h.BaseSupply != ledger.BaseSupply {
-		t.Errorf("BaseSupply = %d, want %d", h.BaseSupply, ledger.BaseSupply)
 	}
 	if h.ExpansionAmount != 0 {
 		t.Errorf("ExpansionAmount = %d, want 0", h.ExpansionAmount)
@@ -868,42 +838,37 @@ func TestSupplyManager_HealthMetrics_NotAtCap(t *testing.T) {
 	if h.VerifiedGeneration != 0 {
 		t.Errorf("VerifiedGeneration = %d, want 0", h.VerifiedGeneration)
 	}
-	if h.MeasurementWindow != ledger.MeasurementWindow {
-		t.Errorf("MeasurementWindow = %v, want %v", h.MeasurementWindow, ledger.MeasurementWindow)
-	}
 	if h.Timestamp.IsZero() {
 		t.Error("Timestamp must not be zero")
 	}
 }
 
-func TestSupplyManager_HealthMetrics_AtCap(t *testing.T) {
+func TestSupplyManager_HealthMetrics_ReportsGeneration(t *testing.T) {
 	gl := ledger.NewGenerationLedger()
 	sm := ledger.NewSupplyManager(ledger.NewTransferLedger(), gl)
 
-	// BaseSupply × (MaxSupplyMultiplier−1) of verified generation is exactly
-	// enough to push CurrentSupply to BaseSupply × MaxSupplyMultiplier.
-	capValue := ledger.BaseSupply * (ledger.MaxSupplyMultiplier - 1)
-	e := newGenerationEvent(t, "gen-agent", "ben-agent", capValue, nil, nil)
+	const verified = uint64(1_000_000)
+	e := newGenerationEvent(t, "gen-agent", "ben-agent", verified, nil, nil)
 	if err := gl.Record(e); err != nil {
-		t.Fatalf("Record() error: %v", err)
+		t.Fatalf("Record: %v", err)
 	}
-	if err := gl.Verify(e.ID, capValue); err != nil {
-		t.Fatalf("Verify() error: %v", err)
+	if err := gl.Verify(e.ID, verified); err != nil {
+		t.Fatalf("Verify: %v", err)
 	}
 
 	h, err := sm.HealthMetrics()
 	if err != nil {
-		t.Fatalf("HealthMetrics() error: %v", err)
+		t.Fatalf("HealthMetrics: %v", err)
 	}
-	if !h.AtCap {
-		t.Error("HealthMetrics.AtCap = false, want true")
+	// Supply stays fixed — generation is reported as a metric, not added.
+	if h.CurrentSupply != ledger.BaseSupply {
+		t.Errorf("CurrentSupply = %d, want %d (fixed)", h.CurrentSupply, ledger.BaseSupply)
 	}
-	maxSupply := ledger.BaseSupply * ledger.MaxSupplyMultiplier
-	if h.CurrentSupply != maxSupply {
-		t.Errorf("CurrentSupply = %d, want %d", h.CurrentSupply, maxSupply)
+	if h.VerifiedGeneration != verified {
+		t.Errorf("VerifiedGeneration = %d, want %d", h.VerifiedGeneration, verified)
 	}
-	if h.SupplyRatio != float64(ledger.MaxSupplyMultiplier) {
-		t.Errorf("SupplyRatio = %f, want %v", h.SupplyRatio, float64(ledger.MaxSupplyMultiplier))
+	if h.SupplyRatio != 1.0 {
+		t.Errorf("SupplyRatio = %f, want 1.0", h.SupplyRatio)
 	}
 }
 
