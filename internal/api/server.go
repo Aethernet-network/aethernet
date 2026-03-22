@@ -1943,6 +1943,9 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 			lastAct := s.stakeManager.LastActivity(fp.AgentID)
 			trustLimit = staking.TrustLimitFull(staked, fp.TasksCompleted, since, lastAct, now)
 		}
+		if staked == 0 {
+			staked = fp.StakedAmount
+		}
 		// Use live reputation score from the reputation manager when available.
 		repScore := fp.ReputationScore
 		tasksCompleted := fp.TasksCompleted
@@ -2269,6 +2272,11 @@ func (s *Server) handleGetStake(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().Unix()
 	staked := s.stakeManager.StakedAmount(agentID)
+	if staked == 0 {
+		if fp, err := s.registry.Get(agentID); err == nil {
+			staked = fp.StakedAmount
+		}
+	}
 	since := s.stakeManager.StakedSince(agentID)
 	lastAct := s.stakeManager.LastActivity(agentID)
 
@@ -2536,6 +2544,9 @@ func (s *Server) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
 			since := s.stakeManager.StakedSince(fp.AgentID)
 			lastAct := s.stakeManager.LastActivity(fp.AgentID)
 			trustLimit = staking.TrustLimitFull(staked, fp.TasksCompleted, since, lastAct, now)
+		}
+		if staked == 0 {
+			staked = fp.StakedAmount
 		}
 		// Use live reputation score from the reputation manager when available.
 		// Compute a quality-weighted score: for each category, weight the

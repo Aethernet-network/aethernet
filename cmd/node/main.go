@@ -880,83 +880,43 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	// Auto-validator: on testnet, automatically settle pending OCS transactions.
 	// The "testnet-validator" agent is registered in the identity registry so
 	// it appears in the explorer as a known participant.
-	testnetValidatorID := crypto.AgentID("testnet-validator")
+	// ── Genesis validator setup ─────────────────────────────────────────────
+	// The testnet-validator is funded in seedGenesis (deterministic, every node).
+	// Here we register it in the identity registry and stake it. Staking is
+	// in-memory consensus data — it must happen on every node identically.
+	testnetValidatorID := crypto.AgentID(genesis.GenesisValidatorID)
 	tvFP, err := identity.NewFingerprint(testnetValidatorID, make([]byte, 32), nil)
 	if err == nil {
-		// Give the testnet validator non-zero reputation and stake so that its
-		// votes carry weight in the consensus round (weight = rep×stake/10000).
-		// Without weight the VotingRound supermajority check can never fire.
-		tvFP.ReputationScore = 5000 // 50 % reputation
-		tvFP.StakedAmount = 10000   // 10 000 micro-AET (consensus metadata only)
+		tvFP.ReputationScore = 5000
+		tvFP.StakedAmount = genesis.GenesisValidatorStake
 		_ = stack.reg.Register(tvFP)
 	}
 
-	// Fund and stake the testnet-validator from the network rewards allocation.
-	// Idempotent: skips funding when balance >= tvValidatorMinBalance and skips
-	// staking when already staked. This gives the validator real economic
-	// participation so its 80% fee share lands in a spendable balance and it
-	// can participate in transfers with collateral at risk.
-	const (
-		tvValidatorFundTarget = uint64(200_000_000_000) // 200,000 AET target balance
-		tvValidatorMinBalance = uint64(10_000_000_000)  // 10,000 AET top-up threshold
-		tvValidatorStakeAmt   = uint64(50_000_000_000)  // 50,000 AET stake
-	)
-	tvInitialBal, _ := stack.transfer.Balance(testnetValidatorID)
-	tvStakedBefore := stack.stakeManager.StakedAmount(testnetValidatorID)
-
-	tvTopUp := uint64(0)
-	if tvInitialBal < tvValidatorMinBalance {
-		tvTopUp = tvValidatorFundTarget - tvInitialBal
-		if err := stack.transfer.TransferFromBucket(
-			crypto.AgentID(genesis.BucketRewards), testnetValidatorID, tvTopUp,
-		); err != nil {
-			slog.Warn("startStack: failed to fund testnet-validator from rewards",
-				"err", err, "top_up", tvTopUp)
-			tvTopUp = 0
+	// Stake the genesis validator (idempotent: skips if already staked).
+	if stack.stakeManager.StakedAmount(testnetValidatorID) == 0 {
+		if err := stack.stakeManager.Stake(testnetValidatorID, genesis.GenesisValidatorStake); err != nil {
+			slog.Warn("startStack: failed to stake genesis validator", "err", err)
 		}
 	}
 
-	tvStaked := false
-	if tvStakedBefore == 0 {
-		if err := stack.stakeManager.Stake(testnetValidatorID, tvValidatorStakeAmt); err != nil {
-			slog.Warn("startStack: failed to stake testnet-validator", "err", err)
-		} else {
-			tvStaked = true
-		}
-	}
-
-	tvPostBal, _ := stack.transfer.Balance(testnetValidatorID)
-	tvStalePurged := 0
-	if tvPostBal < tvValidatorMinBalance {
-		tvStalePurged = stack.transfer.ResetOptimisticOutflows(testnetValidatorID)
-		tvPostBal, _ = stack.transfer.Balance(testnetValidatorID)
-		slog.Warn("startStack: purged stale optimistic outflows for testnet-validator",
-			"entries_removed", tvStalePurged, "balance_after", tvPostBal)
-	}
-	slog.Info("startStack: testnet-validator ready",
-		"balance_before", tvInitialBal,
-		"top_up", tvTopUp,
-		"staked_before", tvStakedBefore,
-		"newly_staked", tvStaked,
-		"stale_purged", tvStalePurged,
-		"balance_after", tvPostBal,
-	)
-
-	// Ensure the testnet validator is registered in the ValidatorRegistry as a
-	// genesis participant (skips probation). Idempotent: GetByAgentID returns
-	// ErrRegistryValidatorNotFound only on first boot.
+	// Register in ValidatorRegistry as genesis participant (skips probation).
 	if stack.validatorReg != nil {
 		if _, lookupErr := stack.validatorReg.GetByAgentID(string(testnetValidatorID)); lookupErr != nil {
 			if _, regErr := stack.validatorReg.Register(
 				string(testnetValidatorID),
-				tvValidatorStakeAmt,
-				nil, // all categories
-				true, // genesis — skip probation
+				genesis.GenesisValidatorStake,
+				nil, true,
 			); regErr != nil {
-				slog.Warn("startStack: failed to register testnet-validator in ValidatorRegistry", "err", regErr)
+				slog.Warn("startStack: failed to register genesis validator in ValidatorRegistry", "err", regErr)
 			}
 		}
 	}
+
+	tvBal, _ := stack.transfer.Balance(testnetValidatorID)
+	slog.Info("startStack: genesis validator ready",
+		"balance", tvBal,
+		"staked", stack.stakeManager.StakedAmount(testnetValidatorID),
+	)
 
 	// ── Node agent setup: fund, stake, register ────────────────────────────
 	// Each node's own agentID needs funds (for transfers), stake (for OCS
@@ -1013,6 +973,17 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			if existing, lookupErr := stack.reg.Get(agentID); lookupErr == nil {
 				existing.ReputationScore = 5000
 				existing.StakedAmount = actualStake
+			}
+		}
+	}
+
+	// 4. Register in ValidatorRegistry as genesis participant.
+	if stack.validatorReg != nil {
+		if _, lookupErr := stack.validatorReg.GetByAgentID(string(agentID)); lookupErr != nil {
+			if _, regErr := stack.validatorReg.Register(
+				string(agentID), nodeAgentStakeAmt, nil, true,
+			); regErr != nil {
+				slog.Warn("startStack: failed to register node agent in ValidatorRegistry", "err", regErr)
 			}
 		}
 	}
@@ -1368,8 +1339,19 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 					existing.StakedAmount = rp.StakedAmount
 				}
 			}
+			// Stake the remote validator in the local StakeManager so the
+			// explorer shows consistent staking data across all nodes.
+			if rp.StakedAmount > 0 && stack.stakeManager.StakedAmount(id) == 0 {
+				_ = stack.stakeManager.Stake(id, rp.StakedAmount)
+			}
+			// Register in ValidatorRegistry for assignment/security floor.
+			if stack.validatorReg != nil && rp.StakedAmount > 0 {
+				if _, lookupErr := stack.validatorReg.GetByAgentID(rp.AgentID); lookupErr != nil {
+					_, _ = stack.validatorReg.Register(rp.AgentID, rp.StakedAmount, nil, true)
+				}
+			}
 			slog.Info("network: registered remote validator identity",
-				"agent_id", rp.AgentID)
+				"agent_id", rp.AgentID, "staked", rp.StakedAmount)
 		}
 	})
 
@@ -1961,6 +1943,16 @@ func seedGenesis(tl *ledger.TransferLedger, s genesisStore) {
 		if err := tl.FundAgent(crypto.AgentID(b.name), b.amount); err != nil {
 			slog.Warn("auto-genesis: failed to fund bucket", "bucket", b.name, "err", err)
 		}
+	}
+
+	// Fund the genesis testnet-validator from the rewards bucket.
+	// This is deterministic — every node seeds the same validator balance.
+	if err := tl.TransferFromBucket(
+		crypto.AgentID(genesis.BucketRewards),
+		crypto.AgentID(genesis.GenesisValidatorID),
+		genesis.GenesisValidatorFund,
+	); err != nil {
+		slog.Warn("auto-genesis: failed to fund genesis validator", "err", err)
 	}
 
 	if s != nil {

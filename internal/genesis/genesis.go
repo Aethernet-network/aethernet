@@ -40,6 +40,14 @@ const (
 	BucketPublic    = "genesis:public"
 )
 
+// Genesis validator constants. The testnet-validator is a shared synthetic
+// identity funded and staked deterministically during genesis on every node.
+const (
+	GenesisValidatorID    = "testnet-validator"
+	GenesisValidatorFund  uint64 = 200_000_000_000 // 200,000 AET
+	GenesisValidatorStake uint64 = 50_000_000_000  // 50,000 AET
+)
+
 // Onboarding constants.
 const (
 	// OnboardingPoolTotal is the maximum total micro-AET distributed to new agents
