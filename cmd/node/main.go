@@ -960,36 +960,69 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		}
 	}
 
-	// Fund the node's own agentID from the rewards bucket so it can submit
-	// transfers during load tests. Idempotent: skips if already funded.
-	const nodeAgentFundTarget = uint64(50_000_000_000) // 50,000 AET
-	const nodeAgentMinBalance = uint64(1_000_000_000)  // 1,000 AET threshold
+	// ── Node agent setup: fund, stake, register ────────────────────────────
+	// Each node's own agentID needs funds (for transfers), stake (for OCS
+	// MinStakeRequired), and identity registry entry (for vote weight).
+	const (
+		nodeAgentFundTarget = uint64(50_000_000_000)  // 50,000 AET
+		nodeAgentMinBalance = uint64(1_000_000_000)   // 1,000 AET top-up threshold
+		nodeAgentStakeAmt   = uint64(25_000_000_000)  // 25,000 AET stake
+	)
+
+	// 1. Fund from rewards bucket (idempotent: skips if above threshold).
 	nodeAgentBal, _ := stack.transfer.Balance(agentID)
 	if nodeAgentBal < nodeAgentMinBalance {
 		topUp := nodeAgentFundTarget - nodeAgentBal
 		if err := stack.transfer.TransferFromBucket(
 			crypto.AgentID(genesis.BucketRewards), agentID, topUp,
 		); err != nil {
-			slog.Warn("startStack: failed to fund node agentID from rewards",
-				"err", err, "agent_id", agentID, "top_up", topUp)
+			slog.Warn("startStack: failed to fund node agentID", "err", err, "agent_id", agentID)
 		} else {
-			slog.Info("startStack: funded node agentID",
-				"agent_id", agentID, "amount", topUp)
+			slog.Info("startStack: funded node agentID", "agent_id", agentID, "amount", topUp)
 		}
 	}
 
-	// Register this node's unique agentID in the identity registry with
-	// non-zero reputation and stake so its consensus votes carry weight.
+	// Purge stale optimistic outflows that may have accumulated from a
+	// previous run's unfinished transfers (same pattern as testnet-validator).
+	nodeAgentBal, _ = stack.transfer.Balance(agentID)
+	if nodeAgentBal < nodeAgentMinBalance {
+		purged := stack.transfer.ResetOptimisticOutflows(agentID)
+		nodeAgentBal, _ = stack.transfer.Balance(agentID)
+		if purged > 0 {
+			slog.Warn("startStack: purged stale optimistic outflows for node agent",
+				"agent_id", agentID, "entries_removed", purged, "balance_after", nodeAgentBal)
+		}
+	}
+
+	// 2. Stake (idempotent: skips if already staked).
+	nodeStakedBefore := stack.stakeManager.StakedAmount(agentID)
+	if nodeStakedBefore == 0 {
+		if err := stack.stakeManager.Stake(agentID, nodeAgentStakeAmt); err != nil {
+			slog.Warn("startStack: failed to stake node agentID", "err", err, "agent_id", agentID)
+		} else {
+			slog.Info("startStack: staked node agentID", "agent_id", agentID, "amount", nodeAgentStakeAmt)
+		}
+	}
+
+	// 3. Register in identity registry with real stake for vote weight.
+	actualStake := stack.stakeManager.StakedAmount(agentID)
 	if nodeFP, err := identity.NewFingerprint(agentID, stack.kp.PublicKey, nil); err == nil {
 		nodeFP.ReputationScore = 5000
-		nodeFP.StakedAmount = 10000
+		nodeFP.StakedAmount = actualStake
 		if regErr := stack.reg.Register(nodeFP); regErr != nil {
 			if existing, lookupErr := stack.reg.Get(agentID); lookupErr == nil {
 				existing.ReputationScore = 5000
-				existing.StakedAmount = 10000
+				existing.StakedAmount = actualStake
 			}
 		}
 	}
+
+	nodeAgentFinalBal, _ := stack.transfer.Balance(agentID)
+	slog.Info("startStack: node agent ready",
+		"agent_id", agentID,
+		"balance", nodeAgentFinalBal,
+		"staked", stack.stakeManager.StakedAmount(agentID),
+	)
 
 	// Create a Registration event in the DAG so this node's identity
 	// propagates to all peers via P2P sync.
@@ -997,7 +1030,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		AgentID:         string(agentID),
 		PublicKey:       stack.kp.PublicKey,
 		ReputationScore: 5000,
-		StakedAmount:    10000,
+		StakedAmount:    actualStake,
 	}
 	if regEv, err := event.New(event.EventTypeRegistration, stack.dag.Tips(), regPayload, string(agentID), nil, 0); err == nil {
 		_ = crypto.SignEvent(regEv, stack.kp)
