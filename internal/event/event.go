@@ -55,6 +55,25 @@ const (
 	// declared spending limit and permitted category constraints, enabling safe
 	// multi-agent orchestration without transferring private keys.
 	EventTypeDelegation EventType = "Delegation"
+
+	// EventTypeRegistration propagates a validator identity across the network.
+	EventTypeRegistration EventType = "Registration"
+
+	// EventTypeVerificationVote records a validator's verdict on a pending event.
+	// Each validator node emits one vote per pending event. Votes propagate via
+	// DAG sync and are consumed by the consensus VotingRound on each node.
+	EventTypeVerificationVote EventType = "VerificationVote"
+
+	// EventTypeSettlement is created by the consensus finalization callback when
+	// a VotingRound reaches supermajority. It is the canonical record that
+	// authorizes the SettlementApplicator to mutate ledger state. No other code
+	// path may create Settlement events.
+	EventTypeSettlement EventType = "Settlement"
+
+	// EventTypeTaskSettlement is the canonical settlement target for marketplace
+	// tasks. Created by the auto-validator after evidence verification passes.
+	// Contains all inputs required for deterministic settlement application.
+	EventTypeTaskSettlement EventType = "TaskSettlement"
 )
 
 // SettlementState tracks an event's position in the Optimistic Capability Settlement
@@ -460,4 +479,12 @@ type DelegationPayload struct {
 	// causal ordering concern — making it one of the few places AetherNet
 	// uses wall-clock time directly.
 	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// RegistrationPayload propagates a validator identity across the network.
+type RegistrationPayload struct {
+	AgentID         string `json:"agent_id"`
+	PublicKey       []byte `json:"public_key"`
+	ReputationScore uint64 `json:"reputation_score"`
+	StakedAmount    uint64 `json:"staked_amount"`
 }

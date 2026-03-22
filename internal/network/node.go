@@ -182,6 +182,12 @@ type Node struct {
 	// Set via SetDisconnectHandler; nil-safe. Protected by mu.
 	disconnectHandler func(address string)
 
+	// syncHandler is called after a DAG event received from a peer is
+	// successfully added to the local DAG. Used to route synced events
+	// by type: Transfer/Generation → OCS pending, VerificationVote →
+	// consensus, Settlement → applicator, Registration → identity.
+	syncHandler func(ev *event.Event)
+
 	mu       sync.RWMutex
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -462,6 +468,15 @@ func (n *Node) SetDisconnectHandler(fn func(address string)) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.disconnectHandler = fn
+}
+
+// SetSyncHandler registers a callback invoked after a DAG event received from
+// a peer is successfully added to the local DAG. The callback routes events
+// by type to the appropriate handler (OCS pending, consensus, applicator).
+func (n *Node) SetSyncHandler(fn func(ev *event.Event)) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.syncHandler = fn
 }
 
 // BroadcastVote sends a signed MsgVote to all currently connected peers.
@@ -856,7 +871,14 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 				"event_id", e.ID, "agent", e.AgentID, "peer", peer.AgentID)
 			return
 		}
-		_ = n.dag.Add(&e)
+		if err := n.dag.Add(&e); err == nil {
+			n.mu.RLock()
+			sh := n.syncHandler
+			n.mu.RUnlock()
+			if sh != nil {
+				sh(&e)
+			}
+		}
 
 	case MsgRequestSync:
 		// Rate-limit per-peer sync requests: allow at most one every 10 seconds.
@@ -908,17 +930,18 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		sort.Slice(batch.Events, func(i, j int) bool {
 			return batch.Events[i].CausalTimestamp < batch.Events[j].CausalTimestamp
 		})
+		n.mu.RLock()
+		sh := n.syncHandler
+		n.mu.RUnlock()
 		for _, e := range batch.Events {
-			// Verify each batched event's Ed25519 signature before adding to
-			// the DAG (NEW-5). The single-event MsgEvent path already enforces
-			// this; applying the same check here closes the gap where a
-			// malicious peer could inject tampered events via a sync batch.
 			if !crypto.VerifyEvent(e) {
 				slog.Warn("network: dropping MsgSyncBatch event with invalid signature",
 					"event_id", e.ID, "agent", e.AgentID, "peer", peer.AgentID)
 				continue
 			}
-			_ = n.dag.Add(e)
+			if err := n.dag.Add(e); err == nil && sh != nil {
+				sh(e)
+			}
 		}
 
 	case MsgPing:

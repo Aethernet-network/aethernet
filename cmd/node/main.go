@@ -62,6 +62,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/registry"
 	"github.com/Aethernet-network/aethernet/internal/replay"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
+	"github.com/Aethernet-network/aethernet/internal/settlement"
 	"github.com/Aethernet-network/aethernet/internal/router"
 	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/store"
@@ -307,6 +308,7 @@ type nodeStack struct {
 	challengeMgr    *assurance.ChallengeManager
 	bootstrapOvr    *assurance.BootstrapOverride
 	replayReserve   *assurance.ReplayReserve
+	votingRound     *consensus.VotingRound
 }
 
 // taskManagerSource adapts *tasks.TaskManager to the router.TaskSource interface,
@@ -605,11 +607,17 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 	// positive weight reaches supermajority immediately, identical to the
 	// previous direct-settlement behaviour. Peer nodes raise effective
 	// participation counts automatically as they join and cast votes.
+	minParticipants := 1
+	if mpStr := os.Getenv("AETHERNET_CONSENSUS_MIN_PARTICIPANTS"); mpStr != "" {
+		if mp, err := strconv.Atoi(mpStr); err == nil && mp > 0 {
+			minParticipants = mp
+		}
+	}
 	votingCfg := &consensus.ConsensusConfig{
 		SupermajorityThreshold: 0.667,
 		MaxRounds:              10,
 		RoundTimeout:           30 * time.Second,
-		MinParticipants:        1,
+		MinParticipants:        minParticipants,
 	}
 	votingRound := consensus.NewVotingRound(votingCfg, reg)
 	eng.SetConsensus(votingRound)
@@ -826,6 +834,7 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 		challengeMgr:    challengeMgr,
 		bootstrapOvr:    bootstrapOvr,
 		replayReserve:   replayReserve,
+		votingRound:     votingRound,
 	}
 }
 
@@ -951,6 +960,33 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		}
 	}
 
+	// Register this node's unique agentID in the identity registry with
+	// non-zero reputation and stake so its consensus votes carry weight.
+	if nodeFP, err := identity.NewFingerprint(agentID, stack.kp.PublicKey, nil); err == nil {
+		nodeFP.ReputationScore = 5000
+		nodeFP.StakedAmount = 10000
+		if regErr := stack.reg.Register(nodeFP); regErr != nil {
+			if existing, lookupErr := stack.reg.Get(agentID); lookupErr == nil {
+				existing.ReputationScore = 5000
+				existing.StakedAmount = 10000
+			}
+		}
+	}
+
+	// Create a Registration event in the DAG so this node's identity
+	// propagates to all peers via P2P sync.
+	regPayload := event.RegistrationPayload{
+		AgentID:         string(agentID),
+		PublicKey:       stack.kp.PublicKey,
+		ReputationScore: 5000,
+		StakedAmount:    10000,
+	}
+	if regEv, err := event.New(event.EventTypeRegistration, stack.dag.Tips(), regPayload, string(agentID), nil, 0); err == nil {
+		_ = crypto.SignEvent(regEv, stack.kp)
+		_ = stack.dag.Add(regEv)
+		slog.Info("startStack: registration event added to DAG", "agent_id", agentID)
+	}
+
 	// SecurityFloor: enforce minimum validator coverage before accepting assured tasks.
 	// The floor checks both validator count (from ValidatorRegistry) and replay-reserve
 	// health (circuit-breaker). Coverage counts are refreshed every 10 s in the metrics
@@ -982,7 +1018,10 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	if os.Getenv("AETHERNET_AUTOVALIDATOR") == "false" {
 		slog.Info("auto-validator disabled (AETHERNET_AUTOVALIDATOR=false)")
 	} else {
-	av := autovalidator.NewAutoValidator(stack.engine, testnetValidatorID, 5*time.Second)
+	// Use the node's own unique agentID as the voter identity — NOT the shared
+	// testnetValidatorID. Each node must vote with a distinct identity so the
+	// VotingRound sees them as separate voters.
+	av := autovalidator.NewAutoValidator(stack.engine, agentID, 5*time.Second)
 	av.SetFeeCollector(stack.feeCollector, crypto.AgentID(genesis.BucketTreasury))
 	av.SetGenerationLedger(stack.generation)
 	av.SetRegistry(stack.reg)
@@ -1132,8 +1171,155 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		os.Exit(1)
 	}
 
-	// Wire consensus ↔ P2P: locally-originated votes are broadcast to peers;
-	// votes received from peers are fed into the local consensus round.
+	// ── Settlement Applicator ────────────────────────────────────────────────
+	// The ONLY component that mutates ledgers in response to consensus.
+	settlementApp := settlement.NewApplicator(
+		stack.transfer, stack.generation, stack.reg,
+		func(id event.EventID) (*event.Event, error) {
+			return stack.dag.Get(id)
+		},
+	)
+	if stack.bus != nil {
+		settlementApp.SetEventBus(stack.bus)
+	}
+	if stack.store != nil {
+		settlementApp.SetStore(stack.store)
+	}
+	settlementApp.Start()
+	defer settlementApp.Stop()
+
+	// ── Consensus finalization callback ──────────────────────────────────────
+	// When VotingRound reaches supermajority for a target, create a canonical
+	// SettlementRecord in the DAG. This is the ONLY code path that creates
+	// Settlement events. The SettlementApplicator applies them.
+	//
+	// Wire DAG sync: route events by type. VerificationVotes feed into
+	// VotingRound. Settlements feed into the Applicator. Transfer/Generation/
+	// TaskSettlement enter the OCS pending queue. Registration updates identity.
+	node.SetSyncHandler(func(ev *event.Event) {
+		switch ev.Type {
+		case event.EventTypeTransfer, event.EventTypeGeneration, event.EventTypeTaskSettlement:
+			_ = stack.engine.SubmitFromSync(ev)
+
+		case event.EventTypeVerificationVote:
+			vp, err := event.GetPayload[settlement.VerificationVotePayload](ev)
+			if err != nil {
+				return
+			}
+			targetID := event.EventID(vp.TargetEventID)
+			voterID := crypto.AgentID(vp.VoterID)
+			verdict := vp.Verdict == string(settlement.VerdictAccepted)
+
+			if err := stack.votingRound.RegisterVote(targetID, voterID, verdict); err != nil {
+				return // duplicate, already finalized, or round exhausted
+			}
+
+			// Check finalization after every vote.
+			finalized, _ := stack.votingRound.IsFinalized(targetID)
+			if !finalized {
+				return
+			}
+
+			// Supermajority reached — check if a Settlement already exists.
+			if settlementApp.IsApplied(targetID) {
+				return
+			}
+
+			rec, err := stack.votingRound.GetRecord(targetID)
+			if err != nil {
+				return
+			}
+
+			consensusVerdict := settlement.VerdictAccepted
+			if rec.TotalWeight == 0 || float64(rec.YesWeight)/float64(rec.TotalWeight) < 0.667 {
+				consensusVerdict = settlement.VerdictRejected
+			}
+
+			// Build attestations from vote record.
+			var attestations []settlement.VoterAttestation
+			for voterKey, vote := range rec.Votes {
+				v := settlement.VerdictAccepted
+				if !vote {
+					v = settlement.VerdictRejected
+				}
+				attestations = append(attestations, settlement.VoterAttestation{
+					VoterID: string(voterKey),
+					Verdict: string(v),
+				})
+			}
+			sp := settlement.SettlementPayload{
+				TargetEventID:  string(targetID),
+				Verdict:        string(consensusVerdict),
+				VerifiedValue:  vp.VerifiedValue,
+				ConsensusRound: uint64(rec.FinalOrder),
+				Attestations:   attestations,
+			}
+			sp.SortAttestations()
+
+			// Create the Settlement DAG event.
+			tips := stack.dag.Tips()
+			priorTS := make(map[event.EventID]uint64, len(tips))
+			for _, ref := range tips {
+				if te, err := stack.dag.Get(ref); err == nil {
+					priorTS[ref] = te.CausalTimestamp
+				}
+			}
+			settlementEv, err := event.New(
+				event.EventTypeSettlement, tips, sp,
+				string(agentID), priorTS, 0,
+			)
+			if err != nil {
+				slog.Error("settlement: failed to create settlement event",
+					"target", targetID, "err", err)
+				return
+			}
+			if stack.kp != nil {
+				_ = crypto.SignEvent(settlementEv, stack.kp)
+			}
+			if err := stack.dag.Add(settlementEv); err != nil {
+				return // duplicate — another node already created one
+			}
+
+			slog.Info("settlement: consensus finalized, settlement event created",
+				"target", targetID, "verdict", consensusVerdict,
+				"settlement_id", settlementEv.ID)
+
+			// Apply immediately on the creating node.
+			_ = settlementApp.Apply(&sp)
+
+		case event.EventTypeSettlement:
+			sp, err := event.GetPayload[settlement.SettlementPayload](ev)
+			if err != nil {
+				return
+			}
+			_ = settlementApp.Apply(&sp)
+
+		case event.EventTypeRegistration:
+			rp, err := event.GetPayload[event.RegistrationPayload](ev)
+			if err != nil {
+				return
+			}
+			id := crypto.AgentID(rp.AgentID)
+			fp, err := identity.NewFingerprint(id, rp.PublicKey, nil)
+			if err != nil {
+				return
+			}
+			fp.ReputationScore = rp.ReputationScore
+			fp.StakedAmount = rp.StakedAmount
+			if regErr := stack.reg.Register(fp); regErr != nil {
+				if existing, lookupErr := stack.reg.Get(id); lookupErr == nil {
+					existing.ReputationScore = rp.ReputationScore
+					existing.StakedAmount = rp.StakedAmount
+				}
+			}
+			slog.Info("network: registered remote validator identity",
+				"agent_id", rp.AgentID)
+		}
+	})
+
+	// Keep legacy P2P vote handler for backward compatibility with existing
+	// MsgVote messages. The new architecture uses DAG sync for vote propagation
+	// but legacy peers may still send MsgVote directly.
 	stack.engine.SetVoteBroadcaster(func(eventID event.EventID, verdict bool, voterID crypto.AgentID) {
 		_ = node.BroadcastVote(eventID, verdict)
 	})

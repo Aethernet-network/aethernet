@@ -43,6 +43,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/replay"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
+	"github.com/Aethernet-network/aethernet/internal/settlement"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/verification"
 )
@@ -824,23 +825,59 @@ func (av *AutoValidator) processStuckHeld() {
 	}
 }
 
-// processPending fetches all pending OCS items and submits a positive verdict
-// for each. Items that fail (e.g. self-dealing checks) are skipped with a log.
+// processPending fetches all pending OCS items and emits a VerificationVote
+// DAG event for each. The auto-validator NEVER calls ProcessResult or any
+// ledger mutation function. Settlement is handled exclusively by the
+// SettlementApplicator after consensus finalization.
 func (av *AutoValidator) processPending() {
+	if av.dag == nil || av.kp == nil {
+		return
+	}
 	pending := av.engine.Pending()
 	for _, item := range pending {
-		err := av.engine.ProcessResult(ocs.VerificationResult{
-			EventID:       item.EventID,
-			Verdict:       true,
-			VerifiedValue: item.Amount,
-			VerifierID:    av.validatorID,
-			Reason:        "auto-validator: testnet settlement",
-			Timestamp:     time.Now(),
-		})
-		if err != nil {
-			slog.Warn("auto-validator: could not settle", "event_id", item.EventID, "err", err)
-			continue
-		}
-		slog.Debug("auto-validator: settled", "event_id", item.EventID, "value", item.Amount)
+		av.emitVote(item.EventID, string(settlement.VerdictAccepted), item.Amount)
 	}
+}
+
+// emitVote creates a VerificationVote DAG event and adds it to the DAG.
+// The vote propagates to all peers via normal DAG sync. The auto-validator
+// never calls ProcessResult — all settlement is consensus-gated.
+func (av *AutoValidator) emitVote(targetEventID event.EventID, verdict string, verifiedValue uint64) {
+	votePayload := settlement.VerificationVotePayload{
+		TargetEventID: string(targetEventID),
+		VoterID:       string(av.validatorID),
+		Verdict:       verdict,
+		VerifiedValue: verifiedValue,
+		Timestamp:     time.Now().Unix(),
+	}
+
+	tips := av.dag.Tips()
+	priorTS := make(map[event.EventID]uint64, len(tips))
+	for _, ref := range tips {
+		if ev, err := av.dag.Get(ref); err == nil {
+			priorTS[ref] = ev.CausalTimestamp
+		}
+	}
+
+	voteEvent, err := event.New(
+		event.EventTypeVerificationVote,
+		tips,
+		votePayload,
+		string(av.validatorID),
+		priorTS,
+		0,
+	)
+	if err != nil {
+		slog.Warn("auto-validator: failed to create vote event",
+			"target", targetEventID, "err", err)
+		return
+	}
+	_ = crypto.SignEvent(voteEvent, av.kp)
+	if err := av.dag.Add(voteEvent); err != nil {
+		slog.Debug("auto-validator: vote event already in DAG",
+			"target", targetEventID)
+		return
+	}
+	slog.Info("auto-validator: emitted vote",
+		"target", targetEventID, "verdict", verdict, "vote_id", voteEvent.ID)
 }

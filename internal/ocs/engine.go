@@ -27,6 +27,7 @@ package ocs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -551,6 +552,77 @@ func (e *Engine) Submit(ev *event.Event) error {
 	if e.nodeMetrics != nil {
 		e.nodeMetrics.TransactionsTotal.Inc()
 	}
+	return nil
+}
+
+// SubmitFromSync adds a DAG-synced event to the local pending queue so the
+// auto-validator can vote on it. Unlike Submit, it skips balance validation
+// and does NOT record the event in the transfer/generation ledger.
+// Idempotent: returns nil if the event is already pending or processed.
+func (e *Engine) SubmitFromSync(ev *event.Event) error {
+	if ev.Type != event.EventTypeTransfer && ev.Type != event.EventTypeGeneration && ev.Type != event.EventTypeTaskSettlement {
+		return nil
+	}
+	if ev.SettlementState != event.SettlementOptimistic {
+		return nil
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if _, exists := e.pending[ev.ID]; exists {
+		return nil
+	}
+	if _, done := e.processed[ev.ID]; done {
+		return nil
+	}
+	if len(e.pending) >= e.config.MaxPendingItems {
+		return fmt.Errorf("%w: capacity %d reached", ErrQueueFull, e.config.MaxPendingItems)
+	}
+
+	var amount uint64
+	var recipientID crypto.AgentID
+	senderID := crypto.AgentID(ev.AgentID)
+
+	switch ev.Type {
+	case event.EventTypeTransfer:
+		tp, err := event.GetPayload[event.TransferPayload](ev)
+		if err == nil {
+			amount = tp.Amount
+			recipientID = crypto.AgentID(tp.ToAgent)
+			senderID = crypto.AgentID(tp.FromAgent)
+		}
+	case event.EventTypeGeneration:
+		gp, err := event.GetPayload[event.GenerationPayload](ev)
+		if err == nil {
+			amount = gp.ClaimedValue
+			recipientID = crypto.AgentID(gp.BeneficiaryAgent)
+		}
+	case event.EventTypeTaskSettlement:
+		// Task settlement events carry budget as the economic amount.
+		var raw struct {
+			Budget uint64 `json:"budget"`
+		}
+		if err := json.Unmarshal(ev.Payload, &raw); err == nil {
+			amount = raw.Budget
+		}
+	}
+
+	e.pending[ev.ID] = &PendingItem{
+		EventID:      ev.ID,
+		EventType:    ev.Type,
+		AgentID:      senderID,
+		Amount:       amount,
+		RecipientID:  recipientID,
+		OptimisticAt: time.Now(),
+		Deadline:     e.config.VerificationTimeout,
+	}
+	if e.store != nil {
+		if err := e.store.PutPending(e.pending[ev.ID]); err != nil {
+			slog.Error("ocs: failed to persist synced pending item", "event_id", ev.ID, "err", err)
+		}
+	}
+	slog.Info("ocs: synced event added to pending", "event_id", ev.ID, "type", ev.Type)
 	return nil
 }
 
