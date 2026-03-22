@@ -204,39 +204,28 @@ func (a *Applicator) applyToTarget(sp *SettlementPayload, target *event.Event) e
 }
 
 func (a *Applicator) applyTransfer(targetID event.EventID, verdict SettlementVerdict, target *event.Event) error {
+	// Record in the ledger first (idempotent — no-op if already recorded).
+	// Submit() no longer records; the applicator is the ONLY code that
+	// creates ledger entries for canonical settlement.
+	if err := a.transfer.RecordFromSync(target); err != nil {
+		return fmt.Errorf("settlement: record transfer %s: %w", targetID, err)
+	}
 	settleState := event.SettlementSettled
 	if verdict != VerdictAccepted {
 		settleState = event.SettlementAdjusted
 	}
-	err := a.transfer.Settle(targetID, settleState)
-	if err != nil && a.lookup != nil {
-		// Safety net: entry may not exist in the local ledger if SubmitFromSync
-		// hasn't processed it yet. Record it from the DAG, then retry.
-		if recErr := a.transfer.RecordFromSync(target); recErr == nil {
-			err = a.transfer.Settle(targetID, settleState)
-		}
-	}
-	return err
+	return a.transfer.Settle(targetID, settleState)
 }
 
 func (a *Applicator) applyGeneration(targetID event.EventID, verdict SettlementVerdict, verifiedValue uint64, target *event.Event) error {
-	var err error
+	// Record in the ledger first (idempotent).
+	if err := a.generation.RecordFromSync(target); err != nil {
+		return fmt.Errorf("settlement: record generation %s: %w", targetID, err)
+	}
 	if verdict == VerdictAccepted {
-		err = a.generation.Verify(targetID, verifiedValue)
-	} else {
-		err = a.generation.Reject(targetID)
+		return a.generation.Verify(targetID, verifiedValue)
 	}
-	if err != nil && a.lookup != nil {
-		// Safety net: record from DAG if entry missing, then retry.
-		if recErr := a.generation.RecordFromSync(target); recErr == nil {
-			if verdict == VerdictAccepted {
-				err = a.generation.Verify(targetID, verifiedValue)
-			} else {
-				err = a.generation.Reject(targetID)
-			}
-		}
-	}
-	return err
+	return a.generation.Reject(targetID)
 }
 
 func (a *Applicator) applyTaskSettlement(target *event.Event, verdict SettlementVerdict) error {

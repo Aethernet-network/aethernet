@@ -228,6 +228,10 @@ type Engine struct {
 	// The function receives the event ID, verdict, and voter ID.
 	broadcastVote func(eventID event.EventID, verdict bool, voterID crypto.AgentID)
 
+	// eventLookup — optional. When non-nil, used to retrieve the original
+	// event from the DAG for ledger recording during settlement.
+	eventLookup func(event.EventID) (*event.Event, error)
+
 	pending      map[event.EventID]*PendingItem
 	processed    map[event.EventID]struct{}    // tracks already-settled events for idempotency
 	processedAt  map[event.EventID]time.Time   // wall-clock time each event was settled (for GC)
@@ -293,6 +297,13 @@ func (e *Engine) SetConsensus(vr *consensus.VotingRound) {
 // peer nodes over the P2P network. Nil-safe.
 func (e *Engine) SetVoteBroadcaster(fn func(eventID event.EventID, verdict bool, voterID crypto.AgentID)) {
 	e.broadcastVote = fn
+}
+
+// SetEventLookup wires a function to retrieve events from the DAG. Used by
+// ProcessResult to record events in the ledger before settling (since Submit
+// no longer records).
+func (e *Engine) SetEventLookup(fn func(event.EventID) (*event.Event, error)) {
+	e.eventLookup = fn
 }
 
 // ProcessVote routes a verification verdict through the consensus engine when
@@ -506,7 +517,6 @@ func (e *Engine) Submit(ev *event.Event) error {
 
 	switch ev.Type {
 	case event.EventTypeTransfer:
-		// Balance check before recording. Extract payload to get the amount.
 		tp, err := event.GetPayload[event.TransferPayload](ev)
 		if err != nil {
 			return fmt.Errorf("ocs: decode transfer payload: %w", err)
@@ -514,6 +524,10 @@ func (e *Engine) Submit(ev *event.Event) error {
 		if err := e.transfer.BalanceCheck(crypto.AgentID(tp.FromAgent), tp.Amount); err != nil {
 			return fmt.Errorf("ocs: %w", err)
 		}
+		// Record optimistically so the sender's balance reflects the
+		// provisional debit (prevents double-spending). The SettlementApplicator
+		// calls Settle() after consensus to finalize. RecordFromSync on peer
+		// nodes is idempotent — both paths produce the same final state.
 		if err := e.transfer.Record(ev); err != nil {
 			return fmt.Errorf("ocs: ledger record failed: %w", err)
 		}
@@ -555,9 +569,9 @@ func (e *Engine) Submit(ev *event.Event) error {
 	return nil
 }
 
-// SubmitFromSync adds a DAG-synced event to the local pending queue and records
-// it in the transfer/generation ledger (without balance validation) so the
-// SettlementApplicator can later call Settle/Verify on it.
+// SubmitFromSync adds a DAG-synced event to the local pending queue so the
+// auto-validator can vote on it. No ledger mutation — the SettlementApplicator
+// records and settles atomically after consensus finalization.
 // Idempotent: returns nil if the event is already pending or processed.
 func (e *Engine) SubmitFromSync(ev *event.Event) error {
 	if ev.Type != event.EventTypeTransfer && ev.Type != event.EventTypeGeneration && ev.Type != event.EventTypeTaskSettlement {
@@ -565,19 +579,6 @@ func (e *Engine) SubmitFromSync(ev *event.Event) error {
 	}
 	if ev.SettlementState != event.SettlementOptimistic {
 		return nil
-	}
-
-	// Record in the ledger BEFORE taking the engine lock (ledger has its own
-	// mutex). RecordFromSync skips balance validation and is idempotent.
-	switch ev.Type {
-	case event.EventTypeTransfer:
-		if err := e.transfer.RecordFromSync(ev); err != nil {
-			slog.Warn("ocs: SubmitFromSync transfer record failed", "event_id", ev.ID, "err", err)
-		}
-	case event.EventTypeGeneration:
-		if err := e.generation.RecordFromSync(ev); err != nil {
-			slog.Warn("ocs: SubmitFromSync generation record failed", "event_id", ev.ID, "err", err)
-		}
 	}
 
 	e.mu.Lock()

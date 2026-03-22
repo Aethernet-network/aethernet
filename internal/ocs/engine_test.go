@@ -20,10 +20,11 @@ import (
 
 // testHarness holds all the wired-up components for a single test.
 type testHarness struct {
-	eng *ocs.Engine
-	tl  *ledger.TransferLedger
-	gl  *ledger.GenerationLedger
-	reg *identity.Registry
+	eng    *ocs.Engine
+	tl     *ledger.TransferLedger
+	gl     *ledger.GenerationLedger
+	reg    *identity.Registry
+	events map[event.EventID]*event.Event // in-memory event store for lookups
 }
 
 // newHarness builds a fully wired engine with the given config.
@@ -37,11 +38,32 @@ func newHarness(t *testing.T, cfg *ocs.EngineConfig) *testHarness {
 	if cfg == nil {
 		cfg = ocs.DefaultConfig()
 	}
-	return &testHarness{
-		eng: ocs.NewEngine(cfg, tl, gl, reg),
-		tl:  tl,
-		gl:  gl,
-		reg: reg,
+	h := &testHarness{
+		eng:    ocs.NewEngine(cfg, tl, gl, reg),
+		tl:     tl,
+		gl:     gl,
+		reg:    reg,
+		events: make(map[event.EventID]*event.Event),
+	}
+	// Wire event lookup so ProcessResult can record events in the ledger
+	// (Submit no longer records — the applicator or ProcessResult does).
+	h.eng.SetEventLookup(func(id event.EventID) (*event.Event, error) {
+		ev, ok := h.events[id]
+		if !ok {
+			return nil, fmt.Errorf("not found: %s", id)
+		}
+		return ev, nil
+	})
+	return h
+}
+
+// submitEvent is a helper that submits an event to the engine AND stores it
+// in the harness event map for ProcessResult's event lookup.
+func submitEvent(t *testing.T, h *testHarness, ev *event.Event) {
+	t.Helper()
+	h.events[ev.ID] = ev
+	if err := h.eng.Submit(ev); err != nil {
+		t.Fatalf("Submit: %v", err)
 	}
 }
 
@@ -215,6 +237,7 @@ func TestEngine_Submit_Transfer_LandsInPending(t *testing.T) {
 	fundAgent(t, h, "alice", 100_000)
 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
 
+	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit() = %v, want nil", err)
 	}
@@ -227,6 +250,7 @@ func TestEngine_Submit_Generation_LandsInPending(t *testing.T) {
 	h := newHarness(t, nil)
 	e := newGenerationEvent(t, "gen-agent", "ben-agent", 10_000, 1000)
 
+	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit() = %v, want nil", err)
 	}
@@ -254,6 +278,7 @@ func TestEngine_Submit_Duplicate_Error(t *testing.T) {
 	fundAgent(t, h, "alice", 100_000)
 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
 
+	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("first Submit() = %v", err)
 	}
@@ -302,6 +327,7 @@ func TestEngine_PendingCount_Increments(t *testing.T) {
 	}
 
 	e1 := newTransferEvent(t, "alice", "bob", 100, 1000)
+	h.events[e1.ID] = e1
 	if err := h.eng.Submit(e1); err != nil {
 		t.Fatalf("Submit e1: %v", err)
 	}
@@ -310,6 +336,7 @@ func TestEngine_PendingCount_Increments(t *testing.T) {
 	}
 
 	e2 := newGenerationEvent(t, "gen", "ben", 500, 2000)
+	h.events[e2.ID] = e2
 	if err := h.eng.Submit(e2); err != nil {
 		t.Fatalf("Submit e2: %v", err)
 	}
@@ -326,6 +353,7 @@ func TestEngine_IsPending_TrueForSubmitted(t *testing.T) {
 	if h.eng.IsPending(e.ID) {
 		t.Error("IsPending before Submit = true, want false")
 	}
+	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -347,6 +375,7 @@ func TestEngine_SubmitVerification_True_TransferSettled(t *testing.T) {
 
 	fundAgent(t, h, "alice", 100_000)
 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
+	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -377,6 +406,7 @@ func TestEngine_SubmitVerification_True_GenerationSettled(t *testing.T) {
 	const verified = uint64(8_000) // partial but still a positive verdict
 
 	e := newGenerationEvent(t, "gen-agent", "ben-agent", claimed, 1000)
+	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -408,6 +438,7 @@ func TestEngine_SubmitVerification_False_Adjusted(t *testing.T) {
 
 	fundAgent(t, h, "alice", 100_000)
 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
+	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -443,6 +474,7 @@ func TestEngine_ProcessResult_True_RecordsTaskCompletion(t *testing.T) {
 	fundAgent(t, h, "alice", 100_000)
 
 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
+	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -480,6 +512,7 @@ func TestEngine_ProcessResult_False_RecordsTaskFailure(t *testing.T) {
 	// minimum floor (1000 micro-AET), so the subsequent 15% failure reduction
 	// is visible rather than clamped back to the floor.
 	e0 := newTransferEvent(t, "alice", "carol", 100, 1000)
+	h.events[e0.ID] = e0
 	if err := h.eng.Submit(e0); err != nil {
 		t.Fatalf("Submit e0: %v", err)
 	}
@@ -494,6 +527,7 @@ func TestEngine_ProcessResult_False_RecordsTaskFailure(t *testing.T) {
 
 	// Now submit and fail a second event.
 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
+	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit e: %v", err)
 	}
@@ -525,6 +559,7 @@ func TestEngine_ProcessResult_PartialVerification(t *testing.T) {
 	const verified = uint64(3_000) // 60% verified — overclaimer pattern
 
 	e := newGenerationEvent(t, "gen-agent", "ben-agent", claimed, 1000)
+	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -574,6 +609,7 @@ func TestEngine_Expiry_AdjustsLedger(t *testing.T) {
 
 	fundAgent(t, h, "alice", 100_000)
 	e := newTransferEvent(t, "alice", "bob", 100, 1000)
+	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -660,7 +696,8 @@ func TestEngine_ConcurrentVerification(t *testing.T) {
 		from := fmt.Sprintf("verif-sender-%d", i)
 		fundAgent(t, h, from, 100_000)
 		e := newTransferEvent(t, from, "verif-sink", uint64(i+1)*100, 1000)
-		if err := h.eng.Submit(e); err != nil {
+		h.events[e.ID] = e
+	if err := h.eng.Submit(e); err != nil {
 			t.Fatalf("Submit %d: %v", i, err)
 		}
 		events[i] = e
@@ -700,6 +737,7 @@ func TestDoubleSettlement_IsIdempotent(t *testing.T) {
 	fundAgent(t, h, "alice", 100_000)
 
 	e := newTransferEvent(t, "alice", "bob", 500, 1000)
+	h.events[e.ID] = e
 	if err := h.eng.Submit(e); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}

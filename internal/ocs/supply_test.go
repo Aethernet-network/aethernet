@@ -57,6 +57,7 @@ func TestSupplyInvariant_TransferWithFees(t *testing.T) {
 
 	// Submit transfer alice → bob.
 	ev := newTransferEvent(t, alice, bob, transferAmt, ocs.DefaultConfig().MinStakeRequired)
+	h.events[ev.ID] = ev
 	if err := h.eng.Submit(ev); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -144,6 +145,7 @@ func TestSupplyInvariant_SlashToTreasury(t *testing.T) {
 
 	// Submit a transfer that will be rejected (fraudulent claim).
 	ev := newTransferEvent(t, alice, bob, transferAmt, sm.StakedAmount(crypto.AgentID(alice)))
+	h.events[ev.ID] = ev
 	if err := h.eng.Submit(ev); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}

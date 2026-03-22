@@ -621,6 +621,9 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 	}
 	votingRound := consensus.NewVotingRound(votingCfg, reg)
 	eng.SetConsensus(votingRound)
+	eng.SetEventLookup(func(id event.EventID) (*event.Event, error) {
+		return d.Get(id)
+	})
 	// Wire VotingRound persistence so in-flight consensus rounds survive node
 	// restarts. Votes are written to BadgerDB after each RegisterVote and
 	// reloaded on boot, preventing silent vote loss (NEW-1).
@@ -970,6 +973,8 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	)
 
 	// 1. Fund from rewards bucket (idempotent: skips if above threshold).
+	// Also create a DAG Transfer event recording the funding so peers can
+	// see this node's balance via DAG sync.
 	nodeAgentBal, _ := stack.transfer.Balance(agentID)
 	if nodeAgentBal < nodeAgentMinBalance {
 		topUp := nodeAgentFundTarget - nodeAgentBal
@@ -979,6 +984,18 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			slog.Warn("startStack: failed to fund node agentID", "err", err, "agent_id", agentID)
 		} else {
 			slog.Info("startStack: funded node agentID", "agent_id", agentID, "amount", topUp)
+			// Record the funding as a canonical DAG Transfer event.
+			fundPayload := event.TransferPayload{
+				FromAgent: string(genesis.BucketRewards),
+				ToAgent:   string(agentID),
+				Amount:    topUp,
+				Currency:  "AET",
+				Memo:      "bootstrap:node-funding",
+			}
+			if fundEv, err := event.New(event.EventTypeTransfer, stack.dag.Tips(), fundPayload, string(agentID), nil, 0); err == nil {
+				_ = crypto.SignEvent(fundEv, stack.kp)
+				_ = stack.dag.Add(fundEv)
+			}
 		}
 	}
 

@@ -63,6 +63,7 @@ func TestConsensus_SingleNodeBackwardCompat(t *testing.T) {
 	registerAgent(t, h.reg, "bob")
 
 	ev := newTransferEvent(t, "alice", "bob", 10_000, ocs.DefaultConfig().MinStakeRequired)
+	h.events[ev.ID] = ev
 	if err := h.eng.Submit(ev); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -71,13 +72,11 @@ func TestConsensus_SingleNodeBackwardCompat(t *testing.T) {
 	err := h.eng.ProcessVote(ocs.VerificationResult{
 		EventID:    ev.ID,
 		Verdict:    true,
-		VerifierID: "bob", // not party to the transfer (bob is recipient, check fails — wait, bob IS recipient)
+		VerifierID: "bob",
 		Timestamp:  time.Now(),
 	})
-	// bob is the recipient — self-dealing check fires.
-	// Use a third-party verifier.
 	if err != nil {
-		// That's fine — self-dealing. Re-do with a neutral verifier.
+		// Self-dealing check — re-do with a neutral verifier.
 	}
 
 	// Re-submit and use a neutral verifier.
@@ -88,6 +87,7 @@ func TestConsensus_SingleNodeBackwardCompat(t *testing.T) {
 	registerAgent(t, h2.reg, "validator")
 
 	ev2 := newTransferEvent(t, "alice", "bob", 10_000, ocs.DefaultConfig().MinStakeRequired)
+	h2.events[ev2.ID] = ev2
 	if err := h2.eng.Submit(ev2); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -132,6 +132,7 @@ func TestConsensus_MultiNodeSupermajority(t *testing.T) {
 	h.eng.SetConsensus(vr)
 
 	ev := newTransferEvent(t, "alice", "bob", 10_000, ocs.DefaultConfig().MinStakeRequired)
+	h.events[ev.ID] = ev
 	if err := h.eng.Submit(ev); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -199,6 +200,7 @@ func TestConsensus_TimeoutWithSingleVote(t *testing.T) {
 	defer h.eng.Stop()
 
 	ev := newTransferEvent(t, "alice", "bob", 10_000, cfg.MinStakeRequired)
+	h.events[ev.ID] = ev
 	if err := h.eng.Submit(ev); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -259,8 +261,8 @@ func TestConsensus_VotePropagation(t *testing.T) {
 	h.eng.SetVoteBroadcaster(func(eventID event.EventID, verdict bool, voterID crypto.AgentID) {
 		broadcasts = append(broadcasts, broadcastRecord{eventID, verdict, voterID})
 	})
-
 	ev := newTransferEvent(t, "alice", "bob", 10_000, ocs.DefaultConfig().MinStakeRequired)
+	h.events[ev.ID] = ev
 	if err := h.eng.Submit(ev); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -324,6 +326,7 @@ func TestConsensus_ReputationWeighting(t *testing.T) {
 	h.eng.SetConsensus(vr)
 
 	ev := newTransferEvent(t, "alice", "bob", 10_000, ocs.DefaultConfig().MinStakeRequired)
+	h.events[ev.ID] = ev
 	if err := h.eng.Submit(ev); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
