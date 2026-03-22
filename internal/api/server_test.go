@@ -14,6 +14,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/dag"
 	"github.com/Aethernet-network/aethernet/internal/genesis"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
+	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/fees"
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
@@ -59,6 +60,7 @@ func newTestSetup(t *testing.T) *testSetup {
 	gl := ledger.NewGenerationLedger()
 	reg := identity.NewRegistry()
 	eng := ocs.NewEngine(ocs.DefaultConfig(), tl, gl, reg)
+	eng.SetEventLookup(func(id event.EventID) (*event.Event, error) { return d.Get(id) })
 	if err := eng.Start(); err != nil {
 		t.Fatalf("start engine: %v", err)
 	}
@@ -246,6 +248,7 @@ func TestHandleRegisterAgent_RateLimit(t *testing.T) {
 	gl := ledger.NewGenerationLedger()
 	reg := identity.NewRegistry()
 	eng := ocs.NewEngine(ocs.DefaultConfig(), tl, gl, reg)
+	eng.SetEventLookup(func(id event.EventID) (*event.Event, error) { return d.Get(id) })
 	if err := eng.Start(); err != nil {
 		t.Fatalf("start engine: %v", err)
 	}
@@ -1148,6 +1151,7 @@ func TestHandleRegisterAgent_OnboardingFunded(t *testing.T) {
 	gl := ledger.NewGenerationLedger()
 	reg := identity.NewRegistry()
 	eng := ocs.NewEngine(ocs.DefaultConfig(), tl, gl, reg)
+	eng.SetEventLookup(func(id event.EventID) (*event.Event, error) { return d.Get(id) })
 	if err := eng.Start(); err != nil {
 		t.Fatalf("start engine: %v", err)
 	}

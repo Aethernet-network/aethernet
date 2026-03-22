@@ -517,6 +517,9 @@ func (e *Engine) Submit(ev *event.Event) error {
 
 	switch ev.Type {
 	case event.EventTypeTransfer:
+		// Validate balance without recording. No ledger mutation at submit
+		// time — the SettlementApplicator records and settles atomically
+		// after consensus finalization.
 		tp, err := event.GetPayload[event.TransferPayload](ev)
 		if err != nil {
 			return fmt.Errorf("ocs: decode transfer payload: %w", err)
@@ -524,21 +527,11 @@ func (e *Engine) Submit(ev *event.Event) error {
 		if err := e.transfer.BalanceCheck(crypto.AgentID(tp.FromAgent), tp.Amount); err != nil {
 			return fmt.Errorf("ocs: %w", err)
 		}
-		// Record optimistically so the sender's balance reflects the
-		// provisional debit (prevents double-spending). The SettlementApplicator
-		// calls Settle() after consensus to finalize. RecordFromSync on peer
-		// nodes is idempotent — both paths produce the same final state.
-		if err := e.transfer.Record(ev); err != nil {
-			return fmt.Errorf("ocs: ledger record failed: %w", err)
-		}
 		amount = tp.Amount
 		recipientID = crypto.AgentID(tp.ToAgent)
 		senderID = crypto.AgentID(tp.FromAgent)
 
 	case event.EventTypeGeneration:
-		if err := e.generation.Record(ev); err != nil {
-			return fmt.Errorf("ocs: ledger record failed: %w", err)
-		}
 		gp, err := event.GetPayload[event.GenerationPayload](ev)
 		if err == nil {
 			amount = gp.ClaimedValue
@@ -718,6 +711,21 @@ func (e *Engine) ProcessResult(result VerificationResult) error {
 	// This is a coarse-grained domain; callers may supply finer-grained
 	// domains through richer VerificationResult metadata in future iterations.
 	domain := string(item.EventType)
+
+	// Record the event in the ledger before settling. Submit() does not
+	// record — the SettlementApplicator (or ProcessResult for expiry sweep)
+	// is the only code that creates ledger entries. RecordFromSync is
+	// idempotent, so double-calls are safe.
+	if e.eventLookup != nil {
+		if ev, err := e.eventLookup(result.EventID); err == nil {
+			switch ev.Type {
+			case event.EventTypeTransfer:
+				_ = e.transfer.RecordFromSync(ev)
+			case event.EventTypeGeneration:
+				_ = e.generation.RecordFromSync(ev)
+			}
+		}
+	}
 
 	// C3: Re-check stake at settlement time for Transfer events.
 	// An agent that unstaked after Submit to exploit the optimistic window is

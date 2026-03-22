@@ -483,6 +483,16 @@ func TestE2E_TransferConsensus(t *testing.T) {
 	cfg := ocs.DefaultConfig()
 	eng := ocs.NewEngine(cfg, tl, gl, reg)
 	eng.SetEconomics(fc, sm, treasuryID)
+	// Wire event lookup so ProcessResult can record events in the ledger
+	// (Submit no longer records — the applicator or ProcessResult does).
+	evStore := make(map[event.EventID]*event.Event)
+	eng.SetEventLookup(func(id event.EventID) (*event.Event, error) {
+		ev, ok := evStore[id]
+		if !ok {
+			return nil, fmt.Errorf("not found: %s", id)
+		}
+		return ev, nil
+	})
 	if err := eng.Start(); err != nil {
 		t.Fatalf("start OCS engine: %v", err)
 	}
@@ -512,12 +522,12 @@ func TestE2E_TransferConsensus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("event.New: %v", err)
 	}
-	// Snapshot balances BEFORE Submit — the OCS engine optimistically reserves
-	// the sender's balance at Record time (not at settlement time), so we must
-	// capture the pre-submit state for the sender assertion.
+	// Snapshot balances BEFORE Submit. Submit no longer records in the ledger,
+	// so balances don't change at submit time.
 	balAPreSubmit, _ := tl.Balance(agentA)
 	balBPreSubmit, _ := tl.Balance(agentB)
 
+	evStore[ev.ID] = ev
 	if err := eng.Submit(ev); err != nil {
 		t.Fatalf("engine.Submit: %v", err)
 	}
