@@ -370,6 +370,17 @@ type TransferPayload struct {
 
 	// Memo is an optional human-readable annotation. Not used in settlement logic.
 	Memo string `json:"memo,omitempty"`
+
+	// Reason classifies the transfer for protocol-level accounting and auditing.
+	// Examples: "transfer", "escrow-lock", "escrow-release", "task-refund",
+	// "onboarding-grant", "node-bootstrap", "fee-validator", "fee-treasury".
+	// Empty string defaults to "transfer" semantics.
+	Reason string `json:"reason,omitempty"`
+
+	// TaskID links this transfer to a marketplace task when applicable.
+	// Set for escrow-lock, escrow-release, task-refund, and fee distributions.
+	// Empty for ordinary peer-to-peer transfers.
+	TaskID string `json:"task_id,omitempty"`
 }
 
 // GenerationPayload records value created by AI computation — net-new value

@@ -27,6 +27,14 @@ type appliedStore interface {
 // eventLookup retrieves a canonical event from the DAG by its ID.
 type eventLookup func(event.EventID) (*event.Event, error)
 
+// escrowHolder is the minimal escrow interface needed by the applicator to
+// register escrow locks on settlement. Injected to avoid a Core→Application
+// import.
+type escrowHolder interface {
+	Hold(taskID string, posterID crypto.AgentID, amount uint64) error
+	IsLocked(taskID string) bool
+}
+
 // taskSettler executes task-specific settlement side effects. Injected by
 // the Application layer to avoid a Core→Application import.
 type taskSettler func(payload TaskSettlementPayload) error
@@ -50,6 +58,9 @@ type Applicator struct {
 	// taskSettlerFn is injected by the Application layer to handle task-
 	// specific settlement (escrow release, reputation, generation ledger).
 	taskSettlerFn taskSettler
+
+	// Escrow — optional, nil-safe.
+	escrow escrowHolder
 
 	// Economics — all optional, nil-safe.
 	feeCollector *fees.Collector
@@ -112,6 +123,10 @@ func (a *Applicator) SetStakeManager(sm *staking.StakeManager) { a.stakeManager 
 
 // SetMetrics wires metrics counters.
 func (a *Applicator) SetMetrics(m *metrics.AetherNetMetrics) { a.nodeMetrics = m }
+
+// SetEscrowManager wires the escrow manager so settled escrow-lock transfers
+// register entries in the local escrow manager for subsequent release/refund.
+func (a *Applicator) SetEscrowManager(e escrowHolder) { a.escrow = e }
 
 // Apply processes a consensus-finalized SettlementPayload. It is the ONLY
 // entry point for ledger mutation in response to consensus.
@@ -278,7 +293,26 @@ func (a *Applicator) applyTransfer(targetID event.EventID, verdict SettlementVer
 	if verdict != VerdictAccepted {
 		settleState = event.SettlementAdjusted
 	}
-	return a.transfer.Settle(targetID, settleState)
+	if err := a.transfer.Settle(targetID, settleState); err != nil {
+		return err
+	}
+
+	// Escrow bookkeeping: when a settled transfer is an escrow lock,
+	// register it in the local escrow manager so release/refund can find it.
+	if verdict == VerdictAccepted && a.escrow != nil {
+		if tp, err := event.GetPayload[event.TransferPayload](target); err == nil {
+			if tp.Reason == "escrow-lock" && tp.TaskID != "" {
+				if !a.escrow.IsLocked(tp.TaskID) {
+					if err := a.escrow.Hold(tp.TaskID, crypto.AgentID(tp.FromAgent), tp.Amount); err != nil {
+						slog.Warn("settlement: escrow hold failed",
+							"task_id", tp.TaskID, "err", err)
+					}
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 func (a *Applicator) applyGeneration(targetID event.EventID, verdict SettlementVerdict, verifiedValue uint64, target *event.Event) error {

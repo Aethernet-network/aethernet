@@ -256,6 +256,10 @@ type Server struct {
 	enableL3    bool
 	explorerDir string // path to serve the explorer UI from; "" disables it
 
+	// protoClient is the canonical protocol interface for token movement.
+	// Set via SetProtocolClient after construction.
+	protoClient protoClientInterface
+
 	// minTaskBudget is the minimum budget (micro-AET) enforced in handlePostTask.
 	// Initialized from tasks.MinTaskBudget; overridable via SetMinTaskBudget.
 	minTaskBudget uint64
@@ -500,6 +504,20 @@ func (s *Server) SetServiceRegistry(r *svcregistry.Registry) {
 // The default is tasks.MinTaskBudget (100,000 µAET). Call before Start.
 func (s *Server) SetMinTaskBudget(budget uint64) {
 	s.minTaskBudget = budget
+}
+
+// protoClientInterface is the canonical protocol interface for token movement.
+// The marketplace uses SubmitEscrowLock for task posting and SubmitGrant for
+// onboarding allocations. All methods produce signed DAG events that settle
+// through the consensus pipeline.
+type protoClientInterface interface {
+	SubmitEscrowLock(posterID crypto.AgentID, taskID string, amount uint64) (event.EventID, error)
+	SubmitGrant(fromBucket string, toAgent crypto.AgentID, amount uint64, reason string) (event.EventID, error)
+}
+
+// SetProtocolClient wires the protocol client into the server. Call before Start.
+func (s *Server) SetProtocolClient(pc protoClientInterface) {
+	s.protoClient = pc
 }
 
 // SetTaskManager wires the task marketplace manager and escrow system into the
@@ -1092,11 +1110,18 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Escrow the budget. Balance was validated above so this should succeed,
-	// but TOCTOU is possible; on failure we log and continue (testnet behaviour).
-	if err := s.escrowMgr.Hold(task.ID, crypto.AgentID(posterID), req.Budget); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+	// Escrow the budget via canonical protocol event when available.
+	if s.protoClient != nil {
+		if _, err := s.protoClient.SubmitEscrowLock(crypto.AgentID(posterID), task.ID, req.Budget); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	} else {
+		// Fallback for tests/single-node without protocol client.
+		if err := s.escrowMgr.Hold(task.ID, crypto.AgentID(posterID), req.Budget); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusCreated, task)
@@ -1895,20 +1920,38 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if err := s.transfer.TransferFromBucket(crypto.AgentID(genesis.BucketEcosystem), regAgentID, allocation); err == nil {
-			resp.OnboardingAllocation = allocation
-			if s.stakeManager != nil {
-				stakeAmount := allocation / 2
-				// The agent was just funded so the stake should succeed; ignore
-				// the error here since onboarding has already committed.
-				if err := s.stakeManager.Stake(regAgentID, stakeAmount); err == nil {
-					since := s.stakeManager.StakedSince(regAgentID)
-					resp.TrustLimit = staking.TrustLimit(stakeAmount, 0, since, time.Now().Unix())
+		if s.protoClient != nil {
+			if _, err := s.protoClient.SubmitGrant(genesis.BucketEcosystem, regAgentID, allocation, "onboarding-grant"); err == nil {
+				resp.OnboardingAllocation = allocation
+				// Note: staking after onboarding grant is deferred until the grant
+				// settles through consensus. For testnet, keep the local stake call
+				// as a convenience that will be consistent once the grant settles.
+				if s.stakeManager != nil {
+					stakeAmount := allocation / 2
+					if err := s.stakeManager.Stake(regAgentID, stakeAmount); err == nil {
+						since := s.stakeManager.StakedSince(regAgentID)
+						resp.TrustLimit = staking.TrustLimit(stakeAmount, 0, since, time.Now().Unix())
+					}
 				}
+			} else {
+				slog.Warn("onboarding: protocol grant failed",
+					"agent_id", regAgentID, "allocation", allocation, "err", err)
 			}
 		} else {
-			slog.Warn("onboarding: transfer from ecosystem failed",
-				"agent_id", regAgentID, "allocation", allocation, "err", err)
+			// Fallback for tests without protocol client.
+			if err := s.transfer.TransferFromBucket(crypto.AgentID(genesis.BucketEcosystem), regAgentID, allocation); err == nil {
+				resp.OnboardingAllocation = allocation
+				if s.stakeManager != nil {
+					stakeAmount := allocation / 2
+					if err := s.stakeManager.Stake(regAgentID, stakeAmount); err == nil {
+						since := s.stakeManager.StakedSince(regAgentID)
+						resp.TrustLimit = staking.TrustLimit(stakeAmount, 0, since, time.Now().Unix())
+					}
+				}
+			} else {
+				slog.Warn("onboarding: transfer from ecosystem failed",
+					"agent_id", regAgentID, "allocation", allocation, "err", err)
+			}
 		}
 	} else {
 		s.onboardingMu.Unlock()

@@ -100,6 +100,14 @@ func bucketID(taskID string) crypto.AgentID {
 	return crypto.AgentID("escrow:" + taskID)
 }
 
+// IsLocked reports whether an escrow entry exists for taskID.
+func (e *Escrow) IsLocked(taskID string) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	_, exists := e.entries[taskID]
+	return exists
+}
+
 // Hold moves amount from posterID's balance into the escrow bucket for taskID.
 // Returns an error wrapping ledger.ErrInsufficientBalance when the poster
 // has insufficient funds.

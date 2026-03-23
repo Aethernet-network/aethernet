@@ -58,6 +58,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/network"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	platformpkg "github.com/Aethernet-network/aethernet/internal/platform"
+	"github.com/Aethernet-network/aethernet/internal/protocol"
 	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 	"github.com/Aethernet-network/aethernet/internal/registry"
 	"github.com/Aethernet-network/aethernet/internal/replay"
@@ -309,6 +310,7 @@ type nodeStack struct {
 	bootstrapOvr    *assurance.BootstrapOverride
 	replayReserve   *assurance.ReplayReserve
 	votingRound     *consensus.VotingRound
+	protoClient     *protocol.Client
 }
 
 // taskManagerSource adapts *tasks.TaskManager to the router.TaskSource interface,
@@ -877,6 +879,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		os.Exit(1)
 	}
 
+	// Protocol client: canonical interface for all token movement.
+	stack.protoClient = protocol.NewClient(stack.dag, stack.kp, stack.engine, agentID)
+
 	// Auto-validator: on testnet, automatically settle pending OCS transactions.
 	// The "testnet-validator" agent is registered in the identity registry so
 	// it appears in the explorer as a known participant.
@@ -1223,6 +1228,57 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	}
 	settlementApp.SetFeeCollector(stack.feeCollector, crypto.AgentID(genesis.BucketTreasury))
 	settlementApp.SetStakeManager(stack.stakeManager)
+	settlementApp.SetEscrowManager(stack.escrowMgr)
+	settlementApp.SetTaskSettler(func(payload settlement.TaskSettlementPayload) error {
+		if payload.ClaimerID == "" {
+			return nil // no claimer — nothing to release
+		}
+		posterID := crypto.AgentID(payload.PosterID)
+		claimerID := crypto.AgentID(payload.ClaimerID)
+		treasuryID := crypto.AgentID(genesis.BucketTreasury)
+
+		// Ensure escrow exists on this node. On the posting node, escrow was
+		// locked via canonical Transfer (prompt 2). On peer nodes, the
+		// SettlementApplicator's applyTransfer registered the escrow entry
+		// when the escrow-lock transfer settled. If for any reason the escrow
+		// doesn't exist yet (e.g. deferred settlement), create it now.
+		if !stack.escrowMgr.IsLocked(payload.TaskID) {
+			if err := stack.escrowMgr.Hold(payload.TaskID, posterID, payload.Budget); err != nil {
+				slog.Warn("task-settler: escrow catch-up hold failed",
+					"task_id", payload.TaskID, "err", err)
+				return err
+			}
+		}
+
+		// Calculate fee splits.
+		fee := fees.CalculateFee(payload.Budget)
+		netAmount := payload.Budget - fee
+		validatorAmount := fee * fees.ValidatorShare / 100
+		treasuryAmount := fee * fees.TreasuryShare / 100
+		burned := fee - validatorAmount - treasuryAmount
+
+		// Release escrow with canonical fee distribution.
+		if err := stack.escrowMgr.ReleaseNet(
+			payload.TaskID,
+			claimerID, netAmount,
+			crypto.AgentID(""), validatorAmount,
+			treasuryID, treasuryAmount,
+		); err != nil {
+			return fmt.Errorf("task-settler: escrow release: %w", err)
+		}
+
+		// Track fee stats.
+		if stack.feeCollector != nil && fee > 0 {
+			stack.feeCollector.TrackFee(fee, burned, treasuryAmount)
+		}
+
+		slog.Info("task-settler: escrow released",
+			"task_id", payload.TaskID,
+			"worker", payload.ClaimerID,
+			"net", netAmount,
+			"fee", fee)
+		return nil
+	})
 	if stack.nodeMetrics != nil {
 		settlementApp.SetMetrics(stack.nodeMetrics)
 	}
@@ -1457,6 +1513,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	}
 	apiSrv.SetEconomics(stack.walletMgr, stack.stakeManager, stack.feeCollector)
 	apiSrv.SetMinTaskBudget(cfg.Tasks.MinTaskBudget)
+	apiSrv.SetProtocolClient(stack.protoClient)
 	// Wire canary calibration endpoints. Only available when the store is present.
 	if canaryMgr != nil {
 		apiSrv.SetCalibrationStore(canaryMgr)

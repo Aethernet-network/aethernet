@@ -87,19 +87,15 @@ func TestAutoValidator_ProcessesPending(t *testing.T) {
 }
 
 // TestAutoValidator_FeeOnTaskSettlement verifies that when the auto-validator
-// approves a submitted task:
-//   - the worker receives budget - fee (not the full budget)
-//   - feeCollector.Stats reports the collected fee
-//
-// Budget: 1_000_000 micro-AET → fee = 1_000 (0.1%) → worker receives 999_000.
+// approves a submitted task it creates a canonical TaskSettlement DAG event
+// containing the full payload needed for consensus-gated escrow release.
+// Escrow release and fee collection are now handled by the SettlementApplicator
+// after consensus — the auto-validator only emits the event.
 func TestAutoValidator_FeeOnTaskSettlement(t *testing.T) {
 	const budget = 1_000_000
-	expectedFee := fees.CalculateFee(budget) // 1_000 (0.1% of 1_000_000)
-	expectedNet := budget - expectedFee      // 999_000
 
 	posterID := crypto.AgentID("poster")
 	claimerID := crypto.AgentID("worker")
-	validatorID := crypto.AgentID("testnet-validator")
 	treasuryID := crypto.AgentID("treasury")
 
 	// Set up ledger, escrow, and fee collector.
@@ -140,27 +136,43 @@ func TestAutoValidator_FeeOnTaskSettlement(t *testing.T) {
 	}
 	defer eng.Stop()
 
+	// Wire a DAG and keypair so the auto-validator can emit TaskSettlement events.
+	// The keypair must match the validatorID so crypto.SignEvent succeeds.
+	d := dag.New()
+	kp, _ := crypto.GenerateKeyPair()
+	validatorID := kp.AgentID()
+
 	av := autovalidator.NewAutoValidator(eng, validatorID, 50*time.Millisecond)
 	av.SetTaskManager(tm, esc)
 	av.SetFeeCollector(fc, treasuryID)
+	av.SetDAG(d)
+	av.SetKeyPair(kp)
 	av.SetTaskStalenessThreshold(0) // process immediately, no 10s wait
 	av.Start()
 	defer av.Stop()
 
-	// Poll on the worker's balance rather than task status. ApproveTask marks
-	// the task Completed at the top of settleTask, before ReleaseNet and
-	// TrackFee run. Polling on status would create a race where the test reads
-	// the ledger before escrow has been released.
+	// Wait for task completion AND the TaskSettlement DAG event. The
+	// autovalidator creates the event after ApproveTask, so we poll for both.
 	deadline := time.Now().Add(2 * time.Second)
+	var found bool
 	for time.Now().Before(deadline) {
-		bal, _ := tl.Balance(claimerID)
-		if bal == expectedNet {
+		tk, err := tm.Get(task.ID)
+		if err != nil || tk.Status != tasks.TaskStatusCompleted {
+			time.Sleep(25 * time.Millisecond)
+			continue
+		}
+		for _, ev := range d.All() {
+			if ev.Type == event.EventTypeTaskSettlement {
+				found = true
+				break
+			}
+		}
+		if found {
 			break
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
 
-	// Task status should also be Completed at this point.
 	tk, err := tm.Get(task.ID)
 	if err != nil {
 		t.Fatalf("Get task after settlement: %v", err)
@@ -168,24 +180,8 @@ func TestAutoValidator_FeeOnTaskSettlement(t *testing.T) {
 	if tk.Status != tasks.TaskStatusCompleted {
 		t.Fatalf("task status = %q; want %q", tk.Status, tasks.TaskStatusCompleted)
 	}
-
-	// Worker should have received netAmount (budget - fee), not the full budget.
-	workerBal, _ := tl.Balance(claimerID)
-	if workerBal != expectedNet {
-		t.Errorf("worker balance = %d; want %d (budget %d - fee %d)",
-			workerBal, expectedNet, budget, expectedFee)
-	}
-	if workerBal >= budget {
-		t.Errorf("worker received full budget %d; fee was not deducted", budget)
-	}
-
-	// Fee collector should have recorded the fee.
-	collected, _, _ := fc.Stats()
-	if collected == 0 {
-		t.Error("feeCollector.totalCollected = 0; expected fee to be collected")
-	}
-	if collected != expectedFee {
-		t.Errorf("feeCollector.totalCollected = %d; want %d", collected, expectedFee)
+	if !found {
+		t.Error("no TaskSettlement event found in DAG after task approval")
 	}
 }
 

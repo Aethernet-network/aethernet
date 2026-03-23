@@ -37,6 +37,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/replay"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/staking"
+	"github.com/Aethernet-network/aethernet/internal/settlement"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/validator"
 )
@@ -176,6 +177,57 @@ func waitGenLedger(gl *ledger.GenerationLedger, window time.Duration, timeout ti
 	}
 	v, _ := gl.TotalVerifiedValue(window)
 	return v
+}
+
+// applyTaskSettlements scans the DAG for TaskSettlement events and applies
+// the escrow release + fee tracking that the SettlementApplicator would
+// normally perform after consensus. Used in integration tests that don't
+// wire the full consensus pipeline.
+func applyTaskSettlements(t *testing.T, d *dag.DAG, esc *escrowpkg.Escrow, fc *fees.Collector, treasuryID crypto.AgentID) {
+	t.Helper()
+	for _, ev := range d.All() {
+		if ev.Type != event.EventTypeTaskSettlement {
+			continue
+		}
+		var payload settlement.TaskSettlementPayload
+		if p, err := event.GetPayload[settlement.TaskSettlementPayload](ev); err == nil {
+			payload = p
+		} else {
+			continue
+		}
+		if payload.ClaimerID == "" {
+			continue
+		}
+		posterID := crypto.AgentID(payload.PosterID)
+		claimerID := crypto.AgentID(payload.ClaimerID)
+
+		if !esc.IsLocked(payload.TaskID) {
+			if err := esc.Hold(payload.TaskID, posterID, payload.Budget); err != nil {
+				t.Logf("applyTaskSettlements: catch-up hold failed: %v", err)
+				continue
+			}
+		}
+
+		fee := fees.CalculateFee(payload.Budget)
+		netAmount := payload.Budget - fee
+		validatorAmount := fee * fees.ValidatorShare / 100
+		treasuryAmount := fee * fees.TreasuryShare / 100
+		burned := fee - validatorAmount - treasuryAmount
+
+		if err := esc.ReleaseNet(
+			payload.TaskID,
+			claimerID, netAmount,
+			crypto.AgentID(""), validatorAmount,
+			treasuryID, treasuryAmount,
+		); err != nil {
+			t.Logf("applyTaskSettlements: ReleaseNet failed: %v", err)
+			continue
+		}
+
+		if fc != nil && fee > 0 {
+			fc.TrackFee(fee, burned, treasuryAmount)
+		}
+	}
 }
 
 // ─── Test 1: Full Settlement Lifecycle ────────────────────────────────────────
@@ -353,12 +405,18 @@ func min(a, b float64) float64 {
 	}
 
 	// Wire the auto-validator with the full testnet stack.
+	// DAG + keypair are required so the autovalidator emits TaskSettlement events.
+	// The keypair must match the validatorID so crypto.SignEvent succeeds.
+	d := dag.New()
+
 	av := autovalidator.NewAutoValidator(eng, validatorID, 5*time.Millisecond)
 	av.SetTaskManager(tm, esc)
 	av.SetFeeCollector(fc, treasuryID)
 	av.SetGenerationLedger(gl)
 	av.SetReputationManager(repMgr)
 	av.SetRegistry(reg)
+	av.SetDAG(d)
+	av.SetKeyPair(validatorKP)
 	av.SetTaskStalenessThreshold(0)
 	av.Start()
 	t.Cleanup(av.Stop)
@@ -373,10 +431,13 @@ func min(a, b float64) float64 {
 		t.Error("generation ledger TotalVerifiedValue = 0 after settlement")
 	}
 
+	// Apply TaskSettlement events: simulate the SettlementApplicator doing
+	// escrow release + fee distribution after consensus finalization.
+	applyTaskSettlements(t, d, esc, fc, treasuryID)
+
 	// ── Economic assertions ───────────────────────────────────────────────────
 	fee := fees.CalculateFee(budget)
 	netAmount := budget - fee
-	validatorFee := fee * fees.ValidatorShare / 100
 	treasuryFee := fee * fees.TreasuryShare / 100
 
 	// Worker received net share of the budget.
@@ -386,12 +447,18 @@ func min(a, b float64) float64 {
 			workerBal, (alloc-stakeAmt)+netAmount, alloc-stakeAmt, netAmount)
 	}
 
-	// Validator received its fee share (on top of initial balance).
+	// Validator balance is unchanged — in the consensus-gated settlement
+	// architecture, per-validator fee distribution is deferred to a
+	// post-consensus callback (the validator share sits in a synthetic
+	// holding bucket until distributed).
 	valBal, _ := tl.Balance(validatorID)
-	if valBal != (alloc-stakeAmt)+validatorFee {
-		t.Errorf("validator balance = %d; want %d (initial %d + fee %d)",
-			valBal, (alloc-stakeAmt)+validatorFee, alloc-stakeAmt, validatorFee)
+	if valBal != alloc-stakeAmt {
+		t.Errorf("validator balance = %d; want %d (initial, no direct fee)",
+			valBal, alloc-stakeAmt)
 	}
+
+	// Track the synthetic validator-fee holding bucket for supply invariant.
+	st.track(crypto.AgentID(""))
 
 	// Treasury received its fee share.
 	treaBal, _ := tl.Balance(treasuryID)
@@ -1052,11 +1119,12 @@ func TestE2E_MultiAgentEconomics(t *testing.T) {
 		st.track(kp.AgentID())
 	}
 
-	validatorID := crypto.AgentID("multi-validator")
+	validatorKP, _ := crypto.GenerateKeyPair()
+	validatorID := validatorKP.AgentID()
 	treasuryID := crypto.AgentID(genesis.BucketTreasury)
 
 	// Register validator with rep+stake for consensus weight.
-	vFP, _ := identity.NewFingerprint(validatorID, make([]byte, 32), nil)
+	vFP, _ := identity.NewFingerprint(validatorID, validatorKP.PublicKey, nil)
 	vFP.ReputationScore = 5000
 	vFP.StakedAmount = 10_000
 	_ = reg.Register(vFP)
@@ -1107,13 +1175,18 @@ func TestE2E_MultiAgentEconomics(t *testing.T) {
 	st.check(t, "after all holds")
 
 	// Wire a single auto-validator with the shared escrow to settle all 5 tasks.
-	avID := validatorID
-	av := autovalidator.NewAutoValidator(eng, avID, 5*time.Millisecond)
+	// DAG + keypair are required so the autovalidator emits TaskSettlement events.
+	// The keypair must match validatorID so crypto.SignEvent succeeds.
+	d := dag.New()
+
+	av := autovalidator.NewAutoValidator(eng, validatorID, 5*time.Millisecond)
 	av.SetTaskManager(tm, sharedEsc)
 	av.SetFeeCollector(fc, treasuryID)
 	av.SetGenerationLedger(gl)
 	av.SetReputationManager(repMgr)
 	av.SetRegistry(reg)
+	av.SetDAG(d)
+	av.SetKeyPair(validatorKP)
 	av.SetTaskStalenessThreshold(0)
 	av.Start()
 	t.Cleanup(av.Stop)
@@ -1143,7 +1216,9 @@ func Solve(input string) (string, error) {
 		}
 	}
 
-	// Wait for all 5 tasks to complete + generation ledger to have 5 entries.
+	// Wait for all 5 tasks to complete, generation ledger entries, AND all 5
+	// TaskSettlement DAG events to be created. The autovalidator creates the
+	// DAG event after calling ApproveTask, so we must wait for both.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		completedAll := true
@@ -1155,17 +1230,14 @@ func Solve(input string) (string, error) {
 			}
 		}
 		genVal, _ := gl.TotalVerifiedValue(24 * time.Hour)
-		if completedAll && genVal > 0 {
-			// Verify generation ledger count by checking 5 separate task entries.
-			allEntries := true
-			for i := 0; i < numTasks; i++ {
-				if v, _ := gl.TotalVerifiedValue(24 * time.Hour); v == 0 {
-					allEntries = false
-				}
+		tsCount := 0
+		for _, ev := range d.All() {
+			if ev.Type == event.EventTypeTaskSettlement {
+				tsCount++
 			}
-			if allEntries {
-				break
-			}
+		}
+		if completedAll && genVal > 0 && tsCount >= numTasks {
+			break
 		}
 		time.Sleep(15 * time.Millisecond)
 	}
@@ -1181,6 +1253,11 @@ func Solve(input string) (string, error) {
 			t.Errorf("task[%d] status = %q; want completed", i, tk.Status)
 		}
 	}
+
+	// Apply TaskSettlement events: simulate the SettlementApplicator doing
+	// escrow release + fee distribution after consensus finalization.
+	st.track(crypto.AgentID("")) // synthetic validator-fee holding bucket
+	applyTaskSettlements(t, d, sharedEsc, fc, treasuryID)
 
 	// Verify total fees collected ≈ 0.1% of total settled value.
 	totalSettledValue := uint64(numTasks) * taskBudget

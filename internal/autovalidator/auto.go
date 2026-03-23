@@ -26,7 +26,6 @@ package autovalidator
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -670,10 +669,10 @@ func (av *AutoValidator) processDisputedTasks() {
 
 // settleTask is the shared approval path used by processSubmittedTasks. It:
 //  1. Marks the task Completed via taskMgr.ApproveTask
-//  2. Releases (budget - fee) to the worker via escrow.ReleaseNet
-//  3. Distributes the fee to validator + treasury via feeCollector.CollectFee
-//  4. Records verified productive output in the generation ledger (unless holdGeneration is true)
-//  5. Records a reputation completion for the worker
+//  2. Creates a canonical TaskSettlement DAG event (escrow release + fee
+//     distribution are handled by the SettlementApplicator after consensus)
+//  3. Records verified productive output in the generation ledger (unless holdGeneration is true)
+//  4. Records a reputation completion for the worker
 //
 // holdGeneration should be true when the replay coordinator has selected this
 // task for replay and the task is generation-eligible. In that case the
@@ -685,74 +684,68 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score, hol
 		slog.Warn("auto-validator: could not approve task", "task_id", task.ID, "err", err)
 		return
 	}
-	if av.escrowMgr != nil && task.ClaimerID != "" {
-		fee := fees.CalculateFee(task.Budget)
-		netAmount := task.Budget - fee
-		validatorAmount := fee * fees.ValidatorShare / 100
-		treasuryAmount := fee * fees.TreasuryShare / 100
-		burned := fee - validatorAmount - treasuryAmount
-		// C1/C2: Distribute all fee splits from the escrow bucket (no minting).
-		if err := av.escrowMgr.ReleaseNet(
-			task.ID,
-			crypto.AgentID(task.ClaimerID), netAmount,
-			av.validatorID, validatorAmount,
-			av.treasuryID, treasuryAmount,
-		); err != nil {
-			slog.Error("auto-validator: could not release escrow for task", "task_id", task.ID, "err", err)
-		} else {
-			if av.feeCollector != nil && fee > 0 {
-				av.feeCollector.TrackFee(fee, burned, treasuryAmount)
-				slog.Info("auto-validator: collected fee", "fee", fee, "task_id", task.ID, "net_to_worker", netAmount)
+
+	// Create canonical TaskSettlement DAG event. This propagates to all
+	// peers, goes through consensus, and the SettlementApplicator handles
+	// escrow release + fee distribution identically on every node.
+	if av.dag != nil && av.kp != nil {
+		scoreVal := 0.0
+		if score != nil {
+			scoreVal = score.Overall
+		}
+		tsPayload := settlement.TaskSettlementPayload{
+			TaskID:         task.ID,
+			PosterID:       task.PosterID,
+			ClaimerID:      task.ClaimerID,
+			Budget:         task.Budget,
+			AcceptanceHash: task.Contract.SpecHash,
+			EvidenceHash:   task.ResultHash,
+			Category:       task.Category,
+			Score:          scoreVal,
+			HoldGeneration: holdGeneration,
+		}
+		tips := av.dag.Tips()
+		priorTS := make(map[event.EventID]uint64, len(tips))
+		for _, ref := range tips {
+			if ev, err := av.dag.Get(ref); err == nil {
+				priorTS[ref] = ev.CausalTimestamp
 			}
-			// Accrue the replay-reserve share of the assurance fee into the
-			// per-category reserve pool. Only fires for assured tasks (AssuranceFee > 0).
-			// This funds future replay-executor minimum payouts for this category.
-			if av.replayReserve != nil && task.AssuranceFee > 0 {
-				contribution := uint64(av.replayReserveShare * float64(task.AssuranceFee))
-				if contribution > 0 {
-					if err := av.replayReserve.Accrue(task.Category, contribution); err != nil {
-						slog.Error("auto-validator: replay reserve accrual failed",
-							"task_id", task.ID,
-							"category", task.Category,
-							"contribution", contribution,
-							"err", err,
-						)
-					}
-				}
-			}
-			// Record the payout as a Transfer event in the DAG so the activity
-			// feed shows task settlements alongside peer-to-peer transfers.
-			if av.dag != nil {
-				tips := av.dag.Tips()
-				priorTS := make(map[event.EventID]uint64, len(tips))
-				for _, ref := range tips {
-					if ev, err := av.dag.Get(ref); err == nil {
-						priorTS[ref] = ev.CausalTimestamp
-					}
-				}
-				e, err := event.New(
-					event.EventTypeTransfer,
-					tips,
-					event.TransferPayload{
-						FromAgent: "escrow:" + task.ID,
-						ToAgent:   string(task.ClaimerID),
-						Amount:    netAmount,
-						Currency:  "AET",
-						Memo:      fmt.Sprintf("task-settlement:%s", task.ID),
-					},
-					string(av.validatorID),
-					priorTS,
-					0,
-				)
-				if err == nil {
-					if av.kp != nil {
-						_ = crypto.SignEvent(e, av.kp)
-					}
-					_ = av.dag.Add(e)
-				}
+		}
+		tsEv, err := event.New(
+			event.EventTypeTaskSettlement, tips, tsPayload,
+			string(av.validatorID), priorTS, 0,
+		)
+		if err == nil {
+			if signErr := crypto.SignEvent(tsEv, av.kp); signErr != nil {
+				slog.Warn("auto-validator: failed to sign task settlement event",
+					"task_id", task.ID, "err", signErr)
+			} else if addErr := av.dag.Add(tsEv); addErr != nil {
+				slog.Warn("auto-validator: failed to add task settlement to DAG",
+					"task_id", task.ID, "err", addErr)
+			} else {
+				slog.Info("auto-validator: emitted task settlement event",
+					"task_id", task.ID, "event_id", tsEv.ID)
 			}
 		}
 	}
+
+	// Accrue the replay-reserve share of the assurance fee into the
+	// per-category reserve pool. Only fires for assured tasks (AssuranceFee > 0).
+	if av.replayReserve != nil && task.AssuranceFee > 0 {
+		contribution := uint64(av.replayReserveShare * float64(task.AssuranceFee))
+		if contribution > 0 {
+			if err := av.replayReserve.Accrue(task.Category, contribution); err != nil {
+				slog.Error("auto-validator: replay reserve accrual failed",
+					"task_id", task.ID,
+					"category", task.Category,
+					"contribution", contribution,
+					"err", err,
+				)
+			}
+		}
+	}
+
+	// --- Non-economic side effects (node-local, not balance-affecting) ---
 
 	// Record verified productive AI computation in the generation ledger.
 	// Only for generation-eligible tasks; non-eligible tasks have their payout

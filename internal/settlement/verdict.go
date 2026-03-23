@@ -63,6 +63,7 @@ func (sp *SettlementPayload) SortAttestations() {
 // application by the SettlementApplicator.
 type TaskSettlementPayload struct {
 	TaskID         string  `json:"task_id"`
+	PosterID       string  `json:"poster_id"`
 	ClaimerID      string  `json:"claimer_id"`
 	Budget         uint64  `json:"budget"`
 	AcceptanceHash string  `json:"acceptance_hash"`
