@@ -512,6 +512,7 @@ func (s *Server) SetMinTaskBudget(budget uint64) {
 // onboarding allocations. All methods produce signed DAG events that settle
 // through the consensus pipeline.
 type protoClientInterface interface {
+	SubmitTransfer(from, to crypto.AgentID, amount uint64, reason, taskID string) (event.EventID, error)
 	SubmitEscrowLock(posterID crypto.AgentID, taskID string, amount uint64) (event.EventID, error)
 	SubmitGrant(fromBucket string, toAgent crypto.AgentID, amount uint64, reason string) (event.EventID, error)
 }
@@ -964,6 +965,8 @@ type stakeOpResponse struct {
 	AgentID      string `json:"agent_id"`
 	StakedAmount uint64 `json:"staked_amount"`
 	TrustLimit   uint64 `json:"trust_limit"`
+	EventID      string `json:"event_id,omitempty"`
+	Message      string `json:"message,omitempty"`
 }
 
 type unstakeOpResponse struct {
@@ -971,6 +974,8 @@ type unstakeOpResponse struct {
 	StakedAmount uint64 `json:"staked_amount"`
 	TrustLimit   uint64 `json:"trust_limit"`
 	Success      bool   `json:"success"`
+	EventID      string `json:"event_id,omitempty"`
+	Message      string `json:"message,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -2445,25 +2450,48 @@ func (s *Server) handleStake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.stakeManager.Stake(agentID, req.Amount); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
+	// Submit canonical stake transfer: agent → staking-pool.
+	if s.protoClient != nil {
+		eventID, err := s.protoClient.SubmitTransfer(
+			agentID,
+			crypto.AgentID("staking-pool"),
+			req.Amount,
+			"stake-lock",
+			"",
+		)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 
-	var tasksCompleted uint64
-	if fp, err := s.registry.Get(agentID); err == nil {
-		tasksCompleted = fp.TasksCompleted
-	}
-	now := time.Now().Unix()
-	staked := s.stakeManager.StakedAmount(agentID)
-	since := s.stakeManager.StakedSince(agentID)
-	lastAct := s.stakeManager.LastActivity(agentID)
+		writeJSON(w, http.StatusOK, stakeOpResponse{
+			AgentID:      req.AgentID,
+			StakedAmount: s.stakeManager.StakedAmount(agentID) + req.Amount,
+			EventID:      string(eventID),
+			Message:      "stake submitted — settles through consensus",
+		})
+	} else {
+		// Fallback for tests without protocol client.
+		if err := s.stakeManager.Stake(agentID, req.Amount); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 
-	writeJSON(w, http.StatusOK, stakeOpResponse{
-		AgentID:      req.AgentID,
-		StakedAmount: staked,
-		TrustLimit:   staking.TrustLimitFull(staked, tasksCompleted, since, lastAct, now),
-	})
+		var tasksCompleted uint64
+		if fp, err := s.registry.Get(agentID); err == nil {
+			tasksCompleted = fp.TasksCompleted
+		}
+		now := time.Now().Unix()
+		staked := s.stakeManager.StakedAmount(agentID)
+		since := s.stakeManager.StakedSince(agentID)
+		lastAct := s.stakeManager.LastActivity(agentID)
+
+		writeJSON(w, http.StatusOK, stakeOpResponse{
+			AgentID:      req.AgentID,
+			StakedAmount: staked,
+			TrustLimit:   staking.TrustLimitFull(staked, tasksCompleted, since, lastAct, now),
+		})
+	}
 
 	if s.eventBus != nil {
 		s.eventBus.Publish(eventbus.Event{
@@ -2976,27 +3004,58 @@ func (s *Server) handleUnstake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ok := s.stakeManager.Unstake(agentID, req.Amount)
-	if !ok {
+	// Verify agent has enough stake before submitting.
+	currentStake := s.stakeManager.StakedAmount(agentID)
+	if req.Amount > currentStake {
 		writeError(w, http.StatusBadRequest, "insufficient staked balance")
 		return
 	}
 
-	var tasksCompleted uint64
-	if fp, err := s.registry.Get(agentID); err == nil {
-		tasksCompleted = fp.TasksCompleted
-	}
-	now := time.Now().Unix()
-	staked := s.stakeManager.StakedAmount(agentID)
-	since := s.stakeManager.StakedSince(agentID)
-	lastAct := s.stakeManager.LastActivity(agentID)
+	// Submit canonical unstake transfer: staking-pool → agent.
+	if s.protoClient != nil {
+		eventID, err := s.protoClient.SubmitTransfer(
+			crypto.AgentID("staking-pool"),
+			agentID,
+			req.Amount,
+			"stake-unlock",
+			"",
+		)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 
-	writeJSON(w, http.StatusOK, unstakeOpResponse{
-		AgentID:      req.AgentID,
-		StakedAmount: staked,
-		TrustLimit:   staking.TrustLimitFull(staked, tasksCompleted, since, lastAct, now),
-		Success:      true,
-	})
+		writeJSON(w, http.StatusOK, unstakeOpResponse{
+			AgentID:      req.AgentID,
+			StakedAmount: currentStake - req.Amount,
+			Success:      true,
+			EventID:      string(eventID),
+			Message:      "unstake submitted — settles through consensus",
+		})
+	} else {
+		// Fallback for tests without protocol client.
+		ok := s.stakeManager.Unstake(agentID, req.Amount)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "insufficient staked balance")
+			return
+		}
+
+		var tasksCompleted uint64
+		if fp, err := s.registry.Get(agentID); err == nil {
+			tasksCompleted = fp.TasksCompleted
+		}
+		now := time.Now().Unix()
+		staked := s.stakeManager.StakedAmount(agentID)
+		since := s.stakeManager.StakedSince(agentID)
+		lastAct := s.stakeManager.LastActivity(agentID)
+
+		writeJSON(w, http.StatusOK, unstakeOpResponse{
+			AgentID:      req.AgentID,
+			StakedAmount: staked,
+			TrustLimit:   staking.TrustLimitFull(staked, tasksCompleted, since, lastAct, now),
+			Success:      true,
+		})
+	}
 
 	if s.eventBus != nil {
 		s.eventBus.Publish(eventbus.Event{

@@ -286,6 +286,44 @@ func (sm *StakeManager) Unstake(agentID crypto.AgentID, amount uint64) bool {
 	return true
 }
 
+// RecordCanonicalStake updates the in-memory stake metadata after a canonical
+// stake-lock transfer has been settled by the Applicator. Does NOT touch the
+// ledger — the transfer already moved the funds.
+func (sm *StakeManager) RecordCanonicalStake(agentID crypto.AgentID, amount uint64) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if _, exists := sm.stakedSince[agentID]; !exists {
+		sm.stakedSince[agentID] = time.Now().Unix()
+	}
+	sm.stakes[agentID] += amount
+	if sm.store != nil {
+		if err := sm.store.PutStakeMeta(agentID, sm.stakedSince[agentID], sm.lastActivity[agentID], sm.stakes[agentID]); err != nil {
+			slog.Error("staking: failed to persist canonical stake", "agent", agentID, "err", err)
+		}
+	}
+}
+
+// RecordCanonicalUnstake updates the in-memory stake metadata after a canonical
+// stake-unlock transfer has been settled by the Applicator. Does NOT touch the
+// ledger — the transfer already moved the funds.
+func (sm *StakeManager) RecordCanonicalUnstake(agentID crypto.AgentID, amount uint64) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	current := sm.stakes[agentID]
+	if amount > current {
+		amount = current
+	}
+	sm.stakes[agentID] = current - amount
+	if sm.stakes[agentID] == 0 {
+		delete(sm.stakes, agentID)
+	}
+	if sm.store != nil {
+		if err := sm.store.PutStakeMeta(agentID, sm.stakedSince[agentID], sm.lastActivity[agentID], sm.stakes[agentID]); err != nil {
+			slog.Error("staking: failed to persist canonical unstake", "agent", agentID, "err", err)
+		}
+	}
+}
+
 // StakedAmount returns the current staked balance for agentID. Returns 0 for
 // unknown agents.
 func (sm *StakeManager) StakedAmount(agentID crypto.AgentID) uint64 {

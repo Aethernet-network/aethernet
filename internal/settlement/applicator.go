@@ -297,16 +297,29 @@ func (a *Applicator) applyTransfer(targetID event.EventID, verdict SettlementVer
 		return err
 	}
 
-	// Escrow bookkeeping: when a settled transfer is an escrow lock,
-	// register it in the local escrow manager so release/refund can find it.
-	if verdict == VerdictAccepted && a.escrow != nil {
+	// Post-settlement bookkeeping for accepted transfers.
+	if verdict == VerdictAccepted {
 		if tp, err := event.GetPayload[event.TransferPayload](target); err == nil {
-			if tp.Reason == "escrow-lock" && tp.TaskID != "" {
-				if !a.escrow.IsLocked(tp.TaskID) {
-					if err := a.escrow.Hold(tp.TaskID, crypto.AgentID(tp.FromAgent), tp.Amount); err != nil {
-						slog.Warn("settlement: escrow hold failed",
-							"task_id", tp.TaskID, "err", err)
+			switch tp.Reason {
+			case "escrow-lock":
+				// Register escrow entry so release/refund can find it.
+				if a.escrow != nil && tp.TaskID != "" {
+					if !a.escrow.IsLocked(tp.TaskID) {
+						if err := a.escrow.Hold(tp.TaskID, crypto.AgentID(tp.FromAgent), tp.Amount); err != nil {
+							slog.Warn("settlement: escrow hold failed",
+								"task_id", tp.TaskID, "err", err)
+						}
 					}
+				}
+			case "stake-lock":
+				// agent → staking-pool: record canonical stake.
+				if a.stakeManager != nil {
+					a.stakeManager.RecordCanonicalStake(crypto.AgentID(tp.FromAgent), tp.Amount)
+				}
+			case "stake-unlock":
+				// staking-pool → agent: record canonical unstake.
+				if a.stakeManager != nil {
+					a.stakeManager.RecordCanonicalUnstake(crypto.AgentID(tp.ToAgent), tp.Amount)
 				}
 			}
 		}
