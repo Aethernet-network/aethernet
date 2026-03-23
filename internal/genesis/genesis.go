@@ -48,6 +48,22 @@ const (
 	GenesisValidatorStake uint64 = 50_000_000_000  // 50,000 AET
 )
 
+// Faucet constants (testnet only).
+const (
+	// BucketFaucet is the testnet faucet pool. Funded at genesis from a
+	// portion of the ecosystem allocation on testnet only.
+	BucketFaucet = "genesis:faucet"
+
+	// FaucetAllocation is the total testnet faucet pool: 10B AET (1% of total supply).
+	FaucetAllocation uint64 = 10_000_000_000_000
+
+	// FaucetGrantAmount is the default per-request faucet grant: 5,000 AET.
+	FaucetGrantAmount uint64 = 5_000_000_000
+
+	// FaucetCooldownHours is the minimum hours between faucet grants per agent.
+	FaucetCooldownHours = 24
+)
+
 // Onboarding constants.
 const (
 	// OnboardingPoolTotal is the maximum total micro-AET distributed to new agents

@@ -388,6 +388,7 @@ func (s *Server) registerL1Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/address/{address}", s.handleResolveAddress)
 	mux.HandleFunc("POST /v1/stake", s.handleStake)
 	mux.HandleFunc("POST /v1/unstake", s.handleUnstake)
+	mux.HandleFunc("POST /v1/faucet", s.handleFaucet)
 	mux.HandleFunc("GET /v1/network/activity", s.handleNetworkActivity)
 	mux.HandleFunc("GET /v1/network/state", s.handleNetworkState)
 	// Infrastructure
@@ -2644,6 +2645,99 @@ func (s *Server) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleNetworkActivity returns hourly transaction volume buckets for the last
+// handleFaucet handles POST /v1/faucet. Grants testnet AET to registered agents
+// via a canonical protocol Transfer event. Rate-limited per agent (24h cooldown)
+// and per IP (reuses the registration limiter for Sybil resistance).
+func (s *Server) handleFaucet(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("AETHERNET_TESTNET") != "true" {
+		writeError(w, http.StatusNotFound, "faucet is testnet-only")
+		return
+	}
+
+	// Sybil resistance: reuse the registration IP limiter.
+	if s.registrationLimiter != nil {
+		clientIP := clientIPFromRequest(r)
+		if !s.registrationLimiter.Allow(clientIP) {
+			writeCodedError(w, http.StatusTooManyRequests, "rate_limit_exceeded",
+				"faucet IP rate limit exceeded", "")
+			return
+		}
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var req struct {
+		AgentID string `json:"agent_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	agentID := crypto.AgentID(req.AgentID)
+	if agentID == "" {
+		agentID = s.agentID
+	}
+
+	// Agent must be registered.
+	if _, err := s.registry.Get(agentID); err != nil {
+		writeError(w, http.StatusBadRequest, "agent not registered — call POST /v1/agents first")
+		return
+	}
+
+	// Rate limit: one grant per agent per 24 hours.
+	if s.store != nil {
+		key := "faucet:last:" + string(agentID)
+		if data, err := s.store.GetMeta(key); err == nil && len(data) > 0 {
+			lastGrant, _ := strconv.ParseInt(string(data), 10, 64)
+			cooldown := int64(genesis.FaucetCooldownHours * 3600)
+			if time.Now().Unix()-lastGrant < cooldown {
+				remaining := cooldown - (time.Now().Unix() - lastGrant)
+				writeCodedError(w, http.StatusTooManyRequests, "faucet_cooldown",
+					fmt.Sprintf("faucet cooldown: %d hours remaining", remaining/3600+1), "")
+				return
+			}
+		}
+	}
+
+	// Check faucet bucket has funds.
+	faucetBal, _ := s.transfer.Balance(crypto.AgentID(genesis.BucketFaucet))
+	if faucetBal < genesis.FaucetGrantAmount {
+		writeError(w, http.StatusServiceUnavailable, "faucet depleted")
+		return
+	}
+
+	if s.protoClient == nil {
+		writeError(w, http.StatusInternalServerError, "protocol client not available")
+		return
+	}
+
+	eventID, err := s.protoClient.SubmitGrant(
+		genesis.BucketFaucet,
+		agentID,
+		genesis.FaucetGrantAmount,
+		"faucet-grant",
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "faucet grant failed: "+err.Error())
+		return
+	}
+
+	// Record grant timestamp for cooldown.
+	if s.store != nil {
+		key := "faucet:last:" + string(agentID)
+		if err := s.store.PutMeta(key, []byte(strconv.FormatInt(time.Now().Unix(), 10))); err != nil {
+			slog.Error("faucet: failed to persist cooldown", "agent_id", agentID, "err", err)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"event_id": string(eventID),
+		"amount":   genesis.FaucetGrantAmount,
+		"agent_id": string(agentID),
+		"message":  "faucet grant submitted — settles through consensus",
+	})
+}
+
 // N hours. The hours query parameter controls the window (default 24, max 168).
 // Since events carry Lamport timestamps rather than wall-clock times, we bucket
 // by event submission epoch: events are partitioned into equal Lamport-clock

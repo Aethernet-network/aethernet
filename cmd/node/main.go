@@ -2053,6 +2053,17 @@ func seedGenesis(tl *ledger.TransferLedger, s genesisStore) {
 		slog.Warn("auto-genesis: failed to fund genesis validator", "err", err)
 	}
 
+	// Testnet-only: fund the faucet bucket from ecosystem allocation.
+	if os.Getenv("AETHERNET_TESTNET") == "true" {
+		if err := tl.TransferFromBucket(
+			crypto.AgentID(genesis.BucketEcosystem),
+			crypto.AgentID(genesis.BucketFaucet),
+			genesis.FaucetAllocation,
+		); err != nil {
+			slog.Warn("auto-genesis: failed to fund faucet bucket", "err", err)
+		}
+	}
+
 	if s != nil {
 		_ = s.PutMeta(genesisMarkerKey, []byte("1"))
 	}
