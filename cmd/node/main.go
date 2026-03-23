@@ -706,6 +706,17 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 		}
 	}
 
+	// Testnet: register a shared well-known API key on every node so requests
+	// behind the ALB are accepted regardless of which node serves them.
+	if os.Getenv("AETHERNET_TESTNET") == "true" {
+		platformKeys.RegisterKnownKey(
+			"aethernet-testnet-arena-key-v1",
+			"arena-testnet",
+			"arena@aethernet.network",
+			platformpkg.TierFree,
+		)
+	}
+
 	// Autonomous task router — matches open tasks to the best registered agent.
 	// The claimFunc and reputationFunc closures bridge the router to the live
 	// task and reputation managers without creating an import cycle.

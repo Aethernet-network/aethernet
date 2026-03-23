@@ -116,6 +116,36 @@ func (km *KeyManager) GenerateKey(name, email string, tier Tier) *APIKey {
 	return key
 }
 
+// RegisterKnownKey registers an API key with a pre-determined key string.
+// Idempotent: returns the existing key if already registered. Used for shared
+// testnet keys that must be recognized by every node without coordination.
+func (km *KeyManager) RegisterKnownKey(keyStr, name, email string, tier Tier) *APIKey {
+	km.mu.Lock()
+	defer km.mu.Unlock()
+
+	if existing, ok := km.keys[keyStr]; ok {
+		return existing
+	}
+
+	key := &APIKey{
+		Key:        keyStr,
+		Name:       name,
+		Tier:       tier,
+		OwnerEmail: email,
+		CreatedAt:  time.Now().Unix(),
+		Active:     true,
+	}
+	km.keys[keyStr] = key
+	if km.store != nil {
+		if data, err := json.Marshal(key); err == nil {
+			if err := km.store.PutAPIKey(keyStr, data); err != nil {
+				slog.Error("platform: failed to persist known API key", "name", name, "err", err)
+			}
+		}
+	}
+	return key
+}
+
 // Validate checks whether a key is known and active, and records usage.
 // Returns the key and true on success; nil and false when unknown or revoked.
 func (km *KeyManager) Validate(keyStr string) (*APIKey, bool) {
