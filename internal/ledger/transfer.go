@@ -97,6 +97,10 @@ type TransferEntry struct {
 	// Memo is the optional human-readable annotation from the payload.
 	Memo string
 
+	// Reason categorizes the transfer (e.g. "faucet-grant", "escrow-lock").
+	// Copied from TransferPayload.Reason. Empty for legacy entries.
+	Reason string
+
 	// Timestamp is the Lamport causal clock value of the originating event.
 	// Used to establish a deterministic causal ordering for History queries.
 	Timestamp uint64
@@ -208,6 +212,7 @@ func (l *TransferLedger) Record(e *event.Event) error {
 		Amount:     p.Amount,
 		Currency:   p.Currency,
 		Memo:       p.Memo,
+		Reason:     p.Reason,
 		Timestamp:  e.CausalTimestamp,
 		Settlement: e.SettlementState,
 		RecordedAt: time.Now(),
@@ -243,6 +248,7 @@ func (l *TransferLedger) RecordFromSync(e *event.Event) error {
 		Amount:     p.Amount,
 		Currency:   p.Currency,
 		Memo:       p.Memo,
+		Reason:     p.Reason,
 		Timestamp:  e.CausalTimestamp,
 		Settlement: e.SettlementState,
 		RecordedAt: time.Now(),
@@ -539,6 +545,24 @@ func (l *TransferLedger) ResetOptimisticOutflows(agentID crypto.AgentID) int {
 		}
 	}
 	return removed
+}
+
+// LastTransferByReason returns the RecordedAt timestamp of the most recent
+// settled transfer to the given agent with the specified reason. Returns the
+// zero time if no matching entry is found. Used for canonical cooldown checks
+// (e.g. faucet rate limiting) that must be consistent across all nodes.
+func (l *TransferLedger) LastTransferByReason(agentID crypto.AgentID, reason string) time.Time {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	var latest time.Time
+	for _, e := range l.entries {
+		if e.ToAgent == agentID && e.Settlement == event.SettlementSettled && e.Reason == reason {
+			if e.RecordedAt.After(latest) {
+				latest = e.RecordedAt
+			}
+		}
+	}
+	return latest
 }
 
 // History returns a page of TransferEntry records in which agentID appears as

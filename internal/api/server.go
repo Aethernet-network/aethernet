@@ -2684,18 +2684,16 @@ func (s *Server) handleFaucet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rate limit: one grant per agent per 24 hours.
-	if s.store != nil {
-		key := "faucet:last:" + string(agentID)
-		if data, err := s.store.GetMeta(key); err == nil && len(data) > 0 {
-			lastGrant, _ := strconv.ParseInt(string(data), 10, 64)
-			cooldown := int64(genesis.FaucetCooldownHours * 3600)
-			if time.Now().Unix()-lastGrant < cooldown {
-				remaining := cooldown - (time.Now().Unix() - lastGrant)
-				writeCodedError(w, http.StatusTooManyRequests, "faucet_cooldown",
-					fmt.Sprintf("faucet cooldown: %d hours remaining", remaining/3600+1), "")
-				return
-			}
+	// Canonical cooldown: check the transfer ledger for recent faucet grants.
+	// Since the ledger is identical on all nodes, this works correctly behind ALB.
+	lastGrant := s.transfer.LastTransferByReason(agentID, "faucet-grant")
+	if !lastGrant.IsZero() {
+		cooldown := time.Duration(genesis.FaucetCooldownHours) * time.Hour
+		if time.Since(lastGrant) < cooldown {
+			remaining := cooldown - time.Since(lastGrant)
+			writeCodedError(w, http.StatusTooManyRequests, "faucet_cooldown",
+				fmt.Sprintf("faucet cooldown: %d hours remaining", int(remaining.Hours())+1), "")
+			return
 		}
 	}
 
@@ -2720,14 +2718,6 @@ func (s *Server) handleFaucet(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "faucet grant failed: "+err.Error())
 		return
-	}
-
-	// Record grant timestamp for cooldown.
-	if s.store != nil {
-		key := "faucet:last:" + string(agentID)
-		if err := s.store.PutMeta(key, []byte(strconv.FormatInt(time.Now().Unix(), 10))); err != nil {
-			slog.Error("faucet: failed to persist cooldown", "agent_id", agentID, "err", err)
-		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
