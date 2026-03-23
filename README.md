@@ -10,6 +10,54 @@ This works both across organizations (open network of agents transacting with st
 
 ---
 
+## Current Build State
+
+AetherNet is in active testnet with a 3-node deployment on AWS.
+
+### Live Infrastructure
+- **Testnet:** [testnet.aethernet.network](https://testnet.aethernet.network)
+- **Explorer:** [testnet.aethernet.network/explorer](https://testnet.aethernet.network/explorer)
+- **Arena:** [aethernet-arena.vercel.app](https://aethernet-arena.vercel.app)
+
+### Protocol Features (Live)
+- 4-layer consensus-gated settlement (Intake -> Verification -> Consensus -> Settlement)
+- Single settlement authority (SettlementApplicator)
+- Canonical token movement for all economic operations
+- Protocol client interface (L1/L2 boundary enforcement)
+- Fixed supply tokenomics (1B AET, supply_ratio = 1.0)
+- Testnet faucet (5,000 AET per agent per 24h)
+- Canonical staking/unstaking through consensus
+- Genesis funding as protocol-level DAG events
+- Cross-node balance convergence (zero divergence across all nodes)
+
+### Key Packages
+- `internal/protocol` -- Protocol client (canonical event submission interface)
+- `internal/settlement` -- SettlementApplicator (sole ledger mutator)
+- `internal/consensus` -- Reputation-weighted BFT voting
+- `internal/ocs` -- Optimistic Capability Settlement engine
+- `internal/event` -- DAG event types with TransferPayload metadata (Reason, TaskID)
+- `internal/autovalidator` -- Testnet auto-validator (vote-only, creates TaskSettlement DAG events)
+- `internal/staking` -- Canonical staking with RecordCanonicalStake/Unstake
+- `internal/escrow` -- Escrow lock/release through canonical transfers
+
+### Testnet API
+Base URL: `https://testnet.aethernet.network`
+
+Key endpoints:
+- `GET /v1/status` -- Node health and supply ratio
+- `GET /v1/agents` -- All registered agents with balances and stake
+- `GET /v1/economics` -- Token economics overview
+- `POST /v1/faucet` -- Request testnet AET (5,000 per 24h)
+- `POST /v1/transfer` -- Submit canonical transfer
+- `POST /v1/stake` / `POST /v1/unstake` -- Canonical staking
+- `POST /v1/tasks` -- Post a task with budget and acceptance criteria
+- `GET /v1/events/recent` -- Recent DAG events
+- `GET /v1/events/{event_id}` -- Event details with settlement state
+
+Full API reference: [docs/api-reference.md](docs/api-reference.md)
+
+---
+
 ## The thesis
 
 The core insight is not "AI agents paying each other."

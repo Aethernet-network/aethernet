@@ -21,6 +21,15 @@ AetherNet is a three-layer protocol. Never cross layer boundaries in imports.
 - **Ledger credit BEFORE memory debit.** In Unstake, credit the agent's balance in the ledger before decrementing sm.stakes. In Stake, debit the balance before incrementing.
 - **Idempotent retries.** Any operation that modifies multiple entities must track which sub-operations completed. Use flags (WorkerPaid, ValidatorPaid) not implicit ordering.
 
+## Canonical State — No Local-Only Mutations
+
+- **ALL economically meaningful token movement must go through canonical protocol events.** No direct TransferFromBucket calls from application code.
+- **The SettlementApplicator is the ONLY component that mutates ledger state** in response to consensus-finalized events. No other code path may write to the transfer or generation ledger.
+- **The protocol client (internal/protocol/client.go) is the ONLY interface** that application-layer and marketplace code may use for token movement. Methods: SubmitTransfer, SubmitEscrowLock, SubmitEscrowRelease, SubmitRefund, SubmitGrant.
+- **Transfer events carry Reason and TaskID metadata.** Reason classifies the transfer: "transfer", "escrow-lock", "escrow-release", "task-refund", "faucet-grant", "onboarding-grant", "node-bootstrap", "stake-lock", "stake-unlock". Protocol-internal reasons are exempt from fee collection.
+- **Protocol-internal transfers are fee-exempt.** Staking, escrow, faucet, onboarding, and genesis operations are protocol mechanics, not taxable economic transactions.
+- **Genesis-level operations (EventTypeGenesisFunding, EventTypeRegistration) are applied deterministically** on every node without consensus. They are protocol state, not economic transactions.
+
 ## Supply Invariant
 
 - **FundAgent creates tokens from nothing.** It must ONLY be called during genesis and onboarding. Never in fee collection, settlement, or slashing paths.
@@ -40,6 +49,13 @@ AetherNet is a three-layer protocol. Never cross layer boundaries in imports.
 - **VotingRound state must be persisted.** Every RegisterVote writes to BadgerDB. On restart, pending votes are reloaded.
 - **MinParticipants is configurable.** Single-node testnet uses 1. Multi-node must use 3+.
 - **Clock skew tolerance: 60 seconds.** Votes older than VoteMaxAge are dropped.
+
+## L1/L2 Boundary
+
+- **L1 (Core Protocol) owns:** canonical DAG events, consensus, settlement finality, ledger mutations, token economics, staking/slashing, escrow balances.
+- **L2 (Application/Marketplace) owns:** task posting, routing, discovery, workflow orchestration, UI/UX, reputation overlays.
+- **L2 interacts with L1 ONLY through the protocol client interface.** No direct imports of ledger, settlement, or ocs from marketplace code.
+- **If it changes balances, escrow, fees, settlement, or economic accountability, it goes through the protocol path.** No exceptions.
 
 ## Configuration
 
@@ -76,7 +92,17 @@ AetherNet is a three-layer protocol. Never cross layer boundaries in imports.
 ## Deployment
 
 - **Docker image: 435998721364.dkr.ecr.us-east-1.amazonaws.com/aethernet:latest**
-- **3 nodes: aethernet-node, aethernet-node2, aethernet-node3**
-- **AETHERNET_TESTNET=true in Dockerfile for testnet activity generator**
+- **3 testnet nodes across 3 AWS AZs (m7i.xlarge EC2 Nitro instances)**
+  - Node 1: 44.200.60.102 (us-east-1a)
+  - Node 2: 3.87.68.158 (us-east-1b)
+  - Node 3: 100.27.227.231 (us-east-1c)
+- **ALB: testnet.aethernet.network -> all 3 nodes on port 8338**
+- **Explorer: testnet.aethernet.network/explorer**
+- **Arena: aethernet-arena.vercel.app**
+- **P2P port: 8337, API port: 8338**
+- **AETHERNET_TESTNET=true enables:** faucet bucket, shared testnet API key, auto-genesis
+- **AETHERNET_CONSENSUS_MIN_PARTICIPANTS=2 for 3-node testnet**
+- **Clean deploy requires wiping /data/aethernet on all nodes (rm -rf, not just rm -rf *)**
+- **Shared testnet API key: aethernet-testnet-arena-key-v1 (registered on all nodes at boot)**
 - **--no-auth in Dockerfile CMD for testnet backward compatibility**
 - **Never add AETHERNET_RESET to task definitions — it wipes the store**
