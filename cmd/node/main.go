@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/api"
+	"github.com/Aethernet-network/aethernet/internal/auth"
 	"github.com/Aethernet-network/aethernet/internal/assurance"
 	"github.com/Aethernet-network/aethernet/internal/autovalidator"
 	"github.com/Aethernet-network/aethernet/internal/canary"
@@ -1533,6 +1534,14 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	apiSrv.SetEventBus(bus)
 	if stack.platformKeys != nil {
 		apiSrv.SetPlatformKeys(stack.platformKeys)
+	}
+	// Wire Ed25519 request signature verification.
+	if stack.store != nil {
+		nonceStore := auth.NewBadgerNonceStore(stack.store)
+		nonceStore.Start()
+		defer nonceStore.Stop()
+		agentLimiter := auth.NewAgentRateLimiter(100)
+		apiSrv.SetAuthVerifier(nonceStore, agentLimiter)
 	}
 	// CRITICAL-1: auth defaults to true in NewServer. Disable only when --no-auth
 	// is explicitly requested (testnet/development). A warning is emitted below.

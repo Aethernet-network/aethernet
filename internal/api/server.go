@@ -35,6 +35,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
@@ -53,6 +54,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Aethernet-network/aethernet/internal/auth"
 	"github.com/Aethernet-network/aethernet/internal/canary"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
@@ -259,6 +261,12 @@ type Server struct {
 	// protoClient is the canonical protocol interface for token movement.
 	// Set via SetProtocolClient after construction.
 	protoClient protoClientInterface
+
+	// Request signature verification — optional. When set, signed requests
+	// (X-Aethernet-Signature header) are verified against the agent's
+	// registered public key. Set via SetAuthVerifier.
+	nonceStore       auth.NonceStore
+	agentRateLimiter *auth.AgentRateLimiter
 
 	// minTaskBudget is the minimum budget (micro-AET) enforced in handlePostTask.
 	// Initialized from tasks.MinTaskBudget; overridable via SetMinTaskBudget.
@@ -522,6 +530,27 @@ func (s *Server) SetProtocolClient(pc protoClientInterface) {
 	s.protoClient = pc
 }
 
+// SetAuthVerifier wires Ed25519 request signature verification. When set,
+// requests with X-Aethernet-Signature are verified against the agent's
+// registered public key. Call before Start.
+func (s *Server) SetAuthVerifier(ns auth.NonceStore, rl *auth.AgentRateLimiter) {
+	s.nonceStore = ns
+	s.agentRateLimiter = rl
+}
+
+type contextKey string
+
+const authContextKey contextKey = "aethernet_auth"
+
+// getAuthAgent returns the verified agent ID from a signed request, or empty
+// if the request was not signature-authenticated.
+func getAuthAgent(r *http.Request) crypto.AgentID {
+	if a, ok := r.Context().Value(authContextKey).(*auth.RequestAuth); ok {
+		return a.AgentID
+	}
+	return ""
+}
+
 // SetTaskManager wires the task marketplace manager and escrow system into the
 // server. Call before Start. When nil, the /v1/tasks endpoints return 501.
 func (s *Server) SetTaskManager(tm *tasks.TaskManager, e *escrow.Escrow) {
@@ -667,6 +696,36 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	corsHeaders(w)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Signature verification: if X-Aethernet-Signature header is present,
+	// verify the request against the agent's registered Ed25519 public key.
+	// This takes priority over API key auth.
+	if sig := r.Header.Get("X-Aethernet-Signature"); sig != "" && s.nonceStore != nil {
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeCodedError(w, http.StatusBadRequest, "body_read_error", "failed to read request body", "")
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(bodyBytes)) // restore for handler
+
+		authResult, err := auth.VerifyRequest(r, bodyBytes, s.registry, s.nonceStore)
+		if err != nil {
+			writeCodedError(w, http.StatusUnauthorized, "auth_failed", err.Error(), "")
+			return
+		}
+
+		if s.agentRateLimiter != nil && !s.agentRateLimiter.Allow(authResult.AgentID) {
+			writeCodedError(w, http.StatusTooManyRequests, "agent_rate_limited",
+				"too many signed requests — try again later", "")
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), authContextKey, authResult)
+		r = r.WithContext(ctx)
+
+		s.mux.ServeHTTP(w, r)
 		return
 	}
 
@@ -2065,11 +2124,13 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
 		req.Currency = "AET"
 	}
 
-	// The economic sender is always the node's own keypair identity (CRITICAL-1.1).
-	// Accepting a from_agent override from the request body would allow attackers
-	// to set from_agent=victim and debit a victim's balance (token theft).
-	// Per-agent transfers require authenticated SDK clients (requireAuth + API key).
+	// The economic sender is the node's own keypair identity by default.
+	// When the request is signature-authenticated, the verified agent ID
+	// is used instead — the signature proves the agent authorized this transfer.
 	fromAgentID := s.agentID
+	if authAgent := getAuthAgent(r); authAgent != "" {
+		fromAgentID = authAgent
+	}
 
 	// Trust limit enforcement: amount must not exceed the sender's trust limit.
 	if s.stakeManager != nil {
@@ -2440,11 +2501,14 @@ func (s *Server) handleStake(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agentID := crypto.AgentID(req.AgentID)
+	if authAgent := getAuthAgent(r); authAgent != "" {
+		agentID = authAgent
+	}
 
 	// Authentication gate (HIGH-4.1): only the node's own identity may stake
-	// without platform credentials. Authenticated platform clients may stake for
-	// any registered agent.
-	if agentID != s.agentID && !s.isAuthenticated(r) {
+	// without platform credentials. Signature-authenticated or API-key-authenticated
+	// clients may stake for any registered agent.
+	if agentID != s.agentID && getAuthAgent(r) == "" && !s.isAuthenticated(r) {
 		writeCodedError(w, http.StatusForbidden, "forbidden",
 			"authenticated API key required to stake for another agent", "")
 		return
@@ -2702,7 +2766,9 @@ func (s *Server) handleFaucet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agentID := crypto.AgentID(req.AgentID)
-	if agentID == "" {
+	if authAgent := getAuthAgent(r); authAgent != "" {
+		agentID = authAgent
+	} else if agentID == "" {
 		agentID = s.agentID
 	}
 
@@ -2994,11 +3060,14 @@ func (s *Server) handleUnstake(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agentID := crypto.AgentID(req.AgentID)
+	if authAgent := getAuthAgent(r); authAgent != "" {
+		agentID = authAgent
+	}
 
 	// Authentication gate (HIGH-4.1): only the node's own identity may unstake
-	// without platform credentials. Allowing unauthenticated unstake of another
-	// agent could force an OCS C3 slash on the victim.
-	if agentID != s.agentID && !s.isAuthenticated(r) {
+	// without platform credentials. Signature-authenticated or API-key-authenticated
+	// clients may unstake for any registered agent.
+	if agentID != s.agentID && getAuthAgent(r) == "" && !s.isAuthenticated(r) {
 		writeCodedError(w, http.StatusForbidden, "forbidden",
 			"authenticated API key required to unstake for another agent", "")
 		return
