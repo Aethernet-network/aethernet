@@ -846,9 +846,11 @@ type registerAgentRequest struct {
 
 type registerAgentResponse struct {
 	AgentID              string `json:"agent_id"`
-	FingerprintHash      string `json:"fingerprint_hash"`
+	FingerprintHash      string `json:"fingerprint_hash,omitempty"`
 	DepositAddress       string `json:"deposit_address,omitempty"`
 	OnboardingAllocation uint64 `json:"onboarding_allocation,omitempty"`
+	RegistrationEventID  string `json:"registration_event_id,omitempty"`
+	GrantEventID         string `json:"grant_event_id,omitempty"`
 }
 
 type transferRequest struct {
@@ -1958,6 +1960,26 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		FingerprintHash: fp.FingerprintHash,
 	}
 
+	// Create canonical Registration event so peer nodes learn about this agent.
+	regPayload := event.RegistrationPayload{
+		AgentID:   string(regAgentID),
+		PublicKey: regPubKey,
+	}
+	tips := s.dag.Tips()
+	priorTS := make(map[event.EventID]uint64, len(tips))
+	for _, ref := range tips {
+		if ev, lookupErr := s.dag.Get(ref); lookupErr == nil {
+			priorTS[ref] = ev.CausalTimestamp
+		}
+	}
+	if regEv, err := event.New(event.EventTypeRegistration, tips, regPayload, string(s.agentID), priorTS, 0); err == nil {
+		if signErr := crypto.SignEvent(regEv, s.kp); signErr == nil {
+			if addErr := s.dag.Add(regEv); addErr == nil {
+				resp.RegistrationEventID = string(regEv.ID)
+			}
+		}
+	}
+
 	// Register deposit address (optional — requires walletMgr).
 	if s.walletMgr != nil {
 		addr := s.walletMgr.Register(regAgentID, regPubKey)
@@ -1985,8 +2007,10 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if s.protoClient != nil {
-			if _, err := s.protoClient.SubmitGrant(genesis.BucketEcosystem, regAgentID, allocation, "onboarding-grant"); err == nil {
+			grantEventID, err := s.protoClient.SubmitGrant(genesis.BucketEcosystem, regAgentID, allocation, "onboarding-grant")
+			if err == nil {
 				resp.OnboardingAllocation = allocation
+				resp.GrantEventID = string(grantEventID)
 			} else {
 				slog.Warn("onboarding: protocol grant failed",
 					"agent_id", regAgentID, "allocation", allocation, "err", err)

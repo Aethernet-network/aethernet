@@ -211,18 +211,20 @@ func (a *Applicator) applyToTarget(sp *SettlementPayload, target *event.Event) e
 	// Economic side effects — single authority for fee collection, staking,
 	// and metrics across all nodes.
 	if verdict == VerdictAccepted {
-		// Fee collection.
+		// Fee collection. Protocol-internal transfers are exempt.
 		if a.feeCollector != nil && sp.VerifiedValue > 0 {
 			switch target.Type {
 			case event.EventTypeTransfer:
 				if tp, err := event.GetPayload[event.TransferPayload](target); err == nil {
-					fee, burned := a.feeCollector.CollectFeeFromRecipient(
-						crypto.AgentID(tp.ToAgent), tp.Amount, "", a.treasuryID,
-					)
-					if a.nodeMetrics != nil && fee > 0 {
-						a.nodeMetrics.FeesCollected.Add(fee)
-						a.nodeMetrics.FeesBurned.Add(burned)
-						a.nodeMetrics.FeesToTreasury.Add(fee * fees.TreasuryShare / 100)
+					if !isProtocolInternalTransfer(tp.Reason) {
+						fee, burned := a.feeCollector.CollectFeeFromRecipient(
+							crypto.AgentID(tp.ToAgent), tp.Amount, "", a.treasuryID,
+						)
+						if a.nodeMetrics != nil && fee > 0 {
+							a.nodeMetrics.FeesCollected.Add(fee)
+							a.nodeMetrics.FeesBurned.Add(burned)
+							a.nodeMetrics.FeesToTreasury.Add(fee * fees.TreasuryShare / 100)
+						}
 					}
 				}
 			case event.EventTypeGeneration:
@@ -427,4 +429,18 @@ func (a *Applicator) Metrics() (applied, duplicated, deferred, failed uint64) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.appliedTotal, a.duplicatedTotal, a.deferredTotal, a.failedTotal
+}
+
+// isProtocolInternalTransfer returns true for transfer reasons that represent
+// protocol mechanics (staking, escrow, faucet, onboarding) and should be
+// exempt from fee collection.
+func isProtocolInternalTransfer(reason string) bool {
+	switch reason {
+	case "stake-lock", "stake-unlock",
+		"escrow-lock", "escrow-release", "task-refund",
+		"faucet-grant", "onboarding-grant", "node-bootstrap":
+		return true
+	default:
+		return false
+	}
 }

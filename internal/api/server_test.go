@@ -435,10 +435,11 @@ func TestHandleTransfer_NodeIdentityTrustLimit(t *testing.T) {
 		t.Fatal("node agent must have non-zero onboarding allocation")
 	}
 
-	// Verify the stake manager holds the stake for the node's own identity.
-	nodeStaked := stakeMgr.StakedAmount(setup.kp.AgentID())
-	if nodeStaked == 0 {
-		t.Fatal("node identity must have non-zero staked amount after registration")
+	// Auto-stake was removed — stake manually so trust limits are testable.
+	stakeMgr.SetTransferLedger(setup.tl)
+	stakeAmt := regResp.OnboardingAllocation / 2
+	if err := stakeMgr.Stake(setup.kp.AgentID(), stakeAmt); err != nil {
+		t.Fatalf("manual stake: %v", err)
 	}
 
 	// Register a receiver.
@@ -490,7 +491,7 @@ func TestHandleTransfer_DefaultStake(t *testing.T) {
 		t.Fatalf("generate receiver keypair: %v", err)
 	}
 
-	// Register the node's own agent — receives onboarding AET and is auto-staked.
+	// Register the node's own agent — receives onboarding AET.
 	r := post(t, setup.ts, "/v1/agents", map[string]any{
 		"agent_id":       string(setup.kp.AgentID()),
 		"public_key_b64": base64.StdEncoding.EncodeToString(setup.kp.PublicKey),
@@ -499,6 +500,12 @@ func TestHandleTransfer_DefaultStake(t *testing.T) {
 		t.Fatalf("register node agent: want 201, got %d", r.StatusCode)
 	}
 	r.Body.Close()
+
+	// Manually stake so trust limits allow transfers.
+	stakeMgr.SetTransferLedger(setup.tl)
+	if err := stakeMgr.Stake(setup.kp.AgentID(), 25_000_000_000); err != nil {
+		t.Fatalf("manual stake: %v", err)
+	}
 
 	// Register receiver.
 	r2 := post(t, setup.ts, "/v1/agents", map[string]any{
@@ -1135,8 +1142,8 @@ func TestDeleteRegistry(t *testing.T) {
 }
 
 // TestHandleRegisterAgent_OnboardingFunded verifies that a newly registered agent
-// receives a non-zero onboarding allocation that is immediately spendable and
-// auto-staked, without requiring prior genesis seeding.
+// receives a non-zero onboarding allocation that is immediately spendable,
+// without requiring prior genesis seeding.
 func TestHandleRegisterAgent_OnboardingFunded(t *testing.T) {
 	kp, err := crypto.GenerateKeyPair()
 	if err != nil {
@@ -1180,15 +1187,11 @@ func TestHandleRegisterAgent_OnboardingFunded(t *testing.T) {
 	var regResp struct {
 		AgentID              string `json:"agent_id"`
 		OnboardingAllocation uint64 `json:"onboarding_allocation"`
-		TrustLimit           uint64 `json:"trust_limit"`
 	}
 	decodeJSON(t, r, &regResp)
 
 	if regResp.OnboardingAllocation == 0 {
 		t.Error("onboarding_allocation must be non-zero after registration")
-	}
-	if regResp.TrustLimit == 0 {
-		t.Error("trust_limit must be non-zero when staking is wired in")
 	}
 
 	// Verify the agent has a spendable balance in the transfer ledger.
@@ -1199,12 +1202,6 @@ func TestHandleRegisterAgent_OnboardingFunded(t *testing.T) {
 	}
 	if bal == 0 {
 		t.Error("agent balance must be non-zero after onboarding")
-	}
-
-	// Verify the agent has a staked amount.
-	staked := stakeMgr.StakedAmount(agentID)
-	if staked == 0 {
-		t.Error("agent staked_amount must be non-zero after auto-stake")
 	}
 }
 
@@ -1290,15 +1287,9 @@ func TestHandleRegisterAgent_TwoDistinctAgents(t *testing.T) {
 		t.Error("agent2 balance must be non-zero after onboarding")
 	}
 
-	// Staked amounts are separate.
-	staked1 := stakeMgr.StakedAmount(kp1.AgentID())
-	staked2 := stakeMgr.StakedAmount(kp2.AgentID())
-	if staked1 == 0 {
-		t.Error("agent1 staked_amount must be non-zero after auto-stake")
-	}
-	if staked2 == 0 {
-		t.Error("agent2 staked_amount must be non-zero after auto-stake")
-	}
+	// Auto-stake was removed — staking is now consensus-gated.
+	// Staked amounts are zero until the agent explicitly stakes.
+	_ = stakeMgr // keep reference
 
 	// Registering the same agent again returns 200 (idempotent), not 201.
 	r1b := post(t, setup.ts, "/v1/agents", map[string]any{
@@ -1420,7 +1411,7 @@ func TestHandleLeaderboard_LiveData(t *testing.T) {
 		t.Fatalf("generate keypair: %v", err)
 	}
 
-	// Register the agent — receives onboarding AET and is auto-staked.
+	// Register the agent — receives onboarding AET.
 	r := post(t, setup.ts, "/v1/agents", map[string]any{
 		"agent_id":       "leaderboard-live-test",
 		"public_key_b64": base64.StdEncoding.EncodeToString(kp.PublicKey),
@@ -1452,12 +1443,8 @@ func TestHandleLeaderboard_LiveData(t *testing.T) {
 		if e.Balance == 0 {
 			t.Error("leaderboard: balance should be non-zero after onboarding")
 		}
-		if e.StakedAmount == 0 {
-			t.Error("leaderboard: staked_amount should be non-zero after auto-stake")
-		}
-		if e.TrustLimit == 0 {
-			t.Error("leaderboard: trust_limit should be non-zero after staking")
-		}
+		// Auto-stake removed — staked_amount and trust_limit are zero until
+		// the agent explicitly stakes through consensus.
 	}
 	if !foundLB {
 		t.Errorf("leaderboard: 'leaderboard-live-test' not found in %+v", lbEntries)
@@ -1484,9 +1471,7 @@ func TestHandleLeaderboard_LiveData(t *testing.T) {
 		if a.Balance == 0 {
 			t.Error("/v1/agents: balance should be non-zero after onboarding")
 		}
-		if a.StakedAmount == 0 {
-			t.Error("/v1/agents: staked_amount should be non-zero after auto-stake")
-		}
+		// Auto-stake removed — staked_amount is zero until explicit stake.
 	}
 	if !foundAL {
 		t.Errorf("/v1/agents: 'leaderboard-live-test' not found in %+v", alEntries)
