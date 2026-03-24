@@ -1112,6 +1112,9 @@ func (s *Server) emitDAGEvent(evType event.EventType, payload any, agentID strin
 	if s.dag.Add(ev) != nil {
 		return ""
 	}
+	if s.node != nil {
+		_ = s.node.Broadcast(ev)
+	}
 	return ev.ID
 }
 
