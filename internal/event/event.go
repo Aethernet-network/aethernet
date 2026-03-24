@@ -79,6 +79,14 @@ const (
 	// genesis bucket to a validator or node agent. Applied deterministically by
 	// every node without consensus — same class as Registration events.
 	EventTypeGenesisFunding EventType = "GenesisFunding"
+
+	// Task lifecycle events — propagated via DAG, applied deterministically
+	// on every node without consensus (same class as Registration events).
+	EventTypeTaskPosted    EventType = "TaskPosted"
+	EventTypeTaskClaimed   EventType = "TaskClaimed"
+	EventTypeTaskSubmitted EventType = "TaskSubmitted"
+	EventTypeTaskApproved  EventType = "TaskApproved"
+	EventTypeTaskDisputed  EventType = "TaskDisputed"
 )
 
 // SettlementState tracks an event's position in the Optimistic Capability Settlement
@@ -513,4 +521,47 @@ type GenesisFundingPayload struct {
 	ToAgent    string `json:"to_agent"`
 	Amount     uint64 `json:"amount"`
 	Reason     string `json:"reason"`
+}
+
+// Task lifecycle payloads — propagated via DAG, applied deterministically.
+
+// TaskPostedPayload carries the full task creation metadata.
+type TaskPostedPayload struct {
+	TaskID          string   `json:"task_id"`
+	PosterID        string   `json:"poster_id"`
+	Title           string   `json:"title"`
+	Description     string   `json:"description"`
+	Category        string   `json:"category"`
+	Budget          uint64   `json:"budget"`
+	DeliveryMethod  string   `json:"delivery_method,omitempty"`
+	SuccessCriteria []string `json:"success_criteria,omitempty"`
+	AssuranceLane   string   `json:"assurance_lane,omitempty"`
+	MaxDeliveryTime int64    `json:"max_delivery_time_secs,omitempty"`
+}
+
+// TaskClaimedPayload records an agent claiming a task.
+type TaskClaimedPayload struct {
+	TaskID    string `json:"task_id"`
+	ClaimerID string `json:"claimer_id"`
+}
+
+// TaskSubmittedPayload records an agent submitting work.
+type TaskSubmittedPayload struct {
+	TaskID     string `json:"task_id"`
+	ClaimerID  string `json:"claimer_id"`
+	ResultHash string `json:"result_hash"`
+	ResultNote string `json:"result_note,omitempty"`
+	ResultURI  string `json:"result_uri,omitempty"`
+}
+
+// TaskApprovedPayload records a poster approving submitted work.
+type TaskApprovedPayload struct {
+	TaskID     string `json:"task_id"`
+	ApproverID string `json:"approver_id"`
+}
+
+// TaskDisputedPayload records a poster disputing submitted work.
+type TaskDisputedPayload struct {
+	TaskID   string `json:"task_id"`
+	PosterID string `json:"poster_id"`
 }

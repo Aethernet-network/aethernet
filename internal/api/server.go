@@ -1094,6 +1094,27 @@ type cancelTaskRequest struct {
 // ---------------------------------------------------------------------------
 
 // handlePostTask handles POST /v1/tasks. It creates a new task and escrows
+// emitDAGEvent creates a signed DAG event and adds it to the local DAG.
+// Returns the event ID on success, or empty on failure (best-effort).
+func (s *Server) emitDAGEvent(evType event.EventType, payload any, agentID string) event.EventID {
+	tips := s.dag.Tips()
+	priorTS := make(map[event.EventID]uint64, len(tips))
+	for _, ref := range tips {
+		if ev, err := s.dag.Get(ref); err == nil {
+			priorTS[ref] = ev.CausalTimestamp
+		}
+	}
+	ev, err := event.New(evType, tips, payload, agentID, priorTS, 0)
+	if err != nil {
+		return ""
+	}
+	_ = crypto.SignEvent(ev, s.kp)
+	if s.dag.Add(ev) != nil {
+		return ""
+	}
+	return ev.ID
+}
+
 // the budget from the poster's balance. Returns 501 when task manager is nil.
 func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 	if s.taskMgr == nil || s.escrowMgr == nil {
@@ -1189,6 +1210,20 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// Emit canonical TaskPosted event for cross-node propagation.
+	s.emitDAGEvent(event.EventTypeTaskPosted, event.TaskPostedPayload{
+		TaskID:          task.ID,
+		PosterID:        posterID,
+		Title:           task.Title,
+		Description:     task.Description,
+		Category:        task.Category,
+		Budget:          task.Budget,
+		DeliveryMethod:  task.DeliveryMethod,
+		SuccessCriteria: req.SuccessCriteria,
+		AssuranceLane:   req.AssuranceLane,
+		MaxDeliveryTime: req.MaxDeliveryTimeSecs,
+	}, posterID)
 
 	writeJSON(w, http.StatusCreated, task)
 }
@@ -1316,6 +1351,11 @@ func (s *Server) handleClaimTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.emitDAGEvent(event.EventTypeTaskClaimed, event.TaskClaimedPayload{
+		TaskID:    taskID,
+		ClaimerID: claimerID,
+	}, claimerID)
+
 	task, _ := s.taskMgr.Get(taskID)
 	writeJSON(w, http.StatusOK, task)
 }
@@ -1368,6 +1408,14 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("handleSubmitTask: could not store result content", "task_id", taskID, "err", err)
 		}
 	}
+
+	s.emitDAGEvent(event.EventTypeTaskSubmitted, event.TaskSubmittedPayload{
+		TaskID:     taskID,
+		ClaimerID:  claimerID,
+		ResultHash: resultHash,
+		ResultNote: resultNote,
+		ResultURI:  resultURI,
+	}, claimerID)
 
 	task, _ := s.taskMgr.Get(taskID)
 	writeJSON(w, http.StatusOK, task)
@@ -1431,6 +1479,11 @@ func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	s.emitDAGEvent(event.EventTypeTaskApproved, event.TaskApprovedPayload{
+		TaskID:     taskID,
+		ApproverID: approverID,
+	}, approverID)
 
 	// Release escrow: distribute budget across worker, validator, and treasury
 	// directly from the escrow bucket (C1/C2 fix — no token minting).
@@ -1509,6 +1562,11 @@ func (s *Server) handleDisputeTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	s.emitDAGEvent(event.EventTypeTaskDisputed, event.TaskDisputedPayload{
+		TaskID:   taskID,
+		PosterID: posterID,
+	}, posterID)
 
 	task, _ := s.taskMgr.Get(taskID)
 	writeJSON(w, http.StatusOK, task)

@@ -123,6 +123,10 @@ type AcceptanceContract struct {
 //   - GenerationEligible  → true
 //   - MaxDeliveryTimeSecs → 600 (10 minutes)
 type PostTaskOpts struct {
+	// TaskID overrides the auto-generated task ID. Used when applying a
+	// TaskPosted DAG event from a peer node to ensure the same ID.
+	TaskID string
+
 	// DeliveryMethod is "public" (default) or "encrypted".
 	DeliveryMethod string
 
@@ -555,8 +559,12 @@ func (m *TaskManager) PostTask(posterID, title, description, category string, bu
 	contract.SpecHash = computeSpecHash(title, description, category, o.SuccessCriteria, o.RequiredChecks)
 
 	now := time.Now()
+	taskID := generateTaskID(posterID, title, now)
+	if len(opts) > 0 && opts[0].TaskID != "" {
+		taskID = opts[0].TaskID
+	}
 	task := &Task{
-		ID:              generateTaskID(posterID, title, now),
+		ID:              taskID,
 		Title:           title,
 		Description:     description,
 		Category:        category,
