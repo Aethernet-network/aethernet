@@ -849,7 +849,6 @@ type registerAgentResponse struct {
 	FingerprintHash      string `json:"fingerprint_hash"`
 	DepositAddress       string `json:"deposit_address,omitempty"`
 	OnboardingAllocation uint64 `json:"onboarding_allocation,omitempty"`
-	TrustLimit           uint64 `json:"trust_limit,omitempty"`
 }
 
 type transferRequest struct {
@@ -1988,16 +1987,6 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		if s.protoClient != nil {
 			if _, err := s.protoClient.SubmitGrant(genesis.BucketEcosystem, regAgentID, allocation, "onboarding-grant"); err == nil {
 				resp.OnboardingAllocation = allocation
-				// Note: staking after onboarding grant is deferred until the grant
-				// settles through consensus. For testnet, keep the local stake call
-				// as a convenience that will be consistent once the grant settles.
-				if s.stakeManager != nil {
-					stakeAmount := allocation / 2
-					if err := s.stakeManager.Stake(regAgentID, stakeAmount); err == nil {
-						since := s.stakeManager.StakedSince(regAgentID)
-						resp.TrustLimit = staking.TrustLimit(stakeAmount, 0, since, time.Now().Unix())
-					}
-				}
 			} else {
 				slog.Warn("onboarding: protocol grant failed",
 					"agent_id", regAgentID, "allocation", allocation, "err", err)
@@ -2006,13 +1995,6 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 			// Fallback for tests without protocol client.
 			if err := s.transfer.TransferFromBucket(crypto.AgentID(genesis.BucketEcosystem), regAgentID, allocation); err == nil {
 				resp.OnboardingAllocation = allocation
-				if s.stakeManager != nil {
-					stakeAmount := allocation / 2
-					if err := s.stakeManager.Stake(regAgentID, stakeAmount); err == nil {
-						since := s.stakeManager.StakedSince(regAgentID)
-						resp.TrustLimit = staking.TrustLimit(stakeAmount, 0, since, time.Now().Unix())
-					}
-				}
 			} else {
 				slog.Warn("onboarding: transfer from ecosystem failed",
 					"agent_id", regAgentID, "allocation", allocation, "err", err)
