@@ -218,18 +218,82 @@ func LoadFromStore(s dagPersistence) (*DAG, error) {
 	d := New()
 	d.store = s
 
-	// Sort events by CausalTimestamp for topological ordering. This guarantees
-	// every parent event is inserted before any of its children.
-	sort.Slice(events, func(i, j int) bool {
-		return events[i].CausalTimestamp < events[j].CausalTimestamp
-	})
+	// Topological sort (Kahn's algorithm): replay parents before children.
+	// CausalTimestamp ordering is insufficient because multiple events can
+	// share a timestamp and clock skew can invert parent/child ordering.
+	sorted, skipped := topoSort(events)
+	if len(skipped) > 0 {
+		slog.Warn("dag: skipped events with unresolvable parents during replay",
+			"skipped", len(skipped), "total", len(events))
+	}
 
-	for _, e := range events {
+	for _, e := range sorted {
 		if err := d.addFromStore(e); err != nil {
 			return nil, fmt.Errorf("dag: replay event %s: %w", e.ID, err)
 		}
 	}
 	return d, nil
+}
+
+// topoSort performs a topological sort of events using Kahn's algorithm.
+// Events with no CausalRefs (roots) are emitted first, followed by events
+// whose parents have all been emitted. Returns the sorted list and any
+// events that could not be placed (missing parents — indicates data corruption).
+func topoSort(events []*event.Event) (sorted []*event.Event, skipped []*event.Event) {
+	byID := make(map[event.EventID]*event.Event, len(events))
+	for _, e := range events {
+		byID[e.ID] = e
+	}
+
+	// inDegree counts the number of unsatisfied parent references per event.
+	inDegree := make(map[event.EventID]int, len(events))
+	// children maps parent → list of child event IDs.
+	children := make(map[event.EventID][]event.EventID)
+
+	for _, e := range events {
+		deps := 0
+		for _, ref := range e.CausalRefs {
+			if _, exists := byID[ref]; exists {
+				deps++
+				children[ref] = append(children[ref], e.ID)
+			}
+			// If parent is not in the set, it's either already in the DAG
+			// (genesis) or truly missing — don't count it as a dependency.
+		}
+		inDegree[e.ID] = deps
+	}
+
+	// Seed the queue with all zero-dependency events (roots).
+	queue := make([]event.EventID, 0, len(events)/2)
+	for _, e := range events {
+		if inDegree[e.ID] == 0 {
+			queue = append(queue, e.ID)
+		}
+	}
+
+	sorted = make([]*event.Event, 0, len(events))
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		sorted = append(sorted, byID[id])
+
+		for _, childID := range children[id] {
+			inDegree[childID]--
+			if inDegree[childID] == 0 {
+				queue = append(queue, childID)
+			}
+		}
+	}
+
+	// Any events still with inDegree > 0 have unresolvable parents.
+	if len(sorted) < len(events) {
+		for _, e := range events {
+			if inDegree[e.ID] > 0 {
+				skipped = append(skipped, e)
+			}
+		}
+	}
+	return
 }
 
 // addFromStore inserts e into the in-memory DAG structures without signature
@@ -245,11 +309,13 @@ func (d *DAG) addFromStore(e *event.Event) error {
 		return nil
 	}
 
-	// Validate causal references. Because events are replayed in CausalTimestamp
-	// order, all parents should already be present.
+	// Validate causal references. Topological sort guarantees parents are
+	// replayed first; a missing ref here indicates data corruption.
 	for _, ref := range e.CausalRefs {
 		if _, ok := d.events[ref]; !ok {
-			return fmt.Errorf("dag: %w: %s (referenced by %s)", ErrMissingCausalRef, ref, e.ID)
+			slog.Warn("dag: missing causal ref during replay, skipping event",
+				"event", e.ID, "missing_ref", ref)
+			return nil
 		}
 	}
 
