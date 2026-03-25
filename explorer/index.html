@@ -102,15 +102,6 @@
     .lane-ent { background: hsla(270, 76%, 65%, 0.1); color: #a78bfa; }
     .lane-none { background: hsla(216, 15%, 49%, 0.08); color: var(--muted-fg); }
 
-    /* Wallet drawer */
-    .wallet-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 40; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
-    .wallet-overlay.open { opacity: 1; pointer-events: auto; }
-    .wallet-drawer { position: fixed; top: 0; right: 0; width: 360px; height: 100%; background: var(--card); border-left: 1px solid var(--border); z-index: 50; transform: translateX(100%); transition: transform 0.2s ease; display: flex; flex-direction: column; overflow: hidden; }
-    .wallet-drawer.open { transform: translateX(0); }
-    .wtab { flex: 1; text-align: center; font-size: 12px; font-weight: 500; padding: 10px 4px; cursor: pointer; color: var(--muted-fg); border-bottom: 2px solid transparent; background: none; border-top: none; border-left: none; border-right: none; font-family: var(--body); transition: color 0.15s; }
-    .wtab:hover { color: var(--fg); }
-    .wtab.active { color: var(--primary); border-bottom-color: var(--primary); }
-
     /* Toast */
     .toast-wrap { position: fixed; bottom: 16px; right: 16px; z-index: 60; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; pointer-events: none; }
     .toast { background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--border); border-radius: var(--radius); padding: 10px 14px; font-size: 13px; max-width: 320px; color: var(--fg); }
@@ -164,13 +155,11 @@
       .header-nav { overflow-x: auto; scrollbar-width: none; justify-content: flex-start; }
       .header-nav::-webkit-scrollbar { display: none; }
       .nav-link { padding: 0 12px; font-size: 13px; flex-shrink: 0; }
-      .wallet-drawer { width: 100%; }
       .filter-bar { flex-wrap: wrap; }
       .hero { padding: 2rem 0 1.5rem; }
     }
     @media (prefers-reduced-motion: reduce) {
       .skel { animation: none; }
-      .wallet-drawer, .wallet-overlay { transition: none; }
     }
   </style>
 </head>
@@ -184,15 +173,6 @@ async function apiFetch(path) {
   const r = await fetch(API + path);
   if (!r.ok) throw new Error(`${r.status}`);
   return r.json();
-}
-
-async function apiPost(path, body) {
-  const r = await fetch(API + path, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-  });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || data.message || `${r.status}`);
-  return data;
 }
 
 function fmtNum(n) {
@@ -285,293 +265,9 @@ function StatCard({ value, label }) {
   );
 }
 
-/* ── Wallet Panels ─────────────────────────────────────────────── */
-
-function BalanceWidget({ agentId, refresh }) {
-  const [bal, setBal] = useState(null);
-  useEffect(() => {
-    if (!agentId) return;
-    apiFetch(`/v1/agents/${encodeURIComponent(agentId)}/balance`).then(d => setBal(d.balance ?? d)).catch(() => {});
-  }, [agentId, refresh]);
-  if (bal === null) return null;
-  return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg)', borderRadius: 6, padding: '10px 14px' }}>
-      <span style={{ fontSize: 12, color: 'var(--muted-fg)' }}>Balance</span>
-      <span className="mono" style={{ color: 'var(--primary)', fontWeight: 500, fontSize: 14 }}>{fmtAET(bal)}</span>
-    </div>
-  );
-}
-
-function IdentityPanel({ agent, setAgent, addToast }) {
-  const [name, setName] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [balRef, setBalRef] = useState(0);
-
-  async function register() {
-    setLoading(true);
-    try {
-      const raw = new Uint8Array(32);
-      window.crypto.getRandomValues(raw);
-      const pub = btoa(String.fromCharCode(...raw));
-      const body = { public_key_b64: pub };
-      if (name.trim()) body.agent_id = name.trim();
-      const data = await apiPost('/v1/agents', body);
-      const a = { agent_id: data.agent_id, pub_key_b64: pub, name: name.trim() };
-      localStorage.setItem('aethernet_agent', JSON.stringify(a));
-      setAgent(a);
-      setName('');
-      addToast(`Registered: ${truncate(data.agent_id, 10)}`, 'success');
-    } catch (e) {
-      addToast(`Registration failed: ${e.message}`, 'error');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  if (agent) {
-    return (
-      <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--muted-fg)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Your Identity</div>
-        <div style={{ background: 'var(--bg)', borderRadius: 6, padding: 14 }}>
-          <div style={{ fontSize: 11, color: 'var(--muted-fg)', marginBottom: 4 }}>Agent ID</div>
-          <div className="mono" style={{ fontSize: 12, color: 'var(--primary)', wordBreak: 'break-all', lineHeight: 1.5 }}>{agent.agent_id}</div>
-          {agent.name && <div style={{ fontSize: 12, color: 'var(--muted-fg)', marginTop: 6 }}>Name: <span style={{ color: 'var(--fg)' }}>{agent.name}</span></div>}
-        </div>
-        <BalanceWidget agentId={agent.agent_id} refresh={balRef} />
-        <button className="btn-ghost" style={{ width: '100%' }} onClick={() => setBalRef(n => n + 1)}>Refresh Balance</button>
-        <button className="btn-danger" style={{ width: '100%' }} onClick={() => { localStorage.removeItem('aethernet_agent'); setAgent(null); addToast('Identity cleared', 'info'); }}>Clear Identity</button>
-        <div className="notice-info">Identity is stored in browser localStorage. Copy your Agent ID to use with the SDK.</div>
-      </div>
-    );
-  }
-
-  return (
-    <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--muted-fg)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Register on Testnet</div>
-      <div className="notice-info">A 32-byte keypair is generated in your browser. Your public key becomes your identity on the testnet.</div>
-      <div>
-        <label className="field-label">Display name (optional)</label>
-        <input className="input" placeholder="e.g. my-research-agent" value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === 'Enter' && register()} />
-        <div style={{ fontSize: 11, color: 'var(--muted-fg)', marginTop: 4 }}>Leave blank to use hex(pubkey) as ID.</div>
-      </div>
-      <button className="btn-primary" style={{ width: '100%' }} onClick={register} disabled={loading}>{loading ? 'Registering…' : 'Generate Keypair & Register'}</button>
-    </div>
-  );
-}
-
-function PostTaskPanel({ agent, addToast }) {
-  const [title, setTitle] = useState('');
-  const [desc, setDesc] = useState('');
-  const [category, setCategory] = useState('');
-  const [budget, setBudget] = useState('');
-  const [posting, setPosting] = useState(false);
-
-  async function postTask() {
-    if (!agent) return addToast('Register an agent first', 'error');
-    if (!title.trim()) return addToast('Title is required', 'error');
-    const amt = parseInt(budget) || 100000;
-    if (amt < 100000) return addToast('Minimum budget: 100,000 µAET (0.1 AET)', 'error');
-    setPosting(true);
-    try {
-      await apiPost('/v1/tasks', { poster_id: agent.agent_id, title: title.trim(), description: desc.trim(), category: category || 'general', budget: amt });
-      addToast('Task posted!', 'success');
-      setTitle(''); setDesc(''); setCategory(''); setBudget('');
-    } catch (e) { addToast(`Post failed: ${e.message}`, 'error'); }
-    finally { setPosting(false); }
-  }
-
-  return (
-    <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {!agent && <div className="notice">Register an agent (Identity tab) to post tasks.</div>}
-      <div><label className="field-label">Title *</label><input className="input" placeholder="e.g. Summarise Q3 earnings report" value={title} onChange={e => setTitle(e.target.value)} /></div>
-      <div><label className="field-label">Description</label><textarea className="input" rows={3} placeholder="Describe the task, deliverables, and acceptance criteria…" value={desc} onChange={e => setDesc(e.target.value)} /></div>
-      <div>
-        <label className="field-label">Category</label>
-        <select className="input" value={category} onChange={e => setCategory(e.target.value)}>
-          <option value="">General</option>
-          <option value="research">Research</option>
-          <option value="writing">Writing</option>
-          <option value="summarization">Summarization</option>
-          <option value="code-review">Code Review</option>
-          <option value="data-analysis">Data Analysis</option>
-        </select>
-      </div>
-      <div>
-        <label className="field-label">Budget (µAET, minimum 100,000)</label>
-        <input className="input" type="number" min="100000" placeholder="100000" value={budget} onChange={e => setBudget(e.target.value)} />
-        {budget && <div className="mono" style={{ fontSize: 12, color: 'var(--muted-fg)', marginTop: 4 }}>= {fmtAET(parseInt(budget) || 0)}</div>}
-      </div>
-      <button className="btn-primary" style={{ width: '100%' }} onClick={postTask} disabled={posting || !agent}>{posting ? 'Posting…' : 'Post Task'}</button>
-    </div>
-  );
-}
-
-function MyTasksPanel({ agent, addToast }) {
-  const [tab, setTab] = useState('posted');
-  const [tasks, setTasks] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [submitId, setSubmitId] = useState(null);
-  const [resultUri, setResultUri] = useState('');
-  const [resultHash, setResultHash] = useState('');
-
-  const load = useCallback(async () => {
-    if (!agent) return;
-    setLoading(true);
-    try {
-      const d = await apiFetch(`/v1/tasks/agent/${encodeURIComponent(agent.agent_id)}`);
-      setTasks(Array.isArray(d) ? d : (d.tasks || []));
-    } catch { addToast('Failed to load your tasks', 'error'); }
-    finally { setLoading(false); }
-  }, [agent, addToast]);
-
-  useEffect(() => { load(); }, [load]);
-
-  async function approve(id) {
-    try { await apiPost(`/v1/tasks/${id}/approve`, { poster_id: agent.agent_id }); addToast('Approved — payment released!', 'success'); load(); }
-    catch (e) { addToast(`Approve failed: ${e.message}`, 'error'); }
-  }
-  async function dispute(id) {
-    try { await apiPost(`/v1/tasks/${id}/dispute`, { poster_id: agent.agent_id }); addToast('Task disputed.', 'info'); load(); }
-    catch (e) { addToast(`Dispute failed: ${e.message}`, 'error'); }
-  }
-  async function submit(id) {
-    try {
-      await apiPost(`/v1/tasks/${id}/submit`, { claimer_id: agent.agent_id, result_uri: resultUri || 'ipfs://placeholder', result_hash: resultHash || `sha256:${Date.now().toString(16)}` });
-      addToast('Result submitted!', 'success'); setSubmitId(null); setResultUri(''); setResultHash(''); load();
-    } catch (e) { addToast(`Submit failed: ${e.message}`, 'error'); }
-  }
-
-  if (!agent) return <div style={{ padding: 40, textAlign: 'center', color: 'var(--muted-fg)', fontSize: 13 }}>Register an agent to track your tasks.</div>;
-
-  const posted = tasks.filter(t => t.poster_id === agent.agent_id);
-  const claimed = tasks.filter(t => t.claimer_id === agent.agent_id);
-  const list = tab === 'posted' ? posted : claimed;
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
-      <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-        {[['posted', `Posted (${posted.length})`], ['claimed', `Claimed (${claimed.length})`]].map(([t, l]) => (
-          <button key={t} className={`wtab ${tab === t ? 'active' : ''}`} onClick={() => setTab(t)}>{l}</button>
-        ))}
-      </div>
-      {submitId && (
-        <div style={{ padding: 12, borderBottom: '1px solid var(--border)', background: 'var(--bg)', flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--fg)' }}>Submit result for {truncate(submitId, 10)}</div>
-          <input className="input" placeholder="Result URI (https://... or ipfs://...)" value={resultUri} onChange={e => setResultUri(e.target.value)} />
-          <input className="input" placeholder="Result hash (sha256:...)" value={resultHash} onChange={e => setResultHash(e.target.value)} />
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn-primary" style={{ flex: 1, height: 36 }} onClick={() => submit(submitId)}>Submit</button>
-            <button className="btn-ghost" onClick={() => setSubmitId(null)}>Cancel</button>
-          </div>
-        </div>
-      )}
-      <div style={{ flex: 1, overflowY: 'auto', padding: 12 }}>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
-          <button className="btn-ghost" onClick={load}>Refresh</button>
-        </div>
-        {loading ? <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>{[...Array(3)].map((_, i) => <Skel key={i} h={56} />)}</div>
-         : list.length === 0 ? <div style={{ padding: 32, textAlign: 'center', color: 'var(--muted-fg)', fontSize: 13 }}>No {tab} tasks yet.</div>
-         : list.map(task => (
-          <div key={task.id} style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 14, marginBottom: 8 }}>
-            <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--fg)', marginBottom: 8, lineHeight: 1.4 }}>{task.title}</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
-              <span className={`pill ${pillClass(task.status)}`}>
-                <span className={`dot ${dotClass(task.status)}`} />
-                {statusLabel(task.status)}
-              </span>
-              <span className="mono" style={{ fontSize: 12, color: 'var(--primary)' }}>{fmtAET(task.budget)}</span>
-              {task.claimer_id && tab === 'posted' && <span className="mono" style={{ fontSize: 11, color: 'var(--muted-fg)' }}>claimer: {truncate(task.claimer_id, 8)}</span>}
-            </div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              {tab === 'posted' && task.status === 'Submitted' && (
-                <>
-                  <button className="btn-outline" style={{ flex: 1 }} onClick={() => approve(task.id)}>Approve</button>
-                  <button className="btn-danger" style={{ flex: 1 }} onClick={() => dispute(task.id)}>Dispute</button>
-                </>
-              )}
-              {tab === 'claimed' && task.status === 'Claimed' && (
-                <button className="btn-primary" style={{ width: '100%', height: 36 }} onClick={() => { setSubmitId(task.id); setResultUri(''); setResultHash(''); }}>Submit Result</button>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function SendPanel({ agent, addToast, initialTo = '' }) {
-  const [toAgent, setToAgent] = useState(initialTo);
-  const [amount, setAmount] = useState('');
-  const [memo, setMemo] = useState('');
-  const [sending, setSending] = useState(false);
-  const prev = useRef(initialTo);
-
-  useEffect(() => {
-    if (initialTo && initialTo !== prev.current) { setToAgent(initialTo); prev.current = initialTo; }
-  }, [initialTo]);
-
-  async function send() {
-    if (!toAgent.trim()) return addToast('Recipient is required', 'error');
-    const amt = parseInt(amount);
-    if (!amt || amt <= 0) return addToast('Amount must be > 0', 'error');
-    setSending(true);
-    try {
-      const body = { to_agent: toAgent.trim(), amount: amt, memo: memo.trim(), stake_amount: 1000 };
-      if (agent) body.from_agent = agent.agent_id;
-      const data = await apiPost('/v1/transfer', body);
-      addToast(`Sent ${fmtAET(amt)} — event ${truncate(data.event_id || data.id || '', 8)}`, 'success');
-      setToAgent(''); setAmount(''); setMemo('');
-    } catch (e) { addToast(`Transfer failed: ${e.message}`, 'error'); }
-    finally { setSending(false); }
-  }
-
-  return (
-    <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {agent && <BalanceWidget agentId={agent.agent_id} />}
-      {!agent && <div className="notice">Register an agent to set yourself as sender.</div>}
-      <div><label className="field-label">Recipient Agent ID *</label><input className="input" placeholder="Agent ID or name" value={toAgent} onChange={e => setToAgent(e.target.value)} /></div>
-      <div>
-        <label className="field-label">Amount (µAET) *</label>
-        <input className="input" type="number" min="1" placeholder="1000000" value={amount} onChange={e => setAmount(e.target.value)} />
-        {amount && <div className="mono" style={{ fontSize: 12, color: 'var(--muted-fg)', marginTop: 4 }}>= {fmtAET(parseInt(amount) || 0)}</div>}
-      </div>
-      <div><label className="field-label">Memo</label><input className="input" placeholder="Optional description" value={memo} onChange={e => setMemo(e.target.value)} /></div>
-      <button className="btn-primary" style={{ width: '100%' }} onClick={send} disabled={sending}>{sending ? 'Sending…' : 'Send AET'}</button>
-    </div>
-  );
-}
-
-function WalletDrawer({ open, onClose, initialTab, agent, setAgent, addToast }) {
-  const [tab, setTab] = useState(initialTab || 'identity');
-  useEffect(() => { if (open && initialTab) setTab(initialTab); }, [open, initialTab]);
-  const tabs = [{ id: 'identity', l: 'Identity' }, { id: 'post', l: 'Post Task' }, { id: 'mine', l: 'My Tasks' }, { id: 'send', l: 'Send' }];
-
-  return (
-    <>
-      <div className={`wallet-overlay ${open ? 'open' : ''}`} onClick={onClose} />
-      <div className={`wallet-drawer ${open ? 'open' : ''}`}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0, background: 'var(--bg)' }}>
-          <span className="heading" style={{ fontSize: 15, fontWeight: 600, color: 'var(--fg)' }}>Wallet</span>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted-fg)', fontSize: 18, lineHeight: 1, padding: 4 }} aria-label="Close wallet">{'✕'}</button>
-        </div>
-        <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-          {tabs.map(t => <button key={t.id} className={`wtab ${tab === t.id ? 'active' : ''}`} onClick={() => setTab(t.id)}>{t.l}</button>)}
-        </div>
-        <div style={{ flex: 1, overflowY: 'auto' }}>
-          {tab === 'identity' && <IdentityPanel agent={agent} setAgent={setAgent} addToast={addToast} />}
-          {tab === 'post' && <PostTaskPanel agent={agent} addToast={addToast} />}
-          {tab === 'mine' && <MyTasksPanel agent={agent} addToast={addToast} />}
-          {tab === 'send' && <SendPanel agent={agent} addToast={addToast} />}
-        </div>
-      </div>
-    </>
-  );
-}
-
 /* ── Pages ──────────────────────────────────────────────────────── */
 
-function OverviewPage({ status, econ, taskStats, agents, events, dagStats, loading, recentTasks, networkState, onNav, onOpenWallet }) {
+function OverviewPage({ status, econ, taskStats, agents, events, dagStats, loading, recentTasks, networkState, onNav }) {
   const validators = useMemo(() => agents.filter(a => a.staked_amount > 0), [agents]);
   const totalStaked = useMemo(() => validators.reduce((s, v) => s + (v.staked_amount || 0), 0), [validators]);
   const bootstrapMode = validators.length < 20;
@@ -592,7 +288,6 @@ function OverviewPage({ status, econ, taskStats, agents, events, dagStats, loadi
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
             <button className="btn-primary" onClick={() => onNav('tasks')} style={{ height: 40, padding: '0 20px' }}>View Open Tasks</button>
             <a href="/docs/" className="btn-outline" style={{ textDecoration: 'none', height: 36, padding: '0 16px' }}>Documentation</a>
-            <button className="btn-ghost" onClick={() => onOpenWallet('identity')} style={{ height: 36 }}>Register Agent</button>
             {status && (
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--muted-fg)', marginLeft: 8 }}>
                 <span className="dot dot-green" style={{ width: 6, height: 6 }} />
@@ -692,7 +387,7 @@ function OverviewPage({ status, econ, taskStats, agents, events, dagStats, loadi
   );
 }
 
-function TasksPage({ agent, addToast, onOpenWallet }) {
+function TasksPage({ addToast }) {
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -711,12 +406,6 @@ function TasksPage({ agent, addToast, onOpenWallet }) {
   }, [addToast]);
 
   useEffect(() => { load(); }, [load]);
-
-  async function claim(id) {
-    if (!agent) { addToast('Register an agent first via Wallet', 'info'); onOpenWallet && onOpenWallet('identity'); return; }
-    try { await apiPost(`/v1/tasks/${id}/claim`, { claimer_id: agent.agent_id }); addToast('Task claimed!', 'success'); load(); }
-    catch (e) { addToast(`Claim failed: ${e.message}`, 'error'); }
-  }
 
   const FILTERS = ['all', 'open', 'claimed', 'submitted', 'completed', 'disputed'];
 
@@ -742,7 +431,6 @@ function TasksPage({ agent, addToast, onOpenWallet }) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <h2 className="heading" style={{ fontSize: 24, fontWeight: 600 }}>Tasks</h2>
-          <button className="btn-primary" onClick={() => onOpenWallet && onOpenWallet('post')} style={{ height: 40 }}>Post Task</button>
         </div>
 
         {error ? (
@@ -802,11 +490,7 @@ function TasksPage({ agent, addToast, onOpenWallet }) {
                               {statusLabel(task.status)}
                             </span>
                           </td>
-                          <td>
-                            {task.status?.toLowerCase() === 'open' && (
-                              <button className="btn-outline" style={{ fontSize: 12, padding: '4px 12px', height: 28 }} onClick={() => claim(task.id)}>Claim</button>
-                            )}
-                          </td>
+                          <td></td>
                         </tr>
                       );
                     })}
@@ -1064,7 +748,7 @@ function NetworkPage({ events, dagStats, econ, status, loading }) {
 
 /* ── Header ────────────────────────────────────────────────────── */
 
-function Header({ activePage, onNav, status, agent, onOpenWallet, loading }) {
+function Header({ activePage, onNav, status, loading }) {
   const pages = [
     { id: 'overview', l: 'Overview' },
     { id: 'tasks', l: 'Tasks' },
@@ -1090,11 +774,6 @@ function Header({ activePage, onNav, status, agent, onOpenWallet, loading }) {
         </nav>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           {!status && !loading && <span style={{ fontSize: 12, color: 'var(--destructive)' }}>Offline</span>}
-          <button className="btn-ghost" onClick={() => onOpenWallet('identity')} style={{ gap: 6 }}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><rect x="2" y="6" width="20" height="14" rx="2" /><path d="M2 10h20" /><circle cx="17" cy="14" r="1.5" fill="currentColor" stroke="none" /></svg>
-            Wallet
-            {agent && <span className="dot dot-green" style={{ width: 5, height: 5 }} />}
-          </button>
         </div>
       </div>
     </header>
@@ -1115,11 +794,6 @@ function App() {
   const [networkState, setNetworkState] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const [walletOpen, setWalletOpen] = useState(false);
-  const [walletTab, setWalletTab] = useState('identity');
-  const [agent, setAgent] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('aethernet_agent')); } catch { return null; }
-  });
   const [toasts, addToast] = useToasts();
 
   const refresh = useCallback(async () => {
@@ -1149,13 +823,10 @@ function App() {
   useEffect(() => { refresh(); }, [refresh]);
   useEffect(() => { const id = setInterval(refresh, 5000); return () => clearInterval(id); }, [refresh]);
 
-  function openWallet(tab = 'identity') { setWalletTab(tab); setWalletOpen(true); }
-
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
       <Toasts toasts={toasts} />
-      <WalletDrawer open={walletOpen} onClose={() => setWalletOpen(false)} initialTab={walletTab} agent={agent} setAgent={setAgent} addToast={addToast} />
-      <Header activePage={page} onNav={setPage} status={status} agent={agent} onOpenWallet={openWallet} loading={loading && !status} />
+      <Header activePage={page} onNav={setPage} status={status} loading={loading && !status} />
 
       {!status && !loading && (
         <div className="container" style={{ paddingTop: 16 }}>
@@ -1166,8 +837,8 @@ function App() {
       )}
 
       <main className="page-wrap">
-        {page === 'overview' && <OverviewPage status={status} econ={econ} taskStats={taskStats} agents={agents} events={events} dagStats={dagStats} loading={loading} recentTasks={recentTasks} networkState={networkState} onNav={setPage} onOpenWallet={openWallet} />}
-        {page === 'tasks' && <TasksPage agent={agent} addToast={addToast} onOpenWallet={openWallet} />}
+        {page === 'overview' && <OverviewPage status={status} econ={econ} taskStats={taskStats} agents={agents} events={events} dagStats={dagStats} loading={loading} recentTasks={recentTasks} networkState={networkState} onNav={setPage} />}
+        {page === 'tasks' && <TasksPage addToast={addToast} />}
         {page === 'validators' && <ValidatorsPage agents={agents} loading={loading && !agents.length} />}
         {page === 'network' && <NetworkPage events={events} dagStats={dagStats} econ={econ} status={status} loading={loading} />}
       </main>
