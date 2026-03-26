@@ -1453,13 +1453,17 @@ func (s *Server) handleGetTaskResult(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "task not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"task_id":          task.ID,
 		"status":           task.Status,
 		"delivery_method":  task.DeliveryMethod,
 		"result_content":   task.ResultContent,
 		"result_encrypted": task.ResultEncrypted,
-	})
+	}
+	if task.SubmittedEvidence != nil && len(task.SubmittedEvidence.GenesisChain) > 0 {
+		resp["genesis_chain"] = task.SubmittedEvidence.GenesisChain
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleApproveTask handles POST /v1/tasks/{id}/approve. It releases the escrowed

@@ -1,6 +1,8 @@
 package evidence
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"strings"
 	"testing"
 )
@@ -94,5 +96,92 @@ func TestScore_PassThreshold(t *testing.T) {
 	failing.ComputeOverall()
 	if failing.Overall >= PassThreshold {
 		t.Fatalf("expected %.3f < PassThreshold %.3f", failing.Overall, PassThreshold)
+	}
+}
+
+func TestGenesisChain_RoundTrip(t *testing.T) {
+	ev := &Evidence{
+		Hash:         "sha256:abc",
+		OutputType:   "text",
+		OutputSize:   100,
+		Summary:      "derived work",
+		GenesisChain: []string{"sha256:parent1", "sha256:parent2"},
+	}
+	if len(ev.GenesisChain) != 2 {
+		t.Fatalf("genesis_chain length = %d; want 2", len(ev.GenesisChain))
+	}
+	if ev.GenesisChain[0] != "sha256:parent1" {
+		t.Errorf("genesis_chain[0] = %q; want sha256:parent1", ev.GenesisChain[0])
+	}
+}
+
+func TestCanonicalBytes_Deterministic(t *testing.T) {
+	ev := &Evidence{
+		Hash:         "sha256:abc",
+		OutputType:   "text",
+		OutputSize:   500,
+		Summary:      "test",
+		GenesisChain: []string{"sha256:p1", "sha256:p2"},
+		Metrics:      map[string]string{"a": "1", "b": "2"},
+	}
+	a := CanonicalBytes(ev)
+	b := CanonicalBytes(ev)
+	if string(a) != string(b) {
+		t.Error("CanonicalBytes is not deterministic")
+	}
+	if !strings.HasPrefix(string(a), "AETHERNET-EVIDENCE-V1\n") {
+		t.Error("missing version prefix")
+	}
+}
+
+func TestVerifyEvidencePacket_Valid(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	vpub, vpriv, _ := ed25519.GenerateKey(rand.Reader)
+	_ = pub
+	_ = vpub
+
+	ev := &Evidence{
+		Hash:       "sha256:test",
+		OutputType: "text",
+		OutputSize: 100,
+		Summary:    "test output",
+	}
+	SignEvidence(ev, priv)
+	SignEvidenceValidator(ev, vpriv)
+
+	if err := VerifyEvidencePacket(ev); err != nil {
+		t.Fatalf("verification failed: %v", err)
+	}
+}
+
+func TestVerifyEvidencePacket_TamperedHash(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+
+	ev := &Evidence{
+		Hash:       "sha256:original",
+		OutputType: "text",
+		OutputSize: 100,
+		Summary:    "test",
+	}
+	SignEvidence(ev, priv)
+
+	// Tamper with the hash after signing.
+	ev.Hash = "sha256:tampered"
+
+	if err := VerifyEvidencePacket(ev); err == nil {
+		t.Fatal("expected verification failure after tampering")
+	}
+}
+
+func TestVerifyEvidencePacket_NoSignatures(t *testing.T) {
+	ev := &Evidence{
+		Hash:       "sha256:test",
+		OutputType: "text",
+		OutputSize: 100,
+		Summary:    "test",
+	}
+	// No signatures — should pass (signatures are optional).
+	if err := VerifyEvidencePacket(ev); err != nil {
+		t.Fatalf("expected pass with no signatures, got: %v", err)
 	}
 }
