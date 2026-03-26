@@ -40,6 +40,14 @@ AetherNet is a three-layer protocol. Never cross layer boundaries in imports.
 - **emitDAGEvent applies locally before broadcasting.** After dag.Add, ApplyDAGEvent runs synchronously on the local node so the API response reflects the new state. Peers apply asynchronously when they receive the event.
 - **Never add a new direct task mutation path.** If a new task state transition is needed, add: (1) a Validate method, (2) an apply method called from ApplyDAGEvent, (3) an API handler that validates then emits. No exceptions.
 
+## Causal Genesis Infrastructure
+
+- **Evidence packets carry causal ancestry.** The `GenesisChain` field lists parent evidence hashes that an output derived from. When Agent B consumes Agent A's verified output, B's evidence must reference A's evidence hash.
+- **Genesis chain must never be lossy.** Every verified input consumed must appear. Dropping links destroys causal provenance permanently.
+- **Evidence packets are self-contained trust primitives.** Each packet carries producer and validator Ed25519 signatures over AETHERNET-EVIDENCE-V1 canonical serialization. A single packet can prove its own provenance without DAG access.
+- **ComputeVerificationDepth is analytics, not core protocol.** It lives in `internal/analytics/` and uses a cached recursive traversal with cycle detection. It does not modify state.
+- **Evidence signatures are separate from DAG event signatures.** The DAG signature proves event authenticity within the DAG. The evidence signature proves evidence authenticity anywhere — portable beyond AetherNet.
+
 ## Supply Invariant
 
 - **FundAgent creates tokens from nothing.** It must ONLY be called during genesis and onboarding. Never in fee collection, settlement, or slashing paths.
