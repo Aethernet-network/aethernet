@@ -852,12 +852,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// API key validation (CRITICAL-2.1):
-	// • A present X-API-Key is always validated; an invalid key is rejected (401).
-	// • When requireAuth is true and platformKeys is wired in, write operations
-	//   (POST/PUT/DELETE/PATCH) without an API key are also rejected (401).
-	// • When requireAuth is false (default/testnet), keyless requests are accepted
-	//   for backward compatibility with the SDK and existing integrations.
+	// API key validation:
+	// • API keys authenticate READ endpoints only (rate limiting, analytics).
+	// • Write operations (POST/PUT/DELETE/PATCH) require Ed25519 signature auth
+	//   (AETHERNET-TX-V1 or deprecated AETHERNET-REQUEST-V1 above).
+	// • When requireAuth is true, unsigned writes are rejected.
+	// • When requireAuth is false (testnet), unsigned writes are still accepted
+	//   for backward compatibility during migration.
 	if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
 		if s.platformKeys != nil {
 			if _, ok := s.platformKeys.Validate(apiKey); !ok {
@@ -866,11 +867,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// API key is valid — allow reads. When requireAuth is enabled, writes
+		// via API key only are rejected (signature auth required).
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
+			if s.requireAuth && s.platformKeys != nil {
+				writeCodedError(w, http.StatusUnauthorized, "SIGNATURE_REQUIRED",
+					"write operations require Ed25519 signature (AETHERNET-TX-V1)", "")
+				return
+			}
+		}
 	} else if s.requireAuth && s.platformKeys != nil {
 		switch r.Method {
 		case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
-			writeCodedError(w, http.StatusUnauthorized, "auth_required",
-				"X-API-Key header required for write operations", "")
+			writeCodedError(w, http.StatusUnauthorized, "SIGNATURE_REQUIRED",
+				"write operations require Ed25519 signature (AETHERNET-TX-V1)", "")
 			return
 		}
 	}
@@ -3817,14 +3828,14 @@ func (s *Server) handleOpenChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// M2: When auth is enabled, challenger_id must match the node's own agent
-	// identity. This prevents an authenticated caller from opening a challenge
-	// on behalf of a different agent.
-	if s.requireAuth && s.platformKeys != nil {
-		if body.ChallengerID != string(s.agentID) {
-			writeError(w, http.StatusForbidden, "challenger_id must match the authenticated agent identity")
-			return
-		}
+	// Signer = actor: if authenticated, use verified identity.
+	if authAgent := getAuthAgent(r); authAgent != "" {
+		body.ChallengerID = string(authAgent)
+	}
+	// M2: challenger_id must match the node's own agent identity when auth is active.
+	if s.isAuthenticated(r) && body.ChallengerID != string(s.agentID) {
+		writeError(w, http.StatusForbidden, "challenger_id must match the authenticated agent identity")
+		return
 	}
 
 	// M1: Enforce the protocol minimum bond. Use task_budget (if provided) for
@@ -3895,13 +3906,17 @@ func (s *Server) handleResolveChallenge(w http.ResponseWriter, r *http.Request) 
 	// by an on-chain replay/dispute outcome rather than by a caller-initiated
 	// API call. When that is implemented this auth check can be replaced with
 	// a protocol-level ownership proof.
-	if s.requireAuth && s.platformKeys != nil {
+	if s.isAuthenticated(r) {
 		challenge, err := s.challengeManager.GetChallenge(challengeID)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if challenge.ChallengerID != string(s.agentID) {
+		resolverID := string(s.agentID)
+		if authAgent := getAuthAgent(r); authAgent != "" {
+			resolverID = string(authAgent)
+		}
+		if challenge.ChallengerID != resolverID {
 			writeError(w, http.StatusForbidden, "only the original challenger may resolve this challenge")
 			return
 		}

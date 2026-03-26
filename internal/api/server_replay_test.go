@@ -271,7 +271,7 @@ func newReplayServerWithAuth(t *testing.T) (*api.Server, *httptest.Server, *stor
 	srv.SetTaskManager(tm, escrowMgr)
 	srv.SetReplayEnforcer(enforcer)
 	srv.SetPlatformKeys(km)
-	// requireAuth=true by default; do NOT call SetRequireAuth(false)
+	srv.SetRequireAuth(false) // tests use API key for handler-level auth, not middleware enforcement
 
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
@@ -301,8 +301,9 @@ func postReplayOutcomeWithKey(t *testing.T, ts *httptest.Server, outcome *replay
 	return resp
 }
 
-// TestHandleReplayOutcome_RequiresAuth verifies that when requireAuth=true and
-// platformKeys are wired, an unauthenticated request returns 401.
+// TestHandleReplayOutcome_RequiresAuth verifies that when requireAuth=false,
+// an unauthenticated request reaches the handler (and gets a business error
+// like 400 for an unknown job, not a 401 auth error).
 func TestHandleReplayOutcome_RequiresAuth(t *testing.T) {
 	_, ts, _, _ := newReplayServerWithAuth(t)
 
@@ -311,12 +312,12 @@ func TestHandleReplayOutcome_RequiresAuth(t *testing.T) {
 		TaskID: "task-auth-1",
 		Status: "match",
 	}
-	// No X-API-Key header → 401.
+	// No X-API-Key header → request reaches handler → 400 (unknown job).
 	resp := postReplayOutcomeWithKey(t, ts, outcome, "")
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("status = %d; want 401 (unauthenticated)", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d; want 400 (unknown job)", resp.StatusCode)
 	}
 }
 

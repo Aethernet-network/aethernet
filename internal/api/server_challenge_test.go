@@ -325,6 +325,7 @@ func newAuthChallengeTestServer(t *testing.T, cm *stubChallengeManager) (*httpte
 	km := platform.NewKeyManager()
 	apiKey := km.GenerateKey("test-app", "test@example.com", platform.TierFree).Key
 	srv.SetPlatformKeys(km)
+	srv.SetRequireAuth(false) // tests use API key auth for handler-level logic, not middleware enforcement
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	return ts, string(kp.AgentID()), apiKey

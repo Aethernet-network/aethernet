@@ -118,11 +118,16 @@ class AetherNetClient:
             May be set after construction by assigning ``client.agent_id``.
     """
 
-    def __init__(self, node_url: str = None, agent_id: str = ""):
+    def __init__(self, node_url: str = None, agent_id: str = "", signing_key=None, chain_id: str = "aethernet-testnet-1"):
         if node_url is None:
             node_url = os.environ.get("AETHERNET_NODE", "http://localhost:8338")
         self.node_url = node_url.rstrip("/")
         self.agent_id = agent_id
+        self.signing_key = signing_key
+        self.chain_id = chain_id
+        if signing_key is not None:
+            from nacl.encoding import RawEncoder
+            self.agent_id = signing_key.verify_key.encode(encoder=RawEncoder).hex()
         self.session = requests.Session()
         self.session.headers["Content-Type"] = "application/json"
 
@@ -1172,7 +1177,11 @@ class AetherNetClient:
         return resp.json()
 
     def _post(self, path: str, body: Dict) -> Any:
-        resp = self.session.post(self.node_url + path, json=body)
+        headers = {}
+        if self.signing_key is not None:
+            from aethernet.signing import sign_request
+            headers = sign_request(self.signing_key, "POST", path, body, chain_id=self.chain_id)
+        resp = self.session.post(self.node_url + path, json=body, headers=headers)
         if resp.status_code >= 400:
             try:
                 err = resp.json().get("error", resp.text)
@@ -1182,7 +1191,11 @@ class AetherNetClient:
         return resp.json()
 
     def _put(self, path: str, body: Dict) -> Any:
-        resp = self.session.put(self.node_url + path, json=body)
+        headers = {}
+        if self.signing_key is not None:
+            from aethernet.signing import sign_request
+            headers = sign_request(self.signing_key, "PUT", path, body, chain_id=self.chain_id)
+        resp = self.session.put(self.node_url + path, json=body, headers=headers)
         if resp.status_code >= 400:
             try:
                 err = resp.json().get("error", resp.text)
@@ -1192,7 +1205,11 @@ class AetherNetClient:
         return resp.json()
 
     def _delete(self, path: str) -> Any:
-        resp = self.session.delete(self.node_url + path)
+        headers = {}
+        if self.signing_key is not None:
+            from aethernet.signing import sign_request
+            headers = sign_request(self.signing_key, "DELETE", path, chain_id=self.chain_id)
+        resp = self.session.delete(self.node_url + path, headers=headers)
         if resp.status_code >= 400:
             try:
                 err = resp.json().get("error", resp.text)
