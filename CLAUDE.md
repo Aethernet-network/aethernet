@@ -30,6 +30,16 @@ AetherNet is a three-layer protocol. Never cross layer boundaries in imports.
 - **Protocol-internal transfers are fee-exempt.** Staking, escrow, faucet, onboarding, and genesis operations are protocol mechanics, not taxable economic transactions.
 - **Genesis-level operations (EventTypeGenesisFunding, EventTypeRegistration) are applied deterministically** on every node without consensus. They are protocol state, not economic transactions.
 
+## Event-Sourced Task State
+
+- **The DAG is the single source of truth for task state.** All task state transitions (post, claim, submit, approve, dispute, cancel) flow through DAG events.
+- **API handlers validate, then emit.** The handler checks preconditions (auth, router assignment, status), and if valid, emits a DAG event. It does NOT call state-mutating methods directly.
+- **TaskManager.ApplyDAGEvent is the ONLY path that mutates task state.** Both local and peer-originated DAG events are applied through the same method. This guarantees all nodes converge on identical task state.
+- **Validate methods are read-only.** ValidateClaimTask, ValidateSubmitResult, ValidateApproveTask, ValidateDisputeTask check preconditions without mutation. They are called by API handlers before emitting DAG events.
+- **Apply methods are idempotent.** applyTaskClaimed, applyTaskSubmitted, etc. check event-sourcing invariants (correct status transition) and skip gracefully if already applied. No API-level business logic (router checks, self-claim) — that was enforced at the API boundary.
+- **emitDAGEvent applies locally before broadcasting.** After dag.Add, ApplyDAGEvent runs synchronously on the local node so the API response reflects the new state. Peers apply asynchronously when they receive the event.
+- **Never add a new direct task mutation path.** If a new task state transition is needed, add: (1) a Validate method, (2) an apply method called from ApplyDAGEvent, (3) an API handler that validates then emits. No exceptions.
+
 ## Supply Invariant
 
 - **FundAgent creates tokens from nothing.** It must ONLY be called during genesis and onboarding. Never in fee collection, settlement, or slashing paths.
@@ -103,6 +113,7 @@ AetherNet is a three-layer protocol. Never cross layer boundaries in imports.
 - **AETHERNET_TESTNET=true enables:** faucet bucket, shared testnet API key, auto-genesis
 - **AETHERNET_CONSENSUS_MIN_PARTICIPANTS=2 for 3-node testnet**
 - **Clean deploy requires wiping /data/aethernet on all nodes (rm -rf, not just rm -rf *)**
+- **Restart without wipe preserves state.** DAG replay uses topological sort (Kahn's algorithm) to load events in causal order from BadgerDB. Events with unresolvable parents are logged and skipped. Normal restarts should never require a data wipe.
 - **Shared testnet API key: aethernet-testnet-arena-key-v1 (registered on all nodes at boot)**
 - **--no-auth in Dockerfile CMD for testnet backward compatibility**
 - **Never add AETHERNET_RESET to task definitions — it wipes the store**
