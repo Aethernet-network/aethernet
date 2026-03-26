@@ -711,6 +711,19 @@ func (m *TaskManager) SubmitResult(taskID string, claimerID crypto.AgentID, resu
 	return nil
 }
 
+// SetSubmittedEvidence stores the structured evidence on a submitted task.
+// Node-local metadata — not propagated via DAG events.
+func (m *TaskManager) SetSubmittedEvidence(taskID string, ev *evidence.Evidence) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return
+	}
+	task.SubmittedEvidence = ev
+	m.persist(task)
+}
+
 // SetResultContent stores the full result output on a submitted task.
 // content is the raw output string (plaintext or ciphertext depending on the
 // delivery method). encrypted should be true when the content is ciphertext.
@@ -896,10 +909,84 @@ func (m *TaskManager) DisputeTask(taskID string, posterID crypto.AgentID) error 
 	return nil
 }
 
+// ValidateClaimTask checks whether claiming this task would be valid without
+// mutating state. Used by API handlers before emitting a DAG event.
+func (m *TaskManager) ValidateClaimTask(taskID string, claimerID crypto.AgentID) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
+	}
+	switch task.Status {
+	case TaskStatusOpen:
+	case TaskStatusClaimed:
+		return fmt.Errorf("%w: %s", ErrTaskAlreadyClaimed, taskID)
+	default:
+		return fmt.Errorf("%w: %s (status: %s)", ErrTaskNotOpen, taskID, task.Status)
+	}
+	if task.PosterID == string(claimerID) {
+		return fmt.Errorf("%w: %s", ErrSelfClaim, taskID)
+	}
+	return nil
+}
+
+// ValidateSubmitResult checks whether submitting a result would be valid
+// without mutating state. Used by API handlers before emitting a DAG event.
+func (m *TaskManager) ValidateSubmitResult(taskID string, claimerID crypto.AgentID) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
+	}
+	if task.Status != TaskStatusClaimed {
+		return fmt.Errorf("%w: %s (status: %s)", ErrTaskNotClaimed, taskID, task.Status)
+	}
+	if task.ClaimerID != string(claimerID) {
+		return fmt.Errorf("%w: %s", ErrWrongClaimer, taskID)
+	}
+	return nil
+}
+
+// ValidateApproveTask checks whether approving would be valid without mutating state.
+func (m *TaskManager) ValidateApproveTask(taskID string) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
+	}
+	if task.Status != TaskStatusSubmitted {
+		return fmt.Errorf("%w: %s (status: %s)", ErrTaskNotSubmitted, taskID, task.Status)
+	}
+	return nil
+}
+
+// ValidateDisputeTask checks whether disputing would be valid without mutating state.
+func (m *TaskManager) ValidateDisputeTask(taskID string, posterID crypto.AgentID) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
+	}
+	if task.Status != TaskStatusSubmitted {
+		return fmt.Errorf("%w: %s (status: %s)", ErrTaskNotSubmitted, taskID, task.Status)
+	}
+	if task.PosterID != string(posterID) {
+		return fmt.Errorf("%w: %s", ErrWrongPoster, taskID)
+	}
+	return nil
+}
+
 // ApplyDAGEvent applies a task lifecycle DAG event to the local TaskManager.
-// Idempotent: if the state transition has already been applied (e.g. this node
-// was the one that created the event), it is silently skipped. This enables
-// safe replay from both DAG sync and local emission.
+// This is the ONLY path for task state mutation from DAG events. Idempotent:
+// if the state transition has already been applied, it is silently skipped.
 func (m *TaskManager) ApplyDAGEvent(ev *event.Event) {
 	switch ev.Type {
 	case event.EventTypeTaskPosted:
@@ -907,64 +994,127 @@ func (m *TaskManager) ApplyDAGEvent(ev *event.Event) {
 		if err != nil {
 			return
 		}
-		if _, getErr := m.Get(tp.TaskID); getErr == nil {
-			return // already exists
-		}
-		_, _ = m.PostTask(
-			tp.PosterID, tp.Title, tp.Description, tp.Category, tp.Budget,
-			PostTaskOpts{
-				TaskID:              tp.TaskID,
-				DeliveryMethod:      tp.DeliveryMethod,
-				SuccessCriteria:     tp.SuccessCriteria,
-				AssuranceLane:       tp.AssuranceLane,
-				MaxDeliveryTimeSecs: tp.MaxDeliveryTime,
-			},
-		)
+		m.applyTaskPosted(tp)
 
 	case event.EventTypeTaskClaimed:
 		tp, err := event.GetPayload[event.TaskClaimedPayload](ev)
 		if err != nil {
 			return
 		}
-		// Idempotent: skip if already claimed.
-		if t, getErr := m.Get(tp.TaskID); getErr == nil && t.Status != TaskStatusOpen {
-			return
-		}
-		_ = m.ClaimTask(tp.TaskID, crypto.AgentID(tp.ClaimerID))
+		m.applyTaskClaimed(tp)
 
 	case event.EventTypeTaskSubmitted:
 		tp, err := event.GetPayload[event.TaskSubmittedPayload](ev)
 		if err != nil {
 			return
 		}
-		// Idempotent: skip if already submitted or later.
-		if t, getErr := m.Get(tp.TaskID); getErr == nil && t.Status != TaskStatusClaimed {
-			return
-		}
-		_ = m.SubmitResult(tp.TaskID, crypto.AgentID(tp.ClaimerID), tp.ResultHash, tp.ResultNote, tp.ResultURI)
+		m.applyTaskSubmitted(tp)
 
 	case event.EventTypeTaskApproved:
 		tp, err := event.GetPayload[event.TaskApprovedPayload](ev)
 		if err != nil {
 			return
 		}
-		// Idempotent: skip if already completed.
-		if t, getErr := m.Get(tp.TaskID); getErr == nil && t.Status != TaskStatusSubmitted {
-			return
-		}
-		_ = m.ApproveTask(tp.TaskID, crypto.AgentID(tp.ApproverID))
+		m.applyTaskApproved(tp)
 
 	case event.EventTypeTaskDisputed:
 		tp, err := event.GetPayload[event.TaskDisputedPayload](ev)
 		if err != nil {
 			return
 		}
-		// Idempotent: skip if already disputed.
-		if t, getErr := m.Get(tp.TaskID); getErr == nil && t.Status != TaskStatusSubmitted {
-			return
-		}
-		_ = m.DisputeTask(tp.TaskID, crypto.AgentID(tp.PosterID))
+		m.applyTaskDisputed(tp)
 	}
+}
+
+func (m *TaskManager) applyTaskPosted(tp event.TaskPostedPayload) {
+	// Check existence under read lock, then call PostTask (which acquires
+	// its own write lock) only if the task doesn't exist yet.
+	m.mu.RLock()
+	_, exists := m.tasks[tp.TaskID]
+	m.mu.RUnlock()
+	if exists {
+		return // idempotent
+	}
+	_, _ = m.PostTask(
+		tp.PosterID, tp.Title, tp.Description, tp.Category, tp.Budget,
+		PostTaskOpts{
+			TaskID:              tp.TaskID,
+			DeliveryMethod:      tp.DeliveryMethod,
+			SuccessCriteria:     tp.SuccessCriteria,
+			AssuranceLane:       tp.AssuranceLane,
+			MaxDeliveryTimeSecs: tp.MaxDeliveryTime,
+		},
+	)
+}
+
+func (m *TaskManager) applyTaskClaimed(tp event.TaskClaimedPayload) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	task, ok := m.tasks[tp.TaskID]
+	if !ok {
+		slog.Debug("applyTaskClaimed: task not found", "task_id", tp.TaskID)
+		return
+	}
+	if task.Status != TaskStatusOpen {
+		return // idempotent — already claimed or later
+	}
+	task.ClaimerID = tp.ClaimerID
+	task.Status = TaskStatusClaimed
+	now := time.Now()
+	task.ClaimedAt = now.UnixNano()
+	task.ClaimDeadline = now.Add(m.claimDeadline).UnixNano()
+	m.persist(task)
+}
+
+func (m *TaskManager) applyTaskSubmitted(tp event.TaskSubmittedPayload) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	task, ok := m.tasks[tp.TaskID]
+	if !ok {
+		slog.Debug("applyTaskSubmitted: task not found", "task_id", tp.TaskID)
+		return
+	}
+	if task.Status != TaskStatusClaimed {
+		return // idempotent — already submitted or later
+	}
+	task.ResultHash = tp.ResultHash
+	task.ResultNote = tp.ResultNote
+	task.ResultURI = tp.ResultURI
+	task.Status = TaskStatusSubmitted
+	task.SubmittedAt = time.Now().UnixNano()
+	m.persist(task)
+}
+
+func (m *TaskManager) applyTaskApproved(tp event.TaskApprovedPayload) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	task, ok := m.tasks[tp.TaskID]
+	if !ok {
+		slog.Debug("applyTaskApproved: task not found", "task_id", tp.TaskID)
+		return
+	}
+	if task.Status != TaskStatusSubmitted {
+		return // idempotent — already completed
+	}
+	task.Status = TaskStatusCompleted
+	task.CompletedAt = time.Now().UnixNano()
+	m.persist(task)
+}
+
+func (m *TaskManager) applyTaskDisputed(tp event.TaskDisputedPayload) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	task, ok := m.tasks[tp.TaskID]
+	if !ok {
+		slog.Debug("applyTaskDisputed: task not found", "task_id", tp.TaskID)
+		return
+	}
+	if task.Status != TaskStatusSubmitted {
+		return // idempotent — already disputed
+	}
+	task.Status = TaskStatusDisputed
+	task.DisputedAt = time.Now().UnixNano()
+	m.persist(task)
 }
 
 // CancelTask cancels an open task. Only the poster may cancel an open task.

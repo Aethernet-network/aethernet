@@ -1094,9 +1094,13 @@ type cancelTaskRequest struct {
 // ---------------------------------------------------------------------------
 
 // handlePostTask handles POST /v1/tasks. It creates a new task and escrows
-// emitDAGEvent creates a signed DAG event and adds it to the local DAG.
-// Returns the event ID on success, or empty on failure (best-effort).
-func (s *Server) emitDAGEvent(evType event.EventType, payload any, agentID string) event.EventID {
+// emitDAGEvent creates a signed DAG event, adds it to the local DAG, applies
+// task state locally via ApplyDAGEvent (so the API response reflects the new
+// state), and broadcasts to peers. Returns the event ID on success.
+// The event is always authored by the node's own identity (s.agentID) so it
+// can be signed with s.kp. The actorAgentID in the payload carries the
+// identity of the agent performing the action.
+func (s *Server) emitDAGEvent(evType event.EventType, payload any, _ string) event.EventID {
 	tips := s.dag.Tips()
 	priorTS := make(map[event.EventID]uint64, len(tips))
 	for _, ref := range tips {
@@ -1104,13 +1108,18 @@ func (s *Server) emitDAGEvent(evType event.EventType, payload any, agentID strin
 			priorTS[ref] = ev.CausalTimestamp
 		}
 	}
-	ev, err := event.New(evType, tips, payload, agentID, priorTS, 0)
+	ev, err := event.New(evType, tips, payload, string(s.agentID), priorTS, 0)
 	if err != nil {
 		return ""
 	}
 	_ = crypto.SignEvent(ev, s.kp)
 	if s.dag.Add(ev) != nil {
 		return ""
+	}
+	// Apply task state locally so the API response reflects the change.
+	// ApplyDAGEvent is idempotent — safe even if the sync handler also fires.
+	if s.taskMgr != nil {
+		s.taskMgr.ApplyDAGEvent(ev)
 	}
 	if s.node != nil {
 		_ = s.node.Broadcast(ev)
@@ -1349,11 +1358,12 @@ func (s *Server) handleClaimTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := s.taskMgr.ClaimTask(taskID, crypto.AgentID(claimerID)); err != nil {
+	if err := s.taskMgr.ValidateClaimTask(taskID, crypto.AgentID(claimerID)); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
+	// Emit DAG event — ApplyDAGEvent applies the state change locally.
 	s.emitDAGEvent(event.EventTypeTaskClaimed, event.TaskClaimedPayload{
 		TaskID:    taskID,
 		ClaimerID: claimerID,
@@ -1400,18 +1410,12 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := s.taskMgr.SubmitResult(taskID, crypto.AgentID(claimerID), resultHash, resultNote, resultURI, req.Evidence); err != nil {
+	if err := s.taskMgr.ValidateSubmitResult(taskID, crypto.AgentID(claimerID)); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	// Store the full result content when the worker provides it.
-	if req.ResultContent != "" {
-		if err := s.taskMgr.SetResultContent(taskID, req.ResultContent, req.ResultEncrypted); err != nil {
-			slog.Warn("handleSubmitTask: could not store result content", "task_id", taskID, "err", err)
-		}
-	}
-
+	// Emit DAG event — ApplyDAGEvent applies the state change locally.
 	s.emitDAGEvent(event.EventTypeTaskSubmitted, event.TaskSubmittedPayload{
 		TaskID:     taskID,
 		ClaimerID:  claimerID,
@@ -1419,6 +1423,14 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		ResultNote: resultNote,
 		ResultURI:  resultURI,
 	}, claimerID)
+
+	// Store evidence and result content after state change (node-local metadata).
+	if req.Evidence != nil {
+		s.taskMgr.SetSubmittedEvidence(taskID, req.Evidence)
+	}
+	if req.ResultContent != "" {
+		_ = s.taskMgr.SetResultContent(taskID, req.ResultContent, req.ResultEncrypted)
+	}
 
 	task, _ := s.taskMgr.Get(taskID)
 	writeJSON(w, http.StatusOK, task)
@@ -1478,11 +1490,12 @@ func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.taskMgr.ApproveTask(taskID, crypto.AgentID(approverID)); err != nil {
+	if err := s.taskMgr.ValidateApproveTask(taskID); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
+	// Emit DAG event — ApplyDAGEvent applies the state change locally.
 	s.emitDAGEvent(event.EventTypeTaskApproved, event.TaskApprovedPayload{
 		TaskID:     taskID,
 		ApproverID: approverID,
@@ -1561,11 +1574,12 @@ func (s *Server) handleDisputeTask(w http.ResponseWriter, r *http.Request) {
 
 	taskID := r.PathValue("id")
 
-	if err := s.taskMgr.DisputeTask(taskID, crypto.AgentID(posterID)); err != nil {
+	if err := s.taskMgr.ValidateDisputeTask(taskID, crypto.AgentID(posterID)); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
+	// Emit DAG event — ApplyDAGEvent applies the state change locally.
 	s.emitDAGEvent(event.EventTypeTaskDisputed, event.TaskDisputedPayload{
 		TaskID:   taskID,
 		PosterID: posterID,
