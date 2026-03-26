@@ -1463,66 +1463,14 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 				"to", gfp.ToAgent, "amount", gfp.Amount, "reason", gfp.Reason)
 
 		// Task lifecycle events — applied deterministically on every node.
-		case event.EventTypeTaskPosted:
-			if stack.taskMgr == nil {
-				return
+		// ApplyDAGEvent is idempotent: if this node created the event, the
+		// state transition was already applied locally and is silently skipped.
+		case event.EventTypeTaskPosted, event.EventTypeTaskClaimed,
+			event.EventTypeTaskSubmitted, event.EventTypeTaskApproved,
+			event.EventTypeTaskDisputed:
+			if stack.taskMgr != nil {
+				stack.taskMgr.ApplyDAGEvent(ev)
 			}
-			tp, err := event.GetPayload[event.TaskPostedPayload](ev)
-			if err != nil {
-				return
-			}
-			if _, getErr := stack.taskMgr.Get(tp.TaskID); getErr != nil {
-				_, _ = stack.taskMgr.PostTask(
-					tp.PosterID, tp.Title, tp.Description, tp.Category, tp.Budget,
-					tasks.PostTaskOpts{
-						TaskID:          tp.TaskID,
-						DeliveryMethod:  tp.DeliveryMethod,
-						SuccessCriteria: tp.SuccessCriteria,
-						AssuranceLane:   tp.AssuranceLane,
-						MaxDeliveryTimeSecs: tp.MaxDeliveryTime,
-					},
-				)
-			}
-
-		case event.EventTypeTaskClaimed:
-			if stack.taskMgr == nil {
-				return
-			}
-			tp, err := event.GetPayload[event.TaskClaimedPayload](ev)
-			if err != nil {
-				return
-			}
-			_ = stack.taskMgr.ClaimTask(tp.TaskID, crypto.AgentID(tp.ClaimerID))
-
-		case event.EventTypeTaskSubmitted:
-			if stack.taskMgr == nil {
-				return
-			}
-			tp, err := event.GetPayload[event.TaskSubmittedPayload](ev)
-			if err != nil {
-				return
-			}
-			_ = stack.taskMgr.SubmitResult(tp.TaskID, crypto.AgentID(tp.ClaimerID), tp.ResultHash, tp.ResultNote, tp.ResultURI)
-
-		case event.EventTypeTaskApproved:
-			if stack.taskMgr == nil {
-				return
-			}
-			tp, err := event.GetPayload[event.TaskApprovedPayload](ev)
-			if err != nil {
-				return
-			}
-			_ = stack.taskMgr.ApproveTask(tp.TaskID, crypto.AgentID(tp.ApproverID))
-
-		case event.EventTypeTaskDisputed:
-			if stack.taskMgr == nil {
-				return
-			}
-			tp, err := event.GetPayload[event.TaskDisputedPayload](ev)
-			if err != nil {
-				return
-			}
-			_ = stack.taskMgr.DisputeTask(tp.TaskID, crypto.AgentID(tp.PosterID))
 		}
 	})
 

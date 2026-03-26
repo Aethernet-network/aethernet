@@ -25,6 +25,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/canary"
 	"github.com/Aethernet-network/aethernet/internal/config"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/evidence"
 )
 
@@ -893,6 +894,77 @@ func (m *TaskManager) DisputeTask(taskID string, posterID crypto.AgentID) error 
 	task.DisputedAt = time.Now().UnixNano()
 	m.persist(task)
 	return nil
+}
+
+// ApplyDAGEvent applies a task lifecycle DAG event to the local TaskManager.
+// Idempotent: if the state transition has already been applied (e.g. this node
+// was the one that created the event), it is silently skipped. This enables
+// safe replay from both DAG sync and local emission.
+func (m *TaskManager) ApplyDAGEvent(ev *event.Event) {
+	switch ev.Type {
+	case event.EventTypeTaskPosted:
+		tp, err := event.GetPayload[event.TaskPostedPayload](ev)
+		if err != nil {
+			return
+		}
+		if _, getErr := m.Get(tp.TaskID); getErr == nil {
+			return // already exists
+		}
+		_, _ = m.PostTask(
+			tp.PosterID, tp.Title, tp.Description, tp.Category, tp.Budget,
+			PostTaskOpts{
+				TaskID:              tp.TaskID,
+				DeliveryMethod:      tp.DeliveryMethod,
+				SuccessCriteria:     tp.SuccessCriteria,
+				AssuranceLane:       tp.AssuranceLane,
+				MaxDeliveryTimeSecs: tp.MaxDeliveryTime,
+			},
+		)
+
+	case event.EventTypeTaskClaimed:
+		tp, err := event.GetPayload[event.TaskClaimedPayload](ev)
+		if err != nil {
+			return
+		}
+		// Idempotent: skip if already claimed.
+		if t, getErr := m.Get(tp.TaskID); getErr == nil && t.Status != TaskStatusOpen {
+			return
+		}
+		_ = m.ClaimTask(tp.TaskID, crypto.AgentID(tp.ClaimerID))
+
+	case event.EventTypeTaskSubmitted:
+		tp, err := event.GetPayload[event.TaskSubmittedPayload](ev)
+		if err != nil {
+			return
+		}
+		// Idempotent: skip if already submitted or later.
+		if t, getErr := m.Get(tp.TaskID); getErr == nil && t.Status != TaskStatusClaimed {
+			return
+		}
+		_ = m.SubmitResult(tp.TaskID, crypto.AgentID(tp.ClaimerID), tp.ResultHash, tp.ResultNote, tp.ResultURI)
+
+	case event.EventTypeTaskApproved:
+		tp, err := event.GetPayload[event.TaskApprovedPayload](ev)
+		if err != nil {
+			return
+		}
+		// Idempotent: skip if already completed.
+		if t, getErr := m.Get(tp.TaskID); getErr == nil && t.Status != TaskStatusSubmitted {
+			return
+		}
+		_ = m.ApproveTask(tp.TaskID, crypto.AgentID(tp.ApproverID))
+
+	case event.EventTypeTaskDisputed:
+		tp, err := event.GetPayload[event.TaskDisputedPayload](ev)
+		if err != nil {
+			return
+		}
+		// Idempotent: skip if already disputed.
+		if t, getErr := m.Get(tp.TaskID); getErr == nil && t.Status != TaskStatusSubmitted {
+			return
+		}
+		_ = m.DisputeTask(tp.TaskID, crypto.AgentID(tp.PosterID))
+	}
 }
 
 // CancelTask cancels an open task. Only the poster may cancel an open task.
