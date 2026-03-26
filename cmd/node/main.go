@@ -1556,6 +1556,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		txIDStore.Start()
 		defer txIDStore.Stop()
 		apiSrv.SetTxAuth(auth.DefaultChainID(), txIDStore)
+		apiSrv.SetEndpointRateLimiter(auth.NewEndpointRateLimiter(auth.DefaultLimits()))
 	}
 	// CRITICAL-1: auth defaults to true in NewServer. Disable only when --no-auth
 	// is explicitly requested (testnet/development). A warning is emitted below.

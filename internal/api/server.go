@@ -270,8 +270,9 @@ type Server struct {
 	agentRateLimiter *auth.AgentRateLimiter
 
 	// AETHERNET-TX-V1 transaction signing infrastructure.
-	chainID    string
-	txIDStore  *auth.TxIDStore
+	chainID           string
+	txIDStore         *auth.TxIDStore
+	endpointLimiter   *auth.EndpointRateLimiter
 
 	// minTaskBudget is the minimum budget (micro-AET) enforced in handlePostTask.
 	// Initialized from tasks.MinTaskBudget; overridable via SetMinTaskBudget.
@@ -549,6 +550,11 @@ func (s *Server) SetTxAuth(chainID string, txIDStore *auth.TxIDStore) {
 	s.txIDStore = txIDStore
 }
 
+// SetEndpointRateLimiter wires per-endpoint rate limiting.
+func (s *Server) SetEndpointRateLimiter(rl *auth.EndpointRateLimiter) {
+	s.endpointLimiter = rl
+}
+
 type contextKey string
 
 const authContextKey contextKey = "aethernet_auth"
@@ -760,6 +766,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
+	}
+
+	// Payload ceiling: reject oversized requests before any crypto work.
+	if r.ContentLength > 0 {
+		maxSize := int64(64 << 10) // 64KB default
+		if strings.HasSuffix(r.URL.Path, "/submit") {
+			maxSize = 256 << 10 // 256KB for task submissions
+		} else if r.URL.Path == "/v1/agents" {
+			maxSize = 16 << 10 // 16KB for registration
+		}
+		if r.ContentLength > maxSize {
+			slog.Warn("payload too large",
+				"ip", ratelimit.ExtractIP(r), "size", r.ContentLength, "limit", maxSize)
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			return
+		}
 	}
 
 	// AETHERNET-TX-V1 transaction signing — primary auth path for writes.
