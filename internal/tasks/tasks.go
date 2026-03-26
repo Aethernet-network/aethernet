@@ -156,6 +156,7 @@ type Task struct {
 	Category          string           `json:"category"`
 	PosterID          string           `json:"poster_id"`
 	ClaimerID         string           `json:"claimer_id,omitempty"`
+	ClaimEventID      string           `json:"claim_event_id,omitempty"` // DAG event ID (TxID) for deterministic tie-break
 	Budget            uint64           `json:"budget"`
 	Status            TaskStatus       `json:"status"`
 	ResultHash        string           `json:"result_hash,omitempty"`
@@ -1001,7 +1002,7 @@ func (m *TaskManager) ApplyDAGEvent(ev *event.Event) {
 		if err != nil {
 			return
 		}
-		m.applyTaskClaimed(tp)
+		m.applyTaskClaimed(tp, string(ev.ID))
 
 	case event.EventTypeTaskSubmitted:
 		tp, err := event.GetPayload[event.TaskSubmittedPayload](ev)
@@ -1047,7 +1048,7 @@ func (m *TaskManager) applyTaskPosted(tp event.TaskPostedPayload) {
 	)
 }
 
-func (m *TaskManager) applyTaskClaimed(tp event.TaskClaimedPayload) {
+func (m *TaskManager) applyTaskClaimed(tp event.TaskClaimedPayload, eventID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	task, ok := m.tasks[tp.TaskID]
@@ -1055,10 +1056,28 @@ func (m *TaskManager) applyTaskClaimed(tp event.TaskClaimedPayload) {
 		slog.Debug("applyTaskClaimed: task not found", "task_id", tp.TaskID)
 		return
 	}
-	if task.Status != TaskStatusOpen {
-		return // idempotent — already claimed or later
+
+	switch task.Status {
+	case TaskStatusOpen:
+		// First claim — apply directly.
+	case TaskStatusClaimed:
+		// Concurrent claim race: deterministic tie-break by event ID.
+		// The claim with the lexicographically lower event ID wins.
+		// This ensures all nodes converge on the same claimer regardless
+		// of the order events are received.
+		if eventID == "" || task.ClaimEventID == "" || eventID >= task.ClaimEventID {
+			return // current claim wins or no tie-break data
+		}
+		slog.Info("applyTaskClaimed: tie-break override",
+			"task_id", tp.TaskID,
+			"prev_claimer", task.ClaimerID, "prev_event", task.ClaimEventID,
+			"new_claimer", tp.ClaimerID, "new_event", eventID)
+	default:
+		return // task is past claimed state (submitted, completed, etc.)
 	}
+
 	task.ClaimerID = tp.ClaimerID
+	task.ClaimEventID = eventID
 	task.Status = TaskStatusClaimed
 	now := time.Now()
 	task.ClaimedAt = now.UnixNano()

@@ -574,6 +574,46 @@ func getTxID(r *http.Request) string {
 	return ""
 }
 
+// checkTxIDSeen checks the TxID store and DAG for replay protection.
+// Returns true if the TxID was already processed (caller should return
+// idempotent response). Marks the TxID as seen if new.
+func (s *Server) checkTxIDSeen(w http.ResponseWriter, r *http.Request) bool {
+	txID := getTxID(r)
+	if txID == "" {
+		return false // not a TX-V1 request — no TxID to check
+	}
+
+	// Hot cache check.
+	if s.txIDStore != nil {
+		seen, _ := s.txIDStore.IsSeen(txID)
+		if seen {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"txid":   txID,
+				"status": "already_processed",
+			})
+			return true
+		}
+	}
+
+	// DAG check: if an event with this ID already exists.
+	if _, err := s.dag.Get(event.EventID(txID)); err == nil {
+		if s.txIDStore != nil {
+			s.txIDStore.MarkSeen(txID)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"txid":   txID,
+			"status": "already_processed",
+		})
+		return true
+	}
+
+	// Mark in hot cache for future checks.
+	if s.txIDStore != nil {
+		s.txIDStore.MarkSeen(txID)
+	}
+	return false
+}
+
 // SetTaskManager wires the task marketplace manager and escrow system into the
 // server. Call before Start. When nil, the /v1/tasks endpoints return 501.
 func (s *Server) SetTaskManager(tm *tasks.TaskManager, e *escrow.Escrow) {
@@ -1194,6 +1234,9 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
 		return
 	}
+	if s.checkTxIDSeen(w, r) {
+		return
+	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req postTaskRequest
@@ -1378,6 +1421,9 @@ func (s *Server) handleClaimTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
 		return
 	}
+	if s.checkTxIDSeen(w, r) {
+		return
+	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req claimTaskRequest
@@ -1437,6 +1483,9 @@ func (s *Server) handleClaimTask(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 	if s.taskMgr == nil {
 		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
+		return
+	}
+	if s.checkTxIDSeen(w, r) {
 		return
 	}
 
@@ -1535,6 +1584,9 @@ func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
 		return
 	}
+	if s.checkTxIDSeen(w, r) {
+		return
+	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req approveTaskRequest
@@ -1628,6 +1680,9 @@ func (s *Server) handleDisputeTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
 		return
 	}
+	if s.checkTxIDSeen(w, r) {
+		return
+	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req disputeTaskRequest
@@ -1664,6 +1719,9 @@ func (s *Server) handleDisputeTask(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 	if s.taskMgr == nil || s.escrowMgr == nil {
 		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
+		return
+	}
+	if s.checkTxIDSeen(w, r) {
 		return
 	}
 
@@ -2266,6 +2324,9 @@ func (s *Server) handleGetBalance(w http.ResponseWriter, r *http.Request) {
 // When staking is wired in, the transfer amount must not exceed the sender's
 // computed trust limit; excess is rejected with HTTP 403.
 func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
+	if s.checkTxIDSeen(w, r) {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req transferRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -2641,6 +2702,9 @@ func (s *Server) handleStake(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "staking not enabled")
 		return
 	}
+	if s.checkTxIDSeen(w, r) {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req stakeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -2904,6 +2968,9 @@ func (s *Server) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleFaucet(w http.ResponseWriter, r *http.Request) {
 	if os.Getenv("AETHERNET_TESTNET") != "true" {
 		writeError(w, http.StatusNotFound, "faucet is testnet-only")
+		return
+	}
+	if s.checkTxIDSeen(w, r) {
 		return
 	}
 
@@ -3198,6 +3265,9 @@ func (s *Server) handleDeleteRegistry(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUnstake(w http.ResponseWriter, r *http.Request) {
 	if s.stakeManager == nil {
 		writeError(w, http.StatusNotImplemented, "staking not enabled")
+		return
+	}
+	if s.checkTxIDSeen(w, r) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
