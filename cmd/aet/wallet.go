@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	aetcrypto "github.com/Aethernet-network/aethernet/internal/crypto"
 	"golang.org/x/crypto/scrypt"
 	"golang.org/x/term"
 )
@@ -23,6 +24,7 @@ type WalletFile struct {
 	Version   int    `json:"version"`
 	Name      string `json:"name"`
 	AgentID   string `json:"agent_id"`
+	Address   string `json:"address,omitempty"` // bech32 address (taet1... or aet1...)
 	PublicKey string `json:"public_key_hex"`
 	Salt      string `json:"salt"`
 	Nonce     string `json:"nonce"`
@@ -164,10 +166,13 @@ func createWallet(name string) (*WalletFile, ed25519.PrivateKey, error) {
 		return nil, nil, err
 	}
 
+	addr, _ := aetcrypto.AddressFromPublicKey(pub, true) // testnet by default
+
 	wf := &WalletFile{
 		Version:   1,
 		Name:      name,
 		AgentID:   agentID,
+		Address:   addr,
 		PublicKey: hex.EncodeToString(pub),
 		Salt:      salt,
 		Nonce:     nonce,

@@ -239,8 +239,10 @@ func runWalletCreate(args []string) {
 
 	printHeader("Wallet Created")
 	printRow("Name", wf.Name)
+	if wf.Address != "" {
+		printRow("Address", wf.Address)
+	}
 	printRow("Agent ID", wf.AgentID)
-	printRow("Public Key", wf.PublicKey)
 	printRow("Stored", walletPath(wf.Name))
 	fmt.Println()
 	if regErr == nil {
@@ -274,14 +276,18 @@ func runWalletList(args []string) {
 	}
 
 	printHeader("Wallets")
-	headers := []string{"", "Name", "Agent ID", "Created"}
+	headers := []string{"", "Name", "Address", "Created"}
 	var rows [][]string
 	for _, w := range wallets {
 		marker := " "
 		if w.Name == active {
 			marker = "*"
 		}
-		rows = append(rows, []string{marker, w.Name, truncateID(w.AgentID, 16), w.CreatedAt[:10]})
+		addrDisplay := truncateID(w.AgentID, 16)
+		if w.Address != "" {
+			addrDisplay = truncateID(w.Address, 20)
+		}
+		rows = append(rows, []string{marker, w.Name, addrDisplay, w.CreatedAt[:10]})
 	}
 	printTable(headers, rows)
 	fmt.Printf("\n  Active wallet: %s\n", active)
