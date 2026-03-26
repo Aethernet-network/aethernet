@@ -37,6 +37,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -267,6 +268,10 @@ type Server struct {
 	// registered public key. Set via SetAuthVerifier.
 	nonceStore       auth.NonceStore
 	agentRateLimiter *auth.AgentRateLimiter
+
+	// AETHERNET-TX-V1 transaction signing infrastructure.
+	chainID    string
+	txIDStore  *auth.TxIDStore
 
 	// minTaskBudget is the minimum budget (micro-AET) enforced in handlePostTask.
 	// Initialized from tasks.MinTaskBudget; overridable via SetMinTaskBudget.
@@ -538,15 +543,33 @@ func (s *Server) SetAuthVerifier(ns auth.NonceStore, rl *auth.AgentRateLimiter) 
 	s.agentRateLimiter = rl
 }
 
+// SetTxAuth wires AETHERNET-TX-V1 transaction signing infrastructure.
+func (s *Server) SetTxAuth(chainID string, txIDStore *auth.TxIDStore) {
+	s.chainID = chainID
+	s.txIDStore = txIDStore
+}
+
 type contextKey string
 
 const authContextKey contextKey = "aethernet_auth"
+const txContextKey contextKey = "aethernet_tx"
 
 // getAuthAgent returns the verified agent ID from a signed request, or empty
 // if the request was not signature-authenticated.
 func getAuthAgent(r *http.Request) crypto.AgentID {
+	if vtx, ok := r.Context().Value(txContextKey).(*auth.VerifiedTx); ok {
+		return crypto.AgentID(vtx.Actor)
+	}
 	if a, ok := r.Context().Value(authContextKey).(*auth.RequestAuth); ok {
 		return a.AgentID
+	}
+	return ""
+}
+
+// getTxID returns the verified TxID from a TX-V1 signed request, or empty.
+func getTxID(r *http.Request) string {
+	if vtx, ok := r.Context().Value(txContextKey).(*auth.VerifiedTx); ok {
+		return vtx.TxID
 	}
 	return ""
 }
@@ -699,16 +722,54 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Signature verification: if X-Aethernet-Signature header is present,
-	// verify the request against the agent's registered Ed25519 public key.
-	// This takes priority over API key auth.
+	// AETHERNET-TX-V1 transaction signing — primary auth path for writes.
+	if r.Header.Get("X-AetherNet-Version") == auth.TxVersion && s.txIDStore != nil {
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeCodedError(w, http.StatusBadRequest, "body_read_error", "failed to read request body", "")
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
+		vtx, err := auth.VerifyTransaction(r, bodyBytes, s.chainID, func(actor string) (ed25519.PublicKey, error) {
+			// For registration: if agent not found, use the actor field as the public key directly.
+			agentID := crypto.AgentID(actor)
+			fp, fpErr := s.registry.Get(agentID)
+			if fpErr == nil {
+				return ed25519.PublicKey(fp.PublicKey), nil
+			}
+			// Self-registration: actor IS the hex-encoded public key.
+			pubBytes, hexErr := hex.DecodeString(actor)
+			if hexErr == nil && len(pubBytes) == 32 {
+				return ed25519.PublicKey(pubBytes), nil
+			}
+			return nil, fmt.Errorf("agent not registered: %s", actor)
+		})
+		if err != nil {
+			writeCodedError(w, http.StatusUnauthorized, "SIGNATURE_INVALID", err.Error(), "")
+			return
+		}
+
+		if s.agentRateLimiter != nil && !s.agentRateLimiter.Allow(crypto.AgentID(vtx.Actor)) {
+			writeCodedError(w, http.StatusTooManyRequests, "RATE_LIMITED",
+				"too many signed requests — try again later", "")
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), txContextKey, vtx)
+		r = r.WithContext(ctx)
+		s.mux.ServeHTTP(w, r)
+		return
+	}
+
+	// AETHERNET-REQUEST-V1 (deprecated) — backward compatibility.
 	if sig := r.Header.Get("X-Aethernet-Signature"); sig != "" && s.nonceStore != nil {
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
 			writeCodedError(w, http.StatusBadRequest, "body_read_error", "failed to read request body", "")
 			return
 		}
-		r.Body = io.NopCloser(bytes.NewReader(bodyBytes)) // restore for handler
+		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 		authResult, err := auth.VerifyRequest(r, bodyBytes, s.registry, s.nonceStore)
 		if err != nil {
@@ -722,9 +783,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		w.Header().Set("X-AetherNet-Deprecated", "AETHERNET-REQUEST-V1 will be removed. Upgrade to AETHERNET-TX-V1.")
 		ctx := context.WithValue(r.Context(), authContextKey, authResult)
 		r = r.WithContext(ctx)
-
 		s.mux.ServeHTTP(w, r)
 		return
 	}
