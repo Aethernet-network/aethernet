@@ -1206,14 +1206,11 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	// Signer = actor: if request is signature-authenticated, the signer IS the poster.
 	posterID := req.PosterID
-	if posterID == "" {
-		posterID = string(s.agentID)
-	} else if s.requireAuth && crypto.AgentID(posterID) != s.agentID && !s.isAuthenticated(r) {
-		// When requireAuth is enabled (mainnet): poster_id must match the node's
-		// own identity without a valid API key, preventing escrow spoofing
-		// (HIGH-1.3). On testnet (requireAuth=false), SDK-set poster_id is
-		// accepted for backward compatibility.
+	if authAgent := getAuthAgent(r); authAgent != "" {
+		posterID = string(authAgent)
+	} else if posterID == "" {
 		posterID = string(s.agentID)
 	}
 
@@ -1388,9 +1385,11 @@ func (s *Server) handleClaimTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	// Prefer agent_id (the canonical field); fall back to claimer_id (legacy), then the node's own identity.
+	// Signer = actor: if signature-authenticated, the signer IS the claimer.
 	claimerID := req.AgentID
-	if claimerID == "" {
+	if authAgent := getAuthAgent(r); authAgent != "" {
+		claimerID = string(authAgent)
+	} else if claimerID == "" {
 		claimerID = req.ClaimerID
 	}
 	if claimerID == "" {
@@ -1448,7 +1447,9 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claimerID := req.ClaimerID
-	if claimerID == "" {
+	if authAgent := getAuthAgent(r); authAgent != "" {
+		claimerID = string(authAgent)
+	} else if claimerID == "" {
 		claimerID = string(s.agentID)
 	}
 
@@ -1542,7 +1543,9 @@ func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	approverID := req.ApproverID
-	if approverID == "" {
+	if authAgent := getAuthAgent(r); authAgent != "" {
+		approverID = string(authAgent)
+	} else if approverID == "" {
 		approverID = string(s.agentID)
 	}
 
@@ -1633,7 +1636,9 @@ func (s *Server) handleDisputeTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	posterID := req.PosterID
-	if posterID == "" {
+	if authAgent := getAuthAgent(r); authAgent != "" {
+		posterID = string(authAgent)
+	} else if posterID == "" {
 		posterID = string(s.agentID)
 	}
 
@@ -1669,7 +1674,9 @@ func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	posterID := req.PosterID
-	if posterID == "" {
+	if authAgent := getAuthAgent(r); authAgent != "" {
+		posterID = string(authAgent)
+	} else if posterID == "" {
 		posterID = string(s.agentID)
 	}
 
@@ -1713,7 +1720,9 @@ func (s *Server) handleCreateSubtask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claimerID := req.ClaimerID
-	if claimerID == "" {
+	if authAgent := getAuthAgent(r); authAgent != "" {
+		claimerID = string(authAgent)
+	} else if claimerID == "" {
 		claimerID = string(s.agentID)
 	}
 
@@ -2018,7 +2027,13 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 	regAgentID := s.agentID
 	regPubKey := []byte(s.kp.PublicKey)
 
-	if req.PublicKeyB64 != "" {
+	// Signer = actor: if TX-V1 authenticated, the signer's public key is the identity.
+	if authAgent := getAuthAgent(r); authAgent != "" {
+		regAgentID = authAgent
+		if pubBytes, err := hex.DecodeString(string(authAgent)); err == nil && len(pubBytes) == 32 {
+			regPubKey = pubBytes
+		}
+	} else if req.PublicKeyB64 != "" {
 		decoded, err := base64.StdEncoding.DecodeString(req.PublicKeyB64)
 		if err != nil {
 			writeCodedError(w, http.StatusBadRequest, "invalid_request",
