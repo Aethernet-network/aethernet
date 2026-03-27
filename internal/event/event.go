@@ -309,6 +309,55 @@ func New(
 	return e, nil
 }
 
+// ComputeBodyCommitment returns the SHA-256 hex digest of the event's canonical
+// payload bytes. This commitment is included in EventHeader so peers can verify
+// body integrity after receiver-driven fetch without the full payload. The
+// commitment is deterministic: same payload → same commitment on every node.
+func ComputeBodyCommitment(e *Event) (string, error) {
+	data := e.Payload
+	if data == nil {
+		data = json.RawMessage("null")
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// EventHeaderProjection contains the causality-plane fields of an Event.
+// This is a read-only projection — it does not modify the original Event
+// or change EventID semantics. Used by the Fast Path wire protocol to relay
+// causal structure before the full body is transferred.
+type EventHeaderProjection struct {
+	EventID         EventID   `json:"event_id"`
+	Type            EventType `json:"type"`
+	CausalRefs      []EventID `json:"causal_refs"`
+	AgentID         string    `json:"agent_id"`
+	CausalTimestamp uint64    `json:"causal_timestamp"`
+	StakeAmount     uint64    `json:"stake_amount"`
+	BodyCommitment  string    `json:"body_commitment"`
+	Signature       []byte    `json:"signature,omitempty"`
+}
+
+// ProjectHeader extracts the causality-plane header from an Event. The
+// EventID, signature, and all causal fields are copied; the payload is
+// replaced by its SHA-256 body commitment. Returns an error if the body
+// commitment cannot be computed.
+func ProjectHeader(e *Event) (*EventHeaderProjection, error) {
+	bc, err := ComputeBodyCommitment(e)
+	if err != nil {
+		return nil, fmt.Errorf("event: project header: %w", err)
+	}
+	return &EventHeaderProjection{
+		EventID:         e.ID,
+		Type:            e.Type,
+		CausalRefs:      e.CausalRefs,
+		AgentID:         e.AgentID,
+		CausalTimestamp: e.CausalTimestamp,
+		StakeAmount:     e.StakeAmount,
+		BodyCommitment:  bc,
+		Signature:       e.Signature,
+	}, nil
+}
+
 // validTransitions declares the permitted settlement state progressions.
 // The DAG is append-only so we never delete or rewrite history — we only
 // allow forward transitions. Settled events can still be Adjusted (via a

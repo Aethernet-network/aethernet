@@ -800,3 +800,99 @@ func TestGetPayload_Generation(t *testing.T) {
 		t.Errorf("GetPayload returned %+v", got)
 	}
 }
+
+// ── Fast Path: Body Commitment ───────────────────────────────────────────────
+
+func TestComputeBodyCommitment_Deterministic(t *testing.T) {
+	payload := event.TransferPayload{
+		FromAgent: "alice",
+		ToAgent:   "bob",
+		Amount:    1000,
+		Currency:  "AET",
+	}
+	e, err := event.New(event.EventTypeTransfer, nil, payload, "alice", nil, 0)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	bc1, err := event.ComputeBodyCommitment(e)
+	if err != nil {
+		t.Fatalf("ComputeBodyCommitment: %v", err)
+	}
+	bc2, err := event.ComputeBodyCommitment(e)
+	if err != nil {
+		t.Fatalf("ComputeBodyCommitment 2: %v", err)
+	}
+	if bc1 != bc2 {
+		t.Error("body commitment is not deterministic")
+	}
+	if len(bc1) != 64 { // SHA-256 hex
+		t.Errorf("body commitment length = %d; want 64", len(bc1))
+	}
+}
+
+func TestComputeBodyCommitment_DiffersForDiffPayloads(t *testing.T) {
+	e1, _ := event.New(event.EventTypeTransfer, nil, event.TransferPayload{FromAgent: "alice", ToAgent: "bob", Amount: 100, Currency: "AET"}, "alice", nil, 0)
+	e2, _ := event.New(event.EventTypeTransfer, nil, event.TransferPayload{FromAgent: "alice", ToAgent: "bob", Amount: 200, Currency: "AET"}, "alice", nil, 0)
+
+	bc1, _ := event.ComputeBodyCommitment(e1)
+	bc2, _ := event.ComputeBodyCommitment(e2)
+	if bc1 == bc2 {
+		t.Error("different payloads produced the same body commitment")
+	}
+}
+
+// ── Fast Path: Header Projection ─────────────────────────────────────────────
+
+func TestProjectHeader_Deterministic(t *testing.T) {
+	payload := event.TransferPayload{FromAgent: "alice", ToAgent: "bob", Amount: 500, Currency: "AET"}
+	e, _ := event.New(event.EventTypeTransfer, nil, payload, "alice", nil, 1000)
+
+	h1, err := event.ProjectHeader(e)
+	if err != nil {
+		t.Fatalf("ProjectHeader: %v", err)
+	}
+	h2, err := event.ProjectHeader(e)
+	if err != nil {
+		t.Fatalf("ProjectHeader 2: %v", err)
+	}
+
+	if h1.EventID != h2.EventID {
+		t.Error("header projection EventID not deterministic")
+	}
+	if h1.BodyCommitment != h2.BodyCommitment {
+		t.Error("header projection BodyCommitment not deterministic")
+	}
+}
+
+func TestProjectHeader_PreservesEventID(t *testing.T) {
+	payload := event.TransferPayload{FromAgent: "alice", ToAgent: "bob", Amount: 750, Currency: "AET"}
+	e, _ := event.New(event.EventTypeTransfer, nil, payload, "alice", nil, 0)
+
+	h, err := event.ProjectHeader(e)
+	if err != nil {
+		t.Fatalf("ProjectHeader: %v", err)
+	}
+	if h.EventID != e.ID {
+		t.Errorf("header EventID = %q; want %q", h.EventID, e.ID)
+	}
+}
+
+func TestProjectHeader_CopiesCausalFields(t *testing.T) {
+	parent, _ := event.New(event.EventTypeTransfer, nil, event.TransferPayload{FromAgent: "x", ToAgent: "y", Amount: 1, Currency: "AET"}, "x", nil, 0)
+	child, _ := event.New(event.EventTypeTransfer, []event.EventID{parent.ID}, event.TransferPayload{FromAgent: "y", ToAgent: "z", Amount: 2, Currency: "AET"}, "y", map[event.EventID]uint64{parent.ID: parent.CausalTimestamp}, 0)
+
+	h, _ := event.ProjectHeader(child)
+	if h.Type != child.Type {
+		t.Errorf("Type = %q; want %q", h.Type, child.Type)
+	}
+	if h.AgentID != child.AgentID {
+		t.Errorf("AgentID = %q; want %q", h.AgentID, child.AgentID)
+	}
+	if h.CausalTimestamp != child.CausalTimestamp {
+		t.Errorf("CausalTimestamp = %d; want %d", h.CausalTimestamp, child.CausalTimestamp)
+	}
+	if len(h.CausalRefs) != 1 || h.CausalRefs[0] != parent.ID {
+		t.Errorf("CausalRefs = %v; want [%s]", h.CausalRefs, parent.ID)
+	}
+}
