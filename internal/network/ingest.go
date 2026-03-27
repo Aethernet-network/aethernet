@@ -69,6 +69,7 @@ type IngestManager struct {
 	completeQ    chan event.EventID // bodies received, ready for validation
 	validateQ    chan event.EventID // validation passed, ready for materialization
 	materializeQ chan event.EventID // materialization ready (dag.Add)
+	repairCh     chan event.EventID // events blocked on missing parents
 
 	mu     sync.RWMutex
 	stopCh chan struct{}
@@ -86,6 +87,7 @@ func NewIngestManager(config FastPathConfig) *IngestManager {
 		completeQ:    make(chan event.EventID, config.MaxAnnounceQueueSize),
 		validateQ:    make(chan event.EventID, config.MaxAnnounceQueueSize),
 		materializeQ: make(chan event.EventID, config.MaxAnnounceQueueSize),
+		repairCh:     make(chan event.EventID, repairQSize),
 		stopCh:       make(chan struct{}),
 	}
 }
@@ -225,6 +227,9 @@ func (im *IngestManager) Remove(id event.EventID) {
 	defer im.mu.Unlock()
 	delete(im.tracked, id)
 }
+
+// RepairQ returns the repair queue for external consumers.
+func (im *IngestManager) RepairQ() <-chan event.EventID { return im.repairCh }
 
 // SetReconstructedEvent stores the validated full event on the tracking entry.
 func (im *IngestManager) SetReconstructedEvent(id event.EventID, ev *event.Event) {

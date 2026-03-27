@@ -250,7 +250,7 @@ func (n *Node) Start() error {
 
 	if n.ingest != nil {
 		n.ingest.Start()
-		n.wg.Add(4)
+		n.wg.Add(5)
 		go func() {
 			defer n.wg.Done()
 			n.relayWorker(ctx)
@@ -266,6 +266,10 @@ func (n *Node) Start() error {
 		go func() {
 			defer n.wg.Done()
 			n.materializeWorker(ctx)
+		}()
+		go func() {
+			defer n.wg.Done()
+			n.repairWorker(ctx)
 		}()
 	}
 
@@ -1054,6 +1058,14 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 	case MsgEventBody:
 		// Body response: verify commitment and advance to Completed.
 		n.handleBodyResponse(peer, msg.Payload)
+
+	case MsgRepairRequest:
+		// Targeted repair: peer needs specific missing events.
+		n.handleRepairRequest(peer, msg.Payload)
+
+	case MsgRepairResponse:
+		// Repair response: feed events into DAG and retry blocked children.
+		n.handleRepairResponse(peer, msg.Payload)
 
 	case MsgPing:
 		_ = peer.Send(Message{Type: MsgPong})

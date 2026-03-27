@@ -100,6 +100,15 @@ type EventTracking struct {
 	// after validation passes. Non-nil only at StageValidated or later.
 	Reconstructed *event.Event
 
+	// MissingParents tracks causal refs that are not yet in the local DAG.
+	// Populated when materialization fails with ErrMissingCausalRef.
+	// Cleared when the missing parents are received and materialized.
+	MissingParents map[event.EventID]struct{}
+
+	// RepairRequested is true when a repair request has been sent for this
+	// event's missing parents. Prevents duplicate repair requests.
+	RepairRequested bool
+
 	// RelayCount tracks how many peers this header has been relayed to.
 	RelayCount int
 }

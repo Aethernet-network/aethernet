@@ -11,8 +11,10 @@ package network
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
+	"github.com/Aethernet-network/aethernet/internal/dag"
 	"github.com/Aethernet-network/aethernet/internal/event"
 )
 
@@ -54,10 +56,26 @@ func (n *Node) materializeEvent(id event.EventID) {
 	// The fast-path validation stage already checked signature and EventID
 	// consistency, but dag.Add re-checks independently. This is defense-in-depth.
 	if err := n.dag.Add(ev); err != nil {
-		slog.Debug("materialize: dag.Add failed",
-			"event_id", id, "err", err)
-		// Not necessarily an error — ErrDuplicateEvent means the V1 sync path
-		// or another fast-path worker already materialized this event.
+		if errors.Is(err, dag.ErrMissingCausalRef) {
+			// Parents not yet materialized — identify which ones and enqueue repair.
+			missing := make(map[event.EventID]struct{})
+			for _, ref := range ev.CausalRefs {
+				if _, getErr := n.dag.Get(ref); getErr != nil {
+					missing[ref] = struct{}{}
+				}
+			}
+			if len(missing) > 0 {
+				n.ingest.SetMissingParents(id, missing)
+				n.ingest.EnqueueRepair(id)
+				slog.Debug("materialize: missing parents, enqueued repair",
+					"event_id", id, "missing", len(missing))
+				return
+			}
+		}
+		if !errors.Is(err, dag.ErrDuplicateEvent) {
+			slog.Debug("materialize: dag.Add failed",
+				"event_id", id, "err", err)
+		}
 		n.ingest.Remove(id)
 		return
 	}
