@@ -188,6 +188,12 @@ type Node struct {
 	// consensus, Settlement → applicator, Registration → identity.
 	syncHandler func(ev *event.Event)
 
+	// ingest is the Fast Path v1 pre-materialization pipeline manager.
+	// Tracks events through Announced → Completed → Validated → Materialized.
+	// Initialized at construction; not wired into the message path until
+	// relay and body-fetch logic are added in subsequent prompts.
+	ingest *IngestManager
+
 	mu       sync.RWMutex
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -204,8 +210,12 @@ func NewNode(config *NodeConfig, d *dag.DAG) *Node {
 		peers:     make(map[crypto.AgentID]*Peer),
 		incoming:  make(chan Message, 256),
 		seenVotes: make(map[string]time.Time),
+		ingest:    NewIngestManager(DefaultFastPathConfig()),
 	}
 }
+
+// Ingest returns the node's IngestManager for external wiring.
+func (n *Node) Ingest() *IngestManager { return n.ingest }
 
 // makePeer constructs a Peer using the node's configured MaxMessageBytes limit.
 // Falls back to the package-level maxMsgBytes when the limit is zero or negative.
@@ -238,6 +248,10 @@ func (n *Node) Start() error {
 	go n.acceptLoop()
 	go n.syncLoop()
 
+	if n.ingest != nil {
+		n.ingest.Start()
+	}
+
 	return nil
 }
 
@@ -268,6 +282,9 @@ func (n *Node) Stop() {
 	listener.Close() // unblocks acceptLoop's Accept call
 	for _, p := range peers {
 		p.Close() // closes conn, unblocks each readLoop's Decode call
+	}
+	if n.ingest != nil {
+		n.ingest.Stop()
 	}
 
 	n.wg.Wait()
