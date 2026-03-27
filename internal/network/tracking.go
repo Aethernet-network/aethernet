@@ -16,6 +16,7 @@
 package network
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
@@ -84,6 +85,16 @@ type EventTracking struct {
 	// BodyRequested tracks whether a body fetch has been initiated.
 	// Prevents duplicate fetch requests for the same event.
 	BodyRequested bool
+
+	// BodyAvailable is true when the body payload is present locally.
+	// For locally-created events this is true from construction.
+	// For remote events it becomes true after a verified body response.
+	BodyAvailable bool
+
+	// Body holds the verified payload bytes. Non-nil only after body
+	// completion (BodyAvailable == true). Used to reconstruct the full
+	// event.Event for validation and materialization.
+	Body json.RawMessage
 
 	// RelayCount tracks how many peers this header has been relayed to.
 	RelayCount int

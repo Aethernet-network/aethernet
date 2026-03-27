@@ -250,10 +250,14 @@ func (n *Node) Start() error {
 
 	if n.ingest != nil {
 		n.ingest.Start()
-		n.wg.Add(1)
+		n.wg.Add(2)
 		go func() {
 			defer n.wg.Done()
 			n.relayWorker(ctx)
+		}()
+		go func() {
+			defer n.wg.Done()
+			n.completionWorker(ctx)
 		}()
 	}
 
@@ -506,8 +510,9 @@ func (n *Node) SubmitLocalEvent(ev *event.Event) error {
 		return nil // already tracked — dedup is safe
 	}
 
-	// Local events have the body available immediately.
-	// Advance directly to Completed (body verified by construction).
+	// Local events have the body available immediately — store it and
+	// advance to Completed (body verified by construction).
+	n.ingest.SetBodyAvailable(ev.ID, ev.Payload)
 	n.ingest.MarkCompleted(ev.ID)
 
 	// Enqueue for relay. The relay consumer (future prompt) will drain
@@ -1033,6 +1038,14 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 				n.ingest.EnqueueRelay(hdr.EventID)
 			}
 		}
+
+	case MsgBodyRequest:
+		// Receiver-driven body fetch: peer is requesting a body we may have.
+		n.handleBodyRequest(peer, msg.Payload)
+
+	case MsgEventBody:
+		// Body response: verify commitment and advance to Completed.
+		n.handleBodyResponse(peer, msg.Payload)
 
 	case MsgPing:
 		_ = peer.Send(Message{Type: MsgPong})
