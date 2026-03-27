@@ -226,6 +226,28 @@ func (im *IngestManager) Remove(id event.EventID) {
 	delete(im.tracked, id)
 }
 
+// SetReconstructedEvent stores the validated full event on the tracking entry.
+func (im *IngestManager) SetReconstructedEvent(id event.EventID, ev *event.Event) {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+	t, ok := im.tracked[id]
+	if !ok {
+		return
+	}
+	t.Reconstructed = ev
+}
+
+// GetReconstructedEvent returns the validated event, or nil.
+func (im *IngestManager) GetReconstructedEvent(id event.EventID) *event.Event {
+	im.mu.RLock()
+	defer im.mu.RUnlock()
+	t, ok := im.tracked[id]
+	if !ok {
+		return nil
+	}
+	return t.Reconstructed
+}
+
 // TrackedCount returns the number of events currently in the pipeline.
 func (im *IngestManager) TrackedCount() int {
 	im.mu.RLock()

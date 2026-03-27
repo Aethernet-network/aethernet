@@ -250,7 +250,7 @@ func (n *Node) Start() error {
 
 	if n.ingest != nil {
 		n.ingest.Start()
-		n.wg.Add(2)
+		n.wg.Add(4)
 		go func() {
 			defer n.wg.Done()
 			n.relayWorker(ctx)
@@ -258,6 +258,14 @@ func (n *Node) Start() error {
 		go func() {
 			defer n.wg.Done()
 			n.completionWorker(ctx)
+		}()
+		go func() {
+			defer n.wg.Done()
+			n.validationWorker(ctx)
+		}()
+		go func() {
+			defer n.wg.Done()
+			n.materializeWorker(ctx)
 		}()
 	}
 

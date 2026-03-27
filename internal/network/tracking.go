@@ -96,6 +96,10 @@ type EventTracking struct {
 	// event.Event for validation and materialization.
 	Body json.RawMessage
 
+	// Reconstructed holds the full event.Event rebuilt from header + body
+	// after validation passes. Non-nil only at StageValidated or later.
+	Reconstructed *event.Event
+
 	// RelayCount tracks how many peers this header has been relayed to.
 	RelayCount int
 }
