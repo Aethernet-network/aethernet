@@ -285,3 +285,223 @@ func TestTrajectoryCommit_BlobStoredBeforeEvent(t *testing.T) {
 		t.Error("checkpoint size should be > 0")
 	}
 }
+
+// ── Retrieval Tests ──────────────────────────────────────────────────────────
+
+func TestGetTrajectories_DeterministicOrdering(t *testing.T) {
+	svc, _, _, kp, taskID := setupTrajectoryTest(t)
+	ctx := context.Background()
+
+	// Emit 3 commits forming a chain.
+	var lastID string
+	for i := 0; i < 3; i++ {
+		resp, err := svc.EmitCommit(ctx, kp.AgentID(), trajectory.CommitRequest{
+			TaskID:              taskID,
+			ParentCommitID:      lastID,
+			Outcome:             event.OutcomeExploring,
+			ApproachDescription: fmt.Sprintf("step %d", i),
+			ComputeCost:         uint64(1000 * (i + 1)),
+			QualityScore:        float64(i+1) * 0.2,
+		})
+		if err != nil {
+			t.Fatalf("commit %d: %v", i, err)
+		}
+		lastID = string(resp.EventID)
+	}
+
+	tree, err := svc.GetTrajectories(ctx, taskID, false, "", 100)
+	if err != nil {
+		t.Fatalf("GetTrajectories: %v", err)
+	}
+	if tree.Count != 3 {
+		t.Fatalf("Count = %d; want 3", tree.Count)
+	}
+
+	// Verify ascending CausalTimestamp order.
+	for i := 1; i < len(tree.Commits); i++ {
+		prev := tree.Commits[i-1].CausalTimestamp
+		curr := tree.Commits[i].CausalTimestamp
+		if curr < prev {
+			t.Errorf("commits not sorted: [%d].ts=%d > [%d].ts=%d", i-1, prev, i, curr)
+		}
+	}
+}
+
+func TestGetTrajectories_WithoutBodies(t *testing.T) {
+	svc, _, _, kp, taskID := setupTrajectoryTest(t)
+	ctx := context.Background()
+
+	svc.EmitCommit(ctx, kp.AgentID(), trajectory.CommitRequest{
+		TaskID:              taskID,
+		Outcome:             event.OutcomeExploring,
+		ApproachDescription: "no bodies test",
+		ComputeCost:         1000,
+		QualityScore:        0.5,
+	})
+
+	tree, err := svc.GetTrajectories(ctx, taskID, false, "", 100)
+	if err != nil {
+		t.Fatalf("GetTrajectories: %v", err)
+	}
+	if tree.Count != 1 {
+		t.Fatalf("Count = %d; want 1", tree.Count)
+	}
+	if tree.Commits[0].CheckpointBody != nil {
+		t.Error("include_bodies=false should not include checkpoint body")
+	}
+}
+
+func TestGetTrajectories_WithBodies(t *testing.T) {
+	svc, _, _, kp, taskID := setupTrajectoryTest(t)
+	ctx := context.Background()
+
+	svc.EmitCommit(ctx, kp.AgentID(), trajectory.CommitRequest{
+		TaskID:              taskID,
+		Outcome:             event.OutcomeExploring,
+		ApproachDescription: "body included test",
+		Parameters:          map[string]string{"lr": "0.01"},
+		ComputeCost:         1000,
+		QualityScore:        0.5,
+	})
+
+	tree, err := svc.GetTrajectories(ctx, taskID, true, "", 100)
+	if err != nil {
+		t.Fatalf("GetTrajectories: %v", err)
+	}
+	if tree.Count != 1 {
+		t.Fatalf("Count = %d; want 1", tree.Count)
+	}
+	if !tree.Commits[0].BodyAvailable {
+		t.Error("body should be available when include_bodies=true")
+	}
+	if tree.Commits[0].CheckpointBody == nil {
+		t.Error("checkpoint body should be non-nil")
+	}
+	if tree.Commits[0].CheckpointBody.ApproachDescription != "body included test" {
+		t.Errorf("ApproachDescription = %q; want 'body included test'",
+			tree.Commits[0].CheckpointBody.ApproachDescription)
+	}
+}
+
+func TestGetTrajectories_MissingBlobGraceful(t *testing.T) {
+	svc, d, _, kp, taskID := setupTrajectoryTest(t)
+	ctx := context.Background()
+
+	// Emit a commit (blob stored normally).
+	resp, _ := svc.EmitCommit(ctx, kp.AgentID(), trajectory.CommitRequest{
+		TaskID:              taskID,
+		Outcome:             event.OutcomeExploring,
+		ApproachDescription: "will delete blob",
+		ComputeCost:         1000,
+		QualityScore:        0.5,
+	})
+
+	// Manually fabricate a trajectory event with a bogus checkpoint hash
+	// to simulate a missing blob. Create directly via event.New.
+	payload := event.TrajectoryCommitPayload{
+		TaskID:         taskID,
+		Outcome:        event.OutcomeDeadEnd,
+		CheckpointHash: "0000000000000000000000000000000000000000000000000000000000000000",
+		CheckpointSize: 1,
+		QualityScore:   0.3,
+	}
+	task, _ := svc.TaskMgr().Get(taskID)
+	claimEv := event.EventID(task.ClaimEventID)
+	ev, _ := event.New(event.EventTypeTrajectoryCommit, []event.EventID{claimEv, resp.EventID}, payload, string(kp.AgentID()),
+		map[event.EventID]uint64{claimEv: 1, resp.EventID: 2}, 0)
+	_ = crypto.SignEvent(ev, kp)
+	_ = d.Add(ev)
+
+	tree, err := svc.GetTrajectories(ctx, taskID, true, "", 100)
+	if err != nil {
+		t.Fatalf("GetTrajectories should not fail: %v", err)
+	}
+	// Both commits returned — the missing blob one has BodyAvailable=false.
+	if tree.Count < 2 {
+		t.Fatalf("Count = %d; want >= 2", tree.Count)
+	}
+
+	var foundMissing bool
+	for _, c := range tree.Commits {
+		if c.CheckpointHash == "0000000000000000000000000000000000000000000000000000000000000000" {
+			foundMissing = true
+			if c.BodyAvailable {
+				t.Error("missing blob should have BodyAvailable=false")
+			}
+			if c.CheckpointBody != nil {
+				t.Error("missing blob should have nil CheckpointBody")
+			}
+		}
+	}
+	if !foundMissing {
+		t.Error("should include the commit with missing blob")
+	}
+}
+
+func TestGetTrajectories_BranchFilter(t *testing.T) {
+	svc, _, _, kp, taskID := setupTrajectoryTest(t)
+	ctx := context.Background()
+
+	// Emit commits on different branches.
+	svc.EmitCommit(ctx, kp.AgentID(), trajectory.CommitRequest{
+		TaskID:              taskID,
+		Outcome:             event.OutcomeExploring,
+		ApproachDescription: "main branch",
+		BranchID:            "main",
+		ComputeCost:         1000,
+		QualityScore:        0.5,
+	})
+	svc.EmitCommit(ctx, kp.AgentID(), trajectory.CommitRequest{
+		TaskID:              taskID,
+		Outcome:             event.OutcomePivot,
+		ApproachDescription: "alt branch",
+		BranchID:            "alt",
+		ComputeCost:         2000,
+		QualityScore:        0.6,
+	})
+
+	// Filter by branch.
+	tree, _ := svc.GetTrajectories(ctx, taskID, false, "main", 100)
+	if tree.Count != 1 {
+		t.Fatalf("filtered Count = %d; want 1", tree.Count)
+	}
+	if tree.Commits[0].BranchID != "main" {
+		t.Errorf("BranchID = %q; want main", tree.Commits[0].BranchID)
+	}
+
+	// No filter — both branches.
+	allTree, _ := svc.GetTrajectories(ctx, taskID, false, "", 100)
+	if allTree.Count != 2 {
+		t.Errorf("unfiltered Count = %d; want 2", allTree.Count)
+	}
+}
+
+func TestGetTrajectories_LimitBounded(t *testing.T) {
+	svc, _, _, kp, taskID := setupTrajectoryTest(t)
+	ctx := context.Background()
+
+	var lastID string
+	for i := 0; i < 5; i++ {
+		resp, _ := svc.EmitCommit(ctx, kp.AgentID(), trajectory.CommitRequest{
+			TaskID:              taskID,
+			ParentCommitID:      lastID,
+			Outcome:             event.OutcomeExploring,
+			ApproachDescription: fmt.Sprintf("step %d", i),
+			ComputeCost:         uint64(1000 + i),
+			QualityScore:        0.5,
+		})
+		lastID = string(resp.EventID)
+	}
+
+	// Limit to 3.
+	tree, _ := svc.GetTrajectories(ctx, taskID, false, "", 3)
+	if tree.Count != 3 {
+		t.Fatalf("limited Count = %d; want 3", tree.Count)
+	}
+
+	// Full retrieval.
+	fullTree, _ := svc.GetTrajectories(ctx, taskID, false, "", 100)
+	if fullTree.Count != 5 {
+		t.Errorf("full Count = %d; want 5", fullTree.Count)
+	}
+}

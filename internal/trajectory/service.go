@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -285,9 +286,88 @@ func (s *Service) EmitCommit(ctx context.Context, actorID crypto.AgentID, req Co
 	}, nil
 }
 
+// TaskMgr returns the task manager used by this service.
+func (s *Service) TaskMgr() *tasks.TaskManager { return s.taskMgr }
+
 // CommitCount returns the number of commits emitted for a task.
 func (s *Service) CommitCount(taskID string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.taskCommits[taskID]
+}
+
+// GetTrajectories retrieves trajectory commits for a task from the DAG.
+// Results are sorted deterministically by (CausalTimestamp, EventID).
+// When includeBodies is true, checkpoint bodies are fetched from the blobstore.
+// Missing blobs do not fail the response — the commit is returned with
+// BodyAvailable=false.
+func (s *Service) GetTrajectories(ctx context.Context, taskID string, includeBodies bool, branchID string, limit int) (*TreeResponse, error) {
+	if limit <= 0 || limit > MaxTrajectoryLimit {
+		limit = MaxTrajectoryLimit
+	}
+
+	// Scan the DAG for trajectory commits matching this task.
+	all := s.dag.All()
+	var nodes []CommitWithBody
+
+	for _, ev := range all {
+		if ev.Type != event.EventTypeTrajectoryCommit {
+			continue
+		}
+		node := CommitNodeFromEvent(ev)
+		if node == nil || node.TaskID != taskID {
+			continue
+		}
+		if branchID != "" && node.BranchID != branchID {
+			continue
+		}
+		nodes = append(nodes, CommitWithBody{CommitNode: *node})
+	}
+
+	// Deterministic sort: (CausalTimestamp ASC, EventID ASC).
+	sortCommits(nodes)
+
+	// Apply limit.
+	if len(nodes) > limit {
+		nodes = nodes[:limit]
+	}
+
+	// Optionally fetch bodies.
+	if includeBodies {
+		for i := range nodes {
+			hash := nodes[i].CheckpointHash
+			if hash == "" {
+				continue
+			}
+			data, err := s.blob.Get(ctx, hash)
+			if err != nil {
+				// Missing blob — not a fatal error.
+				nodes[i].BodyAvailable = false
+				continue
+			}
+			var body CheckpointBody
+			if err := json.Unmarshal(data, &body); err != nil {
+				nodes[i].BodyAvailable = false
+				continue
+			}
+			nodes[i].CheckpointBody = &body
+			nodes[i].BodyAvailable = true
+		}
+	}
+
+	return &TreeResponse{
+		TaskID:  taskID,
+		Count:   len(nodes),
+		Commits: nodes,
+	}, nil
+}
+
+// sortCommits sorts commits deterministically by (CausalTimestamp, EventID).
+func sortCommits(nodes []CommitWithBody) {
+	sort.Slice(nodes, func(i, j int) bool {
+		if nodes[i].CausalTimestamp != nodes[j].CausalTimestamp {
+			return nodes[i].CausalTimestamp < nodes[j].CausalTimestamp
+		}
+		return nodes[i].EventID < nodes[j].EventID
+	})
 }

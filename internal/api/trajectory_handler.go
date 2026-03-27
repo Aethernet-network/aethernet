@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/trajectory"
@@ -91,4 +92,40 @@ func (s *Server) handleTrajectoryCommit(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// handleGetTrajectories handles GET /v1/tasks/{id}/trajectories.
+// Returns the trajectory commit tree for a task, optionally including
+// checkpoint bodies from the blobstore.
+func (s *Server) handleGetTrajectories(w http.ResponseWriter, r *http.Request) {
+	if s.trajService == nil {
+		writeError(w, http.StatusNotImplemented, "trajectory service not enabled")
+		return
+	}
+
+	taskID := r.PathValue("id")
+	if taskID == "" {
+		writeError(w, http.StatusBadRequest, "task ID is required")
+		return
+	}
+
+	includeBodies := r.URL.Query().Get("include_bodies") == "true"
+	branchID := r.URL.Query().Get("branch_id")
+	limit := trajectory.MaxTrajectoryLimit
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > trajectory.MaxTrajectoryLimit {
+		limit = trajectory.MaxTrajectoryLimit
+	}
+
+	resp, err := s.trajService.GetTrajectories(r.Context(), taskID, includeBodies, branchID, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }

@@ -457,6 +457,7 @@ func (s *Server) registerL3Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/tasks", s.handleListTasks)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.handleGetTask)
 	mux.HandleFunc("GET /v1/tasks/result/{id}", s.handleGetTaskResult)
+	mux.HandleFunc("GET /v1/tasks/trajectories/{id}", s.handleGetTrajectories)
 	mux.HandleFunc("POST /v1/tasks/{id}/trajectory/commit", s.handleTrajectoryCommit)
 	mux.HandleFunc("POST /v1/tasks/{id}/claim", s.handleClaimTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/submit", s.handleSubmitTask)
