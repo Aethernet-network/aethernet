@@ -190,9 +190,10 @@ type Node struct {
 
 	// ingest is the Fast Path v1 pre-materialization pipeline manager.
 	// Tracks events through Announced → Completed → Validated → Materialized.
-	// Initialized at construction; not wired into the message path until
-	// relay and body-fetch logic are added in subsequent prompts.
 	ingest *IngestManager
+
+	// mesh manages bounded relay target selection using peer scoring and diversity.
+	mesh *MeshManager
 
 	mu       sync.RWMutex
 	ctx      context.Context
@@ -211,6 +212,7 @@ func NewNode(config *NodeConfig, d *dag.DAG) *Node {
 		incoming:  make(chan Message, 256),
 		seenVotes: make(map[string]time.Time),
 		ingest:    NewIngestManager(DefaultFastPathConfig()),
+		mesh:      NewMeshManager(DefaultMeshConfig()),
 	}
 }
 

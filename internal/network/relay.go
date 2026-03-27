@@ -36,7 +36,8 @@ func (n *Node) relayWorker(ctx context.Context) {
 	}
 }
 
-// relayHeader sends the EventHeader for the given event to all eligible peers.
+// relayHeader sends the EventHeader for the given event to a bounded set of
+// eligible peers selected by the MeshManager (score-weighted, diversity-injected).
 func (n *Node) relayHeader(id event.EventID) {
 	tracking := n.ingest.GetTracking(id)
 	if tracking == nil {
@@ -50,9 +51,19 @@ func (n *Node) relayHeader(id event.EventID) {
 	}
 	msg := Message{Type: MsgEventHeader, Payload: payload}
 
-	peers := n.v2PeersExcept(tracking.SourcePeer)
+	// Use MeshManager for bounded, score-informed peer selection.
+	n.mu.RLock()
+	var targets []*Peer
+	if n.mesh != nil {
+		targets = n.mesh.SelectRelayTargets(n.peers, tracking.SourcePeer)
+	} else {
+		// Fallback: all V2 peers except origin (pre-mesh initialization).
+		targets = n.v2PeersExcept(tracking.SourcePeer)
+	}
+	n.mu.RUnlock()
+
 	relayed := 0
-	for _, p := range peers {
+	for _, p := range targets {
 		if SafeSend(p, msg) {
 			relayed++
 		}
@@ -61,7 +72,8 @@ func (n *Node) relayHeader(id event.EventID) {
 	tracking.RelayCount = relayed
 	if relayed > 0 {
 		slog.Debug("network: relayed header",
-			"event_id", id, "peers", relayed, "source", tracking.SourcePeer)
+			"event_id", id, "peers", relayed, "fanout", len(targets),
+			"source", tracking.SourcePeer)
 	}
 }
 
