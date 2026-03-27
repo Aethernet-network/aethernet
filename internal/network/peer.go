@@ -216,7 +216,16 @@ type Peer struct {
 	lastSyncReq      time.Time // tracks last MsgRequestSync for per-peer rate limiting (NEW-6)
 	connectedAt      time.Time // when the peer entered PeerConnected state
 	disconnectReason string    // set by readLoop on exit: "read_timeout", "remote_closed", "read_error"
-	mu               sync.RWMutex
+
+	// Fast Path v2 capability negotiation state. Set after the V1 handshake
+	// completes when both sides exchange HelloV2 messages. When v2Negotiated
+	// is false, only V1 messages are sent to this peer.
+	protocolVersion uint32   // 0 = V1-only (legacy), 2 = Fast Path v1
+	v2Features      []string // features advertised by the remote peer
+	v2Negotiated    bool     // true after HelloV2 exchange succeeds
+	lastStatus      *PeerStatus // most recent PeerStatus from this peer; nil until first status
+
+	mu sync.RWMutex
 }
 
 // NewPeer constructs a Peer for the given connection. agentID may be empty
