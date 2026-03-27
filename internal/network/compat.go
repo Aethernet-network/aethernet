@@ -88,6 +88,23 @@ func (p *Peer) EnsureScore() *PeerScore {
 	return p.score
 }
 
+// Quota returns the peer's rate quota, or nil if not initialized.
+func (p *Peer) Quota() *PeerQuota {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.quota
+}
+
+// EnsureQuota initializes the quota if not already set.
+func (p *Peer) EnsureQuota(cfg QuotaConfig) *PeerQuota {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.quota == nil {
+		p.quota = NewPeerQuota(cfg)
+	}
+	return p.quota
+}
+
 // UpdateStatus records the most recent PeerStatus from this peer.
 func (p *Peer) UpdateStatus(status PeerStatus) {
 	p.mu.Lock()

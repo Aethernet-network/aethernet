@@ -195,6 +195,9 @@ type Node struct {
 	// mesh manages bounded relay target selection using peer scoring and diversity.
 	mesh *MeshManager
 
+	// overload tracks the node's current load level for backpressure signaling.
+	overload OverloadState
+
 	mu       sync.RWMutex
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -252,7 +255,7 @@ func (n *Node) Start() error {
 
 	if n.ingest != nil {
 		n.ingest.Start()
-		n.wg.Add(5)
+		n.wg.Add(6)
 		go func() {
 			defer n.wg.Done()
 			n.relayWorker(ctx)
@@ -272,6 +275,10 @@ func (n *Node) Start() error {
 		go func() {
 			defer n.wg.Done()
 			n.repairWorker(ctx)
+		}()
+		go func() {
+			defer n.wg.Done()
+			n.backpressureWorker(ctx)
 		}()
 	}
 
@@ -1075,6 +1082,14 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 	case MsgRepairResponse:
 		// Repair response: feed events into DAG and retry blocked children.
 		n.handleRepairResponse(peer, msg.Payload)
+
+	case MsgPeerStatus:
+		// Peer health signal — updates status for mesh selection.
+		n.handlePeerStatus(peer, msg.Payload)
+
+	case MsgOverloaded:
+		// Peer overload signal — deprioritize in mesh selection.
+		n.handleOverloaded(peer, msg.Payload)
 
 	case MsgPing:
 		_ = peer.Send(Message{Type: MsgPong})

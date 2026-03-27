@@ -229,6 +229,9 @@ type Peer struct {
 	// preference. Initialized lazily on first V2 negotiation or scoring event.
 	score *PeerScore
 
+	// quota enforces per-peer send rate limits. Initialized lazily.
+	quota *PeerQuota
+
 	mu sync.RWMutex
 }
 
