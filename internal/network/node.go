@@ -250,6 +250,11 @@ func (n *Node) Start() error {
 
 	if n.ingest != nil {
 		n.ingest.Start()
+		n.wg.Add(1)
+		go func() {
+			defer n.wg.Done()
+			n.relayWorker(ctx)
+		}()
 	}
 
 	return nil
@@ -1012,6 +1017,20 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 			}
 			if err := n.dag.Add(e); err == nil && sh != nil {
 				sh(e)
+			}
+		}
+
+	case MsgEventHeader:
+		// Fast Path: admit the header into the pre-materialization pipeline
+		// and queue for relay. No dag.Add, no validation — those come later.
+		var hdr EventHeader
+		if err := json.Unmarshal(msg.Payload, &hdr); err != nil {
+			slog.Debug("network: invalid MsgEventHeader", "peer", peer.AgentID, "err", err)
+			return
+		}
+		if n.ingest != nil {
+			if n.ingest.AdmitHeader(peer.AgentID, hdr) {
+				n.ingest.EnqueueRelay(hdr.EventID)
 			}
 		}
 
