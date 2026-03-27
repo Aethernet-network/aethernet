@@ -367,6 +367,43 @@ func (d *DAG) Tips() []event.EventID {
 	return tips
 }
 
+// PrimaryTips returns the current DAG tips excluding events of type
+// TrajectoryCommit. This is the default parent selection set for
+// non-trajectory events — it prevents trajectory commits from polluting
+// the causal refs of transfers, tasks, and other primary events.
+//
+// If filtering removes ALL tips (e.g., the DAG frontier consists entirely
+// of trajectory commits), PrimaryTips falls back to the full Tips() set
+// to avoid empty causal refs which would create invalid genesis-like events.
+//
+// The mechanical tip tracking (d.tips) is NOT modified. PrimaryTips is a
+// filtered view, not a second tracked set.
+func (d *DAG) PrimaryTips() []event.EventID {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	primary := make([]event.EventID, 0, len(d.tips))
+	for id := range d.tips {
+		ev, ok := d.events[id]
+		if !ok {
+			continue
+		}
+		if ev.Type == event.EventTypeTrajectoryCommit {
+			continue
+		}
+		primary = append(primary, id)
+	}
+
+	// Fallback: if all tips are trajectory commits, return all tips.
+	if len(primary) == 0 && len(d.tips) > 0 {
+		for id := range d.tips {
+			primary = append(primary, id)
+		}
+	}
+
+	return primary
+}
+
 // Size returns the number of events currently stored in the DAG.
 func (d *DAG) Size() int {
 	d.mu.RLock()

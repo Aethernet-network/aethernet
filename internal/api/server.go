@@ -1235,7 +1235,9 @@ type cancelTaskRequest struct {
 // can be signed with s.kp. The actorAgentID in the payload carries the
 // identity of the agent performing the action.
 func (s *Server) emitDAGEvent(evType event.EventType, payload any, _ string) event.EventID {
-	tips := s.dag.Tips()
+	// Use PrimaryTips to exclude trajectory commits from default parent selection.
+	// Trajectory commits use task-local causal refs, not default tips.
+	tips := s.dag.PrimaryTips()
 	priorTS := make(map[event.EventID]uint64, len(tips))
 	for _, ref := range tips {
 		if ev, err := s.dag.Get(ref); err == nil {
@@ -2035,7 +2037,7 @@ func writeCodedError(w http.ResponseWriter, status int, code, msg, details strin
 func (s *Server) buildCausalRefs(requested []event.EventID) ([]event.EventID, map[event.EventID]uint64) {
 	refs := requested
 	if len(refs) == 0 {
-		refs = s.dag.Tips()
+		refs = s.dag.PrimaryTips()
 	}
 	priorTimestamps := make(map[event.EventID]uint64, len(refs))
 	for _, ref := range refs {
@@ -2214,7 +2216,7 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		AgentID:   string(regAgentID),
 		PublicKey: regPubKey,
 	}
-	tips := s.dag.Tips()
+	tips := s.dag.PrimaryTips()
 	priorTS := make(map[event.EventID]uint64, len(tips))
 	for _, ref := range tips {
 		if ev, lookupErr := s.dag.Get(ref); lookupErr == nil {

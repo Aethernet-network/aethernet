@@ -1163,3 +1163,163 @@ func TestAdd_GenesisUnsigned_Accepted(t *testing.T) {
 		t.Fatalf("Add should accept unsigned genesis event, got: %v", err)
 	}
 }
+
+// ── PrimaryTips ──────────────────────────────────────────────────────────────
+
+// makeTrajectoryGenesis creates a genesis event of type TrajectoryCommit.
+func makeTrajectoryGenesis(t *testing.T, agentID string) *event.Event {
+	t.Helper()
+	payload := event.TrajectoryCommitPayload{
+		TaskID:         "task-1",
+		Outcome:        event.OutcomeExploring,
+		CheckpointHash: "0000000000000000000000000000000000000000000000000000000000000000",
+		CheckpointSize: 100,
+		QualityScore:   0.5,
+	}
+	e, err := event.New(event.EventTypeTrajectoryCommit, nil, payload, agentID, nil, 0)
+	if err != nil {
+		t.Fatalf("makeTrajectoryGenesis: %v", err)
+	}
+	return e
+}
+
+func TestPrimaryTips_ExcludesTrajectoryCommits(t *testing.T) {
+	d := dag.New()
+
+	// Add a non-trajectory genesis event.
+	transfer := makeGenesis(t, "agent-1")
+	if err := d.Add(transfer); err != nil {
+		t.Fatalf("Add transfer: %v", err)
+	}
+
+	// Add a trajectory commit genesis event.
+	traj := makeTrajectoryGenesis(t, "agent-2")
+	if err := d.Add(traj); err != nil {
+		t.Fatalf("Add trajectory: %v", err)
+	}
+
+	// Tips() includes both.
+	allTips := d.Tips()
+	if len(allTips) != 2 {
+		t.Fatalf("Tips() = %d; want 2", len(allTips))
+	}
+
+	// PrimaryTips() excludes the trajectory commit.
+	primary := d.PrimaryTips()
+	if len(primary) != 1 {
+		t.Fatalf("PrimaryTips() = %d; want 1", len(primary))
+	}
+	if primary[0] != transfer.ID {
+		t.Errorf("PrimaryTips()[0] = %q; want transfer %q", primary[0], transfer.ID)
+	}
+}
+
+func TestPrimaryTips_FallsBackWhenOnlyTrajectoryTips(t *testing.T) {
+	d := dag.New()
+
+	// Only trajectory commits in the DAG.
+	traj1 := makeTrajectoryGenesis(t, "agent-1")
+	if err := d.Add(traj1); err != nil {
+		t.Fatalf("Add traj1: %v", err)
+	}
+	traj2Payload := event.TrajectoryCommitPayload{
+		TaskID:         "task-2",
+		Outcome:        event.OutcomeConverged,
+		CheckpointHash: "1111111111111111111111111111111111111111111111111111111111111111",
+		CheckpointSize: 200,
+		QualityScore:   0.8,
+	}
+	traj2, _ := event.New(event.EventTypeTrajectoryCommit, nil, traj2Payload, "agent-2", nil, 0)
+	if err := d.Add(traj2); err != nil {
+		t.Fatalf("Add traj2: %v", err)
+	}
+
+	// PrimaryTips would filter both → falls back to Tips().
+	primary := d.PrimaryTips()
+	if len(primary) != 2 {
+		t.Fatalf("PrimaryTips() = %d; want 2 (fallback to all tips)", len(primary))
+	}
+}
+
+func TestPrimaryTips_TrajectoryStillAffectsMechanicalTips(t *testing.T) {
+	d := dag.New()
+
+	// Add genesis.
+	genesis := makeGenesis(t, "agent-1")
+	if err := d.Add(genesis); err != nil {
+		t.Fatalf("Add genesis: %v", err)
+	}
+
+	// Genesis is a tip.
+	if len(d.Tips()) != 1 {
+		t.Fatalf("Tips should have genesis")
+	}
+
+	// Add a trajectory commit referencing genesis as parent.
+	kp, _ := crypto.GenerateKeyPair()
+	trajPayload := event.TrajectoryCommitPayload{
+		TaskID:         "task-1",
+		Outcome:        event.OutcomeExploring,
+		CheckpointHash: "2222222222222222222222222222222222222222222222222222222222222222",
+		CheckpointSize: 100,
+		QualityScore:   0.5,
+	}
+	traj, _ := event.New(event.EventTypeTrajectoryCommit,
+		[]event.EventID{genesis.ID}, trajPayload,
+		string(kp.AgentID()),
+		map[event.EventID]uint64{genesis.ID: genesis.CausalTimestamp}, 0)
+	_ = crypto.SignEvent(traj, kp)
+	if err := d.Add(traj); err != nil {
+		t.Fatalf("Add trajectory: %v", err)
+	}
+
+	// Mechanical tips: genesis is no longer a tip (has child).
+	// Only the trajectory commit is a tip.
+	allTips := d.Tips()
+	if len(allTips) != 1 || allTips[0] != traj.ID {
+		t.Errorf("Tips() should have only trajectory commit; got %v", allTips)
+	}
+
+	// PrimaryTips: filters trajectory → empty → falls back to Tips().
+	primary := d.PrimaryTips()
+	if len(primary) != 1 {
+		t.Fatalf("PrimaryTips() = %d; want 1 (fallback)", len(primary))
+	}
+}
+
+func TestPrimaryTips_EmptyDAG(t *testing.T) {
+	d := dag.New()
+	primary := d.PrimaryTips()
+	if len(primary) != 0 {
+		t.Errorf("PrimaryTips() on empty DAG = %d; want 0", len(primary))
+	}
+}
+
+func TestPrimaryTips_MixedTypes_MultipleNonTrajectory(t *testing.T) {
+	d := dag.New()
+
+	// Add multiple non-trajectory events.
+	g1 := makeGenesis(t, "agent-1")
+	d.Add(g1)
+
+	g2Payload := event.TransferPayload{FromAgent: "agent-2", ToAgent: "sink", Amount: 2, Currency: "AET"}
+	g2, _ := event.New(event.EventTypeTransfer, nil, g2Payload, "agent-2", nil, 0)
+	d.Add(g2)
+
+	// Add a trajectory commit.
+	traj := makeTrajectoryGenesis(t, "agent-3")
+	d.Add(traj)
+
+	// PrimaryTips should return the two non-trajectory tips.
+	primary := d.PrimaryTips()
+	if len(primary) != 2 {
+		t.Fatalf("PrimaryTips() = %d; want 2", len(primary))
+	}
+
+	// Neither should be the trajectory commit.
+	for _, id := range primary {
+		if id == traj.ID {
+			t.Error("PrimaryTips should not include trajectory commit")
+		}
+	}
+}
