@@ -185,3 +185,89 @@ func TestVerifyEvidencePacket_NoSignatures(t *testing.T) {
 		t.Fatalf("expected pass with no signatures, got: %v", err)
 	}
 }
+
+// ── Exploration Fields ───────────────────────────────────────────────────────
+
+func TestCanonicalBytes_IncludesExplorationRoot(t *testing.T) {
+	ev := &Evidence{
+		Hash:            "sha256:test",
+		OutputType:      "text",
+		OutputSize:      100,
+		Summary:         "test",
+		ExplorationRoot: "abc123merkleroot",
+	}
+	canonical := string(CanonicalBytes(ev))
+	if !strings.Contains(canonical, "exploration_root:abc123merkleroot") {
+		t.Error("canonical bytes should include exploration_root")
+	}
+}
+
+func TestCanonicalBytes_IncludesExplorationSample(t *testing.T) {
+	ev := &Evidence{
+		Hash:              "sha256:test",
+		OutputType:        "text",
+		OutputSize:        100,
+		Summary:           "test",
+		ExplorationSample: []string{"commit-1", "commit-2", "commit-3"},
+	}
+	canonical := string(CanonicalBytes(ev))
+	if !strings.Contains(canonical, "exploration_sample:commit-1,commit-2,commit-3") {
+		t.Error("canonical bytes should include exploration_sample")
+	}
+}
+
+func TestCanonicalBytes_EmptyExplorationFields(t *testing.T) {
+	ev := &Evidence{
+		Hash:       "sha256:test",
+		OutputType: "text",
+		OutputSize: 100,
+		Summary:    "test",
+	}
+	canonical := string(CanonicalBytes(ev))
+	if !strings.Contains(canonical, "exploration_root:\n") {
+		t.Error("empty exploration_root should be included as empty field")
+	}
+	if !strings.Contains(canonical, "exploration_sample:\n") {
+		t.Error("empty exploration_sample should be included as empty field")
+	}
+}
+
+func TestCanonicalBytes_ExplorationDeterministic(t *testing.T) {
+	ev := &Evidence{
+		Hash:              "sha256:test",
+		OutputType:        "text",
+		OutputSize:        100,
+		Summary:           "test",
+		ExplorationRoot:   "root123",
+		ExplorationSample: []string{"c", "b", "a"},
+	}
+	a := CanonicalBytes(ev)
+	b := CanonicalBytes(ev)
+	if string(a) != string(b) {
+		t.Error("canonical bytes with exploration fields should be deterministic")
+	}
+}
+
+func TestSignVerify_WithExplorationFields(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+
+	ev := &Evidence{
+		Hash:              "sha256:test",
+		OutputType:        "text",
+		OutputSize:        100,
+		Summary:           "test with exploration",
+		ExplorationRoot:   "merkleroot456",
+		ExplorationSample: []string{"commit-a", "commit-b"},
+	}
+	SignEvidence(ev, priv)
+
+	if err := VerifyEvidencePacket(ev); err != nil {
+		t.Fatalf("verification should pass with exploration fields: %v", err)
+	}
+
+	// Tamper with exploration root — should fail verification.
+	ev.ExplorationRoot = "tampered"
+	if err := VerifyEvidencePacket(ev); err == nil {
+		t.Error("tampered exploration_root should fail verification")
+	}
+}

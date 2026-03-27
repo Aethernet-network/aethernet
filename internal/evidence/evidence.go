@@ -29,6 +29,16 @@ type Evidence struct {
 	// dependencies. Entries are evidence hashes (SHA-256), not task/event IDs.
 	GenesisChain []string `json:"genesis_chain,omitempty"`
 
+	// ExplorationRoot is the Merkle root of all trajectory commit EventIDs
+	// associated with this task. Anchors the exploration tree that led to
+	// the submitted work. Empty when no trajectory commits exist.
+	ExplorationRoot string `json:"exploration_root,omitempty"`
+
+	// ExplorationSample is a bounded deterministic sample of trajectory
+	// commit EventIDs included for quick inspection without full tree
+	// retrieval. Maximum MaxExplorationSample (10) entries.
+	ExplorationSample []string `json:"exploration_sample,omitempty"`
+
 	// Self-contained signature fields for portable evidence verification
 	// without DAG access.
 	ProducerSignature  string `json:"producer_signature,omitempty"`
@@ -91,6 +101,8 @@ const PassThreshold = 0.60
 //	summary:<summary>
 //	input_hash:<input_hash>
 //	genesis_chain:<comma-separated hashes>
+//	exploration_root:<merkle root>
+//	exploration_sample:<comma-separated event IDs>
 //	metrics:<key=value pairs, sorted by key>
 func CanonicalBytes(ev *Evidence) []byte {
 	var b strings.Builder
@@ -101,6 +113,8 @@ func CanonicalBytes(ev *Evidence) []byte {
 	b.WriteString("summary:" + ev.Summary + "\n")
 	b.WriteString("input_hash:" + ev.InputHash + "\n")
 	b.WriteString("genesis_chain:" + strings.Join(ev.GenesisChain, ",") + "\n")
+	b.WriteString("exploration_root:" + ev.ExplorationRoot + "\n")
+	b.WriteString("exploration_sample:" + strings.Join(ev.ExplorationSample, ",") + "\n")
 
 	// Metrics sorted by key for determinism.
 	keys := make([]string, 0, len(ev.Metrics))
