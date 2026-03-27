@@ -387,6 +387,52 @@ func (d *DAG) All() []*event.Event {
 	return result
 }
 
+// RecentEvents returns events with CausalTimestamp >= minTimestamp, bounded
+// by maxCount. Events are sorted by CausalTimestamp ascending. This is a
+// read-only operation — returned pointers alias the DAG's internal storage.
+func (d *DAG) RecentEvents(minTimestamp uint64, maxCount int) []*event.Event {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var result []*event.Event
+	for _, e := range d.events {
+		if e.CausalTimestamp >= minTimestamp {
+			result = append(result, e)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CausalTimestamp < result[j].CausalTimestamp
+	})
+	if len(result) > maxCount {
+		result = result[len(result)-maxCount:]
+	}
+	return result
+}
+
+// MaxTimestamp returns the highest CausalTimestamp in the DAG, or 0 if empty.
+func (d *DAG) MaxTimestamp() uint64 {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	var max uint64
+	for _, e := range d.events {
+		if e.CausalTimestamp > max {
+			max = e.CausalTimestamp
+		}
+	}
+	return max
+}
+
+// EventIDs returns all event IDs currently in the DAG.
+func (d *DAG) EventIDs() []event.EventID {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	ids := make([]event.EventID, 0, len(d.events))
+	for id := range d.events {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // Ancestors returns the set of all events that causally precede id —
 // the transitive closure of id's CausalRefs, traversed breadth-first.
 //

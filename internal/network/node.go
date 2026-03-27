@@ -1083,6 +1083,14 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		// Repair response: feed events into DAG and retry blocked children.
 		n.handleRepairResponse(peer, msg.Payload)
 
+	case MsgCheckpoint:
+		// Checkpoint: if payload is empty, it's a request. Otherwise a response.
+		if len(msg.Payload) == 0 {
+			n.handleCheckpointRequest(peer, msg.Payload)
+		} else {
+			n.handleCheckpointResponse(peer, msg.Payload)
+		}
+
 	case MsgPeerStatus:
 		// Peer health signal — updates status for mesh selection.
 		n.handlePeerStatus(peer, msg.Payload)
