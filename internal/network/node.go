@@ -69,19 +69,39 @@ type NodeConfig struct {
 	// decoder. Messages exceeding this bound cause the decoder to error and
 	// close the connection (MEDIUM-9.1). Zero falls back to 4 MiB.
 	MaxMessageBytes int64
+
+	// EnableV2 enables Fast Path v2 protocol for this node. When true, the
+	// node sends HelloV2 after handshake and uses header relay, body fetch,
+	// repair, and checkpoint bootstrap instead of periodic full DAG sync
+	// for V2 peers. Default: true.
+	EnableV2 bool
+
+	// EnableLegacySync enables MsgRequestSync periodic polling. When false,
+	// the node only sends MsgRequestSync to V1 (legacy) peers. When true,
+	// all peers receive sync requests regardless of version.
+	// Default: false (V2 peers use fast-path; legacy sync only for V1 peers).
+	EnableLegacySync bool
+
+	// LegacySyncFallbackAllowed permits the node to fall back to full DAG
+	// sync for V2 peers when the fast-path pipeline is degraded (e.g.,
+	// sustained repair failures). Default: true.
+	LegacySyncFallbackAllowed bool
 }
 
 // DefaultNodeConfig returns a NodeConfig with production-ready defaults.
 func DefaultNodeConfig(agentID crypto.AgentID) *NodeConfig {
 	return &NodeConfig{
-		ListenAddr:       "0.0.0.0:8337",
-		AgentID:          agentID,
-		MaxPeers:         50,
-		SyncInterval:     10 * time.Second,
-		Version:          "0.1.0",
-		HandshakeTimeout: 30 * time.Second,
-		VoteMaxAge:       60,
-		MaxMessageBytes:  4 * 1024 * 1024,
+		ListenAddr:                "0.0.0.0:8337",
+		AgentID:                   agentID,
+		MaxPeers:                  50,
+		SyncInterval:              10 * time.Second,
+		Version:                   "0.1.0",
+		HandshakeTimeout:          30 * time.Second,
+		VoteMaxAge:                60,
+		MaxMessageBytes:           4 * 1024 * 1024,
+		EnableV2:                  true,
+		EnableLegacySync:          false,
+		LegacySyncFallbackAllowed: true,
 	}
 }
 
@@ -463,6 +483,10 @@ func (n *Node) Connect(address string) (*Peer, error) {
 	n.mu.Unlock()
 
 	n.startPeerLoops(peer)
+
+	// Initiate V2 negotiation after the V1 handshake and peer loops are running.
+	n.NegotiateV2(peer)
+
 	return peer, nil
 }
 
@@ -922,12 +946,24 @@ func (n *Node) handleIncomingConn(conn net.Conn) error {
 	n.mu.Unlock()
 
 	n.startPeerLoops(peer)
+
+	// Initiate V2 negotiation after the V1 handshake and peer loops are running.
+	n.NegotiateV2(peer)
+
 	return nil
 }
 
-// syncLoop fires every SyncInterval and sends MsgRequestSync to all connected
-// peers, asking them to reply with their current DAG tips. The local node adds
-// whatever events it receives in the resulting MsgSyncBatch to its own DAG.
+// syncLoop fires every SyncInterval and sends MsgRequestSync to peers.
+//
+// Sync target selection:
+//   - When EnableLegacySync is true: all peers receive sync requests.
+//   - When EnableLegacySync is false (default): only V1 (legacy) peers
+//     receive sync requests. V2 peers use the fast-path pipeline
+//     (header relay, body fetch, repair) and do not need periodic
+//     full-DAG polling.
+//
+// This is the normal operating mode after rolling upgrade: V2 peers
+// propagate events via the fast path, V1 peers receive legacy sync.
 func (n *Node) syncLoop() {
 	defer n.wg.Done()
 	ticker := time.NewTicker(n.config.SyncInterval)
@@ -941,7 +977,9 @@ func (n *Node) syncLoop() {
 			n.mu.RLock()
 			peers := make([]*Peer, 0, len(n.peers))
 			for _, p := range n.peers {
-				peers = append(peers, p)
+				if n.config.EnableLegacySync || p.IsLegacySyncOnly() {
+					peers = append(peers, p)
+				}
 			}
 			n.mu.RUnlock()
 
@@ -1082,6 +1120,10 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 	case MsgRepairResponse:
 		// Repair response: feed events into DAG and retry blocked children.
 		n.handleRepairResponse(peer, msg.Payload)
+
+	case MsgHelloV2:
+		// V2 capability negotiation — upgrade peer to fast-path.
+		n.handleHelloV2Message(peer, msg.Payload)
 
 	case MsgCheckpoint:
 		// Checkpoint: if payload is empty, it's a request. Otherwise a response.
