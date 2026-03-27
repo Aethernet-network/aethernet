@@ -169,23 +169,18 @@ func (n *Node) requestRepair(id event.EventID) {
 		return
 	}
 
-	// Fallback: try any V2 peer.
+	// Fallback: try the highest-scored V2 peer.
 	n.mu.RLock()
-	var fallback *Peer
-	for _, p := range n.peers {
-		if p.SupportsFastPath() && p.AgentID != tracking.SourcePeer {
-			fallback = p
-			break
-		}
-	}
+	fallback := BestPeerFor(n.peers, tracking.SourcePeer)
 	n.mu.RUnlock()
 
 	if fallback != nil {
 		req := RepairRequest{MissingIDs: missing}
 		payload, _ := json.Marshal(req)
 		SafeSend(fallback, Message{Type: MsgRepairRequest, Payload: payload})
-		slog.Debug("repair: sent targeted request to fallback peer",
-			"event_id", id, "missing", len(missing), "peer", fallback.AgentID)
+		slog.Debug("repair: sent targeted request to best-scored peer",
+			"event_id", id, "missing", len(missing), "peer", fallback.AgentID,
+			"score", fallback.PeerScore().Score())
 	}
 }
 
@@ -265,10 +260,14 @@ func (n *Node) handleRepairResponse(peer *Peer, payload []byte) {
 	sh := n.syncHandler
 	n.mu.RUnlock()
 
+	added := 0
 	for _, ev := range resp.Events {
 		if !crypto.VerifyEvent(ev) {
 			slog.Warn("repair: dropping event with invalid signature",
 				"event_id", ev.ID, "peer", peer.AgentID)
+			if ps := peer.PeerScore(); ps != nil {
+				ps.RecordInvalidSignature()
+			}
 			continue
 		}
 
@@ -279,6 +278,7 @@ func (n *Node) handleRepairResponse(peer *Peer, payload []byte) {
 			}
 			continue
 		}
+		added++
 
 		if sh != nil {
 			sh(ev)
@@ -287,6 +287,11 @@ func (n *Node) handleRepairResponse(peer *Peer, payload []byte) {
 		// Check if any tracked events were waiting for this parent.
 		if n.ingest != nil {
 			n.retryBlockedChildren(ev.ID)
+		}
+	}
+	if added > 0 {
+		if ps := peer.EnsureScore(); ps != nil {
+			ps.RecordValidRepair()
 		}
 	}
 }

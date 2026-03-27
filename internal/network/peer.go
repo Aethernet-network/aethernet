@@ -225,6 +225,10 @@ type Peer struct {
 	v2Negotiated    bool     // true after HelloV2 exchange succeeds
 	lastStatus      *PeerStatus // most recent PeerStatus from this peer; nil until first status
 
+	// score tracks this peer's quality for relay, body fetch, and repair
+	// preference. Initialized lazily on first V2 negotiation or scoring event.
+	score *PeerScore
+
 	mu sync.RWMutex
 }
 

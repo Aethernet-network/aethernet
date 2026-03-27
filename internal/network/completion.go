@@ -138,12 +138,16 @@ func (n *Node) maybeRequestBody(id event.EventID) {
 		return
 	}
 
-	// Request body from the source peer.
+	// Request body from the source peer, or the best-scored fallback.
 	n.mu.RLock()
 	source, ok := n.peers[tracking.SourcePeer]
+	if !ok || (source.PeerScore() != nil && !source.PeerScore().IsUsable()) {
+		source = BestPeerFor(n.peers, tracking.SourcePeer)
+		ok = source != nil
+	}
 	n.mu.RUnlock()
 	if !ok {
-		slog.Debug("completion: source peer not connected", "event_id", id, "source", tracking.SourcePeer)
+		slog.Debug("completion: no usable peer for body fetch", "event_id", id)
 		return
 	}
 
@@ -206,6 +210,13 @@ func (n *Node) handleBodyResponse(peer *Peer, payload []byte) {
 		if errors.Is(err, ErrBodyCommitmentMismatch) {
 			slog.Warn("completion: body from peer failed commitment check",
 				"event_id", body.EventID, "peer", peer.AgentID)
+			if ps := peer.PeerScore(); ps != nil {
+				ps.RecordInvalidBody()
+			}
+		}
+	} else {
+		if ps := peer.EnsureScore(); ps != nil {
+			ps.RecordValidBody()
 		}
 	}
 }

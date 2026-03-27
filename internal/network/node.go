@@ -1048,6 +1048,13 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		if n.ingest != nil {
 			if n.ingest.AdmitHeader(peer.AgentID, hdr) {
 				n.ingest.EnqueueRelay(hdr.EventID)
+				if ps := peer.EnsureScore(); ps != nil {
+					ps.RecordValidHeader()
+				}
+			} else {
+				if ps := peer.PeerScore(); ps != nil {
+					ps.RecordDuplicateHeader()
+				}
 			}
 		}
 

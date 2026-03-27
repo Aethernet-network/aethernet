@@ -66,6 +66,26 @@ func (p *Peer) SetV2Capabilities(hello HelloV2) {
 	p.protocolVersion = hello.ProtocolVersion
 	p.v2Features = hello.Features
 	p.v2Negotiated = true
+	if p.score == nil {
+		p.score = NewPeerScore()
+	}
+}
+
+// PeerScore returns the peer's quality score, or nil if not initialized.
+func (p *Peer) PeerScore() *PeerScore {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.score
+}
+
+// EnsureScore initializes the score if not already set.
+func (p *Peer) EnsureScore() *PeerScore {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.score == nil {
+		p.score = NewPeerScore()
+	}
+	return p.score
 }
 
 // UpdateStatus records the most recent PeerStatus from this peer.
