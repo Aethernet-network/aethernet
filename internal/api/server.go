@@ -80,6 +80,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/router"
 	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
+	"github.com/Aethernet-network/aethernet/internal/trajectory"
 	"github.com/Aethernet-network/aethernet/internal/wallet"
 )
 
@@ -278,6 +279,10 @@ type Server struct {
 	// Initialized from tasks.MinTaskBudget; overridable via SetMinTaskBudget.
 	minTaskBudget uint64
 
+	// trajService is the trajectory commit service. When non-nil, POST
+	// /v1/tasks/{id}/trajectory/commit is active. Set via SetTrajectoryService.
+	trajService *trajectory.Service
+
 	// replayEnforcer — optional; set via SetReplayEnforcer after construction.
 	// When non-nil, POST /v1/replay/outcome is active and routes replay outcomes
 	// through the enforcer to update task state and release held generation credits.
@@ -452,6 +457,7 @@ func (s *Server) registerL3Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/tasks", s.handleListTasks)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.handleGetTask)
 	mux.HandleFunc("GET /v1/tasks/result/{id}", s.handleGetTaskResult)
+	mux.HandleFunc("POST /v1/tasks/{id}/trajectory/commit", s.handleTrajectoryCommit)
 	mux.HandleFunc("POST /v1/tasks/{id}/claim", s.handleClaimTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/submit", s.handleSubmitTask)
 	mux.HandleFunc("POST /v1/tasks/{id}/approve", s.handleApproveTask)
@@ -519,6 +525,12 @@ func (s *Server) SetServiceRegistry(r *svcregistry.Registry) {
 // The default is tasks.MinTaskBudget (100,000 µAET). Call before Start.
 func (s *Server) SetMinTaskBudget(budget uint64) {
 	s.minTaskBudget = budget
+}
+
+// SetTrajectoryService wires the trajectory commit service. When set,
+// POST /v1/tasks/{id}/trajectory/commit is active. Call before Start.
+func (s *Server) SetTrajectoryService(svc *trajectory.Service) {
+	s.trajService = svc
 }
 
 // protoClientInterface is the canonical protocol interface for token movement.
