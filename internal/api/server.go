@@ -1256,6 +1256,9 @@ func (s *Server) emitDAGEvent(evType event.EventType, payload any, _ string) eve
 		s.taskMgr.ApplyDAGEvent(ev)
 	}
 	if s.node != nil {
+		// Fast-path: register in the ingest pipeline for V2 relay.
+		_ = s.node.SubmitLocalEvent(ev)
+		// Legacy V1: broadcast full event to all peers (including V1-only).
 		_ = s.node.Broadcast(ev)
 	}
 	return ev.ID

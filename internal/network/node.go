@@ -460,6 +460,60 @@ func (n *Node) Broadcast(e *event.Event) error {
 	return nil
 }
 
+// SubmitLocalEvent registers a locally-created event in the fast-path pipeline.
+// The event must already be signed and added to the local DAG. This method:
+//  1. Projects an EventHeader from the full event
+//  2. Computes the BodyCommitment
+//  3. Creates tracking state at Announced stage
+//  4. Immediately advances to Completed (body is available locally)
+//  5. Enqueues for relay to V2 peers
+//
+// V1 peers are served by the existing Broadcast call — this method adds the
+// fast-path pipeline entry without replacing V1 propagation.
+//
+// Returns nil on success, an error if header projection fails. Dedup is safe:
+// if the event is already tracked (e.g. from a peer announcement), the call
+// is a no-op.
+func (n *Node) SubmitLocalEvent(ev *event.Event) error {
+	if n.ingest == nil {
+		return nil // fast path not initialized
+	}
+
+	hdrProj, err := event.ProjectHeader(ev)
+	if err != nil {
+		return fmt.Errorf("network: project header for local event %s: %w", ev.ID, err)
+	}
+
+	// Convert the event-package projection to the wire EventHeader.
+	hdr := EventHeader{
+		EventID:         hdrProj.EventID,
+		Type:            hdrProj.Type,
+		CausalRefs:      hdrProj.CausalRefs,
+		AgentID:         hdrProj.AgentID,
+		CausalTimestamp: hdrProj.CausalTimestamp,
+		StakeAmount:     hdrProj.StakeAmount,
+		BodyCommitment:  hdrProj.BodyCommitment,
+		Signature:       hdrProj.Signature,
+	}
+
+	// Admit creates Announced state and deduplicates.
+	if !n.ingest.AdmitHeader(n.config.AgentID, hdr) {
+		return nil // already tracked — dedup is safe
+	}
+
+	// Local events have the body available immediately.
+	// Advance directly to Completed (body verified by construction).
+	n.ingest.MarkCompleted(ev.ID)
+
+	// Enqueue for relay. The relay consumer (future prompt) will drain
+	// relayQ and SafeSend headers to V2 peers.
+	if !n.ingest.EnqueueRelay(ev.ID) {
+		slog.Debug("network: relayQ full for local event", "event_id", ev.ID)
+	}
+
+	return nil
+}
+
 // SetVoteHandler registers a callback invoked for each authenticated MsgVote
 // received from a peer. The callback feeds the vote into the local OCS consensus
 // round via Engine.AcceptPeerVote. Call before Start.

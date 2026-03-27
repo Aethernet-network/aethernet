@@ -250,6 +250,17 @@ func (im *IngestManager) AnnounceQ() <-chan event.EventID { return im.announceQ 
 // RelayQ returns the relay queue for external consumers.
 func (im *IngestManager) RelayQ() <-chan event.EventID { return im.relayQ }
 
+// EnqueueRelay adds an event ID to the relay queue. Non-blocking: returns
+// false if the queue is full (the caller should log and continue).
+func (im *IngestManager) EnqueueRelay(id event.EventID) bool {
+	select {
+	case im.relayQ <- id:
+		return true
+	default:
+		return false
+	}
+}
+
 // CompleteQ returns the complete queue for external consumers.
 func (im *IngestManager) CompleteQ() <-chan event.EventID { return im.completeQ }
 
