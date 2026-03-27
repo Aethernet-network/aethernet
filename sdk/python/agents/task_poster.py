@@ -14,13 +14,17 @@ import time
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from nacl.encoding import RawEncoder
+
 from aethernet.client import AetherNetClient
+from aethernet.signing import get_or_create_keypair
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [poster] %(message)s")
 log = logging.getLogger("poster")
 
 TESTNET = os.environ.get("AETHERNET_NODE", "https://testnet.aethernet.network")
-POSTER_ID = "task-poster-main"
+SIGNING_KEY = get_or_create_keypair("keys-poster")
+POSTER_ID = SIGNING_KEY.verify_key.encode(encoder=RawEncoder).hex()
 
 # Tier-1 onboarding: 50 AET = 50_000_000 µAET, half auto-staked → 25 AET spendable.
 # All 10 task budgets must fit within that 25 AET ceiling.
@@ -180,13 +184,11 @@ def main():
     log.info(f"Testnet: {TESTNET}")
     log.info(f"Poster agent: {POSTER_ID}")
 
-    client = AetherNetClient(TESTNET, agent_id=POSTER_ID)
+    client = AetherNetClient(TESTNET, signing_key=SIGNING_KEY)
 
-    # Register with a persistent per-agent keypair so this agent gets its own
-    # onboarding allocation from the ecosystem bucket rather than sharing the
-    # node's identity. Key is stored at ~/.aethernet/keys/task-poster-main.key.
+    # Register with the canonical Ed25519 identity derived from signing key.
     try:
-        info = client.register_with_keypair(POSTER_ID)
+        info = client.register()
         alloc = info.get("onboarding_allocation", 0)
         log.info(f"Registered: {POSTER_ID}  onboarding={alloc / 1_000_000:.1f} AET")
     except Exception as e:

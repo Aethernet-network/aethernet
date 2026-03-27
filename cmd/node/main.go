@@ -39,6 +39,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/auth"
 	"github.com/Aethernet-network/aethernet/internal/assurance"
 	"github.com/Aethernet-network/aethernet/internal/autovalidator"
+	"github.com/Aethernet-network/aethernet/internal/blobstore"
 	"github.com/Aethernet-network/aethernet/internal/canary"
 	"github.com/Aethernet-network/aethernet/internal/cloudmap"
 	"github.com/Aethernet-network/aethernet/internal/config"
@@ -69,6 +70,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/store"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
+	"github.com/Aethernet-network/aethernet/internal/trajectory"
 	"github.com/Aethernet-network/aethernet/internal/validator"
 	"github.com/Aethernet-network/aethernet/internal/wallet"
 )
@@ -1501,6 +1503,21 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	if enableMarketplace {
 		apiSrv.SetTaskManager(stack.taskMgr, stack.escrowMgr)
 		apiSrv.SetReputationManager(stack.reputationMgr)
+
+		// Wire trajectory commit service so POST /v1/tasks/{id}/trajectory/commit
+		// and GET /v1/tasks/trajectories/{id} are active.
+		blobDir := filepath.Join(dataDir(), "blobs")
+		blobStore, err := blobstore.NewFSStore(blobDir, 4<<20) // 4 MiB max blob
+		if err != nil {
+			slog.Error("trajectory: failed to create blob store", "error", err, "path", blobDir)
+		} else {
+			trajSvc := trajectory.NewService(
+				trajectory.DefaultTrajectoryConfig(),
+				stack.dag, blobStore, node, stack.taskMgr, stack.kp,
+			)
+			apiSrv.SetTrajectoryService(trajSvc)
+			slog.Info("trajectory service wired", "blob_dir", blobDir)
+		}
 		if stack.discoveryEngine != nil {
 			apiSrv.SetDiscoveryEngine(stack.discoveryEngine)
 		}

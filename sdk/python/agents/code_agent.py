@@ -15,12 +15,13 @@ import anthropic
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from aethernet.client import AetherNetClient, Evidence
+from aethernet.signing import get_or_create_keypair
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [code] %(message)s")
 log = logging.getLogger("code")
 
 TESTNET = os.environ.get("AETHERNET_NODE", "https://testnet.aethernet.network")
-AGENT_ID = "code-worker-01"
+SIGNING_KEY = get_or_create_keypair("keys-code")
 CATEGORIES = ["code-review", "code", "technical", "testing"]
 POLL_INTERVAL = 20
 
@@ -57,16 +58,16 @@ Be thorough — your output quality will be verified and scored."""
 
 
 def main():
-    log.info(f"Starting code agent: {AGENT_ID}")
+    client = AetherNetClient(TESTNET, signing_key=SIGNING_KEY)
+    agent_id = client.agent_id
+
+    log.info(f"Starting code agent: {agent_id}")
     log.info(f"Testnet: {TESTNET}")
     log.info(f"Categories: {CATEGORIES}")
 
-    client = AetherNetClient(TESTNET, agent_id=AGENT_ID)
-
-    # Register with a persistent per-agent keypair so each worker gets its own
-    # onboarding allocation and economic identity, independent of the node's keypair.
+    # Register with the canonical Ed25519 identity derived from signing key.
     try:
-        info = client.register_with_keypair(AGENT_ID)
+        info = client.register()
         alloc = info.get("onboarding_allocation", 0)
         log.info(f"Registered. Onboarding allocation: {alloc / 1_000_000:.1f} AET")
     except Exception as e:
@@ -87,7 +88,7 @@ def main():
 
     # Main loop: poll for tasks routed to this agent, claim them, then work.
     # The routing engine calls SetRoutedTo(taskID, agentID) which marks a task
-    # with routed_to=AGENT_ID while leaving status="open".  The agent must then
+    # with routed_to=agent_id while leaving status="open".  The agent must then
     # call ClaimTask to transition status to "claimed" before submitting work.
     while True:
         try:
@@ -95,7 +96,7 @@ def main():
 
             # Phase 1: Claim any tasks the router has assigned to us.
             for task in my_tasks:
-                if task.get("routed_to") != AGENT_ID:
+                if task.get("routed_to") != agent_id:
                     continue
                 if task.get("status") != "open":
                     continue
@@ -111,7 +112,7 @@ def main():
             for task in my_tasks:
                 if task.get("status") != "claimed":
                     continue
-                if task.get("claimer_id") != AGENT_ID:
+                if task.get("claimer_id") != agent_id:
                     continue
 
                 task_id = task["id"]
@@ -156,7 +157,7 @@ def main():
                     client.submit_task_result(
                         task_id=task_id,
                         evidence=evidence,
-                        claimer_id=AGENT_ID,
+                        claimer_id=agent_id,
                         result_content=result_content,
                         result_encrypted=result_encrypted,
                     )
