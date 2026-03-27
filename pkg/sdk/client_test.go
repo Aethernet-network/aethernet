@@ -1,6 +1,7 @@
 package sdk_test
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"testing"
 
@@ -205,5 +206,122 @@ func TestClient_Profile(t *testing.T) {
 	}
 	if profile.AgentID != string(agentID) {
 		t.Errorf("agent_id mismatch: got %q", profile.AgentID)
+	}
+}
+
+// ── Trajectory SDK Type Tests ────────────────────────────────────────────────
+
+func TestTrajectoryCommitRequest_JSONRoundtrip(t *testing.T) {
+	req := sdk.TrajectoryCommitRequest{
+		ParentCommitID:      "parent-abc",
+		Outcome:             "exploring",
+		ApproachDescription: "Testing recursive approach",
+		Parameters:          map[string]string{"lr": "0.001"},
+		EvidenceSnippet:     "Loss decreased",
+		ComputeCost:         50000,
+		QualityScore:        0.75,
+		CategoryHint:        "research",
+		BranchID:            "main",
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var decoded sdk.TrajectoryCommitRequest
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if decoded.Outcome != req.Outcome {
+		t.Errorf("Outcome = %q; want %q", decoded.Outcome, req.Outcome)
+	}
+	if decoded.ParentCommitID != req.ParentCommitID {
+		t.Errorf("ParentCommitID = %q; want %q", decoded.ParentCommitID, req.ParentCommitID)
+	}
+	if decoded.QualityScore != req.QualityScore {
+		t.Errorf("QualityScore = %v; want %v", decoded.QualityScore, req.QualityScore)
+	}
+	if decoded.Parameters["lr"] != "0.001" {
+		t.Error("Parameters not preserved")
+	}
+}
+
+func TestTrajectoryCommitResponse_JSONRoundtrip(t *testing.T) {
+	resp := sdk.TrajectoryCommitResponse{
+		EventID:        "event-123",
+		CheckpointHash: "abc123def456",
+		CheckpointSize: 1024,
+		TaskID:         "task-456",
+	}
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var decoded sdk.TrajectoryCommitResponse
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if decoded.EventID != resp.EventID {
+		t.Errorf("EventID = %q; want %q", decoded.EventID, resp.EventID)
+	}
+	if decoded.CheckpointHash != resp.CheckpointHash {
+		t.Errorf("CheckpointHash = %q; want %q", decoded.CheckpointHash, resp.CheckpointHash)
+	}
+	if decoded.CheckpointSize != resp.CheckpointSize {
+		t.Errorf("CheckpointSize = %d; want %d", decoded.CheckpointSize, resp.CheckpointSize)
+	}
+}
+
+func TestTrajectoryTreeResponse_JSONRoundtrip(t *testing.T) {
+	resp := sdk.TrajectoryTreeResponse{
+		TaskID: "task-789",
+		Count:  2,
+		Commits: []sdk.TrajectoryCommitNode{
+			{
+				EventID:         "ev-1",
+				TaskID:          "task-789",
+				Outcome:         "exploring",
+				CheckpointHash:  "hash1",
+				CausalTimestamp: 1,
+				BodyAvailable:   true,
+			},
+			{
+				EventID:         "ev-2",
+				TaskID:          "task-789",
+				ParentCommitID:  "ev-1",
+				Outcome:         "converged",
+				CheckpointHash:  "hash2",
+				CausalTimestamp: 2,
+				BodyAvailable:   false,
+			},
+		},
+	}
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var decoded sdk.TrajectoryTreeResponse
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if decoded.Count != 2 {
+		t.Errorf("Count = %d; want 2", decoded.Count)
+	}
+	if decoded.Commits[0].Outcome != "exploring" {
+		t.Errorf("Commits[0].Outcome = %q; want exploring", decoded.Commits[0].Outcome)
+	}
+	if decoded.Commits[1].ParentCommitID != "ev-1" {
+		t.Errorf("Commits[1].ParentCommitID = %q; want ev-1", decoded.Commits[1].ParentCommitID)
+	}
+	if decoded.Commits[0].BodyAvailable != true {
+		t.Error("Commits[0].BodyAvailable should be true")
 	}
 }

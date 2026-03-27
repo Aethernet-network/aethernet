@@ -1168,6 +1168,100 @@ class AetherNetClient:
         return resp.json()
 
     # ------------------------------------------------------------------
+    # Trajectory commits
+    # ------------------------------------------------------------------
+
+    def emit_trajectory_commit(
+        self,
+        task_id: str,
+        outcome: str,
+        approach_description: str,
+        compute_cost: int = 0,
+        quality_score: float = 0.5,
+        parent_commit_id: str = "",
+        parameters: Optional[Dict[str, str]] = None,
+        evidence_snippet: str = "",
+        error_detail: str = "",
+        intermediate_output_hash: str = "",
+        category_hint: str = "",
+        branch_id: str = "",
+    ) -> Dict[str, Any]:
+        """Emit a trajectory commit for the given task.
+
+        Stores the checkpoint body in the blobstore and creates a lean DAG
+        event referencing it by content hash. Only the task claimer may emit.
+
+        Args:
+            task_id:              Task to commit against.
+            outcome:              One of: exploring, dead_end, pivot, converged.
+            approach_description: Summary of the current approach.
+            compute_cost:         Self-reported compute cost in micro-AET.
+            quality_score:        Self-assessed quality [0.0, 1.0].
+            parent_commit_id:     EventID of the parent commit (empty for root).
+            parameters:           Configuration/hyperparameters used.
+            evidence_snippet:     Short sample of the work output.
+            error_detail:         Any errors encountered.
+            intermediate_output_hash: Content hash of intermediate artifacts.
+            category_hint:        Category of work (e.g. code, research).
+            branch_id:            Branch identifier within the trajectory.
+
+        Returns:
+            Dict with event_id, checkpoint_hash, checkpoint_size, task_id.
+        """
+        body: Dict[str, Any] = {
+            "outcome": outcome,
+            "approach_description": approach_description,
+            "compute_cost": compute_cost,
+            "quality_score": quality_score,
+        }
+        if parent_commit_id:
+            body["parent_commit_id"] = parent_commit_id
+        if parameters:
+            body["parameters"] = parameters
+        if evidence_snippet:
+            body["evidence_snippet"] = evidence_snippet
+        if error_detail:
+            body["error_detail"] = error_detail
+        if intermediate_output_hash:
+            body["intermediate_output_hash"] = intermediate_output_hash
+        if category_hint:
+            body["category_hint"] = category_hint
+        if branch_id:
+            body["branch_id"] = branch_id
+        return self._post(f"/v1/tasks/{task_id}/trajectory/commit", body)
+
+    def get_trajectories(
+        self,
+        task_id: str,
+        include_bodies: bool = False,
+        branch_id: str = "",
+        limit: int = 0,
+    ) -> Dict[str, Any]:
+        """Retrieve the trajectory commit tree for a task.
+
+        Args:
+            task_id:         Task to query.
+            include_bodies:  If True, include checkpoint body content.
+            branch_id:       Filter by branch (empty = all branches).
+            limit:           Max commits to return (0 = server default).
+
+        Returns:
+            Dict with task_id, count, and commits array.
+        """
+        params = []
+        if include_bodies:
+            params.append("include_bodies=true")
+        if branch_id:
+            params.append(f"branch_id={branch_id}")
+        if limit > 0:
+            params.append(f"limit={limit}")
+        qs = "&".join(params)
+        path = f"/v1/tasks/trajectories/{task_id}"
+        if qs:
+            path += f"?{qs}"
+        return self._get(path)
+
+    # ------------------------------------------------------------------
     # Transport helpers
     # ------------------------------------------------------------------
 

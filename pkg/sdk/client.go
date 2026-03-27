@@ -944,3 +944,94 @@ func (c *Client) DeactivateService() error {
 	}
 	return nil
 }
+
+// ── Trajectory Commits ───────────────────────────────────────────────────────
+
+// TrajectoryCommitRequest is the input for EmitTrajectoryCommit.
+type TrajectoryCommitRequest struct {
+	ParentCommitID         string            `json:"parent_commit_id,omitempty"`
+	Outcome                string            `json:"outcome"`
+	ApproachDescription    string            `json:"approach_description"`
+	Parameters             map[string]string `json:"parameters,omitempty"`
+	EvidenceSnippet        string            `json:"evidence_snippet,omitempty"`
+	ErrorDetail            string            `json:"error_detail,omitempty"`
+	IntermediateOutputHash string            `json:"intermediate_output_hash,omitempty"`
+	ComputeCost            uint64            `json:"compute_cost"`
+	QualityScore           float64           `json:"quality_score"`
+	CategoryHint           string            `json:"category_hint,omitempty"`
+	BranchID               string            `json:"branch_id,omitempty"`
+}
+
+// TrajectoryCommitResponse is the output of EmitTrajectoryCommit.
+type TrajectoryCommitResponse struct {
+	EventID        string `json:"event_id"`
+	CheckpointHash string `json:"checkpoint_hash"`
+	CheckpointSize int64  `json:"checkpoint_size"`
+	TaskID         string `json:"task_id"`
+}
+
+// TrajectoryCommitNode is a single commit in the trajectory tree.
+type TrajectoryCommitNode struct {
+	EventID         string  `json:"event_id"`
+	TaskID          string  `json:"task_id"`
+	ParentCommitID  string  `json:"parent_commit_id,omitempty"`
+	Outcome         string  `json:"outcome"`
+	CheckpointHash  string  `json:"checkpoint_hash"`
+	CheckpointSize  int64   `json:"checkpoint_size"`
+	ComputeCost     uint64  `json:"compute_cost"`
+	QualityScore    float64 `json:"quality_score"`
+	CategoryHint    string  `json:"category_hint,omitempty"`
+	BranchID        string  `json:"branch_id,omitempty"`
+	CausalTimestamp uint64  `json:"causal_timestamp"`
+	AgentID         string  `json:"agent_id"`
+	BodyAvailable   bool    `json:"body_available"`
+}
+
+// TrajectoryTreeResponse is the output of GetTrajectories.
+type TrajectoryTreeResponse struct {
+	TaskID  string                 `json:"task_id"`
+	Count   int                    `json:"count"`
+	Commits []TrajectoryCommitNode `json:"commits"`
+}
+
+// EmitTrajectoryCommit emits a trajectory commit for the given task.
+// The server stores the checkpoint body in the blobstore and creates a
+// lean DAG event referencing it by content hash.
+func (c *Client) EmitTrajectoryCommit(taskID string, req TrajectoryCommitRequest) (*TrajectoryCommitResponse, error) {
+	resp, err := c.do(http.MethodPost, "/v1/tasks/"+taskID+"/trajectory/commit", req)
+	if err != nil {
+		return nil, err
+	}
+	result, err := checkAndDecode[TrajectoryCommitResponse](resp, http.StatusCreated)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// GetTrajectories retrieves the trajectory commit tree for a task.
+// Set includeBodies to true to fetch checkpoint body content.
+// branchID filters by branch (empty = all branches).
+// limit caps the number of commits returned (0 = server default).
+func (c *Client) GetTrajectories(taskID string, includeBodies bool, branchID string, limit int) (*TrajectoryTreeResponse, error) {
+	path := "/v1/tasks/trajectories/" + taskID + "?"
+	if includeBodies {
+		path += "include_bodies=true&"
+	}
+	if branchID != "" {
+		path += "branch_id=" + branchID + "&"
+	}
+	if limit > 0 {
+		path += fmt.Sprintf("limit=%d&", limit)
+	}
+
+	resp, err := c.do(http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	result, err := checkAndDecode[TrajectoryTreeResponse](resp, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
