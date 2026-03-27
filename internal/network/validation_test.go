@@ -203,3 +203,200 @@ func TestBodyHeaderMismatch_ReconstructionFails(t *testing.T) {
 		t.Fatal("CompleteBody should reject mismatched body")
 	}
 }
+
+// ── Trajectory Commit Validation ─────────────────────────────────────────────
+
+func makeTrajectoryEvent(t *testing.T, kp *crypto.KeyPair, d *dag.DAG, taskID string, claimEventID event.EventID, parentCommitID string) *event.Event {
+	t.Helper()
+	payload := event.TrajectoryCommitPayload{
+		TaskID:         taskID,
+		ParentCommitID: parentCommitID,
+		Outcome:        event.OutcomeExploring,
+		CheckpointHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		CheckpointSize: 100,
+		QualityScore:   0.7,
+	}
+	var refs []event.EventID
+	priorTS := make(map[event.EventID]uint64)
+	if parentCommitID == "" {
+		refs = []event.EventID{claimEventID}
+	} else {
+		refs = []event.EventID{claimEventID, event.EventID(parentCommitID)}
+		if ev, err := d.Get(event.EventID(parentCommitID)); err == nil {
+			priorTS[event.EventID(parentCommitID)] = ev.CausalTimestamp
+		}
+	}
+	if ev, err := d.Get(claimEventID); err == nil {
+		priorTS[claimEventID] = ev.CausalTimestamp
+	}
+
+	ev, err := event.New(event.EventTypeTrajectoryCommit, refs, payload, string(kp.AgentID()), priorTS, 0)
+	if err != nil {
+		t.Fatalf("makeTrajectoryEvent: %v", err)
+	}
+	_ = crypto.SignEvent(ev, kp)
+	return ev
+}
+
+func TestTrajectoryValidation_ValidRootCommit(t *testing.T) {
+	kp, _ := crypto.GenerateKeyPair()
+	d := dag.New()
+
+	// Create a claim event.
+	claimPayload := event.TaskClaimedPayload{TaskID: "task-1", ClaimerID: string(kp.AgentID())}
+	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, claimPayload, string(kp.AgentID()), nil, 0)
+	_ = d.Add(claimEv)
+
+	// Create root trajectory commit.
+	ev := makeTrajectoryEvent(t, kp, d, "task-1", claimEv.ID, "")
+	_ = d.Add(ev)
+
+	if err := network.ValidateEvent(ev); err != nil {
+		t.Fatalf("valid root trajectory commit should pass: %v", err)
+	}
+}
+
+func TestTrajectoryValidation_ValidChildCommit(t *testing.T) {
+	kp, _ := crypto.GenerateKeyPair()
+	d := dag.New()
+
+	claimPayload := event.TaskClaimedPayload{TaskID: "task-1", ClaimerID: string(kp.AgentID())}
+	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, claimPayload, string(kp.AgentID()), nil, 0)
+	_ = d.Add(claimEv)
+
+	root := makeTrajectoryEvent(t, kp, d, "task-1", claimEv.ID, "")
+	_ = d.Add(root)
+
+	child := makeTrajectoryEvent(t, kp, d, "task-1", claimEv.ID, string(root.ID))
+	_ = d.Add(child)
+
+	if err := network.ValidateEvent(child); err != nil {
+		t.Fatalf("valid child trajectory commit should pass: %v", err)
+	}
+}
+
+func TestTrajectoryValidation_InvalidOutcomeRejected(t *testing.T) {
+	kp, _ := crypto.GenerateKeyPair()
+	d := dag.New()
+
+	claimPayload := event.TaskClaimedPayload{TaskID: "task-1", ClaimerID: string(kp.AgentID())}
+	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, claimPayload, string(kp.AgentID()), nil, 0)
+	_ = d.Add(claimEv)
+
+	// Create event with invalid outcome by raw JSON manipulation.
+	rawPayload := json.RawMessage(`{"task_id":"task-1","outcome":"invalid_outcome","checkpoint_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","checkpoint_size":100,"quality_score":0.5}`)
+	ev, _ := event.New(event.EventTypeTrajectoryCommit, []event.EventID{claimEv.ID}, rawPayload, string(kp.AgentID()), map[event.EventID]uint64{claimEv.ID: claimEv.CausalTimestamp}, 0)
+	_ = crypto.SignEvent(ev, kp)
+
+	err := network.ValidateEvent(ev)
+	if err == nil {
+		t.Fatal("invalid outcome should be rejected")
+	}
+}
+
+func TestTrajectoryValidation_InvalidQualityScoreRejected(t *testing.T) {
+	kp, _ := crypto.GenerateKeyPair()
+	d := dag.New()
+
+	claimPayload := event.TaskClaimedPayload{TaskID: "task-1", ClaimerID: string(kp.AgentID())}
+	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, claimPayload, string(kp.AgentID()), nil, 0)
+	_ = d.Add(claimEv)
+
+	rawPayload := json.RawMessage(`{"task_id":"task-1","outcome":"exploring","checkpoint_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","checkpoint_size":100,"quality_score":1.5}`)
+	ev, _ := event.New(event.EventTypeTrajectoryCommit, []event.EventID{claimEv.ID}, rawPayload, string(kp.AgentID()), map[event.EventID]uint64{claimEv.ID: claimEv.CausalTimestamp}, 0)
+	_ = crypto.SignEvent(ev, kp)
+
+	err := network.ValidateEvent(ev)
+	if err == nil {
+		t.Fatal("quality_score > 1.0 should be rejected")
+	}
+}
+
+func TestTrajectoryValidation_RootCausalRefsShapeEnforced(t *testing.T) {
+	kp, _ := crypto.GenerateKeyPair()
+	d := dag.New()
+
+	claimPayload := event.TaskClaimedPayload{TaskID: "task-1", ClaimerID: string(kp.AgentID())}
+	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, claimPayload, string(kp.AgentID()), nil, 0)
+	_ = d.Add(claimEv)
+
+	// Root commit (no parent_commit_id) but with 2 causal refs — invalid.
+	dummy, _ := event.New(event.EventTypeTransfer, nil, event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"}, string(kp.AgentID()), nil, 0)
+	_ = d.Add(dummy)
+
+	payload := event.TrajectoryCommitPayload{
+		TaskID:         "task-1",
+		Outcome:        event.OutcomeExploring,
+		CheckpointHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		CheckpointSize: 100,
+		QualityScore:   0.5,
+	}
+	// Root commit should have 1 ref, but we give it 2.
+	ev, _ := event.New(event.EventTypeTrajectoryCommit, []event.EventID{claimEv.ID, dummy.ID}, payload, string(kp.AgentID()), map[event.EventID]uint64{claimEv.ID: 1, dummy.ID: 1}, 0)
+	_ = crypto.SignEvent(ev, kp)
+
+	err := network.ValidateEvent(ev)
+	if err == nil {
+		t.Fatal("root commit with 2 causal refs should be rejected")
+	}
+}
+
+func TestTrajectoryValidation_ChildCausalRefsShapeEnforced(t *testing.T) {
+	kp, _ := crypto.GenerateKeyPair()
+	d := dag.New()
+
+	claimPayload := event.TaskClaimedPayload{TaskID: "task-1", ClaimerID: string(kp.AgentID())}
+	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, claimPayload, string(kp.AgentID()), nil, 0)
+	_ = d.Add(claimEv)
+
+	// Child commit (has parent_commit_id) but with 1 causal ref — invalid.
+	payload := event.TrajectoryCommitPayload{
+		TaskID:         "task-1",
+		ParentCommitID: "parent-123",
+		Outcome:        event.OutcomeExploring,
+		CheckpointHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		CheckpointSize: 100,
+		QualityScore:   0.5,
+	}
+	ev, _ := event.New(event.EventTypeTrajectoryCommit, []event.EventID{claimEv.ID}, payload, string(kp.AgentID()), map[event.EventID]uint64{claimEv.ID: 1}, 0)
+	_ = crypto.SignEvent(ev, kp)
+
+	err := network.ValidateEvent(ev)
+	if err == nil {
+		t.Fatal("child commit with 1 causal ref should be rejected")
+	}
+}
+
+func TestTrajectoryValidation_BlobAbsenceDoesNotBlockValidation(t *testing.T) {
+	kp, _ := crypto.GenerateKeyPair()
+	d := dag.New()
+
+	claimPayload := event.TaskClaimedPayload{TaskID: "task-1", ClaimerID: string(kp.AgentID())}
+	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, claimPayload, string(kp.AgentID()), nil, 0)
+	_ = d.Add(claimEv)
+
+	// Create a valid trajectory commit referencing a blob that doesn't exist.
+	// Validation should NOT require blob presence.
+	ev := makeTrajectoryEvent(t, kp, d, "task-1", claimEv.ID, "")
+	_ = d.Add(ev)
+
+	if err := network.ValidateEvent(ev); err != nil {
+		t.Fatalf("blob absence should not block validation: %v", err)
+	}
+}
+
+func TestTrajectoryValidation_NormalEventUnaffected(t *testing.T) {
+	// Non-trajectory events should not trigger trajectory-specific validation.
+	kp, _ := crypto.GenerateKeyPair()
+	d := dag.New()
+	parent := makeTestEvent(t, d, kp)
+
+	payload := event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"}
+	child, _ := event.New(event.EventTypeTransfer, []event.EventID{parent.ID}, payload, string(kp.AgentID()), map[event.EventID]uint64{parent.ID: parent.CausalTimestamp}, 0)
+	_ = crypto.SignEvent(child, kp)
+	_ = d.Add(child)
+
+	if err := network.ValidateEvent(child); err != nil {
+		t.Fatalf("normal event validation should pass: %v", err)
+	}
+}

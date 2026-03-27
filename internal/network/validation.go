@@ -12,6 +12,7 @@ package network
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,10 +23,12 @@ import (
 
 // Validation errors.
 var (
-	ErrValidationNotCompleted = errors.New("validation: event not at Completed stage")
-	ErrValidationNoBody       = errors.New("validation: body not available")
-	ErrValidationIDMismatch   = errors.New("validation: reconstructed EventID does not match header")
-	ErrValidationBadSignature = errors.New("validation: signature verification failed")
+	ErrValidationNotCompleted      = errors.New("validation: event not at Completed stage")
+	ErrValidationNoBody            = errors.New("validation: body not available")
+	ErrValidationIDMismatch        = errors.New("validation: reconstructed EventID does not match header")
+	ErrValidationBadSignature      = errors.New("validation: signature verification failed")
+	ErrTrajectoryInvalidPayload    = errors.New("validation: trajectory commit has invalid payload")
+	ErrTrajectoryInvalidCausalRefs = errors.New("validation: trajectory commit has invalid causal ref shape")
 )
 
 // ReconstructEvent rebuilds a full event.Event from an EventTracking entry
@@ -65,8 +68,8 @@ func ReconstructEvent(t *EventTracking) (*event.Event, error) {
 }
 
 // ValidateEvent performs pre-materialization checks on a reconstructed event:
-// signature verification and EventID consistency. This is advisory — dag.Add
-// still enforces its own checks independently.
+// signature verification, EventID consistency, and type-specific validation.
+// This is advisory — dag.Add still enforces its own checks independently.
 func ValidateEvent(e *event.Event) error {
 	// Signature verification. Genesis events (empty CausalRefs) may be unsigned.
 	isGenesis := len(e.CausalRefs) == 0
@@ -78,6 +81,50 @@ func ValidateEvent(e *event.Event) error {
 			return fmt.Errorf("%w: event %s", ErrValidationBadSignature, e.ID)
 		}
 	}
+
+	// Type-specific validation.
+	if e.Type == event.EventTypeTrajectoryCommit {
+		if err := validateTrajectoryCommit(e); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateTrajectoryCommit performs trajectory-specific validation:
+//   - Payload must parse as TrajectoryCommitPayload with valid fields
+//   - Causal ref shape must be task-local:
+//   - Root commit: exactly 1 ref (task claim event)
+//   - Child commit: exactly 2 refs (task claim event + parent commit)
+//   - Checkpoint blob presence is NOT required for Phase 1 validation.
+//     The blob is an external artifact fetched by the trajectory service,
+//     not by the Fast Path completion pipeline.
+func validateTrajectoryCommit(e *event.Event) error {
+	var payload event.TrajectoryCommitPayload
+	if err := json.Unmarshal(e.Payload, &payload); err != nil {
+		return fmt.Errorf("%w: unmarshal failed: %v", ErrTrajectoryInvalidPayload, err)
+	}
+
+	if err := payload.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrTrajectoryInvalidPayload, err)
+	}
+
+	// Causal ref shape validation.
+	if payload.IsRootCommit() {
+		// Root commit: CausalRefs = [task_claim_event_id]
+		if len(e.CausalRefs) != 1 {
+			return fmt.Errorf("%w: root commit must have exactly 1 causal ref (task claim), got %d",
+				ErrTrajectoryInvalidCausalRefs, len(e.CausalRefs))
+		}
+	} else {
+		// Child commit: CausalRefs = [task_claim_event_id, parent_commit_id]
+		if len(e.CausalRefs) != 2 {
+			return fmt.Errorf("%w: child commit must have exactly 2 causal refs (claim + parent), got %d",
+				ErrTrajectoryInvalidCausalRefs, len(e.CausalRefs))
+		}
+	}
+
 	return nil
 }
 

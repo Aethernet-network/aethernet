@@ -7,6 +7,14 @@
 // This separates header awareness (fast relay) from body availability
 // (needed for validation and materialization). Bodies are no longer
 // mandatory on the initial hot-path relay.
+//
+// TRAJECTORY COMMIT POLICY: For EventTypeTrajectoryCommit events, the Fast
+// Path EventBody is the lean TrajectoryCommitPayload JSON — NOT the large
+// CheckpointBody blob. Checkpoint bodies are external content-addressed
+// artifacts stored in the blobstore and retrieved by the trajectory service
+// layer, not by the Fast Path completion pipeline. This separation is
+// architectural: the Fast Path handles event payload propagation; blob
+// retrieval is an application-layer concern.
 package network
 
 import (
