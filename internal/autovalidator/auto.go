@@ -882,4 +882,16 @@ func (av *AutoValidator) emitVote(targetEventID event.EventID, verdict string, v
 	}
 	slog.Info("auto-validator: emitted vote",
 		"target", targetEventID, "verdict", verdict, "vote_id", voteEvent.ID)
+
+	// Register the vote with the OCS engine so the VotingRound counts it
+	// and the MsgVote wire protocol broadcasts it to peers. Without this,
+	// the vote exists only as a DAG event and never enters the consensus
+	// pipeline — causing the pending item to expire with zero votes.
+	_ = av.engine.ProcessVote(ocs.VerificationResult{
+		EventID:       targetEventID,
+		VerifierID:    av.validatorID,
+		Verdict:       verdict == string(settlement.VerdictAccepted),
+		VerifiedValue: verifiedValue,
+		Timestamp:     time.Now(),
+	})
 }

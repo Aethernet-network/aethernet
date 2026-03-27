@@ -1226,6 +1226,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		os.Exit(1)
 	}
 
+	// Wire broadcaster so protocol client events are disseminated to peers.
+	stack.protoClient.SetBroadcaster(node)
+
 	// ── Settlement Applicator ────────────────────────────────────────────────
 	// The ONLY component that mutates ledgers in response to consensus.
 	settlementApp := settlement.NewApplicator(

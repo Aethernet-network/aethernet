@@ -79,10 +79,12 @@ func TestAutoValidator_ProcessesPending(t *testing.T) {
 		t.Fatal("expected at least one VerificationVote event in DAG after auto-validation")
 	}
 
-	// The pending count stays non-zero — the auto-validator only emits votes,
-	// it never calls ProcessResult. Settlement is handled by the applicator.
-	if eng.PendingCount() == 0 {
-		t.Error("pending count should NOT be 0 — auto-validator emits votes, not settlements")
+	// In single-node mode (no VotingRound), the auto-validator's ProcessVote
+	// call settles the event immediately via ProcessResult. The pending count
+	// should drop to 0. In multi-node mode, the vote is registered with the
+	// VotingRound and settlement waits for supermajority.
+	if eng.PendingCount() != 0 {
+		t.Errorf("pending count should be 0 in single-node mode — ProcessVote settles immediately, got %d", eng.PendingCount())
 	}
 }
 
