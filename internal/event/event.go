@@ -82,6 +82,12 @@ const (
 
 	// Task lifecycle events — propagated via DAG, applied deterministically
 	// on every node without consensus (same class as Registration events).
+	// EventTypeTrajectoryCommit records a checkpoint in a task's execution
+	// trajectory. Contains a hash reference to the checkpoint body stored
+	// in the blobstore. Causal refs are task-local: root commits reference
+	// the task claim event; child commits reference the claim + parent commit.
+	EventTypeTrajectoryCommit EventType = "TrajectoryCommit"
+
 	EventTypeTaskPosted    EventType = "TaskPosted"
 	EventTypeTaskClaimed   EventType = "TaskClaimed"
 	EventTypeTaskSubmitted EventType = "TaskSubmitted"
