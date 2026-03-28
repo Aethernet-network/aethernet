@@ -1510,108 +1510,106 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	settlementApp.Start()
 	defer settlementApp.Stop()
 
-	// ── Consensus finalization callback ──────────────────────────────────────
-	// When VotingRound reaches supermajority for a target, create a canonical
-	// SettlementRecord in the DAG. This is the ONLY code path that creates
-	// Settlement events. The SettlementApplicator applies them.
-	//
-	// Wire DAG sync: route events by type. VerificationVotes feed into
-	// VotingRound. Settlements feed into the Applicator. Transfer/Generation/
-	// TaskSettlement enter the OCS pending queue. Registration updates identity.
+	// ── Consensus finalization handler ───────────────────────────────────────
+	// When processVoteInternal detects supermajority, this handler fires to
+	// create the Settlement DAG event and apply it. Settlement creation is
+	// now inevitable on finalization — it does not depend on a later sync
+	// handler noticing that finalization happened.
+	stack.engine.SetFinalizationHandler(func(targetID event.EventID, verdict bool, verifiedValue uint64, finalOrder uint64) {
+		// Idempotency: skip if already applied.
+		if settlementApp.IsApplied(targetID) {
+			return
+		}
+
+		rec, err := stack.votingRound.GetRecord(targetID)
+		if err != nil {
+			return
+		}
+
+		consensusVerdict := settlement.VerdictAccepted
+		if !verdict {
+			consensusVerdict = settlement.VerdictRejected
+		}
+
+		// Build attestations from vote record.
+		var attestations []settlement.VoterAttestation
+		for voterKey, vote := range rec.Votes {
+			v := settlement.VerdictAccepted
+			if !vote {
+				v = settlement.VerdictRejected
+			}
+			attestations = append(attestations, settlement.VoterAttestation{
+				VoterID: string(voterKey),
+				Verdict: string(v),
+			})
+		}
+		sp := settlement.SettlementPayload{
+			TargetEventID:  string(targetID),
+			Verdict:        string(consensusVerdict),
+			VerifiedValue:  verifiedValue,
+			ConsensusRound: finalOrder,
+			Attestations:   attestations,
+		}
+		sp.SortAttestations()
+
+		// Create the Settlement DAG event.
+		tips := stack.dag.Tips()
+		priorTS := make(map[event.EventID]uint64, len(tips))
+		for _, ref := range tips {
+			if te, err := stack.dag.Get(ref); err == nil {
+				priorTS[ref] = te.CausalTimestamp
+			}
+		}
+		settlementEv, err := event.New(
+			event.EventTypeSettlement, tips, sp,
+			string(agentID), priorTS, 0,
+		)
+		if err != nil {
+			slog.Error("settlement: failed to create settlement event",
+				"target", targetID, "err", err)
+			return
+		}
+		if stack.kp != nil {
+			_ = crypto.SignEvent(settlementEv, stack.kp)
+		}
+		if err := pub.Publish(settlementEv); err != nil {
+			return // duplicate — another node already created one
+		}
+
+		slog.Info("settlement: consensus finalized, settlement event created",
+			"target", targetID, "verdict", consensusVerdict,
+			"settlement_id", settlementEv.ID)
+
+		// Apply immediately on the creating node.
+		_ = settlementApp.Apply(&sp)
+	})
+
+	// ── DAG sync handler ────────────────────────────────────────────────────
+	// Route events by type. VerificationVotes feed into VotingRound (the
+	// finalization handler creates settlements). Settlements feed into the
+	// Applicator. Transfer/Generation/TaskSettlement enter the OCS pending
+	// queue. Registration updates identity.
 	node.SetSyncHandler(func(ev *event.Event) {
 		switch ev.Type {
 		case event.EventTypeTransfer, event.EventTypeGeneration, event.EventTypeTaskSettlement:
 			_ = stack.engine.SubmitFromSync(ev)
 
 		case event.EventTypeVerificationVote:
+			// Route the vote through the OCS engine so it reaches the
+			// finalization handler. AcceptPeerVote → processVoteInternal →
+			// if finalized: onFinalized callback fires → creates Settlement
+			// event + calls Apply. This ensures settlement creation is
+			// inevitable regardless of which path (MsgVote or DAG sync)
+			// delivers the finalizing vote.
 			vp, err := event.GetPayload[settlement.VerificationVotePayload](ev)
 			if err != nil {
 				return
 			}
-			targetID := event.EventID(vp.TargetEventID)
-			voterID := crypto.AgentID(vp.VoterID)
-			verdict := vp.Verdict == string(settlement.VerdictAccepted)
-
-			// Register the vote. Duplicate/finalized/exhausted errors are
-			// non-fatal — the vote was already counted via another path
-			// (MsgVote or prior DAG sync). We still check finalization
-			// below because the MsgVote path may have finalized the round
-			// via processVoteInternal → ProcessResult (metrics only) without
-			// creating a Settlement event or calling the applicator.
-			_ = stack.votingRound.RegisterVote(targetID, voterID, verdict)
-
-			// Check finalization regardless of RegisterVote result.
-			finalized, _ := stack.votingRound.IsFinalized(targetID)
-			if !finalized {
-				return
-			}
-
-			// Supermajority reached — check if a Settlement already exists.
-			if settlementApp.IsApplied(targetID) {
-				return
-			}
-
-			rec, err := stack.votingRound.GetRecord(targetID)
-			if err != nil {
-				return
-			}
-
-			consensusVerdict := settlement.VerdictAccepted
-			if rec.TotalWeight == 0 || float64(rec.YesWeight)/float64(rec.TotalWeight) < 0.667 {
-				consensusVerdict = settlement.VerdictRejected
-			}
-
-			// Build attestations from vote record.
-			var attestations []settlement.VoterAttestation
-			for voterKey, vote := range rec.Votes {
-				v := settlement.VerdictAccepted
-				if !vote {
-					v = settlement.VerdictRejected
-				}
-				attestations = append(attestations, settlement.VoterAttestation{
-					VoterID: string(voterKey),
-					Verdict: string(v),
-				})
-			}
-			sp := settlement.SettlementPayload{
-				TargetEventID:  string(targetID),
-				Verdict:        string(consensusVerdict),
-				VerifiedValue:  vp.VerifiedValue,
-				ConsensusRound: uint64(rec.FinalOrder),
-				Attestations:   attestations,
-			}
-			sp.SortAttestations()
-
-			// Create the Settlement DAG event.
-			tips := stack.dag.Tips()
-			priorTS := make(map[event.EventID]uint64, len(tips))
-			for _, ref := range tips {
-				if te, err := stack.dag.Get(ref); err == nil {
-					priorTS[ref] = te.CausalTimestamp
-				}
-			}
-			settlementEv, err := event.New(
-				event.EventTypeSettlement, tips, sp,
-				string(agentID), priorTS, 0,
+			_ = stack.engine.AcceptPeerVote(
+				event.EventID(vp.TargetEventID),
+				crypto.AgentID(vp.VoterID),
+				vp.Verdict == string(settlement.VerdictAccepted),
 			)
-			if err != nil {
-				slog.Error("settlement: failed to create settlement event",
-					"target", targetID, "err", err)
-				return
-			}
-			if stack.kp != nil {
-				_ = crypto.SignEvent(settlementEv, stack.kp)
-			}
-			if err := pub.Publish(settlementEv); err != nil {
-				return // duplicate — another node already created one
-			}
-
-			slog.Info("settlement: consensus finalized, settlement event created",
-				"target", targetID, "verdict", consensusVerdict,
-				"settlement_id", settlementEv.ID)
-
-			// Apply immediately on the creating node.
-			_ = settlementApp.Apply(&sp)
 
 		case event.EventTypeSettlement:
 			sp, err := event.GetPayload[settlement.SettlementPayload](ev)

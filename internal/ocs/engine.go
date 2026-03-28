@@ -219,6 +219,15 @@ type Engine struct {
 	// The function receives the event ID, verdict, and voter ID.
 	broadcastVote func(eventID event.EventID, verdict bool, voterID crypto.AgentID)
 
+	// onFinalized — optional. When non-nil, called exactly once when
+	// processVoteInternal detects that a consensus round has finalized.
+	// The callback receives the target event ID, the computed consensus
+	// verdict, the verified value, and the finalization order. The callback
+	// is responsible for creating the Settlement DAG event and applying it.
+	// This makes settlement creation inevitable on finalization, rather
+	// than depending on a later observer noticing finalization.
+	onFinalized func(targetID event.EventID, verdict bool, verifiedValue uint64, finalOrder uint64)
+
 	pending      map[event.EventID]*PendingItem
 	processed    map[event.EventID]struct{}    // tracks already-settled events for idempotency
 	processedAt  map[event.EventID]time.Time   // wall-clock time each event was settled (for GC)
@@ -275,6 +284,28 @@ func (e *Engine) SetConsensus(vr *consensus.VotingRound) {
 // peer nodes over the P2P network. Nil-safe.
 func (e *Engine) SetVoteBroadcaster(fn func(eventID event.EventID, verdict bool, voterID crypto.AgentID)) {
 	e.broadcastVote = fn
+}
+
+// SetFinalizationHandler registers a callback that fires when consensus
+// finalizes a target event. The callback is the authoritative path for
+// settlement creation — it creates the Settlement DAG event and calls
+// the settlement applicator. This makes settlement inevitable on
+// finalization, regardless of which vote path (MsgVote or DAG sync)
+// triggered the supermajority.
+//
+// The callback receives:
+//   - targetID: the event that was finalized
+//   - verdict: true if accepted (supermajority yes), false if rejected
+//   - verifiedValue: the verified value from the triggering vote
+//   - finalOrder: the monotonic finalization sequence number
+//
+// The callback must be idempotent — it may be called from multiple
+// vote paths for the same target. Use settlementApp.IsApplied for
+// deduplication.
+//
+// Call before Start.
+func (e *Engine) SetFinalizationHandler(fn func(targetID event.EventID, verdict bool, verifiedValue uint64, finalOrder uint64)) {
+	e.onFinalized = fn
 }
 
 // ProcessVote routes a verification verdict through the consensus engine when
@@ -335,21 +366,16 @@ func (e *Engine) processVoteInternal(result VerificationResult, broadcast bool) 
 		return nil // awaiting more votes
 	}
 
-	// Supermajority reached — read the consensus result and settle.
+	// Supermajority reached — read the consensus result.
 	rec, ferr := e.voting.GetRecord(result.EventID)
 	if ferr != nil {
 		return nil
 	}
-	// Compute the consensus verdict from accumulated weights.
-	// Finalization only occurs when YesWeight/TotalWeight >= SupermajorityThreshold,
-	// so the verdict is always true here. Kept explicit for auditability.
 	consensusVerdict := rec.TotalWeight > 0 &&
 		float64(rec.YesWeight)/float64(rec.TotalWeight) >= 0.667
 
-	// Settle with an empty VerifierID to bypass the self-dealing check:
-	// consensus means multiple independent validators agreed, so the check
-	// against any single verifier being a party to the transaction is moot.
-	return e.ProcessResult(VerificationResult{
+	// Clear from OCS pending (metrics only — no ledger mutation).
+	_ = e.ProcessResult(VerificationResult{
 		EventID:       result.EventID,
 		Verdict:       consensusVerdict,
 		VerifiedValue: result.VerifiedValue,
@@ -357,6 +383,16 @@ func (e *Engine) processVoteInternal(result VerificationResult, broadcast bool) 
 		Reason:        "consensus: supermajority finalized",
 		Timestamp:     result.Timestamp,
 	})
+
+	// Fire the finalization handler to create the Settlement event and
+	// call the settlement applicator. This is the authoritative path —
+	// settlement creation is inevitable once consensus finalizes,
+	// regardless of which vote delivery path triggered the supermajority.
+	if e.onFinalized != nil {
+		e.onFinalized(result.EventID, consensusVerdict, result.VerifiedValue, rec.FinalOrder)
+	}
+
+	return nil
 }
 
 // NewEngine constructs an Engine backed by the provided ledgers and identity registry.
