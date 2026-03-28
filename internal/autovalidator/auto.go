@@ -127,7 +127,7 @@ type AutoValidator struct {
 
 	// publisher is the authoritative local event publisher. When set,
 	// emitVote and settleTask publish events through this path instead of
-	// inline dag.Add + eventBroadcaster calls.
+	// direct dag.Add calls. Falls back to dag.Add for tests.
 	publisher interface{ Publish(ev *event.Event) error }
 
 	// canaryInjector is optional. When set, IsCanary is checked for each
@@ -170,12 +170,6 @@ type AutoValidator struct {
 	// VerificationVote for. Prevents duplicate vote emission on every tick.
 	voted map[event.EventID]struct{}
 
-	// eventBroadcaster disseminates locally-created DAG events (vote events,
-	// task settlement events) to peers via the Fast Path pipeline. When nil,
-	// events exist only in the local DAG and peers must discover them via
-	// periodic sync (which is disabled for V2 peers). Set via
-	// SetEventBroadcaster before Start.
-	eventBroadcaster func(ev *event.Event)
 }
 
 // NewAutoValidator creates an AutoValidator that polls engine every interval
@@ -309,13 +303,6 @@ func (av *AutoValidator) SetReplayReserve(rr replayReserveAccruer, reserveShare 
 // not called.
 func (av *AutoValidator) SetDAG(d *dag.DAG) {
 	av.dag = d
-}
-
-// SetEventBroadcaster wires a callback that disseminates locally-created DAG
-// events to peers. Deprecated — use SetPublisher. Retained for backward
-// compatibility during incremental migration.
-func (av *AutoValidator) SetEventBroadcaster(fn func(ev *event.Event)) {
-	av.eventBroadcaster = fn
 }
 
 // SetPublisher wires the authoritative local event publisher. When set,
@@ -754,12 +741,10 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score, hol
 						"task_id", task.ID, "event_id", tsEv.ID)
 				}
 			} else if addErr := av.dag.Add(tsEv); addErr != nil {
+				// Fallback for tests without a publisher: DAG-only, no broadcast.
 				slog.Warn("auto-validator: failed to add task settlement to DAG",
 					"task_id", task.ID, "err", addErr)
 			} else {
-				if av.eventBroadcaster != nil {
-					av.eventBroadcaster(tsEv)
-				}
 				slog.Info("auto-validator: emitted task settlement event",
 					"task_id", task.ID, "event_id", tsEv.ID)
 			}
@@ -921,14 +906,11 @@ func (av *AutoValidator) emitVote(targetEventID event.EventID, verdict string, v
 			return
 		}
 	} else {
-		// Fallback for tests without a publisher.
+		// Fallback for tests without a publisher: DAG-only, no broadcast.
 		if err := av.dag.Add(voteEvent); err != nil {
 			slog.Debug("auto-validator: vote event already in DAG",
 				"target", targetEventID)
 			return
-		}
-		if av.eventBroadcaster != nil {
-			av.eventBroadcaster(voteEvent)
 		}
 	}
 

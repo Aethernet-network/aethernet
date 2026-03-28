@@ -2077,8 +2077,8 @@ func (s *Server) buildCausalRefs(requested []event.EventID) ([]event.EventID, ma
 	return refs, priorTimestamps
 }
 
-// submitAndAdd builds, signs, submits to the OCS engine, and adds to the DAG.
-// Broadcast is attempted if s.node is non-nil. Returns the event on success.
+// submitAndAdd signs, submits to OCS, and publishes via the authoritative
+// publisher. Falls back to direct dag.Add for tests without a publisher.
 func (s *Server) submitAndAdd(e *event.Event) error {
 	if err := crypto.SignEvent(e, s.kp); err != nil {
 		return fmt.Errorf("sign: %w", err)

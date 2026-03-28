@@ -61,15 +61,6 @@ func (c *Client) SetPublisher(p localPublisher) {
 	c.publisher = p
 }
 
-// SetBroadcaster is a backward-compatible adapter that wraps an
-// eventBroadcaster as a localPublisher. Deprecated — use SetPublisher.
-// Retained so existing wiring in cmd/node/main.go compiles during
-// incremental migration.
-func (c *Client) SetBroadcaster(b interface{ Broadcast(*event.Event) error; SubmitLocalEvent(*event.Event) error }) {
-	// No-op: the publisher path supersedes the broadcaster.
-	// The caller should use SetPublisher instead.
-}
-
 // SubmitTransfer creates a canonical Transfer event and submits it through
 // the OCS engine into the DAG. The transfer settles through consensus →
 // SettlementApplicator on every node.
