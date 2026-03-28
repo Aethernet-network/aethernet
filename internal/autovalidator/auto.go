@@ -125,6 +125,11 @@ type AutoValidator struct {
 	dag *dag.DAG
 	kp  *crypto.KeyPair
 
+	// publisher is the authoritative local event publisher. When set,
+	// emitVote and settleTask publish events through this path instead of
+	// inline dag.Add + eventBroadcaster calls.
+	publisher interface{ Publish(ev *event.Event) error }
+
 	// canaryInjector is optional. When set, IsCanary is checked for each
 	// submitted task to detect protocol-internal measurement tasks injected
 	// into the live stream. Used by SetCanaryInjector; nil = skip all injection
@@ -307,11 +312,17 @@ func (av *AutoValidator) SetDAG(d *dag.DAG) {
 }
 
 // SetEventBroadcaster wires a callback that disseminates locally-created DAG
-// events to peers. Without this, vote events and task settlement events exist
-// only in the local DAG and are never seen by peers (V2 peers do not use
-// periodic sync, so events must be explicitly broadcast). Call before Start.
+// events to peers. Deprecated — use SetPublisher. Retained for backward
+// compatibility during incremental migration.
 func (av *AutoValidator) SetEventBroadcaster(fn func(ev *event.Event)) {
 	av.eventBroadcaster = fn
+}
+
+// SetPublisher wires the authoritative local event publisher. When set,
+// emitVote and settleTask publish events through this path, which handles
+// dag.Add + Fast Path + legacy broadcast in a single call. Call before Start.
+func (av *AutoValidator) SetPublisher(p interface{ Publish(ev *event.Event) error }) {
+	av.publisher = p
 }
 
 // SetKeyPair sets the signing key used to author DAG events created by the
@@ -734,6 +745,14 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score, hol
 			if signErr := crypto.SignEvent(tsEv, av.kp); signErr != nil {
 				slog.Warn("auto-validator: failed to sign task settlement event",
 					"task_id", task.ID, "err", signErr)
+			} else if av.publisher != nil {
+				if pubErr := av.publisher.Publish(tsEv); pubErr != nil {
+					slog.Warn("auto-validator: failed to publish task settlement event",
+						"task_id", task.ID, "err", pubErr)
+				} else {
+					slog.Info("auto-validator: emitted task settlement event",
+						"task_id", task.ID, "event_id", tsEv.ID)
+				}
 			} else if addErr := av.dag.Add(tsEv); addErr != nil {
 				slog.Warn("auto-validator: failed to add task settlement to DAG",
 					"task_id", task.ID, "err", addErr)
@@ -893,18 +912,24 @@ func (av *AutoValidator) emitVote(targetEventID event.EventID, verdict string, v
 		return
 	}
 	_ = crypto.SignEvent(voteEvent, av.kp)
-	if err := av.dag.Add(voteEvent); err != nil {
-		slog.Debug("auto-validator: vote event already in DAG",
-			"target", targetEventID)
-		return
-	}
 
-	// Broadcast the vote event to peers via the Fast Path pipeline so their
-	// sync handlers receive it and can create Settlement events on consensus
-	// finalization. Without this, the vote exists only in the local DAG and
-	// V2 peers never learn about it (periodic sync is disabled for V2).
-	if av.eventBroadcaster != nil {
-		av.eventBroadcaster(voteEvent)
+	// Publish through the authoritative publisher (dag.Add + disseminate).
+	if av.publisher != nil {
+		if err := av.publisher.Publish(voteEvent); err != nil {
+			slog.Debug("auto-validator: vote event publication failed",
+				"target", targetEventID, "err", err)
+			return
+		}
+	} else {
+		// Fallback for tests without a publisher.
+		if err := av.dag.Add(voteEvent); err != nil {
+			slog.Debug("auto-validator: vote event already in DAG",
+				"target", targetEventID)
+			return
+		}
+		if av.eventBroadcaster != nil {
+			av.eventBroadcaster(voteEvent)
+		}
 	}
 
 	slog.Info("auto-validator: emitted vote",

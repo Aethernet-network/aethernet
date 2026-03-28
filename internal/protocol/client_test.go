@@ -8,6 +8,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
+	"github.com/Aethernet-network/aethernet/internal/localpub"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/protocol"
 )
@@ -32,7 +33,9 @@ func newTestClient(t *testing.T) (*protocol.Client, *dag.DAG, *ocs.Engine, *ledg
 		t.Fatalf("fund agent: %v", err)
 	}
 
-	return protocol.NewClient(d, kp, eng, agentID), d, eng, tl
+	client := protocol.NewClient(d, kp, eng, agentID)
+	client.SetPublisher(localpub.New(d, nil))
+	return client, d, eng, tl
 }
 
 func TestSubmitTransfer_CreatesDAGEvent(t *testing.T) {

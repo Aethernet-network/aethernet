@@ -175,6 +175,12 @@ type taskRouterInterface interface {
 // It wraps all core node components and exposes them over a JSON API.
 // Server implements http.Handler so it can be mounted in httptest.NewServer
 // for tests without binding a real TCP port.
+// localEventPublisher publishes locally-created events through the
+// authoritative DAG-add + disseminate path. Satisfied by *localpub.Publisher.
+type localEventPublisher interface {
+	Publish(ev *event.Event) error
+}
+
 type Server struct {
 	dag        *dag.DAG
 	transfer   *ledger.TransferLedger
@@ -185,6 +191,7 @@ type Server struct {
 	node       *network.Node // may be nil in tests
 	kp         *crypto.KeyPair
 	agentID    crypto.AgentID
+	publisher  localEventPublisher // authoritative local event publication
 
 	// Economics — all optional; set via SetEconomics after construction.
 	walletMgr    *wallet.Wallet
@@ -547,6 +554,13 @@ type protoClientInterface interface {
 // SetProtocolClient wires the protocol client into the server. Call before Start.
 func (s *Server) SetProtocolClient(pc protoClientInterface) {
 	s.protoClient = pc
+}
+
+// SetPublisher wires the authoritative local event publisher. When set,
+// all locally-created DAG events (task lifecycle, registration) are published
+// through this path instead of inline dag.Add + broadcast calls.
+func (s *Server) SetPublisher(p localEventPublisher) {
+	s.publisher = p
 }
 
 // SetAuthVerifier wires Ed25519 request signature verification. When set,
@@ -1262,19 +1276,21 @@ func (s *Server) emitDAGEvent(evType event.EventType, payload any, _ string) eve
 		return ""
 	}
 	_ = crypto.SignEvent(ev, s.kp)
-	if s.dag.Add(ev) != nil {
+
+	// Publish through the authoritative local event publisher.
+	if s.publisher != nil {
+		if s.publisher.Publish(ev) != nil {
+			return ""
+		}
+	} else if s.dag.Add(ev) != nil {
+		// Fallback for tests without a publisher wired.
 		return ""
 	}
+
 	// Apply task state locally so the API response reflects the change.
 	// ApplyDAGEvent is idempotent — safe even if the sync handler also fires.
 	if s.taskMgr != nil {
 		s.taskMgr.ApplyDAGEvent(ev)
-	}
-	if s.node != nil {
-		// Fast-path: register in the ingest pipeline for V2 relay.
-		_ = s.node.SubmitLocalEvent(ev)
-		// Legacy V1: broadcast full event to all peers (including V1-only).
-		_ = s.node.Broadcast(ev)
 	}
 	return ev.ID
 }
@@ -2070,13 +2086,18 @@ func (s *Server) submitAndAdd(e *event.Event) error {
 	if err := s.engine.Submit(e); err != nil {
 		return fmt.Errorf("submit: %w", err)
 	}
-	if err := s.dag.Add(e); err != nil {
-		// Ledger entry exists but DAG rejected — should not occur with valid events.
-		slog.Error("api: dag.Add failed after Submit", "event_id", e.ID, "err", err)
-		return fmt.Errorf("dag: %w", err)
-	}
-	if s.node != nil {
-		_ = s.node.Broadcast(e)
+	// Publish through the authoritative local event publisher.
+	if s.publisher != nil {
+		if err := s.publisher.Publish(e); err != nil {
+			slog.Error("api: publisher.Publish failed after Submit", "event_id", e.ID, "err", err)
+			return fmt.Errorf("publish: %w", err)
+		}
+	} else {
+		// Fallback for tests without a publisher wired.
+		if err := s.dag.Add(e); err != nil {
+			slog.Error("api: dag.Add failed after Submit", "event_id", e.ID, "err", err)
+			return fmt.Errorf("dag: %w", err)
+		}
 	}
 	return nil
 }
@@ -2238,13 +2259,14 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if regEv, err := event.New(event.EventTypeRegistration, tips, regPayload, string(s.agentID), priorTS, 0); err == nil {
 		if signErr := crypto.SignEvent(regEv, s.kp); signErr == nil {
-			if addErr := s.dag.Add(regEv); addErr == nil {
-				resp.RegistrationEventID = string(regEv.ID)
-				// Broadcast to peers so the registration propagates.
-				if s.node != nil {
-					_ = s.node.SubmitLocalEvent(regEv)
-					_ = s.node.Broadcast(regEv)
+			// Publish through the authoritative local event publisher.
+			if s.publisher != nil {
+				if pubErr := s.publisher.Publish(regEv); pubErr == nil {
+					resp.RegistrationEventID = string(regEv.ID)
 				}
+			} else if addErr := s.dag.Add(regEv); addErr == nil {
+				// Fallback for tests without a publisher.
+				resp.RegistrationEventID = string(regEv.ID)
 			}
 		}
 	}

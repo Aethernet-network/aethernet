@@ -58,6 +58,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/genesis"
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
+	"github.com/Aethernet-network/aethernet/internal/localpub"
 	"github.com/Aethernet-network/aethernet/internal/metrics"
 	"github.com/Aethernet-network/aethernet/internal/network"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
@@ -1418,18 +1419,13 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		os.Exit(1)
 	}
 
-	// Wire broadcaster so protocol client events are disseminated to peers.
-	stack.protoClient.SetBroadcaster(node)
-
-	// Wire event broadcaster on the auto-validator so vote events and task
-	// settlement events are disseminated to peers via the Fast Path pipeline.
-	// Without this, locally-created DAG events exist only on this node and
-	// V2 peers never discover them (periodic sync is disabled for V2 peers).
+	// Wire the authoritative local event publisher. All locally-created DAG
+	// events from the protocol client, API server, and auto-validator flow
+	// through this publisher for DAG insertion + peer dissemination.
+	pub := localpub.New(stack.dag, node)
+	stack.protoClient.SetPublisher(pub)
 	if stack.autoVal != nil {
-		stack.autoVal.SetEventBroadcaster(func(ev *event.Event) {
-			_ = node.SubmitLocalEvent(ev)
-			_ = node.Broadcast(ev)
-		})
+		stack.autoVal.SetPublisher(pub)
 	}
 
 	// ── Settlement Applicator ────────────────────────────────────────────────
@@ -1719,6 +1715,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		stack.reg, stack.engine, stack.supply,
 		node, stack.kp,
 	)
+	apiSrv.SetPublisher(pub)
 	if stack.store != nil {
 		// Persist onboarding counter so the declining-curve survives restarts.
 		apiSrv.SetStore(stack.store)
