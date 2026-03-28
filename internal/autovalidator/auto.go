@@ -164,6 +164,13 @@ type AutoValidator struct {
 	// voted tracks event IDs that this auto-validator has already emitted a
 	// VerificationVote for. Prevents duplicate vote emission on every tick.
 	voted map[event.EventID]struct{}
+
+	// eventBroadcaster disseminates locally-created DAG events (vote events,
+	// task settlement events) to peers via the Fast Path pipeline. When nil,
+	// events exist only in the local DAG and peers must discover them via
+	// periodic sync (which is disabled for V2 peers). Set via
+	// SetEventBroadcaster before Start.
+	eventBroadcaster func(ev *event.Event)
 }
 
 // NewAutoValidator creates an AutoValidator that polls engine every interval
@@ -297,6 +304,14 @@ func (av *AutoValidator) SetReplayReserve(rr replayReserveAccruer, reserveShare 
 // not called.
 func (av *AutoValidator) SetDAG(d *dag.DAG) {
 	av.dag = d
+}
+
+// SetEventBroadcaster wires a callback that disseminates locally-created DAG
+// events to peers. Without this, vote events and task settlement events exist
+// only in the local DAG and are never seen by peers (V2 peers do not use
+// periodic sync, so events must be explicitly broadcast). Call before Start.
+func (av *AutoValidator) SetEventBroadcaster(fn func(ev *event.Event)) {
+	av.eventBroadcaster = fn
 }
 
 // SetKeyPair sets the signing key used to author DAG events created by the
@@ -723,6 +738,9 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score, hol
 				slog.Warn("auto-validator: failed to add task settlement to DAG",
 					"task_id", task.ID, "err", addErr)
 			} else {
+				if av.eventBroadcaster != nil {
+					av.eventBroadcaster(tsEv)
+				}
 				slog.Info("auto-validator: emitted task settlement event",
 					"task_id", task.ID, "event_id", tsEv.ID)
 			}
@@ -880,6 +898,15 @@ func (av *AutoValidator) emitVote(targetEventID event.EventID, verdict string, v
 			"target", targetEventID)
 		return
 	}
+
+	// Broadcast the vote event to peers via the Fast Path pipeline so their
+	// sync handlers receive it and can create Settlement events on consensus
+	// finalization. Without this, the vote exists only in the local DAG and
+	// V2 peers never learn about it (periodic sync is disabled for V2).
+	if av.eventBroadcaster != nil {
+		av.eventBroadcaster(voteEvent)
+	}
+
 	slog.Info("auto-validator: emitted vote",
 		"target", targetEventID, "verdict", verdict, "vote_id", voteEvent.ID)
 

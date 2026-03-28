@@ -1421,6 +1421,17 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	// Wire broadcaster so protocol client events are disseminated to peers.
 	stack.protoClient.SetBroadcaster(node)
 
+	// Wire event broadcaster on the auto-validator so vote events and task
+	// settlement events are disseminated to peers via the Fast Path pipeline.
+	// Without this, locally-created DAG events exist only on this node and
+	// V2 peers never discover them (periodic sync is disabled for V2 peers).
+	if stack.autoVal != nil {
+		stack.autoVal.SetEventBroadcaster(func(ev *event.Event) {
+			_ = node.SubmitLocalEvent(ev)
+			_ = node.Broadcast(ev)
+		})
+	}
+
 	// ── Settlement Applicator ────────────────────────────────────────────────
 	// The ONLY component that mutates ledgers in response to consensus.
 	settlementApp := settlement.NewApplicator(
