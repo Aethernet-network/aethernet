@@ -1040,6 +1040,12 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 			return
 		}
 		if err := n.dag.Add(&e); err == nil {
+			slog.Info("network: V1 event received and materialized",
+				"event_id", e.ID,
+				"type", e.Type,
+				"peer", peer.AgentID,
+				"path", "legacy_v1",
+			)
 			n.mu.RLock()
 			sh := n.syncHandler
 			n.mu.RUnlock()
@@ -1127,6 +1133,11 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 					ps.RecordValidHeader()
 				}
 			} else {
+				slog.Debug("fastpath: duplicate header received",
+					"event_id", hdr.EventID,
+					"peer", peer.AgentID,
+					"reason", "already_tracked",
+				)
 				if ps := peer.PeerScore(); ps != nil {
 					ps.RecordDuplicateHeader()
 				}

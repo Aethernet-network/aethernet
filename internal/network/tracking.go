@@ -146,3 +146,9 @@ func (t *EventTracking) IsExpired(ttl time.Duration) bool {
 func (t *EventTracking) EventID() event.EventID {
 	return t.Header.EventID
 }
+
+// LatencyMS returns the time in milliseconds from header admission to now.
+// Useful for logging materialization latency.
+func (t *EventTracking) LatencyMS() int64 {
+	return time.Since(t.ReceivedAt).Milliseconds()
+}

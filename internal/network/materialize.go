@@ -39,7 +39,8 @@ func (n *Node) materializeWorker(ctx context.Context) {
 func (n *Node) materializeEvent(id event.EventID) {
 	ev := n.ingest.GetReconstructedEvent(id)
 	if ev == nil {
-		slog.Debug("materialize: no reconstructed event", "event_id", id)
+		slog.Warn("fastpath: materialize skipped — no reconstructed event",
+			"event_id", id, "reason", "no_reconstructed_event")
 		return
 	}
 
@@ -48,16 +49,8 @@ func (n *Node) materializeEvent(id event.EventID) {
 		return
 	}
 
-	// dag.Add enforces its own invariants:
-	// - Duplicate detection (ErrDuplicateEvent)
-	// - Causal ref existence (ErrMissingCausalRef)
-	// - Signature verification for non-genesis events (ErrInvalidSignature)
-	//
-	// The fast-path validation stage already checked signature and EventID
-	// consistency, but dag.Add re-checks independently. This is defense-in-depth.
 	if err := n.dag.Add(ev); err != nil {
 		if errors.Is(err, dag.ErrMissingCausalRef) {
-			// Parents not yet materialized — identify which ones and enqueue repair.
 			missing := make(map[event.EventID]struct{})
 			for _, ref := range ev.CausalRefs {
 				if _, getErr := n.dag.Get(ref); getErr != nil {
@@ -67,15 +60,28 @@ func (n *Node) materializeEvent(id event.EventID) {
 			if len(missing) > 0 {
 				n.ingest.SetMissingParents(id, missing)
 				n.ingest.EnqueueRepair(id)
-				slog.Debug("materialize: missing parents, enqueued repair",
-					"event_id", id, "missing", len(missing))
+				slog.Info("fastpath: materialize blocked — missing parents, repair requested",
+					"event_id", id,
+					"type", ev.Type,
+					"missing_parents", len(missing),
+					"source_peer", tracking.SourcePeer,
+					"reason", "missing_causal_refs",
+				)
 				return
 			}
 		}
-		if !errors.Is(err, dag.ErrDuplicateEvent) {
-			slog.Debug("materialize: dag.Add failed",
-				"event_id", id, "err", err)
+		if errors.Is(err, dag.ErrDuplicateEvent) {
+			// Duplicate — silently skip (normal during concurrent sync).
+			n.ingest.Remove(id)
+			return
 		}
+		slog.Warn("fastpath: materialize failed — dag.Add rejected",
+			"event_id", id,
+			"type", ev.Type,
+			"source_peer", tracking.SourcePeer,
+			"reason", "dag_add_failed",
+			"err", err,
+		)
 		n.ingest.Remove(id)
 		return
 	}
@@ -90,6 +96,11 @@ func (n *Node) materializeEvent(id event.EventID) {
 
 	n.ingest.MarkMaterialized(id)
 
-	slog.Debug("materialize: event materialized via fast path",
-		"event_id", id, "type", ev.Type)
+	slog.Info("fastpath: event materialized",
+		"event_id", id,
+		"type", ev.Type,
+		"source_peer", tracking.SourcePeer,
+		"stage", "materialized",
+		"latency_ms", tracking.LatencyMS(),
+	)
 }

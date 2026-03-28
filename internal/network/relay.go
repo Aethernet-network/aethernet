@@ -70,11 +70,12 @@ func (n *Node) relayHeader(id event.EventID) {
 	}
 
 	tracking.RelayCount = relayed
-	if relayed > 0 {
-		slog.Debug("network: relayed header",
-			"event_id", id, "peers", relayed, "fanout", len(targets),
-			"source", tracking.SourcePeer)
-	}
+	slog.Info("fastpath: header relayed",
+		"event_id", id,
+		"relayed_to", relayed,
+		"fanout_targets", len(targets),
+		"source_peer", tracking.SourcePeer,
+	)
 }
 
 // v2PeersExcept returns all connected V2 peers except the one with the given

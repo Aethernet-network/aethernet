@@ -164,8 +164,12 @@ func (n *Node) requestRepair(id event.EventID) {
 			return
 		}
 		SafeSend(source, Message{Type: MsgRepairRequest, Payload: payload})
-		slog.Debug("repair: sent targeted request",
-			"event_id", id, "missing", len(missing), "peer", tracking.SourcePeer)
+		slog.Info("fastpath: repair requested",
+			"event_id", id,
+			"missing_parents", len(missing),
+			"repair_peer", tracking.SourcePeer,
+			"reason", "missing_causal_refs",
+		)
 		return
 	}
 
@@ -178,9 +182,17 @@ func (n *Node) requestRepair(id event.EventID) {
 		req := RepairRequest{MissingIDs: missing}
 		payload, _ := json.Marshal(req)
 		SafeSend(fallback, Message{Type: MsgRepairRequest, Payload: payload})
-		slog.Debug("repair: sent targeted request to best-scored peer",
-			"event_id", id, "missing", len(missing), "peer", fallback.AgentID,
-			"score", fallback.PeerScore().Score())
+		slog.Info("fastpath: repair requested (fallback peer)",
+			"event_id", id,
+			"missing_parents", len(missing),
+			"repair_peer", fallback.AgentID,
+		)
+	} else {
+		slog.Warn("fastpath: repair failed — no V2 peer available",
+			"event_id", id,
+			"missing_parents", len(missing),
+			"reason", "no_v2_peer",
+		)
 	}
 }
 

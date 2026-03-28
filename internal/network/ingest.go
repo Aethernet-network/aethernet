@@ -137,13 +137,21 @@ func (im *IngestManager) AdmitHeader(from crypto.AgentID, hdr EventHeader) bool 
 	}
 	im.tracked[id] = tracking
 
+	slog.Info("fastpath: header admitted",
+		"event_id", id,
+		"type", hdr.Type,
+		"stage", "announced",
+		"source_peer", from,
+		"tracked_count", len(im.tracked),
+	)
+
 	// Non-blocking enqueue. If the queue is full, log and continue —
 	// the event is still tracked and can be picked up on the next pass.
 	select {
 	case im.announceQ <- id:
 	default:
-		slog.Debug("ingest: announceQ full, event tracked but not queued",
-			"event_id", id)
+		slog.Warn("fastpath: announceQ full, event tracked but not queued",
+			"event_id", id, "stage", "announced")
 	}
 
 	return true
@@ -176,6 +184,11 @@ func (im *IngestManager) MarkCompleted(id event.EventID) bool {
 	if !t.AdvanceTo(StageCompleted) {
 		return false
 	}
+	slog.Info("fastpath: body completed",
+		"event_id", id,
+		"stage", "completed",
+		"source_peer", t.SourcePeer,
+	)
 	select {
 	case im.completeQ <- id:
 	default:
@@ -194,6 +207,11 @@ func (im *IngestManager) MarkValidated(id event.EventID) bool {
 	if !t.AdvanceTo(StageValidated) {
 		return false
 	}
+	slog.Info("fastpath: validation passed",
+		"event_id", id,
+		"stage", "validated",
+		"source_peer", t.SourcePeer,
+	)
 	select {
 	case im.validateQ <- id:
 	default:

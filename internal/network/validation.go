@@ -156,14 +156,23 @@ func (n *Node) validateEvent(id event.EventID) {
 
 	reconstructed, err := ReconstructEvent(tracking)
 	if err != nil {
-		slog.Warn("validation: reconstruction failed",
-			"event_id", id, "err", err)
+		slog.Warn("fastpath: validation failed — reconstruction error",
+			"event_id", id,
+			"source_peer", tracking.SourcePeer,
+			"reason", "reconstruction_failed",
+			"err", err,
+		)
 		return
 	}
 
 	if err := ValidateEvent(reconstructed); err != nil {
-		slog.Warn("validation: event rejected",
-			"event_id", id, "err", err)
+		slog.Warn("fastpath: validation failed — event rejected",
+			"event_id", id,
+			"type", reconstructed.Type,
+			"source_peer", tracking.SourcePeer,
+			"reason", "validation_rejected",
+			"err", err,
+		)
 		return
 	}
 
@@ -171,6 +180,6 @@ func (n *Node) validateEvent(id event.EventID) {
 	n.ingest.SetReconstructedEvent(id, reconstructed)
 
 	if !n.ingest.MarkValidated(id) {
-		slog.Debug("validation: could not advance to Validated", "event_id", id)
+		slog.Debug("fastpath: could not advance to Validated", "event_id", id)
 	}
 }

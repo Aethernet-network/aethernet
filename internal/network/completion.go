@@ -84,8 +84,13 @@ func (im *IngestManager) CompleteBody(id event.EventID, payload json.RawMessage)
 	sum := sha256.Sum256(data)
 	got := hex.EncodeToString(sum[:])
 	if got != t.Header.BodyCommitment {
-		slog.Warn("completion: body commitment mismatch",
-			"event_id", id, "expected", t.Header.BodyCommitment, "got", got)
+		slog.Warn("fastpath: body commitment mismatch — rejecting body",
+			"event_id", id,
+			"expected", t.Header.BodyCommitment,
+			"got", got,
+			"source_peer", t.SourcePeer,
+			"reason", "commitment_mismatch",
+		)
 		return ErrBodyCommitmentMismatch
 	}
 
@@ -155,9 +160,19 @@ func (n *Node) maybeRequestBody(id event.EventID) {
 	}
 	n.mu.RUnlock()
 	if !ok {
-		slog.Debug("completion: no usable peer for body fetch", "event_id", id)
+		slog.Warn("fastpath: body fetch failed — no usable peer",
+			"event_id", id,
+			"source_peer", tracking.SourcePeer,
+			"reason", "no_usable_peer",
+		)
 		return
 	}
+
+	slog.Info("fastpath: body requested",
+		"event_id", id,
+		"fetch_peer", source.AgentID,
+		"source_peer", tracking.SourcePeer,
+	)
 
 	ref := BodyRef{
 		EventID:        id,
