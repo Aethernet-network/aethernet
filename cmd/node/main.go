@@ -1428,7 +1428,11 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		av.SetTaskManager(stack.taskMgr, stack.escrowMgr)
 		av.SetReputationManager(stack.reputationMgr)
 	}
-	av.Start()
+	// NOTE: av.Start() is deferred until AFTER SetFinalizationHandler is wired.
+	// If the auto-validator starts before the handler, it can vote and trigger
+	// finalization while onFinalized is nil — causing ProcessResult to clear
+	// pending without creating a Settlement event. This was the root cause of
+	// "OCS pending clears but balance stays 0."
 	stack.autoVal = av
 	} // end AETHERNET_AUTOVALIDATOR gate
 
@@ -1547,6 +1551,13 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	// now inevitable on finalization — it does not depend on a later sync
 	// handler noticing that finalization happened.
 	stack.engine.SetFinalizationHandler(func(targetID event.EventID, verdict bool, verifiedValue uint64, finalOrder uint64) {
+		slog.Warn("settlement: finalization handler invoked",
+			"target_id", targetID,
+			"verdict", verdict,
+			"verified_value", verifiedValue,
+			"final_order", finalOrder,
+		)
+
 		// Idempotency: skip if already applied.
 		if settlementApp.IsApplied(targetID) {
 			return
@@ -1742,6 +1753,17 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	node.SetVoteHandler(func(voterID crypto.AgentID, eventID event.EventID, verdict bool) {
 		_ = stack.engine.AcceptPeerVote(eventID, voterID, verdict)
 	})
+
+	// Start the auto-validator AFTER the finalization handler, sync handler,
+	// and vote handler are all wired. If the auto-validator starts before the
+	// finalization handler, it can vote and trigger finalization while
+	// onFinalized is nil — causing ProcessResult to clear pending without
+	// creating a Settlement event (the "OCS pending clears but balance=0" bug).
+	if stack.autoVal != nil {
+		stack.autoVal.Start()
+		slog.Info("auto-validator started (post-handler wiring)",
+			"validator_id", agentID)
+	}
 
 	apiSrv := api.NewServer(
 		apiListenAddr,
