@@ -62,14 +62,21 @@ var (
 	ErrClaimEventMissing    = errors.New("trajectory: task has no claim event ID")
 )
 
+// localEventPublisher publishes locally-created events through the
+// authoritative DAG-add + disseminate path. Satisfied by *localpub.Publisher.
+type localEventPublisher interface {
+	Publish(ev *event.Event) error
+}
+
 // Service manages trajectory commit emission. Safe for concurrent use.
 type Service struct {
-	config  TrajectoryConfig
-	dag     *dag.DAG
-	blob    blobstore.Store
-	node    *network.Node
-	taskMgr *tasks.TaskManager
-	kp      *crypto.KeyPair
+	config    TrajectoryConfig
+	dag       *dag.DAG
+	blob      blobstore.Store
+	node      *network.Node
+	taskMgr   *tasks.TaskManager
+	kp        *crypto.KeyPair
+	publisher localEventPublisher
 
 	// Per-task commit count.
 	taskCommits map[string]int
@@ -258,15 +265,20 @@ func (s *Service) EmitCommit(ctx context.Context, actorID crypto.AgentID, req Co
 		return nil, fmt.Errorf("trajectory: sign event: %w", err)
 	}
 
-	// Add to DAG.
-	if err := s.dag.Add(ev); err != nil {
-		return nil, fmt.Errorf("trajectory: dag.Add: %w", err)
-	}
-
-	// Submit via Fast Path local submission.
-	if s.node != nil {
-		_ = s.node.SubmitLocalEvent(ev)
-		_ = s.node.Broadcast(ev)
+	// Publish through the authoritative local event publisher.
+	if s.publisher != nil {
+		if err := s.publisher.Publish(ev); err != nil {
+			return nil, fmt.Errorf("trajectory: publish: %w", err)
+		}
+	} else {
+		// Fallback for tests without a publisher.
+		if err := s.dag.Add(ev); err != nil {
+			return nil, fmt.Errorf("trajectory: dag.Add: %w", err)
+		}
+		if s.node != nil {
+			_ = s.node.SubmitLocalEvent(ev)
+			_ = s.node.Broadcast(ev)
+		}
 	}
 
 	// Update per-task commit count.
@@ -285,6 +297,9 @@ func (s *Service) EmitCommit(ctx context.Context, actorID crypto.AgentID, req Co
 		TaskID:         req.TaskID,
 	}, nil
 }
+
+// SetPublisher wires the authoritative local event publisher.
+func (s *Service) SetPublisher(p localEventPublisher) { s.publisher = p }
 
 // TaskMgr returns the task manager used by this service.
 func (s *Service) TaskMgr() *tasks.TaskManager { return s.taskMgr }

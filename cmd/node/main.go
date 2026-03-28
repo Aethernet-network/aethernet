@@ -1081,6 +1081,14 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		stack.votingRound.SetCommitteeSource(&reducerCommitteeSource{reducer: lifecycleReducer})
 	}
 
+	// Create the authoritative local event publisher. Started with nil
+	// disseminator — startup events (genesis funding, registration) are
+	// persisted in the DAG but not broadcast. After node.Start(), the
+	// disseminator is wired and future events are broadcast immediately.
+	// Pre-networking events are broadcast by broadcastLocalEvents after
+	// peer connections are established.
+	pub := localpub.New(stack.dag, nil)
+
 	if err := stack.engine.Start(); err != nil {
 		slog.Error("failed to start OCS engine", "err", err)
 		os.Exit(1)
@@ -1088,6 +1096,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 
 	// Protocol client: canonical interface for all token movement.
 	stack.protoClient = protocol.NewClient(stack.dag, stack.kp, stack.engine, agentID)
+	stack.protoClient.SetPublisher(pub)
 
 	// Auto-validator: on testnet, automatically settle pending OCS transactions.
 	// The "testnet-validator" agent is registered in the identity registry so
@@ -1163,7 +1172,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		)
 		if err == nil {
 			_ = crypto.SignEvent(gfEv, stack.kp)
-			if dagErr := stack.dag.Add(gfEv); dagErr == nil {
+			if pubErr := pub.Publish(gfEv); pubErr == nil {
 				// Apply locally immediately (peers apply via sync handler).
 				if err := stack.transfer.TransferFromBucket(
 					crypto.AgentID(genesis.BucketRewards), agentID, nodeAgentFundTarget,
@@ -1231,8 +1240,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	}
 	if regEv, err := event.New(event.EventTypeRegistration, stack.dag.Tips(), regPayload, string(agentID), nil, 0); err == nil {
 		_ = crypto.SignEvent(regEv, stack.kp)
-		_ = stack.dag.Add(regEv)
-		slog.Info("startStack: registration event added to DAG", "agent_id", agentID)
+		if pubErr := pub.Publish(regEv); pubErr == nil {
+			slog.Info("startStack: registration event published", "agent_id", agentID)
+		}
 	}
 
 	// SecurityFloor: enforce minimum validator coverage before accepting assured tasks.
@@ -1419,11 +1429,10 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		os.Exit(1)
 	}
 
-	// Wire the authoritative local event publisher. All locally-created DAG
-	// events from the protocol client, API server, and auto-validator flow
-	// through this publisher for DAG insertion + peer dissemination.
-	pub := localpub.New(stack.dag, node)
-	stack.protoClient.SetPublisher(pub)
+	// Wire the network disseminator onto the publisher. Before this point,
+	// startup events (genesis funding, registration) were published to the
+	// DAG only. After this, all new events are broadcast to peers immediately.
+	pub.SetDisseminator(node)
 	if stack.autoVal != nil {
 		stack.autoVal.SetPublisher(pub)
 	}
@@ -1593,13 +1602,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			if stack.kp != nil {
 				_ = crypto.SignEvent(settlementEv, stack.kp)
 			}
-			if err := stack.dag.Add(settlementEv); err != nil {
+			if err := pub.Publish(settlementEv); err != nil {
 				return // duplicate — another node already created one
 			}
-
-			// Broadcast settlement to peers so they can apply it.
-			_ = node.SubmitLocalEvent(settlementEv)
-			_ = node.Broadcast(settlementEv)
 
 			slog.Info("settlement: consensus finalized, settlement event created",
 				"target", targetID, "verdict", consensusVerdict,
@@ -1739,6 +1744,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 				trajectory.DefaultTrajectoryConfig(),
 				stack.dag, blobStore, node, stack.taskMgr, stack.kp,
 			)
+			trajSvc.SetPublisher(pub)
 			apiSrv.SetTrajectoryService(trajSvc)
 			slog.Info("trajectory service wired", "blob_dir", blobDir)
 		}
