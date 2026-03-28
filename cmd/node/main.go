@@ -443,23 +443,139 @@ func (a *slashEngineAdapter) Slash(validatorID string, offense string) (uint64, 
 }
 
 // nodeNetworkState bridges *validator.ValidatorRegistry, *assurance.BootstrapOverride,
-// snapshotCommitteeSource adapts a ValidatorSnapshot into the consensus
-// CommitteeSource interface. For each round (event ID), it selects a
-// deterministic committee and returns the set of eligible operator keys.
-type snapshotCommitteeSource struct {
-	snap *validatorlifecycle.ValidatorSnapshot
+// reducerCommitteeSource adapts the lifecycle Reducer into the consensus
+// CommitteeSource interface. It reads the current snapshot from the Reducer
+// on each call, so committee selection always reflects the latest validator
+// set state (including post-genesis lifecycle events).
+type reducerCommitteeSource struct {
+	reducer *validatorlifecycle.Reducer
 }
 
-func (s *snapshotCommitteeSource) SelectForRound(eventID event.EventID) map[crypto.AgentID]bool {
-	cs := s.snap.SelectCommittee(string(eventID))
+func (s *reducerCommitteeSource) SelectForRound(eventID event.EventID) map[crypto.AgentID]bool {
+	snap := s.reducer.Snapshot()
+	cs := snap.SelectCommittee(string(eventID))
 	members := make(map[crypto.AgentID]bool, len(cs.Members))
 	for _, seatID := range cs.Members {
-		seat, ok := s.snap.Seats[seatID]
+		seat, ok := snap.Seats[seatID]
 		if ok {
 			members[seat.OperatorKey] = true
 		}
 	}
 	return members
+}
+
+// applyLifecycleEventFromSync extracts lifecycle events from a DAG event and
+// applies them to the Reducer. After a successful apply, the VotingRound's
+// snapshot is rebound to reflect the updated validator set. Errors from
+// extraction or application are logged and the event is skipped — a single
+// invalid lifecycle event must not crash the node.
+func applyLifecycleEventFromSync(ev *event.Event, reducer *validatorlifecycle.Reducer, vr *consensus.VotingRound) {
+	if reducer == nil {
+		return
+	}
+	lcEvents, err := validatorlifecycle.ExtractLifecycleEvent(ev)
+	if err != nil {
+		slog.Warn("validator lifecycle: failed to extract lifecycle event",
+			"event_id", ev.ID, "type", ev.Type, "err", err)
+		return
+	}
+	applied := false
+	for _, lc := range lcEvents {
+		if err := reducer.Apply(lc); err != nil {
+			slog.Warn("validator lifecycle: failed to apply lifecycle event",
+				"event_id", ev.ID, "kind", lc.Kind, "seat_id", lc.SeatID, "err", err)
+			continue
+		}
+		applied = true
+		slog.Info("validator lifecycle: applied",
+			"kind", lc.Kind,
+			"seat_id", lc.SeatID,
+			"event_id", ev.ID,
+			"version", reducer.Version(),
+		)
+	}
+	// Rebind the VotingRound's snapshot if any lifecycle events were applied.
+	if applied && vr != nil {
+		vr.SetValidatorSet(reducer.Snapshot())
+	}
+}
+
+// replayLifecycleEventsFromDAG iterates all events in the loaded DAG and
+// applies any validator lifecycle events to the Reducer. This reconstructs
+// the full validator set state from the DAG history, not just genesis.
+//
+// Events are sorted by CausalTimestamp for deterministic ordering. The
+// Reducer's Apply function uses EffectiveFromVersion for temporal correctness,
+// so processing order within the same timestamp does not affect the final
+// snapshot (version increments monotonically regardless of intra-timestamp order).
+func replayLifecycleEventsFromDAG(d *dag.DAG, reducer *validatorlifecycle.Reducer) int {
+	if d == nil || reducer == nil {
+		return 0
+	}
+	allEvents := d.All()
+	if len(allEvents) == 0 {
+		return 0
+	}
+
+	// Sort by CausalTimestamp for deterministic replay order.
+	sortEventsByCausalTS(allEvents)
+
+	applied := 0
+	for _, ev := range allEvents {
+		if !isLifecycleEventType(ev.Type) {
+			continue
+		}
+		lcEvents, err := validatorlifecycle.ExtractLifecycleEvent(ev)
+		if err != nil {
+			slog.Debug("validator lifecycle: skip invalid event during replay",
+				"event_id", ev.ID, "type", ev.Type, "err", err)
+			continue
+		}
+		for _, lc := range lcEvents {
+			if err := reducer.Apply(lc); err != nil {
+				slog.Debug("validator lifecycle: skip failed apply during replay",
+					"event_id", ev.ID, "kind", lc.Kind, "seat_id", lc.SeatID, "err", err)
+				continue
+			}
+			applied++
+		}
+	}
+	return applied
+}
+
+// isLifecycleEventType returns true if the event type is a validator lifecycle
+// event that should be routed to the Reducer.
+func isLifecycleEventType(t event.EventType) bool {
+	switch t {
+	case event.EventTypeValidatorGenesisSet,
+		event.EventTypeValidatorJoin,
+		event.EventTypeValidatorActivate,
+		event.EventTypeValidatorSuspend,
+		event.EventTypeValidatorResume,
+		event.EventTypeValidatorExit,
+		event.EventTypeValidatorKeyRotate,
+		event.EventTypeValidatorSlashApplied:
+		return true
+	default:
+		return false
+	}
+}
+
+// sortEventsByCausalTS sorts events by CausalTimestamp ascending, with EventID
+// as a tiebreaker for determinism.
+func sortEventsByCausalTS(events []*event.Event) {
+	for i := 1; i < len(events); i++ {
+		for j := i; j > 0; j-- {
+			if events[j].CausalTimestamp < events[j-1].CausalTimestamp {
+				events[j], events[j-1] = events[j-1], events[j]
+			} else if events[j].CausalTimestamp == events[j-1].CausalTimestamp &&
+				string(events[j].ID) < string(events[j-1].ID) {
+				events[j], events[j-1] = events[j-1], events[j]
+			} else {
+				break
+			}
+		}
+	}
 }
 
 // and *assurance.ReplayReserve into the api.networkStateSource interface. It is
@@ -940,6 +1056,16 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		os.Exit(1)
 	}
 	stack.lifecycleReducer = lifecycleReducer
+
+	// Replay any validator lifecycle events from the loaded DAG to reconstruct
+	// the full validator set state from history, not just genesis. This ensures
+	// a restarted node's Reducer matches the state of a node that processed
+	// the events live.
+	replayedCount := replayLifecycleEventsFromDAG(stack.dag, lifecycleReducer)
+	if replayedCount > 0 {
+		slog.Info("validator lifecycle: replayed lifecycle events from DAG",
+			"replayed", replayedCount, "version", lifecycleReducer.Version())
+	}
 	validatorlifecycle.LogSnapshotDigest(lifecycleReducer)
 
 	// Bind the genesis validator snapshot to the VotingRound so consensus
@@ -947,12 +1073,11 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	// registry alone. This must happen before engine.Start() so the first
 	// consensus round is snapshot-bound.
 	if stack.votingRound != nil {
-		snap := lifecycleReducer.Snapshot()
-		stack.votingRound.SetValidatorSet(snap)
-		// Bind deterministic committee selection. For the 3-node testnet this
-		// includes all seats (committee size ≤ max). At scale, sortition bounds
-		// the committee to DefaultCommitteePolicy().MaxSize.
-		stack.votingRound.SetCommitteeSource(&snapshotCommitteeSource{snap: snap})
+		stack.votingRound.SetValidatorSet(lifecycleReducer.Snapshot())
+		// Bind deterministic committee selection. The committee source reads
+		// from the Reducer on each call, so it always reflects the latest
+		// validator set (including post-genesis lifecycle events).
+		stack.votingRound.SetCommitteeSource(&reducerCommitteeSource{reducer: lifecycleReducer})
 	}
 
 	if err := stack.engine.Start(); err != nil {
@@ -1543,6 +1668,19 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			if stack.taskMgr != nil {
 				stack.taskMgr.ApplyDAGEvent(ev)
 			}
+
+		// Validator lifecycle events — applied deterministically via the
+		// Reducer. After each successful apply, the VotingRound's snapshot
+		// is rebound so future rounds use the updated validator set.
+		case event.EventTypeValidatorGenesisSet,
+			event.EventTypeValidatorJoin,
+			event.EventTypeValidatorActivate,
+			event.EventTypeValidatorSuspend,
+			event.EventTypeValidatorResume,
+			event.EventTypeValidatorExit,
+			event.EventTypeValidatorKeyRotate,
+			event.EventTypeValidatorSlashApplied:
+			applyLifecycleEventFromSync(ev, stack.lifecycleReducer, stack.votingRound)
 		}
 	})
 
