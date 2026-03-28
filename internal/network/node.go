@@ -191,7 +191,24 @@ type Node struct {
 	// When set, received vote public keys are checked against the registry to
 	// prevent a peer from impersonating a different voter (CRITICAL-5).
 	// Returns nil if the agent is not registered.
+	// Deprecated: use voteAdmission for snapshot-based admission.
 	identityLookup func(crypto.AgentID) []byte
+
+	// voteAdmission validates a voter's eligibility using the validator-set
+	// snapshot. When set, it replaces identityLookup as the primary vote
+	// gate. The function receives the claimed VoterID and the Ed25519 public
+	// key from the vote payload, and returns nil if the voter is eligible
+	// with a matching key, or a descriptive error otherwise.
+	//
+	// Rejection reasons (returned as error):
+	//   - seat not in snapshot: VoterID does not map to an eligible seat
+	//   - key mismatch: public key does not match the seat's operator key
+	//   - seat not eligible: seat exists but is not in participating status
+	//
+	// When both voteAdmission and identityLookup are set, voteAdmission
+	// takes precedence. When neither is set, votes are accepted without
+	// impersonation checks (unsafe, testnet-only).
+	voteAdmission func(voterID crypto.AgentID, publicKey []byte) error
 
 	// seenVotes tracks the signature of every MsgVote already processed, keyed
 	// by string(signature). Entries expire after voteSeenTTL. Protected by mu.
@@ -584,6 +601,17 @@ func (n *Node) SetVoteHandler(fn func(voterID crypto.AgentID, eventID event.Even
 // Call before Start.
 func (n *Node) SetIdentityLookup(fn func(crypto.AgentID) []byte) {
 	n.identityLookup = fn
+}
+
+// SetVoteAdmission registers a snapshot-based vote admission callback that
+// replaces the identity-registry-only gate for incoming P2P votes. The
+// callback receives the claimed VoterID and the vote's Ed25519 public key,
+// and returns nil if the voter holds an eligible seat with a matching key
+// in the current validator-set snapshot.
+//
+// When set, this takes precedence over SetIdentityLookup. Call before Start.
+func (n *Node) SetVoteAdmission(fn func(voterID crypto.AgentID, publicKey []byte) error) {
+	n.voteAdmission = fn
 }
 
 // SetDisconnectHandler registers a callback invoked when a peer disconnects.
@@ -1164,12 +1192,24 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 			slog.Warn("network: dropping vote with invalid signature", "peer", peer.AgentID)
 			return
 		}
-		// Verify the voter's claimed public key against the identity registry
-		// (CRITICAL-5). A malicious peer could otherwise provide any VoterID and
-		// a matching self-generated keypair to impersonate an arbitrary agent.
-		// When the registry is wired, the voter must be registered and their
-		// public key must match the one on file.
-		if n.identityLookup != nil {
+		// Verify the voter's eligibility and public key (CRITICAL-5).
+		// A malicious peer could provide any VoterID with a self-generated
+		// keypair to impersonate an arbitrary agent. The admission check
+		// validates that the claimed VoterID holds an eligible seat in the
+		// validator-set snapshot and that the public key matches.
+		//
+		// Priority: voteAdmission (snapshot-based) > identityLookup (registry).
+		if n.voteAdmission != nil {
+			if err := n.voteAdmission(vp.VoterID, vp.PublicKey); err != nil {
+				slog.Warn("network: dropping vote: admission denied",
+					"voter", vp.VoterID,
+					"peer", peer.AgentID,
+					"reason", err.Error(),
+				)
+				return
+			}
+		} else if n.identityLookup != nil {
+			// Fallback: identity-registry-only gate (pre-snapshot compatibility).
 			registeredKey := n.identityLookup(vp.VoterID)
 			if len(registeredKey) == 0 {
 				slog.Warn("network: dropping vote from unregistered voter", "voter", vp.VoterID, "peer", peer.AgentID)

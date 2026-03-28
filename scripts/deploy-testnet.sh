@@ -24,6 +24,16 @@ step() { printf "\n\033[1;34m==> %s\033[0m\n" "$1"; }
 ok()   { printf "\033[1;32m    OK\033[0m\n"; }
 fail() { printf "\033[1;31m    FAIL: %s\033[0m\n" "$1"; exit 1; }
 
+# ── 0. Validator Set Verification ────────────────────────────────────────────
+
+step "Verifying genesis validator set digest"
+VS_DIGEST=$(go run ./cmd/node validator-set 2>/dev/null | grep "Snapshot digest:" | awk '{print $NF}')
+if [ -z "$VS_DIGEST" ]; then
+    fail "Could not compute validator set digest"
+fi
+printf "    Validator set digest: %s\n" "$VS_DIGEST"
+ok
+
 # ── 1. Tests ─────────────────────────────────────────────────────────────────
 
 step "Running tests (go test -p 1 ./... -race -count=1)"

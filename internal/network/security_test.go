@@ -8,12 +8,14 @@ package network
 //   - MEDIUM-3.3: Votes with a stale timestamp are dropped.
 //   - CRITICAL-4: resetLimitReader resets per-message so connections survive 10 MB+ of traffic.
 //   - CRITICAL-5: SetIdentityLookup drops votes where peer's claimed key ≠ registry key.
+//   - SNAPSHOT-1: SetVoteAdmission replaces identity-only gate with snapshot check.
 //
 // Tests are in the internal `network` package (not `network_test`) so they can
 // access unexported methods (handleMessage, handleIncomingConn, resetLimitReader).
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -368,5 +370,219 @@ func TestHandleMessage_VoteIdentityMatch(t *testing.T) {
 
 	if !handlerCalled {
 		t.Error("voteHandler was NOT called for a legitimate voter; regression — valid votes with matching registry key must be accepted (CRITICAL-5)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot-based vote admission tests (SetVoteAdmission)
+// ---------------------------------------------------------------------------
+
+// signedVote builds a fresh, validly signed VotePayload for the given keypair.
+func signedVote(t *testing.T, kp *crypto.KeyPair, evID event.EventID, verdict bool) VotePayload {
+	t.Helper()
+	ts := time.Now().Unix()
+	voterID := kp.AgentID()
+	sig, err := kp.Sign(voteBytes(evID, voterID, verdict, ts))
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	return VotePayload{
+		EventID:   evID,
+		VoterID:   voterID,
+		Verdict:   verdict,
+		Timestamp: ts,
+		PublicKey: kp.PublicKey,
+		Signature: sig,
+	}
+}
+
+func TestVoteAdmission_SnapshotAccepts(t *testing.T) {
+	n := newTestNode(t, false)
+	handlerCalled := false
+	n.SetVoteHandler(func(_ crypto.AgentID, _ event.EventID, _ bool) {
+		handlerCalled = true
+	})
+
+	voterKP, _ := crypto.GenerateKeyPair()
+	voterID := voterKP.AgentID()
+
+	// Snapshot admits this voter.
+	n.SetVoteAdmission(func(id crypto.AgentID, pubKey []byte) error {
+		if id == voterID {
+			return nil
+		}
+		return fmt.Errorf("not in snapshot")
+	})
+
+	vp := signedVote(t, voterKP, "ev-snap-ok", true)
+	payload, _ := json.Marshal(vp)
+	n.handleMessage(&Peer{AgentID: "peer"}, Message{Type: MsgVote, Payload: payload})
+
+	if !handlerCalled {
+		t.Error("snapshot-admitted vote was NOT forwarded to handler")
+	}
+}
+
+func TestVoteAdmission_IdentityExistsButNotInSnapshot(t *testing.T) {
+	n := newTestNode(t, false)
+	handlerCalled := false
+	n.SetVoteHandler(func(_ crypto.AgentID, _ event.EventID, _ bool) {
+		handlerCalled = true
+	})
+
+	voterKP, _ := crypto.GenerateKeyPair()
+
+	// Identity registry knows this voter (via legacy lookup).
+	n.SetIdentityLookup(func(id crypto.AgentID) []byte {
+		if id == voterKP.AgentID() {
+			return voterKP.PublicKey
+		}
+		return nil
+	})
+
+	// But snapshot-based admission rejects: seat not in snapshot.
+	n.SetVoteAdmission(func(_ crypto.AgentID, _ []byte) error {
+		return fmt.Errorf("seat not in snapshot")
+	})
+
+	vp := signedVote(t, voterKP, "ev-snap-no", true)
+	payload, _ := json.Marshal(vp)
+	n.handleMessage(&Peer{AgentID: "peer"}, Message{Type: MsgVote, Payload: payload})
+
+	if handlerCalled {
+		t.Error("vote should be REJECTED: identity exists but seat not in snapshot — snapshot takes precedence")
+	}
+}
+
+func TestVoteAdmission_WrongKeyEpoch(t *testing.T) {
+	n := newTestNode(t, false)
+	handlerCalled := false
+	n.SetVoteHandler(func(_ crypto.AgentID, _ event.EventID, _ bool) {
+		handlerCalled = true
+	})
+
+	voterKP, _ := crypto.GenerateKeyPair()
+
+	// Admission rejects: key epoch mismatch.
+	n.SetVoteAdmission(func(_ crypto.AgentID, _ []byte) error {
+		return fmt.Errorf("wrong key epoch: expected epoch 2, got epoch 1")
+	})
+
+	vp := signedVote(t, voterKP, "ev-key-epoch", true)
+	payload, _ := json.Marshal(vp)
+	n.handleMessage(&Peer{AgentID: "peer"}, Message{Type: MsgVote, Payload: payload})
+
+	if handlerCalled {
+		t.Error("vote should be REJECTED: wrong key epoch")
+	}
+}
+
+func TestVoteAdmission_SnapshotMismatch(t *testing.T) {
+	n := newTestNode(t, false)
+	handlerCalled := false
+	n.SetVoteHandler(func(_ crypto.AgentID, _ event.EventID, _ bool) {
+		handlerCalled = true
+	})
+
+	voterKP, _ := crypto.GenerateKeyPair()
+
+	// Admission rejects: stale validator set version.
+	n.SetVoteAdmission(func(_ crypto.AgentID, _ []byte) error {
+		return fmt.Errorf("stale validator set version: vote claims v2, current v5")
+	})
+
+	vp := signedVote(t, voterKP, "ev-snap-ver", true)
+	payload, _ := json.Marshal(vp)
+	n.handleMessage(&Peer{AgentID: "peer"}, Message{Type: MsgVote, Payload: payload})
+
+	if handlerCalled {
+		t.Error("vote should be REJECTED: snapshot version mismatch")
+	}
+}
+
+func TestVoteAdmission_GenesisValidatorAccepted(t *testing.T) {
+	n := newTestNode(t, false)
+	handlerCalled := false
+	n.SetVoteHandler(func(_ crypto.AgentID, _ event.EventID, _ bool) {
+		handlerCalled = true
+	})
+
+	genesisKP, _ := crypto.GenerateKeyPair()
+	genesisID := genesisKP.AgentID()
+
+	// Genesis validator is in snapshot — no identity registry needed.
+	// Do NOT set identityLookup — proving that snapshot alone suffices.
+	n.SetVoteAdmission(func(id crypto.AgentID, _ []byte) error {
+		if id == genesisID {
+			return nil // genesis seat found in snapshot
+		}
+		return fmt.Errorf("not in snapshot")
+	})
+
+	vp := signedVote(t, genesisKP, "ev-genesis", true)
+	payload, _ := json.Marshal(vp)
+	n.handleMessage(&Peer{AgentID: "peer"}, Message{Type: MsgVote, Payload: payload})
+
+	if !handlerCalled {
+		t.Error("genesis validator vote should be ACCEPTED via snapshot even without identity registry")
+	}
+}
+
+func TestVoteAdmission_FallbackToRegistry(t *testing.T) {
+	n := newTestNode(t, false)
+	handlerCalled := false
+	n.SetVoteHandler(func(_ crypto.AgentID, _ event.EventID, _ bool) {
+		handlerCalled = true
+	})
+
+	voterKP, _ := crypto.GenerateKeyPair()
+	voterID := voterKP.AgentID()
+
+	// No voteAdmission set — should fall back to identityLookup.
+	n.SetIdentityLookup(func(id crypto.AgentID) []byte {
+		if id == voterID {
+			return voterKP.PublicKey
+		}
+		return nil
+	})
+
+	vp := signedVote(t, voterKP, "ev-fallback", true)
+	payload, _ := json.Marshal(vp)
+	n.handleMessage(&Peer{AgentID: "peer"}, Message{Type: MsgVote, Payload: payload})
+
+	if !handlerCalled {
+		t.Error("vote should be ACCEPTED via identity registry fallback when no snapshot admission is set")
+	}
+}
+
+func TestVoteAdmission_PrecedenceOverIdentityLookup(t *testing.T) {
+	n := newTestNode(t, false)
+	handlerCalled := false
+	n.SetVoteHandler(func(_ crypto.AgentID, _ event.EventID, _ bool) {
+		handlerCalled = true
+	})
+
+	voterKP, _ := crypto.GenerateKeyPair()
+	voterID := voterKP.AgentID()
+
+	// Identity lookup would accept.
+	n.SetIdentityLookup(func(id crypto.AgentID) []byte {
+		if id == voterID {
+			return voterKP.PublicKey
+		}
+		return nil
+	})
+
+	// But snapshot admission rejects.
+	n.SetVoteAdmission(func(_ crypto.AgentID, _ []byte) error {
+		return fmt.Errorf("seat not eligible")
+	})
+
+	vp := signedVote(t, voterKP, "ev-precedence", true)
+	payload, _ := json.Marshal(vp)
+	n.handleMessage(&Peer{AgentID: "peer"}, Message{Type: MsgVote, Payload: payload})
+
+	if handlerCalled {
+		t.Error("voteAdmission should take PRECEDENCE over identityLookup")
 	}
 }

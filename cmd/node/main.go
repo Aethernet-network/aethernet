@@ -22,7 +22,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -72,6 +74,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/trajectory"
 	"github.com/Aethernet-network/aethernet/internal/validator"
+	"github.com/Aethernet-network/aethernet/internal/validatorlifecycle"
 	"github.com/Aethernet-network/aethernet/internal/wallet"
 )
 
@@ -176,6 +179,8 @@ func main() {
 		cmdConnect()
 	case "status":
 		cmdStatus()
+	case "validator-set":
+		cmdValidatorSet()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %q\n\n", os.Args[1])
 		printUsage()
@@ -189,6 +194,8 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, "  aethernet genesis                               seed genesis token supply\n")
 	fmt.Fprintf(os.Stderr, "  aethernet start [--listen addr] [--api addr] [--peer addr] [--marketplace]\n")
 	fmt.Fprintf(os.Stderr, "                                                  start the node\n")
+	fmt.Fprintf(os.Stderr, "  aethernet validator-set [--manifest path] [--verify digest]\n")
+	fmt.Fprintf(os.Stderr, "                                                  show or verify genesis validator set\n")
 	fmt.Fprintf(os.Stderr, "  aethernet connect --peer <address>              start and connect to a peer\n")
 	fmt.Fprintf(os.Stderr, "  aethernet status                                print node identity and config\n")
 	fmt.Fprintf(os.Stderr, "\nFlags for 'start':\n")
@@ -314,6 +321,7 @@ type nodeStack struct {
 	replayReserve   *assurance.ReplayReserve
 	votingRound     *consensus.VotingRound
 	protoClient     *protocol.Client
+	lifecycleReducer *validatorlifecycle.Reducer
 }
 
 // taskManagerSource adapts *tasks.TaskManager to the router.TaskSource interface,
@@ -435,6 +443,25 @@ func (a *slashEngineAdapter) Slash(validatorID string, offense string) (uint64, 
 }
 
 // nodeNetworkState bridges *validator.ValidatorRegistry, *assurance.BootstrapOverride,
+// snapshotCommitteeSource adapts a ValidatorSnapshot into the consensus
+// CommitteeSource interface. For each round (event ID), it selects a
+// deterministic committee and returns the set of eligible operator keys.
+type snapshotCommitteeSource struct {
+	snap *validatorlifecycle.ValidatorSnapshot
+}
+
+func (s *snapshotCommitteeSource) SelectForRound(eventID event.EventID) map[crypto.AgentID]bool {
+	cs := s.snap.SelectCommittee(string(eventID))
+	members := make(map[crypto.AgentID]bool, len(cs.Members))
+	for _, seatID := range cs.Members {
+		seat, ok := s.snap.Seats[seatID]
+		if ok {
+			members[seat.OperatorKey] = true
+		}
+	}
+	return members
+}
+
 // and *assurance.ReplayReserve into the api.networkStateSource interface. It is
 // constructed once in startStack and wired via apiSrv.SetNetworkStateSource.
 type nodeNetworkState struct {
@@ -887,6 +914,46 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	bus := eventbus.New()
 	stack.engine.SetEventBus(bus)
 	stack.bus = bus
+
+	// ── Validator Lifecycle: seed genesis snapshot ──────────────────────────
+	// The lifecycle Reducer must be seeded before the OCS engine, auto-
+	// validator, or networking start so that snapshot version 1 exists when
+	// consensus-consuming code begins. All nodes load the same manifest
+	// and produce the same snapshot digest.
+	//
+	// Startup safety: the node fails closed if the manifest is invalid or
+	// the snapshot cannot be seeded. Consensus services never start without
+	// a valid snapshot.
+	genesisManifest := validatorlifecycle.DefaultTestnetManifest()
+	startupCheck := validatorlifecycle.DefaultStartupCheck()
+	if err := startupCheck.ValidateManifest(genesisManifest); err != nil {
+		slog.Error("validator lifecycle: manifest validation failed", "err", err)
+		os.Exit(1)
+	}
+	lifecycleReducer, err := validatorlifecycle.SeedReducerFromManifest(genesisManifest)
+	if err != nil {
+		slog.Error("validator lifecycle: failed to seed genesis manifest", "err", err)
+		os.Exit(1)
+	}
+	if err := startupCheck.ValidateReducer(lifecycleReducer); err != nil {
+		slog.Error("validator lifecycle: startup check failed — consensus cannot start", "err", err)
+		os.Exit(1)
+	}
+	stack.lifecycleReducer = lifecycleReducer
+	validatorlifecycle.LogSnapshotDigest(lifecycleReducer)
+
+	// Bind the genesis validator snapshot to the VotingRound so consensus
+	// reads vote eligibility and weight from the snapshot, not the identity
+	// registry alone. This must happen before engine.Start() so the first
+	// consensus round is snapshot-bound.
+	if stack.votingRound != nil {
+		snap := lifecycleReducer.Snapshot()
+		stack.votingRound.SetValidatorSet(snap)
+		// Bind deterministic committee selection. For the 3-node testnet this
+		// includes all seats (committee size ≤ max). At scale, sortition bounds
+		// the committee to DefaultCommitteePolicy().MaxSize.
+		stack.votingRound.SetCommitteeSource(&snapshotCommitteeSource{snap: snap})
+	}
 
 	if err := stack.engine.Start(); err != nil {
 		slog.Error("failed to start OCS engine", "err", err)
@@ -1584,14 +1651,38 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		apiSrv.SetRequireAuth(false)
 		slog.Warn("⚠️  API authentication is DISABLED — all write endpoints are open to unauthenticated callers. Do NOT use in production.")
 	}
-	// CRITICAL-5: wire identity registry lookup so P2P votes are verified against
-	// the registered public key, preventing voter impersonation.
-	node.SetIdentityLookup(func(id crypto.AgentID) []byte {
-		fp, err := stack.reg.Get(id)
-		if err != nil {
-			return nil
+	// CRITICAL-5: wire snapshot-based vote admission so P2P votes are verified
+	// against the validator-set snapshot (seat eligibility + key match).
+	// The lifecycle snapshot is the canonical authority; the identity registry
+	// is used as fallback when the voter is not in the snapshot (backward
+	// compatibility for the transition period).
+	node.SetVoteAdmission(func(voterID crypto.AgentID, publicKey []byte) error {
+		// Primary path: check the lifecycle snapshot.
+		if stack.lifecycleReducer != nil {
+			snap := stack.lifecycleReducer.Snapshot()
+			w, eligible := snap.VoteWeightByKey(voterID)
+			if eligible && w > 0 {
+				// Seat found and eligible — verify the key matches.
+				// The voterID is the hex-encoded public key; compare directly.
+				if hex.EncodeToString(publicKey) == string(voterID) {
+					return nil // snapshot-validated
+				}
+				return fmt.Errorf("seat eligible but key mismatch for %s", voterID)
+			}
+			// Seat not in snapshot or not eligible — check if the voter's
+			// operator key matches their claimed identity via the snapshot's
+			// seat table (the voterID might be the operator key, not the seat ID).
 		}
-		return fp.PublicKey
+		// Fallback: identity registry for agents not yet in the lifecycle
+		// snapshot (e.g., node agents that haven't joined via lifecycle events).
+		fp, err := stack.reg.Get(voterID)
+		if err != nil {
+			return fmt.Errorf("voter %s not in snapshot or registry", voterID)
+		}
+		if !bytes.Equal(fp.PublicKey, publicKey) {
+			return fmt.Errorf("public key mismatch for %s", voterID)
+		}
+		return nil
 	})
 	apiSrv.SetRateLimiters(
 		ratelimit.New(ratelimit.Config{Rate: cfg.RateLimit.WriteRatePerSec, Burst: cfg.RateLimit.WriteBurst, CleanupAge: 5 * time.Minute}),
@@ -2210,4 +2301,60 @@ func cmdStatus() {
 	fmt.Printf("Max peers  : %d\n", cfg.MaxPeers)
 	fmt.Printf("Sync every : %s\n", cfg.SyncInterval)
 	fmt.Printf("Key file   : %s\n", keyFilePath())
+}
+
+// cmdValidatorSet shows or verifies the genesis validator set. Operators use
+// this to confirm all nodes will produce the same snapshot before deploying.
+//
+// Usage:
+//
+//	aethernet validator-set                          show default testnet manifest
+//	aethernet validator-set --manifest path.json     show custom manifest
+//	aethernet validator-set --verify <digest>         verify digest matches
+//	aethernet validator-set --export path.json       write manifest to file
+func cmdValidatorSet() {
+	fs := flag.NewFlagSet("validator-set", flag.ExitOnError)
+	manifestPath := fs.String("manifest", "", "path to genesis validator manifest JSON")
+	verifyDigest := fs.String("verify", "", "expected snapshot digest to verify")
+	exportPath := fs.String("export", "", "write manifest JSON to this path")
+	_ = fs.Parse(os.Args[2:])
+
+	// Load manifest.
+	var m *validatorlifecycle.GenesisManifest
+	if *manifestPath != "" {
+		var err error
+		m, err = validatorlifecycle.LoadManifestFromFile(*manifestPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		m = validatorlifecycle.DefaultTestnetManifest()
+	}
+
+	// Export mode.
+	if *exportPath != "" {
+		if err := validatorlifecycle.WriteManifestFile(m, *exportPath); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: write manifest: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Manifest written to %s\n", *exportPath)
+	}
+
+	// Show summary.
+	fmt.Print(validatorlifecycle.FormatManifestSummary(m))
+
+	// Verify mode.
+	if *verifyDigest != "" {
+		actual, err := validatorlifecycle.ComputeManifestDigest(m)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+			os.Exit(1)
+		}
+		if actual != *verifyDigest {
+			fmt.Fprintf(os.Stderr, "\nDIGEST MISMATCH\n  expected: %s\n  actual:   %s\n", *verifyDigest, actual)
+			os.Exit(1)
+		}
+		fmt.Printf("\nDigest verified: %s\n", actual)
+	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/identity"
+	"github.com/Aethernet-network/aethernet/internal/validatorlifecycle"
 )
 
 // ---------------------------------------------------------------------------
@@ -445,5 +446,393 @@ func TestComputeWeight_LargeValues_NoWrapAround(t *testing.T) {
 	// Since 10000 * MaxUint64 / 10000 = MaxUint64, the result should be MaxUint64.
 	if w != ^uint64(0) {
 		t.Errorf("want MaxUint64 (%d), got %d", ^uint64(0), w)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot-bound consensus tests
+// ---------------------------------------------------------------------------
+
+// buildSnapshot creates a lifecycle Reducer with the given seats, all Active,
+// and returns the snapshot. Uses SeedReducerFromManifest which handles the
+// PendingJoin → Probationary → Active genesis bypass correctly.
+func buildSnapshot(t *testing.T, seats []struct {
+	id    validatorlifecycle.ValidatorID
+	key   crypto.AgentID
+	stake uint64
+}) *validatorlifecycle.ValidatorSnapshot {
+	t.Helper()
+	entries := make([]validatorlifecycle.GenesisManifestEntry, len(seats))
+	for i, s := range seats {
+		entries[i] = validatorlifecycle.GenesisManifestEntry{
+			ValidatorID:        s.id,
+			OperatorAgentID:    s.key,
+			ConsensusPublicKey: s.key,
+			KeyEpoch:           1,
+			BondedStake:        s.stake,
+			InitialStatus:      validatorlifecycle.SeatActive,
+		}
+	}
+	manifest := &validatorlifecycle.GenesisManifest{Entries: entries}
+	r, err := validatorlifecycle.SeedReducerFromManifest(manifest)
+	if err != nil {
+		t.Fatalf("SeedReducerFromManifest: %v", err)
+	}
+	return r.Snapshot()
+}
+
+func TestSnapshot_VoteRejectedIfNotInSnapshot(t *testing.T) {
+	// Create snapshot with two seats.
+	snap := buildSnapshot(t, []struct {
+		id    validatorlifecycle.ValidatorID
+		key   crypto.AgentID
+		stake uint64
+	}{
+		{"seat-1", "key-alice", 100_000},
+		{"seat-2", "key-bob", 200_000},
+	})
+
+	// VotingRound with snapshot bound.
+	reg := identity.NewRegistry()
+	// Register a third agent in the registry but NOT in the snapshot.
+	registerAgent(t, reg, "key-eve", 5000, 100_000)
+	cfg := &consensus.ConsensusConfig{
+		SupermajorityThreshold: 0.667,
+		MaxRounds:              10,
+		RoundTimeout:           5 * time.Second,
+		MinParticipants:        1,
+	}
+	vr := consensus.NewVotingRound(cfg, reg)
+	vr.SetValidatorSet(snap)
+
+	eid := event.EventID("test-event-snap")
+
+	// Eve is in the registry but NOT in the snapshot — should be rejected.
+	err := vr.RegisterVote(eid, "key-eve", true)
+	if !errors.Is(err, consensus.ErrVoterNotInSnapshot) {
+		t.Fatalf("expected ErrVoterNotInSnapshot for eve, got: %v", err)
+	}
+
+	// Alice IS in the snapshot — should succeed.
+	if err := vr.RegisterVote(eid, "key-alice", true); err != nil {
+		t.Fatalf("alice should be accepted: %v", err)
+	}
+}
+
+func TestSnapshot_WeightFromSnapshot(t *testing.T) {
+	// Snapshot gives alice weight 100_000, bob weight 200_000.
+	snap := buildSnapshot(t, []struct {
+		id    validatorlifecycle.ValidatorID
+		key   crypto.AgentID
+		stake uint64
+	}{
+		{"seat-a", "key-alice", 100_000},
+		{"seat-b", "key-bob", 200_000},
+	})
+
+	// Registry gives alice different values — snapshot should take precedence.
+	reg := identity.NewRegistry()
+	registerAgent(t, reg, "key-alice", 9999, 999_999) // would give huge weight from registry
+	registerAgent(t, reg, "key-bob", 9999, 999_999)
+
+	vr := consensus.NewVotingRound(nil, reg)
+	vr.SetValidatorSet(snap)
+
+	// Weight should come from snapshot, not registry.
+	w, err := vr.ComputeWeight("key-alice")
+	if err != nil {
+		t.Fatalf("ComputeWeight alice: %v", err)
+	}
+	if w != 100_000 {
+		t.Fatalf("expected weight 100_000 from snapshot, got %d", w)
+	}
+	w, err = vr.ComputeWeight("key-bob")
+	if err != nil {
+		t.Fatalf("ComputeWeight bob: %v", err)
+	}
+	if w != 200_000 {
+		t.Fatalf("expected weight 200_000 from snapshot, got %d", w)
+	}
+}
+
+func TestSnapshot_SameVotesSameDeterministicResult(t *testing.T) {
+	seats := []struct {
+		id    validatorlifecycle.ValidatorID
+		key   crypto.AgentID
+		stake uint64
+	}{
+		{"s1", "k1", 100_000},
+		{"s2", "k2", 100_000},
+		{"s3", "k3", 100_000},
+	}
+	snap := buildSnapshot(t, seats)
+
+	// Run the same voting sequence twice with the same snapshot.
+	for attempt := 0; attempt < 2; attempt++ {
+		reg := identity.NewRegistry()
+		for _, s := range seats {
+			registerAgent(t, reg, s.key, 5000, uint64(s.stake))
+		}
+		cfg := &consensus.ConsensusConfig{
+			SupermajorityThreshold: 0.667,
+			MaxRounds:              10,
+			RoundTimeout:           5 * time.Second,
+			MinParticipants:        3,
+		}
+		vr := consensus.NewVotingRound(cfg, reg)
+		vr.SetValidatorSet(snap)
+		eid := event.EventID("deterministic-event")
+
+		for _, s := range seats {
+			_ = vr.RegisterVote(eid, s.key, true)
+		}
+
+		rec, err := vr.GetRecord(eid)
+		if err != nil {
+			t.Fatalf("attempt %d: GetRecord: %v", attempt, err)
+		}
+		if !rec.Finalized {
+			t.Fatalf("attempt %d: expected finalized", attempt)
+		}
+		if rec.TotalWeight != 300_000 {
+			t.Fatalf("attempt %d: expected TotalWeight 300_000, got %d", attempt, rec.TotalWeight)
+		}
+		if rec.YesWeight != 300_000 {
+			t.Fatalf("attempt %d: expected YesWeight 300_000, got %d", attempt, rec.YesWeight)
+		}
+	}
+}
+
+func TestSnapshot_RoundCapturesVersion(t *testing.T) {
+	snap := buildSnapshot(t, []struct {
+		id    validatorlifecycle.ValidatorID
+		key   crypto.AgentID
+		stake uint64
+	}{
+		{"seat-v", "key-ver", 100_000},
+	})
+
+	reg := identity.NewRegistry()
+	registerAgent(t, reg, "key-ver", 5000, 100_000)
+	cfg := &consensus.ConsensusConfig{
+		SupermajorityThreshold: 0.667,
+		MaxRounds:              10,
+		RoundTimeout:           5 * time.Second,
+		MinParticipants:        1,
+	}
+	vr := consensus.NewVotingRound(cfg, reg)
+	vr.SetValidatorSet(snap)
+
+	eid := event.EventID("version-check")
+	if err := vr.RegisterVote(eid, "key-ver", true); err != nil {
+		t.Fatalf("RegisterVote: %v", err)
+	}
+
+	rec, err := vr.GetRecord(eid)
+	if err != nil {
+		t.Fatalf("GetRecord: %v", err)
+	}
+	if rec.ValidatorSetVersion == 0 {
+		t.Fatal("ValidatorSetVersion should be non-zero when snapshot is bound")
+	}
+	// The snapshot version should match.
+	if rec.ValidatorSetVersion != snap.SetVersion() {
+		t.Fatalf("expected version %d, got %d", snap.SetVersion(), rec.ValidatorSetVersion)
+	}
+}
+
+func TestSnapshot_FallbackToRegistry_WhenNoSnapshot(t *testing.T) {
+	// When no snapshot is bound, the original registry-based path is used.
+	reg := identity.NewRegistry()
+	registerAgent(t, reg, "legacy-voter", 5000, 2000)
+	vr := consensus.NewVotingRound(nil, reg)
+	// No SetValidatorSet call.
+
+	w, err := vr.ComputeWeight("legacy-voter")
+	if err != nil {
+		t.Fatalf("ComputeWeight: %v", err)
+	}
+	// 5000 * 2000 / 10000 = 1000
+	if w != 1000 {
+		t.Fatalf("expected registry weight 1000, got %d", w)
+	}
+}
+
+func TestSnapshot_NoVersionWhenNoSnapshot(t *testing.T) {
+	reg := identity.NewRegistry()
+	registerAgent(t, reg, "no-snap-voter", 5000, 2000)
+	cfg := &consensus.ConsensusConfig{
+		SupermajorityThreshold: 0.667,
+		MaxRounds:              10,
+		RoundTimeout:           5 * time.Second,
+		MinParticipants:        1,
+	}
+	vr := consensus.NewVotingRound(cfg, reg)
+
+	eid := event.EventID("no-snap-event")
+	_ = vr.RegisterVote(eid, "no-snap-voter", true)
+
+	rec, err := vr.GetRecord(eid)
+	if err != nil {
+		t.Fatalf("GetRecord: %v", err)
+	}
+	if rec.ValidatorSetVersion != 0 {
+		t.Fatalf("expected version 0 when no snapshot, got %d", rec.ValidatorSetVersion)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Committee-bound consensus tests
+// ---------------------------------------------------------------------------
+
+// staticCommittee implements CommitteeSource with a fixed member set.
+type staticCommittee struct {
+	members map[crypto.AgentID]bool
+}
+
+func (sc *staticCommittee) SelectForRound(_ event.EventID) map[crypto.AgentID]bool {
+	return sc.members
+}
+
+func TestCommittee_OutOfCommitteeVoteRejected(t *testing.T) {
+	snap := buildSnapshot(t, []struct {
+		id    validatorlifecycle.ValidatorID
+		key   crypto.AgentID
+		stake uint64
+	}{
+		{"s1", "key-alice", 100_000},
+		{"s2", "key-bob", 200_000},
+		{"s3", "key-carol", 150_000},
+	})
+
+	reg := identity.NewRegistry()
+	registerAgent(t, reg, "key-alice", 5000, 100_000)
+	registerAgent(t, reg, "key-bob", 5000, 200_000)
+	registerAgent(t, reg, "key-carol", 5000, 150_000)
+
+	cfg := &consensus.ConsensusConfig{
+		SupermajorityThreshold: 0.667,
+		MaxRounds:              10,
+		RoundTimeout:           5 * time.Second,
+		MinParticipants:        2,
+	}
+	vr := consensus.NewVotingRound(cfg, reg)
+	vr.SetValidatorSet(snap)
+
+	// Committee includes only alice and bob — not carol.
+	vr.SetCommitteeSource(&staticCommittee{
+		members: map[crypto.AgentID]bool{
+			"key-alice": true,
+			"key-bob":   true,
+		},
+	})
+
+	eid := event.EventID("committee-event")
+
+	// Alice and bob should succeed.
+	if err := vr.RegisterVote(eid, "key-alice", true); err != nil {
+		t.Fatalf("alice (in committee) should succeed: %v", err)
+	}
+	if err := vr.RegisterVote(eid, "key-bob", true); err != nil {
+		t.Fatalf("bob (in committee) should succeed: %v", err)
+	}
+
+	// Carol is in the snapshot but NOT in the committee.
+	err := vr.RegisterVote(eid, "key-carol", true)
+	if !errors.Is(err, consensus.ErrVoterNotInCommittee) {
+		t.Fatalf("carol (out of committee) should get ErrVoterNotInCommittee, got: %v", err)
+	}
+}
+
+func TestCommittee_NoCommitteeSource_AllVotersAccepted(t *testing.T) {
+	snap := buildSnapshot(t, []struct {
+		id    validatorlifecycle.ValidatorID
+		key   crypto.AgentID
+		stake uint64
+	}{
+		{"s1", "key-x", 100_000},
+		{"s2", "key-y", 100_000},
+		{"s3", "key-z", 100_000},
+	})
+
+	reg := identity.NewRegistry()
+	registerAgent(t, reg, "key-x", 5000, 100_000)
+	registerAgent(t, reg, "key-y", 5000, 100_000)
+	registerAgent(t, reg, "key-z", 5000, 100_000)
+
+	cfg := &consensus.ConsensusConfig{
+		SupermajorityThreshold: 0.667,
+		MaxRounds:              10,
+		RoundTimeout:           5 * time.Second,
+		MinParticipants:        3,
+	}
+	vr := consensus.NewVotingRound(cfg, reg)
+	vr.SetValidatorSet(snap)
+	// No SetCommitteeSource — all voters accepted.
+
+	eid := event.EventID("no-committee-event")
+	for _, key := range []crypto.AgentID{"key-x", "key-y", "key-z"} {
+		if err := vr.RegisterVote(eid, key, true); err != nil {
+			t.Fatalf("voter %s should succeed without committee source: %v", key, err)
+		}
+	}
+
+	finalized, _ := vr.IsFinalized(eid)
+	if !finalized {
+		t.Fatal("expected finalization with 3/3 votes, no committee restriction")
+	}
+}
+
+func TestCommittee_ThreeNodeTestnet_AllInCommittee(t *testing.T) {
+	// Simulate the 3-node testnet: 3 seats, all should be in the committee
+	// since 3 ≤ DefaultCommitteePolicy().MaxSize (21).
+	snap := buildSnapshot(t, []struct {
+		id    validatorlifecycle.ValidatorID
+		key   crypto.AgentID
+		stake uint64
+	}{
+		{"node-1", "key-n1", 100_000},
+		{"node-2", "key-n2", 100_000},
+		{"node-3", "key-n3", 100_000},
+	})
+
+	// Use the actual SelectCommittee function (which now uses bounded selection).
+	cs := snap.SelectCommittee("some-event")
+	if len(cs.Members) != 3 {
+		t.Fatalf("3-node testnet: expected all 3 in committee, got %d", len(cs.Members))
+	}
+	if cs.TotalWeight != 300_000 {
+		t.Fatalf("expected total weight 300000, got %d", cs.TotalWeight)
+	}
+}
+
+func TestCommittee_NilCommitteeReturn_DisablesFiltering(t *testing.T) {
+	// A CommitteeSource that returns nil disables filtering for that round.
+	snap := buildSnapshot(t, []struct {
+		id    validatorlifecycle.ValidatorID
+		key   crypto.AgentID
+		stake uint64
+	}{
+		{"s1", "key-a", 100_000},
+	})
+
+	reg := identity.NewRegistry()
+	registerAgent(t, reg, "key-a", 5000, 100_000)
+
+	cfg := &consensus.ConsensusConfig{
+		SupermajorityThreshold: 0.667,
+		MaxRounds:              10,
+		RoundTimeout:           5 * time.Second,
+		MinParticipants:        1,
+	}
+	vr := consensus.NewVotingRound(cfg, reg)
+	vr.SetValidatorSet(snap)
+
+	// Committee source returns nil — filtering disabled.
+	vr.SetCommitteeSource(&staticCommittee{members: nil})
+
+	eid := event.EventID("nil-committee-event")
+	if err := vr.RegisterVote(eid, "key-a", true); err != nil {
+		t.Fatalf("nil committee should disable filtering: %v", err)
 	}
 }

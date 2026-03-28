@@ -97,6 +97,52 @@ var (
 	ErrNotFinalized = errors.New("consensus: event not yet finalized")
 )
 
+// ValidatorSetSource provides snapshot-bound vote eligibility and weight for
+// consensus rounds. When set on VotingRound via SetValidatorSet, it replaces
+// the identity registry as the canonical source of vote authority.
+//
+// The snapshot is immutable — weights do not change between votes in the same
+// round. This eliminates the race where a voter's identity record changes
+// between vote registration and tally, causing different nodes to compute
+// different weights for the same voter.
+//
+// *validatorlifecycle.ValidatorSnapshot satisfies this interface.
+type ValidatorSetSource interface {
+	// VoteWeightByKey returns the consensus weight for the given operator key.
+	// Returns 0, false if the key does not hold an eligible seat in the
+	// snapshot (seat not found, non-participating status, or zero weight).
+	VoteWeightByKey(operatorKey crypto.AgentID) (weight uint64, eligible bool)
+
+	// SetVersion returns the monotonic validator set version number. Each
+	// lifecycle event that changes the active validator set increments the
+	// version. Consensus rounds record this version at open time so votes
+	// for already-open rounds are evaluated against the correct snapshot.
+	SetVersion() uint64
+}
+
+// ErrVoterNotInSnapshot is returned when a voter's key is not found in the
+// bound validator set snapshot.
+var ErrVoterNotInSnapshot = errors.New("consensus: voter not in validator set snapshot")
+
+// ErrVoterNotInCommittee is returned when a voter is in the snapshot but was
+// not selected for the committee that serves a specific round.
+var ErrVoterNotInCommittee = errors.New("consensus: voter not in committee for this round")
+
+// CommitteeSource provides deterministic committee selection for consensus
+// rounds. When set on VotingRound via SetCommitteeSource, each round binds
+// to a committee and only committee members may vote.
+//
+// The function receives the event ID (round identifier) and returns the set
+// of operator keys that are committee members, along with the committee size.
+// Returns nil if committee filtering is disabled (all eligible voters accepted).
+type CommitteeSource interface {
+	// SelectForRound returns the set of operator keys that are committee
+	// members for the given round. The returned map must be deterministic:
+	// same eventID → same committee on every node.
+	// Returns nil to disable committee filtering for this round.
+	SelectForRound(eventID event.EventID) map[crypto.AgentID]bool
+}
+
 // NodeWeight captures the reputation and stake components that determine a
 // node's influence in a virtual voting tally.
 type NodeWeight struct {
@@ -118,6 +164,12 @@ type NodeWeight struct {
 type VoteRecord struct {
 	// EventID is the content-addressed ID of the event under consideration.
 	EventID event.EventID
+
+	// ValidatorSetVersion is the snapshot version that was current when this
+	// record was created. Votes for this event are evaluated against this
+	// snapshot version, not the latest runtime view. Zero when no snapshot
+	// was bound at record creation time (backward compatibility).
+	ValidatorSetVersion uint64
 
 	// Round is the number of completed tally iterations for this event.
 	// It starts at 1 and increments after each TallyVotes call that does not
@@ -192,9 +244,11 @@ func DefaultConsensusConfig() *ConsensusConfig {
 // supermajority are assigned the next sequence number, establishing a total
 // order over finalized events within this round instance.
 type VotingRound struct {
-	config      *ConsensusConfig
-	registry    *identity.Registry
-	persistence VotePersistence // optional; when set, votes are written through
+	config          *ConsensusConfig
+	registry        *identity.Registry
+	validatorSet    ValidatorSetSource  // optional; when set, replaces registry for weight
+	committeeSource CommitteeSource     // optional; when set, only committee members may vote
+	persistence     VotePersistence     // optional; when set, votes are written through
 
 	records  map[event.EventID]*VoteRecord
 	orderSeq uint64 // monotonically increasing; assigned to each finalized event
@@ -222,6 +276,34 @@ func NewVotingRound(config *ConsensusConfig, registry *identity.Registry) *Votin
 func (vr *VotingRound) SetPersistence(p VotePersistence) {
 	vr.mu.Lock()
 	vr.persistence = p
+	vr.mu.Unlock()
+}
+
+// SetValidatorSet binds a validator-set snapshot to this VotingRound. When
+// set, vote eligibility and weight are derived from the snapshot instead of
+// the identity registry. The snapshot is immutable, so weights are stable
+// across all votes in a round — eliminating races caused by registry updates
+// between vote registration and tally.
+//
+// Call after the lifecycle Reducer has been seeded and before consensus
+// traffic begins. Can be updated atomically when the validator set changes.
+func (vr *VotingRound) SetValidatorSet(vs ValidatorSetSource) {
+	vr.mu.Lock()
+	vr.validatorSet = vs
+	vr.mu.Unlock()
+}
+
+// SetCommitteeSource wires deterministic committee selection into the
+// VotingRound. When set, each round's votes are filtered against the
+// committee selected for that round's event ID. Voters not in the
+// committee are rejected with ErrVoterNotInCommittee.
+//
+// When nil (the default), all snapshot-eligible voters may vote on any
+// round — appropriate for small networks where all validators participate.
+// Call before Start.
+func (vr *VotingRound) SetCommitteeSource(cs CommitteeSource) {
+	vr.mu.Lock()
+	vr.committeeSource = cs
 	vr.mu.Unlock()
 }
 
@@ -265,17 +347,37 @@ func (vr *VotingRound) ComputeWeight(agentID crypto.AgentID) (uint64, error) {
 }
 
 // computeWeight is the lock-free core shared by ComputeWeight and tallyVotesLocked.
-// It acquires only the registry's read lock, making it safe to call while vr.mu
-// is held (locking order: vr.mu → registry.mu, no reverse dependency).
+//
+// When a ValidatorSetSource is bound (via SetValidatorSet), weight is read
+// from the snapshot — the seat's pre-computed weight is returned directly.
+// This eliminates the race where identity registry mutations between vote
+// registration and tally cause different nodes to compute different weights.
+//
+// When no snapshot is bound, falls back to the identity registry using the
+// original reputation × stake / 10000 formula. This preserves backward
+// compatibility for tests and deployments that haven't adopted lifecycle
+// snapshots yet.
 func (vr *VotingRound) computeWeight(agentID crypto.AgentID) (uint64, error) {
+	// Snapshot path: preferred when a validator set is bound.
+	if vr.validatorSet != nil {
+		w, eligible := vr.validatorSet.VoteWeightByKey(agentID)
+		if !eligible {
+			return 0, fmt.Errorf("%w: %s", ErrVoterNotInSnapshot, agentID)
+		}
+		return w, nil
+	}
+
+	// Fallback: identity registry path (pre-snapshot backward compatibility).
+	return vr.computeWeightFromRegistry(agentID)
+}
+
+// computeWeightFromRegistry is the original weight computation that reads
+// from the identity registry. Retained as fallback when no snapshot is bound.
+func (vr *VotingRound) computeWeightFromRegistry(agentID crypto.AgentID) (uint64, error) {
 	fp, err := vr.registry.Get(agentID)
 	if err != nil {
 		return 0, fmt.Errorf("consensus: agent %s not in registry: %w", agentID, err)
 	}
-	// Overflow-safe arithmetic using math/big: the intermediate product of
-	// ReputationScore × StakedAmount can exceed uint64 for large stakes.
-	// Using big.Int for the multiplication avoids silent wraparound.
-	// If either factor is zero, return zero immediately (short-circuit).
 	if fp.ReputationScore == 0 || fp.StakedAmount == 0 {
 		return 0, nil
 	}
@@ -284,7 +386,6 @@ func (vr *VotingRound) computeWeight(agentID crypto.AgentID) (uint64, error) {
 		new(big.Int).SetUint64(fp.StakedAmount),
 	)
 	result := new(big.Int).Div(product, bigDivisor)
-	// If the result exceeds uint64 range, saturate at MaxUint64.
 	if !result.IsUint64() {
 		return ^uint64(0), nil
 	}
@@ -306,6 +407,17 @@ func (vr *VotingRound) RegisterVote(eventID event.EventID, voterID crypto.AgentI
 		return fmt.Errorf("consensus: voter %s not eligible: %w", voterID, err)
 	}
 
+	// Committee membership check: when a committee source is configured,
+	// only committee members may vote for a specific round. This is checked
+	// before acquiring the write lock to avoid contention from non-committee
+	// voters.
+	if vr.committeeSource != nil {
+		committee := vr.committeeSource.SelectForRound(eventID)
+		if committee != nil && !committee[voterID] {
+			return fmt.Errorf("%w: voter %s for event %s", ErrVoterNotInCommittee, voterID, eventID)
+		}
+	}
+
 	vr.mu.Lock()
 	defer vr.mu.Unlock()
 
@@ -316,6 +428,11 @@ func (vr *VotingRound) RegisterVote(eventID event.EventID, voterID crypto.AgentI
 			Round:     1,
 			Votes:     make(map[crypto.AgentID]bool),
 			CreatedAt: time.Now(),
+		}
+		// Capture the validator set version at round-open time so all
+		// votes for this event are evaluated against the same snapshot.
+		if vr.validatorSet != nil {
+			record.ValidatorSetVersion = vr.validatorSet.SetVersion()
 		}
 		vr.records[eventID] = record
 	}

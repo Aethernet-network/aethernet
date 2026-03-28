@@ -48,6 +48,27 @@ AetherNet is a three-layer protocol. Never cross layer boundaries in imports.
 - **ComputeVerificationDepth is analytics, not core protocol.** It lives in `internal/analytics/` and uses a cached recursive traversal with cycle detection. It does not modify state.
 - **Evidence signatures are separate from DAG event signatures.** The DAG signature proves event authenticity within the DAG. The evidence signature proves evidence authenticity anywhere — portable beyond AetherNet.
 
+## Fast Path v1 Networking
+
+- **Three-plane architecture:** causality (headers), body (payloads), repair (missing events). Relay happens before validation.
+- **5-stage ingest pipeline:** Announced → Completed → Validated → Materialized. Events relay at Announced state.
+- **dag.Add retains full enforcement.** Fast Path validation is advisory pre-screening; dag.Add re-checks independently (defense-in-depth).
+- **Peer scoring is advisory.** 8 score events, sorted selection, unusable peer exclusion. Does not affect consensus or settlement.
+- **Backpressure:** per-peer quotas, node-level overload detection, low-priority work shed before high-priority.
+- **Checkpoint bootstrap:** deterministic state hash, bounded backfill for long-disconnected nodes.
+- **Rolling upgrade safe.** V1 peers continue full-event sync. V2 peers use Fast Path. Both coexist.
+- **6 concurrent workers:** relay, completion, validation, materialization, repair, backpressure.
+- **New files live in internal/network/.** Do not bloat into node.go.
+
+## Trajectory Layer
+
+- **TrajectoryCommit is a standard event.Event.** Uses EventTypeTrajectoryCommit, flows through normal DAG/signing/Fast Path.
+- **Checkpoint blobs are NOT Fast Path EventBody.** The lean TrajectoryCommitPayload is the event payload. Large CheckpointBody is stored in blobstore (internal/blobstore/), fetched by trajectory service, invisible to network layer.
+- **PrimaryTips() filters trajectory commits from default parent selection.** Non-trajectory event emission uses PrimaryTips(). Falls back to Tips() when all tips are trajectories.
+- **Only the task claimer can emit trajectory commits.** Enforced at service/API layer.
+- **Evidence packets anchor exploration via ExplorationRoot (Merkle) and ExplorationSample.**
+- **Trajectory service wired in cmd/node/main.go.** BlobStore at {data_dir}/blobs, 4MB max.
+
 ## Supply Invariant
 
 - **FundAgent creates tokens from nothing.** It must ONLY be called during genesis and onboarding. Never in fee collection, settlement, or slashing paths.
@@ -125,3 +146,5 @@ AetherNet is a three-layer protocol. Never cross layer boundaries in imports.
 - **Shared testnet API key: aethernet-testnet-arena-key-v1 (registered on all nodes at boot)**
 - **--no-auth in Dockerfile CMD for testnet backward compatibility**
 - **Never add AETHERNET_RESET to task definitions — it wipes the store**
+- **Blob store directory:** {AETHERNET_DATA}/blobs (created automatically)
+- **Grant settlement requires consensus.** Onboarding grants go through OCS → autovalidator → consensus vote → settlement. Not instant.

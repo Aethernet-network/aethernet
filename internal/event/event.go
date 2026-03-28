@@ -93,6 +93,38 @@ const (
 	EventTypeTaskSubmitted EventType = "TaskSubmitted"
 	EventTypeTaskApproved  EventType = "TaskApproved"
 	EventTypeTaskDisputed  EventType = "TaskDisputed"
+
+	// Validator lifecycle events — propagated via DAG, applied
+	// deterministically on every node via the validatorlifecycle.Reducer.
+	// These are the canonical DAG records for all validator set mutations.
+
+	// EventTypeValidatorGenesisSet bootstraps the initial validator set.
+	// Emitted once during genesis. Contains the full set of initial seats.
+	EventTypeValidatorGenesisSet EventType = "ValidatorGenesisSet"
+
+	// EventTypeValidatorJoin records a new validator requesting to join.
+	// Creates a seat in PendingJoin status.
+	EventTypeValidatorJoin EventType = "ValidatorJoin"
+
+	// EventTypeValidatorActivate promotes a seat from Probationary to Active.
+	EventTypeValidatorActivate EventType = "ValidatorActivate"
+
+	// EventTypeValidatorSuspend temporarily removes a seat from consensus.
+	EventTypeValidatorSuspend EventType = "ValidatorSuspend"
+
+	// EventTypeValidatorResume reinstates a suspended seat to Active.
+	EventTypeValidatorResume EventType = "ValidatorResume"
+
+	// EventTypeValidatorExit records a voluntary exit (cooldown initiation
+	// or exit completion, depending on payload fields).
+	EventTypeValidatorExit EventType = "ValidatorExit"
+
+	// EventTypeValidatorKeyRotate records a key rotation for a seat.
+	EventTypeValidatorKeyRotate EventType = "ValidatorKeyRotate"
+
+	// EventTypeValidatorSlashApplied records a slash applied to a seat.
+	// May result in suspension, cooldown, or permanent exclusion.
+	EventTypeValidatorSlashApplied EventType = "ValidatorSlashApplied"
 )
 
 // SettlementState tracks an event's position in the Optimistic Capability Settlement
