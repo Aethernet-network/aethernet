@@ -751,6 +751,12 @@ func (e *Engine) checkExpired() {
 	}
 	e.mu.Unlock()
 
+	if len(expired) > 0 {
+		slog.Warn("ocs: checkExpired found expired events",
+			"expired_count", len(expired),
+			"pending_count", len(e.pending),
+		)
+	}
 	for _, id := range expired {
 		if e.voting != nil {
 			// Consensus mode: inspect accumulated votes to make a majority
@@ -758,6 +764,10 @@ func (e *Engine) checkExpired() {
 			rec, recErr := e.voting.GetRecord(id)
 			if recErr != nil {
 				// No votes at all — conservative reject.
+				slog.Warn("ocs: event expired with zero votes — rejecting",
+					"event_id", id,
+					"reason", "timeout_no_votes",
+				)
 				_ = e.ProcessResult(VerificationResult{
 					EventID:   id,
 					Verdict:   false,

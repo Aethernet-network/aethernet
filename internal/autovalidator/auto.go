@@ -851,13 +851,27 @@ func (av *AutoValidator) processStuckHeld() {
 // SettlementApplicator after consensus finalization.
 func (av *AutoValidator) processPending() {
 	if av.dag == nil || av.kp == nil {
+		slog.Debug("auto-validator: processPending skipped — dag or kp nil",
+			"dag_nil", av.dag == nil, "kp_nil", av.kp == nil)
 		return
 	}
 	pending := av.engine.Pending()
+	if len(pending) > 0 {
+		slog.Info("auto-validator: processPending found events",
+			"pending_count", len(pending),
+			"voted_count", len(av.voted),
+			"validator_id", av.validatorID,
+		)
+	}
 	for _, item := range pending {
 		if _, done := av.voted[item.EventID]; done {
 			continue // already voted — do not emit duplicate
 		}
+		slog.Info("auto-validator: voting on pending event",
+			"event_id", item.EventID,
+			"event_type", item.EventType,
+			"amount", item.Amount,
+		)
 		av.emitVote(item.EventID, string(settlement.VerdictAccepted), item.Amount)
 		av.voted[item.EventID] = struct{}{}
 	}
@@ -901,7 +915,7 @@ func (av *AutoValidator) emitVote(targetEventID event.EventID, verdict string, v
 	// Publish through the authoritative publisher (dag.Add + disseminate).
 	if av.publisher != nil {
 		if err := av.publisher.Publish(voteEvent); err != nil {
-			slog.Debug("auto-validator: vote event publication failed",
+			slog.Warn("auto-validator: vote event publication failed",
 				"target", targetEventID, "err", err)
 			return
 		}
