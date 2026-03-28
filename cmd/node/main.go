@@ -1586,6 +1586,10 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 				return // duplicate — another node already created one
 			}
 
+			// Broadcast settlement to peers so they can apply it.
+			_ = node.SubmitLocalEvent(settlementEv)
+			_ = node.Broadcast(settlementEv)
+
 			slog.Info("settlement: consensus finalized, settlement event created",
 				"target", targetID, "verdict", consensusVerdict,
 				"settlement_id", settlementEv.ID)
@@ -2155,9 +2159,35 @@ func cmdStart() {
 		fmt.Println()
 	}
 
+	// Broadcast locally-created DAG events that were added before peers
+	// connected. Genesis funding, registration, and other startup events are
+	// created during startStack (before node.Start), so they never entered
+	// the Fast Path pipeline. Broadcast them now so peers receive them.
+	broadcastLocalEvents(stack.dag, node, agentID)
+
 	runLoop(agentID, stack.dag, node, stack.engine, stack.supply, stack.bus)
 	stopStack(node, stack)
 	slog.Info("node stopped cleanly")
+}
+
+// broadcastLocalEvents sends all DAG events authored by this node to
+// connected peers. Called once after peer connections are established to
+// disseminate events created during startup before the node was networked.
+func broadcastLocalEvents(d *dag.DAG, node *network.Node, localAgent crypto.AgentID) {
+	events := d.All()
+	sent := 0
+	for _, ev := range events {
+		if ev.AgentID != string(localAgent) {
+			continue // only broadcast our own events
+		}
+		_ = node.SubmitLocalEvent(ev)
+		_ = node.Broadcast(ev)
+		sent++
+	}
+	if sent > 0 {
+		slog.Info("broadcast: disseminated locally-created startup events",
+			"count", sent, "agent_id", localAgent)
+	}
 }
 
 // cmdConnect is the legacy subcommand that requires --peer. It is equivalent to

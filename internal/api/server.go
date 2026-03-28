@@ -2240,6 +2240,11 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		if signErr := crypto.SignEvent(regEv, s.kp); signErr == nil {
 			if addErr := s.dag.Add(regEv); addErr == nil {
 				resp.RegistrationEventID = string(regEv.ID)
+				// Broadcast to peers so the registration propagates.
+				if s.node != nil {
+					_ = s.node.SubmitLocalEvent(regEv)
+					_ = s.node.Broadcast(regEv)
+				}
 			}
 		}
 	}
