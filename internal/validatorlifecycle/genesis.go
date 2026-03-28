@@ -152,6 +152,26 @@ func DefaultTestnetManifest() *GenesisManifest {
 	}
 }
 
+// SingleNodeManifest creates a genesis manifest with a single Active seat
+// using the provided agent ID (hex-encoded Ed25519 public key) as both
+// operator and consensus key. This ensures the auto-validator can vote on
+// its own events in single-node dev mode without a shared manifest file.
+func SingleNodeManifest(agentID crypto.AgentID) *GenesisManifest {
+	return &GenesisManifest{
+		Entries: []GenesisManifestEntry{
+			{
+				ValidatorID:        ValidatorID("seat-" + string(agentID)[:16]),
+				OperatorAgentID:    agentID,
+				ConsensusPublicKey: agentID,
+				KeyEpoch:           1,
+				BondedStake:        genesis.GenesisValidatorStake,
+				InitialStatus:      SeatActive,
+				ReputationBaseline: 5000,
+			},
+		},
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Manifest Loading
 // ---------------------------------------------------------------------------

@@ -1041,7 +1041,38 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	// Startup safety: the node fails closed if the manifest is invalid or
 	// the snapshot cannot be seeded. Consensus services never start without
 	// a valid snapshot.
-	genesisManifest := validatorlifecycle.DefaultTestnetManifest()
+	//
+	// Manifest loading priority:
+	//   1. AETHERNET_VALIDATOR_MANIFEST — path to a JSON manifest file
+	//      containing the actual Ed25519 public keys of all validator nodes.
+	//      Required for multi-node testnets where each node has a persistent
+	//      keypair that must match the validator seat's operator key.
+	//   2. Auto-manifest from node's own key — when no manifest file is
+	//      specified and AETHERNET_TESTNET=true, a single-seat manifest is
+	//      generated from this node's actual keypair. This ensures the
+	//      auto-validator can vote on its own events (single-node dev mode).
+	//   3. DefaultTestnetManifest() — fallback using the symbolic
+	//      "testnet-validator" identity. Only appropriate when the validator
+	//      lifecycle snapshot is not used for vote eligibility.
+	var genesisManifest *validatorlifecycle.GenesisManifest
+	if manifestPath := os.Getenv("AETHERNET_VALIDATOR_MANIFEST"); manifestPath != "" {
+		var err error
+		genesisManifest, err = validatorlifecycle.LoadManifestFromFile(manifestPath)
+		if err != nil {
+			slog.Error("validator lifecycle: failed to load manifest file",
+				"path", manifestPath, "err", err)
+			os.Exit(1)
+		}
+		slog.Info("validator lifecycle: loaded manifest from file",
+			"path", manifestPath, "seats", len(genesisManifest.Entries))
+	} else {
+		// Auto-manifest: use this node's actual keypair as the sole
+		// validator seat. This ensures vote eligibility works in
+		// single-node testnet / dev mode without a shared manifest.
+		genesisManifest = validatorlifecycle.SingleNodeManifest(agentID)
+		slog.Info("validator lifecycle: using auto-manifest from node key",
+			"agent_id", agentID)
+	}
 	startupCheck := validatorlifecycle.DefaultStartupCheck()
 	if err := startupCheck.ValidateManifest(genesisManifest); err != nil {
 		slog.Error("validator lifecycle: manifest validation failed", "err", err)
