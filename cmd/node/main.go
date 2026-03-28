@@ -1516,11 +1516,15 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			voterID := crypto.AgentID(vp.VoterID)
 			verdict := vp.Verdict == string(settlement.VerdictAccepted)
 
-			if err := stack.votingRound.RegisterVote(targetID, voterID, verdict); err != nil {
-				return // duplicate, already finalized, or round exhausted
-			}
+			// Register the vote. Duplicate/finalized/exhausted errors are
+			// non-fatal — the vote was already counted via another path
+			// (MsgVote or prior DAG sync). We still check finalization
+			// below because the MsgVote path may have finalized the round
+			// via processVoteInternal → ProcessResult (metrics only) without
+			// creating a Settlement event or calling the applicator.
+			_ = stack.votingRound.RegisterVote(targetID, voterID, verdict)
 
-			// Check finalization after every vote.
+			// Check finalization regardless of RegisterVote result.
 			finalized, _ := stack.votingRound.IsFinalized(targetID)
 			if !finalized {
 				return
