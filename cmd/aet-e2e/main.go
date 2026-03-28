@@ -31,14 +31,108 @@
 package main
 
 import (
+	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Aethernet-network/aethernet/internal/auth"
 	"github.com/Aethernet-network/aethernet/pkg/sdk"
 )
+
+// ---------------------------------------------------------------------------
+// TX-V1 Signing Transport
+// ---------------------------------------------------------------------------
+
+// signingTransport wraps an http.RoundTripper and adds AETHERNET-TX-V1 signing
+// headers to every request. This authenticates the harness as a real agent.
+type signingTransport struct {
+	inner      http.RoundTripper
+	privateKey ed25519.PrivateKey
+	publicKey  ed25519.PublicKey
+	actorHex   string // hex-encoded public key = agent identity
+	chainID    string
+}
+
+func newSigningTransport(inner http.RoundTripper) *signingTransport {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		panic("generate keypair: " + err.Error())
+	}
+	return &signingTransport{
+		inner:      inner,
+		privateKey: priv,
+		publicKey:  pub,
+		actorHex:   hex.EncodeToString(pub),
+		chainID:    auth.DefaultChainID(),
+	}
+}
+
+func (st *signingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Read body for hashing (if present).
+	var bodyBytes []byte
+	if req.Body != nil {
+		var err error
+		bodyBytes, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, fmt.Errorf("signing: read body: %w", err)
+		}
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	}
+
+	// Compute body hash (JCS-canonicalized if valid JSON, raw otherwise).
+	canonBody, err := auth.CanonicalizeJSON(bodyBytes)
+	if err != nil {
+		canonBody = bodyBytes
+	}
+	bodyHash := sha256.Sum256(canonBody)
+	bodyHashHex := hex.EncodeToString(bodyHash[:])
+
+	// Generate nonce (16 random bytes = 32 hex chars).
+	nonceBytes := make([]byte, 16)
+	_, _ = rand.Read(nonceBytes)
+	nonce := hex.EncodeToString(nonceBytes)
+
+	now := time.Now().Unix()
+
+	// Build transaction envelope.
+	tx := &auth.Transaction{
+		Version:    auth.TxVersion,
+		ChainID:    st.chainID,
+		Actor:      st.actorHex,
+		Method:     req.Method,
+		Path:       req.URL.Path,
+		BodySHA256: bodyHashHex,
+		CreatedAt:  now,
+		ExpiresAt:  now + 120,
+		Nonce:      nonce,
+	}
+
+	// Sign.
+	sig, err := tx.Sign(st.privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("signing: %w", err)
+	}
+
+	// Set headers.
+	req.Header.Set("X-AetherNet-Version", auth.TxVersion)
+	req.Header.Set("X-AetherNet-Chain-ID", st.chainID)
+	req.Header.Set("X-AetherNet-Actor", st.actorHex)
+	req.Header.Set("X-AetherNet-Created", strconv.FormatInt(now, 10))
+	req.Header.Set("X-AetherNet-Expires", strconv.FormatInt(now+120, 10))
+	req.Header.Set("X-AetherNet-Nonce", nonce)
+	req.Header.Set("X-AetherNet-Signature", sig)
+
+	return st.inner.RoundTrip(req)
+}
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -144,17 +238,30 @@ func diagnoseSettlementFailure(clients []*sdk.Client) string {
 
 func main() {
 	cfg := loadConfig()
-	httpClient := &http.Client{Timeout: cfg.timeout}
 
-	// Create SDK clients for each node.
-	clients := make([]*sdk.Client, len(cfg.nodes))
+	// Generate an Ed25519 keypair for TX-V1 signing. The actor identity
+	// is the hex-encoded public key — the same format the protocol uses.
+	signer := newSigningTransport(http.DefaultTransport)
+	signedHTTP := &http.Client{Timeout: cfg.timeout, Transport: signer}
+	unsignedHTTP := &http.Client{Timeout: cfg.timeout}
+
+	// Create SDK clients for each node. The first client uses the signed
+	// transport for write operations (registration, etc.). All clients use
+	// unsigned transport for read operations (status, balance).
+	signedClients := make([]*sdk.Client, len(cfg.nodes))
+	readClients := make([]*sdk.Client, len(cfg.nodes))
 	for i, url := range cfg.nodes {
-		clients[i] = sdk.New(url, httpClient)
+		signedClients[i] = sdk.New(url, signedHTTP)
+		readClients[i] = sdk.New(url, unsignedHTTP)
 	}
+	// Use readClients for diagnostic functions that only need GET access.
+	clients := readClients
 
 	fmt.Println("AetherNet E2E Verification Harness")
 	fmt.Println("===================================")
-	fmt.Printf("Nodes: %s\n", strings.Join(cfg.nodes, ", "))
+	fmt.Printf("Nodes:   %s\n", strings.Join(cfg.nodes, ", "))
+	fmt.Printf("Actor:   %s\n", signer.actorHex[:16]+"...")
+	fmt.Printf("ChainID: %s\n", signer.chainID)
 	fmt.Printf("Timeout: %s\n\n", cfg.timeout)
 
 	// Track state across stages.
@@ -202,10 +309,15 @@ func main() {
 		}},
 
 		// ── Stage 4: Register agent ───────────────────────────────────────
-		{name: "Register agent", runFn: func() error {
-			id, err := clients[0].Register(nil)
+		{name: "Register agent (TX-V1 signed)", runFn: func() error {
+			// Use the signed client — the signing transport adds
+			// AETHERNET-TX-V1 headers to the POST /v1/agents request.
+			id, err := signedClients[0].Register(nil)
 			if err != nil {
-				return fmt.Errorf("POST /v1/agents: %w", err)
+				return fmt.Errorf("POST /v1/agents (signed): %w\n"+
+					"  DIAGNOSIS: TX-V1 signing may be misconfigured.\n"+
+					"  Actor: %s\n"+
+					"  ChainID: %s", err, signer.actorHex[:16]+"...", signer.chainID)
 			}
 			agentID = id
 			if cfg.verbose {
