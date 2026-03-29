@@ -44,6 +44,7 @@ func TestSync_JoinUpdatesSnapshot(t *testing.T) {
 
 	// Simulate a ValidatorJoin DAG event arriving via sync.
 	joinPayload := ValidatorJoinPayload{
+		Version:              1,
 		ValidatorID:          "new-joiner",
 		OperatorAgentID:      "key-joiner",
 		ConsensusPublicKey:   "key-joiner",
@@ -109,6 +110,7 @@ func TestSync_ExitRemovesFromSnapshot(t *testing.T) {
 
 	// Begin cooldown via exit event.
 	exitBeginPayload := ValidatorExitPayload{
+		Version:              1,
 		ValidatorID:          "v-exit",
 		Phase:                ExitPhaseBeginCooldown,
 		CooldownDuration:     5,
@@ -122,6 +124,7 @@ func TestSync_ExitRemovesFromSnapshot(t *testing.T) {
 
 	// Complete exit.
 	exitCompletePayload := ValidatorExitPayload{
+		Version:              1,
 		ValidatorID:          "v-exit",
 		Phase:                ExitPhaseCompleteExit,
 		EffectiveFromVersion: 99,
@@ -159,10 +162,11 @@ func TestSync_SlashReducesStake(t *testing.T) {
 	r, _ := SeedReducerFromManifest(m)
 
 	slashPayload := ValidatorSlashAppliedPayload{
+		Version:              1,
 		ValidatorID:          "v-slash",
 		Offense:              "fraud",
 		EvidenceRef:          "ev-hash",
-		SlashPercent:         30,
+		SlashPercentBP:       3000,
 		SlashAmount:          30_000,
 		RemainingStake:       70_000,
 		PermanentExclusion:   false,
@@ -205,6 +209,7 @@ func TestSync_KeyRotateUpdatesKey(t *testing.T) {
 	preRotateSnap := r.Snapshot()
 
 	rotatePayload := ValidatorKeyRotatePayload{
+		Version:              1,
 		ValidatorID:          "v-rot",
 		OldConsensusKey:      "k-old",
 		NewConsensusKey:      "k-new",
@@ -267,6 +272,7 @@ func TestSync_InvalidLifecycleEventSkipped(t *testing.T) {
 	agentID := string(kp.AgentID())
 	badPayload := ValidatorJoinPayload{
 		// Missing ValidatorID and ConsensusPublicKey.
+		Version:              1,
 		OperatorAgentID:      "op",
 		KeyEpoch:             1,
 		BondedStake:          100_000,
@@ -300,11 +306,11 @@ func TestSync_ReplayMatchesLiveProcessing(t *testing.T) {
 		ts      uint64
 	}{
 		{event.EventTypeValidatorJoin, ValidatorJoinPayload{
-			ValidatorID: "v-new", OperatorAgentID: "k-new", ConsensusPublicKey: "k-new",
+			Version: 1, ValidatorID: "v-new", OperatorAgentID: "k-new", ConsensusPublicKey: "k-new",
 			KeyEpoch: 1, BondedStake: MinBondedStake, EffectiveFromVersion: 1,
 		}, 100},
 		{event.EventTypeValidatorSuspend, ValidatorSuspendPayload{
-			ValidatorID: "v-new", Reason: "test", EffectiveFromVersion: 2,
+			Version: 1, ValidatorID: "v-new", Reason: "test", EffectiveFromVersion: 2,
 		}, 200},
 	}
 
@@ -362,7 +368,7 @@ func TestSync_FullPipeline_JoinActivateVote(t *testing.T) {
 
 	// New validator joins via sync.
 	joinEv := createLifecycleDAGEvent(t, event.EventTypeValidatorJoin, ValidatorJoinPayload{
-		ValidatorID: "v-new", OperatorAgentID: "k-new", ConsensusPublicKey: "k-new",
+		Version: 1, ValidatorID: "v-new", OperatorAgentID: "k-new", ConsensusPublicKey: "k-new",
 		KeyEpoch: 1, BondedStake: MinBondedStake, EffectiveFromVersion: 1,
 	}, 100)
 	lcEvents, _ := ExtractLifecycleEvent(joinEv)

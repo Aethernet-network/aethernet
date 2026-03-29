@@ -1177,7 +1177,7 @@ class AetherNetClient:
         outcome: str,
         approach_description: str,
         compute_cost: int = 0,
-        quality_score: float = 0.5,
+        quality_score_bp: int = 5000,
         parent_commit_id: str = "",
         parameters: Optional[Dict[str, str]] = None,
         evidence_snippet: str = "",
@@ -1196,7 +1196,7 @@ class AetherNetClient:
             outcome:              One of: exploring, dead_end, pivot, converged.
             approach_description: Summary of the current approach.
             compute_cost:         Self-reported compute cost in micro-AET.
-            quality_score:        Self-assessed quality [0.0, 1.0].
+            quality_score_bp:     Self-assessed quality in basis points [0, 10000].
             parent_commit_id:     EventID of the parent commit (empty for root).
             parameters:           Configuration/hyperparameters used.
             evidence_snippet:     Short sample of the work output.
@@ -1212,7 +1212,7 @@ class AetherNetClient:
             "outcome": outcome,
             "approach_description": approach_description,
             "compute_cost": compute_cost,
-            "quality_score": quality_score,
+            "quality_score_bp": quality_score_bp,
         }
         if parent_commit_id:
             body["parent_commit_id"] = parent_commit_id

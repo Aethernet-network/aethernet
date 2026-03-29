@@ -702,11 +702,12 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score, hol
 	// peers, goes through consensus, and the SettlementApplicator handles
 	// escrow release + fee distribution identically on every node.
 	if av.dag != nil && av.kp != nil {
-		scoreVal := 0.0
+		var scoreBP uint32
 		if score != nil {
-			scoreVal = score.Overall
+			scoreBP = uint32(score.Overall * 10000)
 		}
 		tsPayload := settlement.TaskSettlementPayload{
+			Version:        1,
 			TaskID:         task.ID,
 			PosterID:       task.PosterID,
 			ClaimerID:      task.ClaimerID,
@@ -714,7 +715,7 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score, hol
 			AcceptanceHash: task.Contract.SpecHash,
 			EvidenceHash:   task.ResultHash,
 			Category:       task.Category,
-			Score:          scoreVal,
+			ScoreBP:        scoreBP,
 			HoldGeneration: holdGeneration,
 		}
 		tips := av.dag.Tips()
@@ -882,6 +883,7 @@ func (av *AutoValidator) processPending() {
 // never calls ProcessResult — all settlement is consensus-gated.
 func (av *AutoValidator) emitVote(targetEventID event.EventID, verdict string, verifiedValue uint64) {
 	votePayload := settlement.VerificationVotePayload{
+		Version:       1,
 		TargetEventID: string(targetEventID),
 		VoterID:       string(av.validatorID),
 		Verdict:       verdict,

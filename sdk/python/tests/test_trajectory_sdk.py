@@ -9,7 +9,7 @@ def test_emit_request_serialization():
         "outcome": "exploring",
         "approach_description": "Testing approach",
         "compute_cost": 50000,
-        "quality_score": 0.75,
+        "quality_score_bp": 7500,
         "parent_commit_id": "parent-123",
         "parameters": {"lr": "0.001"},
         "evidence_snippet": "Loss decreased",
@@ -20,7 +20,7 @@ def test_emit_request_serialization():
     deserialized = json.loads(serialized)
 
     assert deserialized["outcome"] == "exploring"
-    assert deserialized["quality_score"] == 0.75
+    assert deserialized["quality_score_bp"] == 7500
     assert deserialized["parameters"]["lr"] == "0.001"
     assert deserialized["parent_commit_id"] == "parent-123"
 
@@ -85,7 +85,7 @@ def test_emit_request_minimal_fields():
         "outcome": "dead_end",
         "approach_description": "Failed approach",
         "compute_cost": 1000,
-        "quality_score": 0.2,
+        "quality_score_bp": 2000,
     }
     serialized = json.dumps(body)
     parsed = json.loads(serialized)

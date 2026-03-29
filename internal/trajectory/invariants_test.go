@@ -25,11 +25,12 @@ func TestInvariant_TrajectoryCommitIsStandardEvent(t *testing.T) {
 	// A trajectory commit is stored as event.Event with EventTypeTrajectoryCommit.
 	// It is NOT a separate model, parallel event type, or external object.
 	payload := event.TrajectoryCommitPayload{
+		Version:        1,
 		TaskID:         "task-1",
 		Outcome:        event.OutcomeExploring,
 		CheckpointHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		CheckpointSize: 100,
-		QualityScore:   0.7,
+		QualityScoreBP: 7000,
 	}
 	ev, err := event.New(event.EventTypeTrajectoryCommit, nil, payload, "agent-1", nil, 0)
 	if err != nil {
@@ -65,11 +66,12 @@ func TestInvariant_DAGAddEnforcesAllChecksForTrajectory(t *testing.T) {
 
 	// Create a trajectory commit referencing genesis.
 	payload := event.TrajectoryCommitPayload{
+		Version:        1,
 		TaskID:         "task-1",
 		Outcome:        event.OutcomeExploring,
 		CheckpointHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		CheckpointSize: 100,
-		QualityScore:   0.5,
+		QualityScoreBP: 5000,
 	}
 	ev, _ := event.New(event.EventTypeTrajectoryCommit, []event.EventID{genesis.ID},
 		payload, string(kp.AgentID()),
@@ -88,11 +90,12 @@ func TestInvariant_DAGAddEnforcesAllChecksForTrajectory(t *testing.T) {
 
 	// Missing causal ref still rejected.
 	payload2 := event.TrajectoryCommitPayload{
+		Version:        1,
 		TaskID:         "task-2",
 		Outcome:        event.OutcomeConverged,
 		CheckpointHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		CheckpointSize: 200,
-		QualityScore:   0.9,
+		QualityScoreBP: 9000,
 	}
 	orphan, _ := event.New(event.EventTypeTrajectoryCommit, []event.EventID{"nonexistent-parent"},
 		payload2, string(kp.AgentID()),
@@ -119,7 +122,7 @@ func TestInvariant_DAGAppendOnlyWithTrajectory(t *testing.T) {
 		event.TrajectoryCommitPayload{
 			TaskID: "task-1", Outcome: event.OutcomeExploring,
 			CheckpointHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-			CheckpointSize: 100, QualityScore: 0.5,
+			CheckpointSize: 100, QualityScoreBP: 5000, Version: 1,
 		}, string(kp.AgentID()), nil, 0)
 	d.Add(traj)
 
@@ -141,11 +144,12 @@ func TestInvariant_CheckpointBlobNotFastPathEventBody(t *testing.T) {
 	// the Fast Path EventBody). The large CheckpointBody is stored in the
 	// blobstore, referenced by CheckpointHash.
 	payload := event.TrajectoryCommitPayload{
+		Version:        1,
 		TaskID:         "task-1",
 		Outcome:        event.OutcomeExploring,
 		CheckpointHash: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		CheckpointSize: 1048576, // 1 MiB — the blob is large
-		QualityScore:   0.7,
+		QualityScoreBP: 7000,
 	}
 	ev, _ := event.New(event.EventTypeTrajectoryCommit, nil, payload, "agent-1", nil, 0)
 
@@ -175,12 +179,12 @@ func TestInvariant_CheckpointBlobNotFastPathEventBody(t *testing.T) {
 
 func TestInvariant_TrajectoryPayloadInCanonicalID(t *testing.T) {
 	p1 := event.TrajectoryCommitPayload{
-		TaskID: "task-1", Outcome: event.OutcomeExploring,
-		CheckpointHash: "aaaa", CheckpointSize: 100, QualityScore: 0.5,
+		Version: 1, TaskID: "task-1", Outcome: event.OutcomeExploring,
+		CheckpointHash: "aaaa", CheckpointSize: 100, QualityScoreBP: 5000,
 	}
 	p2 := event.TrajectoryCommitPayload{
-		TaskID: "task-1", Outcome: event.OutcomeExploring,
-		CheckpointHash: "bbbb", CheckpointSize: 100, QualityScore: 0.5,
+		Version: 1, TaskID: "task-1", Outcome: event.OutcomeExploring,
+		CheckpointHash: "bbbb", CheckpointSize: 100, QualityScoreBP: 5000,
 	}
 
 	ev1, _ := event.New(event.EventTypeTrajectoryCommit, nil, p1, "agent", nil, 0)
@@ -211,7 +215,7 @@ func TestInvariant_PrimaryTipsDoesNotAffectMechanicalTips(t *testing.T) {
 	traj, _ := event.New(event.EventTypeTrajectoryCommit, nil,
 		event.TrajectoryCommitPayload{
 			TaskID: "task-1", Outcome: event.OutcomeExploring,
-			CheckpointHash: "ffff", CheckpointSize: 100, QualityScore: 0.5,
+			CheckpointHash: "ffff", CheckpointSize: 100, QualityScoreBP: 5000, Version: 1,
 		}, "agent-2", nil, 0)
 	d.Add(traj)
 
@@ -245,7 +249,7 @@ func TestInvariant_EmitAndRetrieveRoundtrip(t *testing.T) {
 	// Create and claim a task.
 	task, _ := tm.PostTask(string(kp.AgentID()), "Task", "desc", "code", 100000)
 	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil,
-		event.TaskClaimedPayload{TaskID: task.ID, ClaimerID: string(kp.AgentID())},
+		event.TaskClaimedPayload{Version: 1, TaskID: task.ID, ClaimerID: string(kp.AgentID())},
 		string(kp.AgentID()), nil, 0)
 	d.Add(claimEv)
 	tm.ApplyDAGEvent(claimEv)
@@ -257,7 +261,7 @@ func TestInvariant_EmitAndRetrieveRoundtrip(t *testing.T) {
 		Outcome:             event.OutcomeExploring,
 		ApproachDescription: "roundtrip test",
 		ComputeCost:         5000,
-		QualityScore:        0.8,
+		QualityScoreBP:      8000,
 	})
 	if err != nil {
 		t.Fatalf("EmitCommit: %v", err)
@@ -293,11 +297,12 @@ func TestInvariant_MissingBlobDoesNotCorruptDAG(t *testing.T) {
 
 	// Create a trajectory commit with a bogus checkpoint hash.
 	payload := event.TrajectoryCommitPayload{
+		Version:        1,
 		TaskID:         "task-1",
 		Outcome:        event.OutcomeDeadEnd,
 		CheckpointHash: "0000000000000000000000000000000000000000000000000000000000000000",
 		CheckpointSize: 1,
-		QualityScore:   0.3,
+		QualityScoreBP: 3000,
 	}
 	ev, _ := event.New(event.EventTypeTrajectoryCommit, nil, payload, string(kp.AgentID()), nil, 0)
 	d.Add(ev)
@@ -335,7 +340,7 @@ func TestInvariant_TrajectorySigningUsesStandardPath(t *testing.T) {
 	payload := event.TrajectoryCommitPayload{
 		TaskID: "task-1", Outcome: event.OutcomeExploring,
 		CheckpointHash: "1111111111111111111111111111111111111111111111111111111111111111",
-		CheckpointSize: 100, QualityScore: 0.5,
+		CheckpointSize: 100, QualityScoreBP: 5000, Version: 1,
 	}
 	ev, _ := event.New(event.EventTypeTrajectoryCommit, []event.EventID{genesis.ID},
 		payload, string(kp.AgentID()),
@@ -388,7 +393,7 @@ func TestInvariant_RetrievalOrderingDeterministic(t *testing.T) {
 
 	task, _ := tm.PostTask(string(kp.AgentID()), "Task", "desc", "code", 100000)
 	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil,
-		event.TaskClaimedPayload{TaskID: task.ID, ClaimerID: string(kp.AgentID())},
+		event.TaskClaimedPayload{Version: 1, TaskID: task.ID, ClaimerID: string(kp.AgentID())},
 		string(kp.AgentID()), nil, 0)
 	d.Add(claimEv)
 	tm.ApplyDAGEvent(claimEv)
@@ -402,7 +407,7 @@ func TestInvariant_RetrievalOrderingDeterministic(t *testing.T) {
 			Outcome:             event.OutcomeExploring,
 			ApproachDescription: "step",
 			ComputeCost:         uint64(1000 + i),
-			QualityScore:        0.5,
+			QualityScoreBP:      5000,
 		})
 		lastID = string(resp.EventID)
 	}

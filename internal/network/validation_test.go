@@ -79,7 +79,7 @@ func makeNonGenesisCompletedTracking(t *testing.T) (*network.IngestManager, even
 	// Create a genesis event first, then a child that references it.
 	parent := makeTestEvent(t, d, kp)
 
-	payload := event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 2, Currency: "AET"}
+	payload := event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 2, Currency: "AET"}
 	child, err := event.New(event.EventTypeTransfer, []event.EventID{parent.ID},
 		payload, string(kp.AgentID()),
 		map[event.EventID]uint64{parent.ID: parent.CausalTimestamp}, 0)
@@ -209,12 +209,13 @@ func TestBodyHeaderMismatch_ReconstructionFails(t *testing.T) {
 func makeTrajectoryEvent(t *testing.T, kp *crypto.KeyPair, d *dag.DAG, taskID string, claimEventID event.EventID, parentCommitID string) *event.Event {
 	t.Helper()
 	payload := event.TrajectoryCommitPayload{
+		Version:        1,
 		TaskID:         taskID,
 		ParentCommitID: parentCommitID,
 		Outcome:        event.OutcomeExploring,
 		CheckpointHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		CheckpointSize: 100,
-		QualityScore:   0.7,
+		QualityScoreBP: 7000,
 	}
 	var refs []event.EventID
 	priorTS := make(map[event.EventID]uint64)
@@ -243,7 +244,7 @@ func TestTrajectoryValidation_ValidRootCommit(t *testing.T) {
 	d := dag.New()
 
 	// Create a claim event.
-	claimPayload := event.TaskClaimedPayload{TaskID: "task-1", ClaimerID: string(kp.AgentID())}
+	claimPayload := event.TaskClaimedPayload{Version: 1, TaskID: "task-1", ClaimerID: string(kp.AgentID())}
 	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, claimPayload, string(kp.AgentID()), nil, 0)
 	_ = d.Add(claimEv)
 
@@ -260,7 +261,7 @@ func TestTrajectoryValidation_ValidChildCommit(t *testing.T) {
 	kp, _ := crypto.GenerateKeyPair()
 	d := dag.New()
 
-	claimPayload := event.TaskClaimedPayload{TaskID: "task-1", ClaimerID: string(kp.AgentID())}
+	claimPayload := event.TaskClaimedPayload{Version: 1, TaskID: "task-1", ClaimerID: string(kp.AgentID())}
 	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, claimPayload, string(kp.AgentID()), nil, 0)
 	_ = d.Add(claimEv)
 
@@ -279,12 +280,12 @@ func TestTrajectoryValidation_InvalidOutcomeRejected(t *testing.T) {
 	kp, _ := crypto.GenerateKeyPair()
 	d := dag.New()
 
-	claimPayload := event.TaskClaimedPayload{TaskID: "task-1", ClaimerID: string(kp.AgentID())}
+	claimPayload := event.TaskClaimedPayload{Version: 1, TaskID: "task-1", ClaimerID: string(kp.AgentID())}
 	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, claimPayload, string(kp.AgentID()), nil, 0)
 	_ = d.Add(claimEv)
 
 	// Create event with invalid outcome by raw JSON manipulation.
-	rawPayload := json.RawMessage(`{"task_id":"task-1","outcome":"invalid_outcome","checkpoint_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","checkpoint_size":100,"quality_score":0.5}`)
+	rawPayload := json.RawMessage(`{"v":1,"task_id":"task-1","outcome":"invalid_outcome","checkpoint_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","checkpoint_size":100,"quality_score_bp":5000}`)
 	ev, _ := event.New(event.EventTypeTrajectoryCommit, []event.EventID{claimEv.ID}, rawPayload, string(kp.AgentID()), map[event.EventID]uint64{claimEv.ID: claimEv.CausalTimestamp}, 0)
 	_ = crypto.SignEvent(ev, kp)
 
@@ -298,17 +299,17 @@ func TestTrajectoryValidation_InvalidQualityScoreRejected(t *testing.T) {
 	kp, _ := crypto.GenerateKeyPair()
 	d := dag.New()
 
-	claimPayload := event.TaskClaimedPayload{TaskID: "task-1", ClaimerID: string(kp.AgentID())}
+	claimPayload := event.TaskClaimedPayload{Version: 1, TaskID: "task-1", ClaimerID: string(kp.AgentID())}
 	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, claimPayload, string(kp.AgentID()), nil, 0)
 	_ = d.Add(claimEv)
 
-	rawPayload := json.RawMessage(`{"task_id":"task-1","outcome":"exploring","checkpoint_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","checkpoint_size":100,"quality_score":1.5}`)
+	rawPayload := json.RawMessage(`{"v":1,"task_id":"task-1","outcome":"exploring","checkpoint_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","checkpoint_size":100,"quality_score_bp":15000}`)
 	ev, _ := event.New(event.EventTypeTrajectoryCommit, []event.EventID{claimEv.ID}, rawPayload, string(kp.AgentID()), map[event.EventID]uint64{claimEv.ID: claimEv.CausalTimestamp}, 0)
 	_ = crypto.SignEvent(ev, kp)
 
 	err := network.ValidateEvent(ev)
 	if err == nil {
-		t.Fatal("quality_score > 1.0 should be rejected")
+		t.Fatal("quality_score_bp > 10000 should be rejected")
 	}
 }
 
@@ -316,20 +317,21 @@ func TestTrajectoryValidation_RootCausalRefsShapeEnforced(t *testing.T) {
 	kp, _ := crypto.GenerateKeyPair()
 	d := dag.New()
 
-	claimPayload := event.TaskClaimedPayload{TaskID: "task-1", ClaimerID: string(kp.AgentID())}
+	claimPayload := event.TaskClaimedPayload{Version: 1, TaskID: "task-1", ClaimerID: string(kp.AgentID())}
 	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, claimPayload, string(kp.AgentID()), nil, 0)
 	_ = d.Add(claimEv)
 
 	// Root commit (no parent_commit_id) but with 2 causal refs — invalid.
-	dummy, _ := event.New(event.EventTypeTransfer, nil, event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"}, string(kp.AgentID()), nil, 0)
+	dummy, _ := event.New(event.EventTypeTransfer, nil, event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"}, string(kp.AgentID()), nil, 0)
 	_ = d.Add(dummy)
 
 	payload := event.TrajectoryCommitPayload{
+		Version:        1,
 		TaskID:         "task-1",
 		Outcome:        event.OutcomeExploring,
 		CheckpointHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		CheckpointSize: 100,
-		QualityScore:   0.5,
+		QualityScoreBP: 5000,
 	}
 	// Root commit should have 1 ref, but we give it 2.
 	ev, _ := event.New(event.EventTypeTrajectoryCommit, []event.EventID{claimEv.ID, dummy.ID}, payload, string(kp.AgentID()), map[event.EventID]uint64{claimEv.ID: 1, dummy.ID: 1}, 0)
@@ -345,18 +347,19 @@ func TestTrajectoryValidation_ChildCausalRefsShapeEnforced(t *testing.T) {
 	kp, _ := crypto.GenerateKeyPair()
 	d := dag.New()
 
-	claimPayload := event.TaskClaimedPayload{TaskID: "task-1", ClaimerID: string(kp.AgentID())}
+	claimPayload := event.TaskClaimedPayload{Version: 1, TaskID: "task-1", ClaimerID: string(kp.AgentID())}
 	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, claimPayload, string(kp.AgentID()), nil, 0)
 	_ = d.Add(claimEv)
 
 	// Child commit (has parent_commit_id) but with 1 causal ref — invalid.
 	payload := event.TrajectoryCommitPayload{
+		Version:        1,
 		TaskID:         "task-1",
 		ParentCommitID: "parent-123",
 		Outcome:        event.OutcomeExploring,
 		CheckpointHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		CheckpointSize: 100,
-		QualityScore:   0.5,
+		QualityScoreBP: 5000,
 	}
 	ev, _ := event.New(event.EventTypeTrajectoryCommit, []event.EventID{claimEv.ID}, payload, string(kp.AgentID()), map[event.EventID]uint64{claimEv.ID: 1}, 0)
 	_ = crypto.SignEvent(ev, kp)
@@ -371,7 +374,7 @@ func TestTrajectoryValidation_BlobAbsenceDoesNotBlockValidation(t *testing.T) {
 	kp, _ := crypto.GenerateKeyPair()
 	d := dag.New()
 
-	claimPayload := event.TaskClaimedPayload{TaskID: "task-1", ClaimerID: string(kp.AgentID())}
+	claimPayload := event.TaskClaimedPayload{Version: 1, TaskID: "task-1", ClaimerID: string(kp.AgentID())}
 	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, claimPayload, string(kp.AgentID()), nil, 0)
 	_ = d.Add(claimEv)
 
@@ -391,7 +394,7 @@ func TestTrajectoryValidation_NormalEventUnaffected(t *testing.T) {
 	d := dag.New()
 	parent := makeTestEvent(t, d, kp)
 
-	payload := event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"}
+	payload := event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"}
 	child, _ := event.New(event.EventTypeTransfer, []event.EventID{parent.ID}, payload, string(kp.AgentID()), map[event.EventID]uint64{parent.ID: parent.CausalTimestamp}, 0)
 	_ = crypto.SignEvent(child, kp)
 	_ = d.Add(child)

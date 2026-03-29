@@ -30,7 +30,7 @@ var (
 	ErrPayloadMissingReason           = errors.New("validatorlifecycle: reason is required")
 	ErrPayloadMissingEvidenceRef      = errors.New("validatorlifecycle: evidence_ref is required for slash")
 	ErrPayloadMissingOffense          = errors.New("validatorlifecycle: offense is required for slash")
-	ErrPayloadInvalidSlashPercent     = errors.New("validatorlifecycle: slash_percent must be in (0, 100]")
+	ErrPayloadInvalidSlashPercent     = errors.New("validatorlifecycle: slash_percent_bp must be in (0, 10000]")
 	ErrPayloadKeyEpochNotAdvanced     = errors.New("validatorlifecycle: new_key_epoch must be > old_key_epoch")
 	ErrPayloadMissingGenesisSeats     = errors.New("validatorlifecycle: genesis set must contain at least one seat")
 	ErrPayloadMissingEffectiveVersion = errors.New("validatorlifecycle: effective_from_version is required")
@@ -62,6 +62,9 @@ type GenesisSeatEntry struct {
 // once during genesis. Each seat enters Active status immediately (genesis
 // validators bypass PendingJoin and Probationary).
 type ValidatorGenesisSetPayload struct {
+	// Version is the payload schema version. Must be 1 for current protocol.
+	Version uint8 `json:"v"`
+
 	// Seats is the ordered list of genesis validator seats.
 	Seats []GenesisSeatEntry `json:"seats"`
 
@@ -107,6 +110,9 @@ func (p *ValidatorGenesisSetPayload) Validate() error {
 // ValidatorJoinPayload records a new validator requesting to join the set.
 // Creates a seat in PendingJoin status.
 type ValidatorJoinPayload struct {
+	// Version is the payload schema version. Must be 1 for current protocol.
+	Version uint8 `json:"v"`
+
 	// ValidatorID is derived from the join event ID by the Reducer.
 	// Included in the payload for explicitness and auditability.
 	ValidatorID ValidatorID `json:"validator_id"`
@@ -157,6 +163,7 @@ func (p *ValidatorJoinPayload) Validate() error {
 
 // ValidatorActivatePayload promotes a seat from Probationary to Active.
 type ValidatorActivatePayload struct {
+	Version              uint8       `json:"v"`
 	ValidatorID          ValidatorID `json:"validator_id"`
 	EffectiveFromVersion uint64      `json:"effective_from_version"`
 }
@@ -178,6 +185,7 @@ func (p *ValidatorActivatePayload) Validate() error {
 
 // ValidatorSuspendPayload temporarily removes a seat from consensus.
 type ValidatorSuspendPayload struct {
+	Version              uint8       `json:"v"`
 	ValidatorID          ValidatorID `json:"validator_id"`
 	Reason               string      `json:"reason"`
 	EvidenceRef          string      `json:"evidence_ref,omitempty"`
@@ -204,6 +212,7 @@ func (p *ValidatorSuspendPayload) Validate() error {
 
 // ValidatorResumePayload reinstates a suspended seat to Active status.
 type ValidatorResumePayload struct {
+	Version              uint8       `json:"v"`
 	ValidatorID          ValidatorID `json:"validator_id"`
 	EffectiveFromVersion uint64      `json:"effective_from_version"`
 }
@@ -236,6 +245,7 @@ const (
 // ValidatorExitPayload records a voluntary exit. The Phase field determines
 // whether this begins cooldown or completes the exit.
 type ValidatorExitPayload struct {
+	Version              uint8       `json:"v"`
 	ValidatorID          ValidatorID `json:"validator_id"`
 	Phase                ExitPhase   `json:"phase"`
 	CooldownDuration     uint64      `json:"cooldown_duration,omitempty"`
@@ -265,6 +275,7 @@ func (p *ValidatorExitPayload) Validate() error {
 
 // ValidatorKeyRotatePayload records a key rotation for a seat.
 type ValidatorKeyRotatePayload struct {
+	Version              uint8          `json:"v"`
 	ValidatorID          ValidatorID    `json:"validator_id"`
 	OldConsensusKey      crypto.AgentID `json:"old_consensus_key"`
 	NewConsensusKey      crypto.AgentID `json:"new_consensus_key"`
@@ -301,10 +312,11 @@ func (p *ValidatorKeyRotatePayload) Validate() error {
 // The resulting status depends on the severity: minor offenses may suspend,
 // severe offenses permanently exclude.
 type ValidatorSlashAppliedPayload struct {
+	Version              uint8       `json:"v"`
 	ValidatorID          ValidatorID `json:"validator_id"`
 	Offense              string      `json:"offense"`
 	EvidenceRef          string      `json:"evidence_ref"`
-	SlashPercent         float64     `json:"slash_percent"`
+	SlashPercentBP       uint32      `json:"slash_percent_bp"`
 	SlashAmount          uint64      `json:"slash_amount"`
 	RemainingStake       uint64      `json:"remaining_stake"`
 	PermanentExclusion   bool        `json:"permanent_exclusion"`
@@ -324,8 +336,8 @@ func (p *ValidatorSlashAppliedPayload) Validate() error {
 	if p.EvidenceRef == "" {
 		return ErrPayloadMissingEvidenceRef
 	}
-	if p.SlashPercent <= 0 || p.SlashPercent > 100 {
-		return fmt.Errorf("%w: %.2f", ErrPayloadInvalidSlashPercent, p.SlashPercent)
+	if p.SlashPercentBP == 0 || p.SlashPercentBP > 10000 {
+		return fmt.Errorf("%w: %d", ErrPayloadInvalidSlashPercent, p.SlashPercentBP)
 	}
 	if p.Reason == "" {
 		return ErrPayloadMissingReason

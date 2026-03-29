@@ -39,6 +39,9 @@ func IsValidOutcome(o TrajectoryOutcome) bool {
 //   - Root commit: CausalRefs = [task_claim_event_id]
 //   - Child commit: CausalRefs = [task_claim_event_id, parent_commit_id]
 type TrajectoryCommitPayload struct {
+	// Version is the payload schema version. Must be 1 for current protocol.
+	Version uint8 `json:"v"`
+
 	// TaskID identifies the task this trajectory belongs to.
 	TaskID string `json:"task_id"`
 
@@ -59,8 +62,8 @@ type TrajectoryCommitPayload struct {
 	// ComputeCost is the self-reported compute cost in micro-AET.
 	ComputeCost uint64 `json:"compute_cost"`
 
-	// QualityScore is the agent's self-assessed quality [0.0, 1.0].
-	QualityScore float64 `json:"quality_score"`
+	// QualityScoreBP is the agent's self-assessed quality in basis points [0, 10000].
+	QualityScoreBP uint32 `json:"quality_score_bp"`
 
 	// CategoryHint classifies the type of work (e.g. "code", "research").
 	CategoryHint string `json:"category_hint,omitempty"`
@@ -77,7 +80,7 @@ var (
 	ErrTrajectoryInvalidOutcome        = errors.New("trajectory: invalid outcome value")
 	ErrTrajectoryMissingCheckpointHash = errors.New("trajectory: checkpoint_hash is required")
 	ErrTrajectoryInvalidCheckpointSize = errors.New("trajectory: checkpoint_size must be > 0")
-	ErrTrajectoryInvalidQualityScore   = errors.New("trajectory: quality_score must be in [0.0, 1.0]")
+	ErrTrajectoryInvalidQualityScore   = errors.New("trajectory: quality_score_bp must be in [0, 10000]")
 )
 
 // Validate checks that all required fields are present and valid.
@@ -97,7 +100,7 @@ func (p *TrajectoryCommitPayload) Validate() error {
 	if p.CheckpointSize <= 0 {
 		return ErrTrajectoryInvalidCheckpointSize
 	}
-	if p.QualityScore < 0.0 || p.QualityScore > 1.0 {
+	if p.QualityScoreBP > 10000 {
 		return ErrTrajectoryInvalidQualityScore
 	}
 	return nil

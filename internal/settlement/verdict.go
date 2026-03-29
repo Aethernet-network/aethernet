@@ -22,6 +22,7 @@ const (
 // Each validator emits one vote per pending event. The vote propagates via
 // DAG sync and is consumed by the consensus VotingRound on each node.
 type VerificationVotePayload struct {
+	Version       uint8  `json:"v"`
 	TargetEventID string `json:"target_event_id"`
 	VoterID       string `json:"voter_id"`
 	Verdict       string `json:"verdict"` // SettlementVerdict as string
@@ -43,6 +44,7 @@ type VoterAttestation struct {
 // reaches supermajority. This is the canonical record that authorizes the
 // SettlementApplicator to mutate ledger state.
 type SettlementPayload struct {
+	Version        uint8              `json:"v"`
 	TargetEventID  string             `json:"target_event_id"`
 	Verdict        string             `json:"verdict"` // SettlementVerdict as string
 	VerifiedValue  uint64             `json:"verified_value"`
@@ -62,13 +64,14 @@ func (sp *SettlementPayload) SortAttestations() {
 // Contains all canonical inputs required for deterministic settlement
 // application by the SettlementApplicator.
 type TaskSettlementPayload struct {
-	TaskID         string  `json:"task_id"`
-	PosterID       string  `json:"poster_id"`
-	ClaimerID      string  `json:"claimer_id"`
-	Budget         uint64  `json:"budget"`
-	AcceptanceHash string  `json:"acceptance_hash"`
-	EvidenceHash   string  `json:"evidence_hash"`
-	Category       string  `json:"category"`
-	Score          float64 `json:"score"`
-	HoldGeneration bool    `json:"hold_generation"`
+	Version        uint8  `json:"v"`
+	TaskID         string `json:"task_id"`
+	PosterID       string `json:"poster_id"`
+	ClaimerID      string `json:"claimer_id"`
+	Budget         uint64 `json:"budget"`
+	AcceptanceHash string `json:"acceptance_hash"`
+	EvidenceHash   string `json:"evidence_hash"`
+	Category       string `json:"category"`
+	ScoreBP        uint32 `json:"score_bp"`
+	HoldGeneration bool   `json:"hold_generation"`
 }

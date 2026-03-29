@@ -20,7 +20,7 @@ type trajectoryCommitRequest struct {
 	ErrorDetail            string            `json:"error_detail,omitempty"`
 	IntermediateOutputHash string            `json:"intermediate_output_hash,omitempty"`
 	ComputeCost            uint64            `json:"compute_cost"`
-	QualityScore           float64           `json:"quality_score"`
+	QualityScoreBP         uint32            `json:"quality_score_bp"`
 	CategoryHint           string            `json:"category_hint,omitempty"`
 	BranchID               string            `json:"branch_id,omitempty"`
 }
@@ -72,7 +72,7 @@ func (s *Server) handleTrajectoryCommit(w http.ResponseWriter, r *http.Request) 
 		ErrorDetail:            req.ErrorDetail,
 		IntermediateOutputHash: req.IntermediateOutputHash,
 		ComputeCost:            req.ComputeCost,
-		QualityScore:           req.QualityScore,
+		QualityScoreBP:         req.QualityScoreBP,
 		CategoryHint:           req.CategoryHint,
 		BranchID:               req.BranchID,
 	})

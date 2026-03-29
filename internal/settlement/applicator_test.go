@@ -75,6 +75,7 @@ func TestApplicator_Transfer_Accepted(t *testing.T) {
 	}
 
 	sp := &settlement.SettlementPayload{
+		Version:       1,
 		TargetEventID: string(ev.ID),
 		Verdict:       string(settlement.VerdictAccepted),
 		VerifiedValue: 500,
@@ -103,6 +104,7 @@ func TestApplicator_Transfer_Rejected(t *testing.T) {
 	}
 
 	sp := &settlement.SettlementPayload{
+		Version:       1,
 		TargetEventID: string(ev.ID),
 		Verdict:       string(settlement.VerdictRejected),
 	}
@@ -127,6 +129,7 @@ func TestApplicator_Generation_Accepted(t *testing.T) {
 	}
 
 	sp := &settlement.SettlementPayload{
+		Version:       1,
 		TargetEventID: string(ev.ID),
 		Verdict:       string(settlement.VerdictAccepted),
 		VerifiedValue: 5000,
@@ -155,6 +158,7 @@ func TestApplicator_Idempotent(t *testing.T) {
 	}
 
 	sp := &settlement.SettlementPayload{
+		Version:       1,
 		TargetEventID: string(ev.ID),
 		Verdict:       string(settlement.VerdictAccepted),
 		VerifiedValue: 500,
@@ -181,6 +185,7 @@ func TestApplicator_DeferredTarget(t *testing.T) {
 	a, _, _ := newApplicator(t, events)
 
 	sp := &settlement.SettlementPayload{
+		Version:       1,
 		TargetEventID: "nonexistent-event-id",
 		Verdict:       string(settlement.VerdictAccepted),
 		VerifiedValue: 100,
@@ -221,6 +226,7 @@ func TestDeterministicSerialization(t *testing.T) {
 	// After sorting, JSON serialization must be byte-identical.
 	makePayload := func(order []string) *settlement.SettlementPayload {
 		sp := &settlement.SettlementPayload{
+			Version:        1,
 			TargetEventID:  "target-123",
 			Verdict:        "accepted",
 			VerifiedValue:  1000,
@@ -260,6 +266,7 @@ func TestApplicator_Metrics(t *testing.T) {
 	}
 
 	sp := &settlement.SettlementPayload{
+		Version:       1,
 		TargetEventID: string(ev.ID),
 		Verdict:       string(settlement.VerdictAccepted),
 		VerifiedValue: 500,

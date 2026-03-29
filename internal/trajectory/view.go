@@ -18,7 +18,7 @@ type CommitNode struct {
 	CheckpointHash string                     `json:"checkpoint_hash"`
 	CheckpointSize int64                      `json:"checkpoint_size"`
 	ComputeCost    uint64                     `json:"compute_cost"`
-	QualityScore   float64                    `json:"quality_score"`
+	QualityScoreBP uint32                     `json:"quality_score_bp"`
 	CategoryHint   string                     `json:"category_hint,omitempty"`
 	BranchID       string                     `json:"branch_id,omitempty"`
 	CausalTimestamp uint64                    `json:"causal_timestamp"`
@@ -61,7 +61,7 @@ func CommitNodeFromEvent(ev *event.Event) *CommitNode {
 		CheckpointHash:  payload.CheckpointHash,
 		CheckpointSize:  payload.CheckpointSize,
 		ComputeCost:     payload.ComputeCost,
-		QualityScore:    payload.QualityScore,
+		QualityScoreBP:  payload.QualityScoreBP,
 		CategoryHint:    payload.CategoryHint,
 		BranchID:        payload.BranchID,
 		CausalTimestamp: ev.CausalTimestamp,

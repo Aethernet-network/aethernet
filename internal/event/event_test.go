@@ -37,6 +37,7 @@ func mustNew(
 
 func TestNew_Transfer(t *testing.T) {
 	payload := event.TransferPayload{
+		Version:   1,
 		FromAgent: "agent-alpha",
 		ToAgent:   "agent-beta",
 		Amount:    1_000_000,
@@ -93,6 +94,7 @@ func TestNew_Transfer(t *testing.T) {
 
 func TestNew_Generation(t *testing.T) {
 	payload := event.GenerationPayload{
+		Version:          1,
 		GeneratingAgent:  "agent-gpu-1",
 		BeneficiaryAgent: "agent-client",
 		ClaimedValue:     250_000,
@@ -135,14 +137,15 @@ func TestNew_Generation(t *testing.T) {
 func TestNew_Attestation(t *testing.T) {
 	// Create a target event to attest against.
 	target := mustNew(t, event.EventTypeTransfer, nil,
-		event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 100, Currency: "AET"},
+		event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 100, Currency: "AET"},
 		"agent-a", nil, 0)
 
 	payload := event.AttestationPayload{
-		AttestingAgent:  "agent-validator",
-		TargetEventID:   target.ID,
-		ClaimedAccuracy: 0.97,
-		StakedAmount:    5000,
+		Version:           1,
+		AttestingAgent:    "agent-validator",
+		TargetEventID:     target.ID,
+		ClaimedAccuracyBP: 9700,
+		StakedAmount:      5000,
 	}
 
 	e := mustNew(t, event.EventTypeAttestation, []event.EventID{target.ID}, payload, "agent-validator", nil, 5000)
@@ -162,8 +165,8 @@ func TestNew_Attestation(t *testing.T) {
 	if p.TargetEventID != target.ID {
 		t.Errorf("AttestationPayload.TargetEventID = %q, want %q", p.TargetEventID, target.ID)
 	}
-	if p.ClaimedAccuracy != 0.97 {
-		t.Errorf("AttestationPayload.ClaimedAccuracy = %f, want 0.97", p.ClaimedAccuracy)
+	if p.ClaimedAccuracyBP != 9700 {
+		t.Errorf("AttestationPayload.ClaimedAccuracyBP = %d, want 9700", p.ClaimedAccuracyBP)
 	}
 	if p.StakedAmount != 5000 {
 		t.Errorf("AttestationPayload.StakedAmount = %d, want 5000", p.StakedAmount)
@@ -177,6 +180,7 @@ func TestNew_Attestation(t *testing.T) {
 func TestNew_Verification(t *testing.T) {
 	target := mustNew(t, event.EventTypeGeneration, nil,
 		event.GenerationPayload{
+			Version:          1,
 			GeneratingAgent:  "gen-agent",
 			BeneficiaryAgent: "client",
 			ClaimedValue:     100,
@@ -186,6 +190,7 @@ func TestNew_Verification(t *testing.T) {
 		"gen-agent", nil, 0)
 
 	payload := event.VerificationPayload{
+		Version:        1,
 		VerifyingAgent: "validator-node-7",
 		TargetEventID:  target.ID,
 		Verdict:        true,
@@ -223,10 +228,11 @@ func TestNew_Verification(t *testing.T) {
 
 func TestNew_Verification_NegativeVerdict(t *testing.T) {
 	target := mustNew(t, event.EventTypeGeneration, nil,
-		event.GenerationPayload{ClaimedValue: 999, EvidenceHash: "sha256:fake"},
+		event.GenerationPayload{Version: 1, ClaimedValue: 999, EvidenceHash: "sha256:fake"},
 		"bad-agent", nil, 0)
 
 	payload := event.VerificationPayload{
+		Version:        1,
 		VerifyingAgent: "honest-validator",
 		TargetEventID:  target.ID,
 		Verdict:        false, // the claimed work is fraudulent
@@ -247,9 +253,10 @@ func TestNew_Verification_NegativeVerdict(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNew_Delegation(t *testing.T) {
-	expiry := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	expiry := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC).Unix()
 
 	payload := event.DelegationPayload{
+		Version:             1,
 		DelegatorAgent:      "orchestrator-agent",
 		DelegateAgent:       "sub-agent-3",
 		SpendingLimit:       500_000,
@@ -283,8 +290,8 @@ func TestNew_Delegation(t *testing.T) {
 	if p.PermittedCategories[0] != "inference" || p.PermittedCategories[1] != "storage" {
 		t.Errorf("DelegationPayload.PermittedCategories = %v, want [inference storage]", p.PermittedCategories)
 	}
-	if !p.ExpiresAt.Equal(expiry) {
-		t.Errorf("DelegationPayload.ExpiresAt = %v, want %v", p.ExpiresAt, expiry)
+	if p.ExpiresAt != expiry {
+		t.Errorf("DelegationPayload.ExpiresAt = %d, want %d", p.ExpiresAt, expiry)
 	}
 }
 
@@ -295,7 +302,7 @@ func TestNew_Delegation(t *testing.T) {
 func TestNew_GenesisEvent_CausalTimestamp(t *testing.T) {
 	// A genesis event has no causal references; its timestamp must be 1 (the logical origin).
 	e := mustNew(t, event.EventTypeTransfer, nil,
-		event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
+		event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
 		"agent-a", nil, 0)
 
 	if e.CausalTimestamp != 1 {
@@ -309,12 +316,12 @@ func TestNew_GenesisEvent_CausalTimestamp(t *testing.T) {
 func TestNew_CausalTimestamp_SingleRef(t *testing.T) {
 	// Event A is a genesis (timestamp 1). Event B references A → B's timestamp = 2.
 	a := mustNew(t, event.EventTypeTransfer, nil,
-		event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
+		event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
 		"agent-a", nil, 0)
 
 	prior := map[event.EventID]uint64{a.ID: a.CausalTimestamp}
 	b := mustNew(t, event.EventTypeAttestation, []event.EventID{a.ID},
-		event.AttestationPayload{AttestingAgent: "v", TargetEventID: a.ID, ClaimedAccuracy: 1.0},
+		event.AttestationPayload{Version: 1, AttestingAgent: "v", TargetEventID: a.ID, ClaimedAccuracyBP: 10000},
 		"agent-v", prior, 0)
 
 	if b.CausalTimestamp != 2 {
@@ -330,7 +337,7 @@ func TestNew_CausalTimestamp_MultipleRefs(t *testing.T) {
 	}
 	refs := []event.EventID{"event-id-low", "event-id-high"}
 	e := mustNew(t, event.EventTypeTransfer, refs,
-		event.TransferPayload{FromAgent: "x", ToAgent: "y", Amount: 10, Currency: "AET"},
+		event.TransferPayload{Version: 1, FromAgent: "x", ToAgent: "y", Amount: 10, Currency: "AET"},
 		"agent-x", prior, 0)
 
 	if e.CausalTimestamp != 8 {
@@ -362,7 +369,7 @@ func TestComputeCausalTimestamp_EmptyRefs(t *testing.T) {
 
 func TestComputeID_Determinism(t *testing.T) {
 	// The same inputs must always produce the same ID — content-addressing guarantee.
-	payload := event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 42, Currency: "AET"}
+	payload := event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 42, Currency: "AET"}
 
 	e1 := mustNew(t, event.EventTypeTransfer, nil, payload, "agent-a", nil, 0)
 	e2 := mustNew(t, event.EventTypeTransfer, nil, payload, "agent-a", nil, 0)
@@ -374,7 +381,7 @@ func TestComputeID_Determinism(t *testing.T) {
 
 func TestComputeID_Sensitivity_AgentID(t *testing.T) {
 	// Changing any canonical field must produce a different ID.
-	payload := event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"}
+	payload := event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"}
 
 	e1 := mustNew(t, event.EventTypeTransfer, nil, payload, "agent-a", nil, 0)
 	e2 := mustNew(t, event.EventTypeTransfer, nil, payload, "agent-b", nil, 0)
@@ -385,7 +392,7 @@ func TestComputeID_Sensitivity_AgentID(t *testing.T) {
 }
 
 func TestComputeID_Sensitivity_StakeAmount(t *testing.T) {
-	payload := event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"}
+	payload := event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"}
 
 	e1 := mustNew(t, event.EventTypeTransfer, nil, payload, "agent-a", nil, 0)
 	e2 := mustNew(t, event.EventTypeTransfer, nil, payload, "agent-a", nil, 100)
@@ -396,8 +403,8 @@ func TestComputeID_Sensitivity_StakeAmount(t *testing.T) {
 }
 
 func TestComputeID_Sensitivity_Payload(t *testing.T) {
-	p1 := event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"}
-	p2 := event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 2, Currency: "AET"}
+	p1 := event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"}
+	p2 := event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 2, Currency: "AET"}
 
 	e1 := mustNew(t, event.EventTypeTransfer, nil, p1, "agent-a", nil, 0)
 	e2 := mustNew(t, event.EventTypeTransfer, nil, p2, "agent-a", nil, 0)
@@ -409,7 +416,7 @@ func TestComputeID_Sensitivity_Payload(t *testing.T) {
 
 func TestComputeID_Sensitivity_Type(t *testing.T) {
 	// Two events that differ only in Type must have different IDs.
-	p1 := event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"}
+	p1 := event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"}
 
 	e1 := mustNew(t, event.EventTypeTransfer, nil, p1, "agent-a", nil, 0)
 	// Use the same payload struct but a different EventType to isolate the type field.
@@ -421,7 +428,7 @@ func TestComputeID_Sensitivity_Type(t *testing.T) {
 }
 
 func TestComputeID_Sensitivity_CausalRefs(t *testing.T) {
-	payload := event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"}
+	payload := event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"}
 
 	// e1 has no causal refs; e2 references a fake event.
 	e1 := mustNew(t, event.EventTypeTransfer, nil, payload, "agent-a", nil, 0)
@@ -437,7 +444,7 @@ func TestComputeID_Sensitivity_CausalRefs(t *testing.T) {
 
 func TestComputeID_IsHexSHA256(t *testing.T) {
 	e := mustNew(t, event.EventTypeTransfer, nil,
-		event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
+		event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
 		"agent-a", nil, 0)
 
 	id := string(e.ID)
@@ -454,7 +461,7 @@ func TestComputeID_IsHexSHA256(t *testing.T) {
 
 func TestComputeID_SettlementStateExcluded(t *testing.T) {
 	// Mutating SettlementState must NOT change the ID — it is excluded from the hash.
-	payload := event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"}
+	payload := event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"}
 	e := mustNew(t, event.EventTypeTransfer, nil, payload, "agent-a", nil, 0)
 	originalID := e.ID
 
@@ -496,7 +503,7 @@ func TestNew_InitialSettlementState(t *testing.T) {
 
 func TestTransition_Optimistic_to_Settled(t *testing.T) {
 	e := mustNew(t, event.EventTypeTransfer, nil,
-		event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
+		event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
 		"agent-a", nil, 0)
 
 	if err := event.Transition(e, event.SettlementSettled); err != nil {
@@ -509,7 +516,7 @@ func TestTransition_Optimistic_to_Settled(t *testing.T) {
 
 func TestTransition_Optimistic_to_Adjusted(t *testing.T) {
 	e := mustNew(t, event.EventTypeTransfer, nil,
-		event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
+		event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
 		"agent-a", nil, 0)
 
 	if err := event.Transition(e, event.SettlementAdjusted); err != nil {
@@ -523,7 +530,7 @@ func TestTransition_Optimistic_to_Adjusted(t *testing.T) {
 func TestTransition_Settled_to_Adjusted(t *testing.T) {
 	// A supermajority late challenge can still adjust a Settled event.
 	e := mustNew(t, event.EventTypeTransfer, nil,
-		event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
+		event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
 		"agent-a", nil, 0)
 
 	_ = event.Transition(e, event.SettlementSettled)
@@ -542,7 +549,7 @@ func TestTransition_Settled_to_Adjusted(t *testing.T) {
 
 func TestTransition_Optimistic_to_Optimistic_Invalid(t *testing.T) {
 	e := mustNew(t, event.EventTypeTransfer, nil,
-		event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
+		event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
 		"agent-a", nil, 0)
 
 	err := event.Transition(e, event.SettlementOptimistic)
@@ -557,7 +564,7 @@ func TestTransition_Optimistic_to_Optimistic_Invalid(t *testing.T) {
 
 func TestTransition_Settled_to_Optimistic_Invalid(t *testing.T) {
 	e := mustNew(t, event.EventTypeTransfer, nil,
-		event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
+		event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
 		"agent-a", nil, 0)
 	_ = event.Transition(e, event.SettlementSettled)
 
@@ -572,7 +579,7 @@ func TestTransition_Settled_to_Optimistic_Invalid(t *testing.T) {
 
 func TestTransition_Settled_to_Settled_Invalid(t *testing.T) {
 	e := mustNew(t, event.EventTypeTransfer, nil,
-		event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
+		event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
 		"agent-a", nil, 0)
 	_ = event.Transition(e, event.SettlementSettled)
 
@@ -585,7 +592,7 @@ func TestTransition_Settled_to_Settled_Invalid(t *testing.T) {
 func TestTransition_Adjusted_to_Any_Invalid(t *testing.T) {
 	// Adjusted is a terminal state — no further transitions allowed.
 	e := mustNew(t, event.EventTypeTransfer, nil,
-		event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
+		event.TransferPayload{Version: 1, FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
 		"agent-a", nil, 0)
 	_ = event.Transition(e, event.SettlementAdjusted)
 
@@ -632,6 +639,7 @@ func TestDAGChain_CausalTimestamps(t *testing.T) {
 
 	genesis := mustNew(t, event.EventTypeGeneration, nil,
 		event.GenerationPayload{
+			Version:          1,
 			GeneratingAgent:  "ai-node",
 			BeneficiaryAgent: "client",
 			ClaimedValue:     100,
@@ -647,10 +655,11 @@ func TestDAGChain_CausalTimestamps(t *testing.T) {
 	prior := map[event.EventID]uint64{genesis.ID: genesis.CausalTimestamp}
 	attest := mustNew(t, event.EventTypeAttestation, []event.EventID{genesis.ID},
 		event.AttestationPayload{
-			AttestingAgent:  "peer-validator",
-			TargetEventID:   genesis.ID,
-			ClaimedAccuracy: 0.95,
-			StakedAmount:    1000,
+			Version:           1,
+			AttestingAgent:    "peer-validator",
+			TargetEventID:     genesis.ID,
+			ClaimedAccuracyBP: 9500,
+			StakedAmount:      1000,
 		},
 		"peer-validator", prior, 1000)
 
@@ -661,6 +670,7 @@ func TestDAGChain_CausalTimestamps(t *testing.T) {
 	prior[attest.ID] = attest.CausalTimestamp
 	verify := mustNew(t, event.EventTypeVerification, []event.EventID{genesis.ID, attest.ID},
 		event.VerificationPayload{
+			Version:        1,
 			VerifyingAgent: "validator-node",
 			TargetEventID:  genesis.ID,
 			Verdict:        true,
@@ -687,17 +697,17 @@ func TestDAGChain_ForkThenMerge(t *testing.T) {
 	//                  └─→ branch-B (ts=2) ──┴→ merge (ts=3)
 
 	genesis := mustNew(t, event.EventTypeTransfer, nil,
-		event.TransferPayload{FromAgent: "root", ToAgent: "fork", Amount: 1000, Currency: "AET"},
+		event.TransferPayload{Version: 1, FromAgent: "root", ToAgent: "fork", Amount: 1000, Currency: "AET"},
 		"root-agent", nil, 0)
 
 	genesisMap := map[event.EventID]uint64{genesis.ID: genesis.CausalTimestamp}
 
 	branchA := mustNew(t, event.EventTypeAttestation, []event.EventID{genesis.ID},
-		event.AttestationPayload{AttestingAgent: "peer-a", TargetEventID: genesis.ID, ClaimedAccuracy: 1.0},
+		event.AttestationPayload{Version: 1, AttestingAgent: "peer-a", TargetEventID: genesis.ID, ClaimedAccuracyBP: 10000},
 		"peer-a", genesisMap, 0)
 
 	branchB := mustNew(t, event.EventTypeAttestation, []event.EventID{genesis.ID},
-		event.AttestationPayload{AttestingAgent: "peer-b", TargetEventID: genesis.ID, ClaimedAccuracy: 1.0},
+		event.AttestationPayload{Version: 1, AttestingAgent: "peer-b", TargetEventID: genesis.ID, ClaimedAccuracyBP: 10000},
 		"peer-b", genesisMap, 0)
 
 	if branchA.CausalTimestamp != 2 || branchB.CausalTimestamp != 2 {
@@ -713,6 +723,7 @@ func TestDAGChain_ForkThenMerge(t *testing.T) {
 	merge := mustNew(t, event.EventTypeVerification,
 		[]event.EventID{branchA.ID, branchB.ID},
 		event.VerificationPayload{
+			Version:        1,
 			VerifyingAgent: "merge-validator",
 			TargetEventID:  genesis.ID,
 			Verdict:        true,
@@ -736,6 +747,7 @@ func TestPayload_RoundTrip_Deterministic(t *testing.T) {
 	// a JSON round-trip, the interface{} lost its concrete type and produced
 	// different canonical bytes.
 	payload := event.TransferPayload{
+		Version:   1,
 		FromAgent: "alice",
 		ToAgent:   "bob",
 		Amount:    42,
@@ -766,6 +778,7 @@ func TestPayload_RoundTrip_Deterministic(t *testing.T) {
 
 func TestGetPayload_Transfer(t *testing.T) {
 	payload := event.TransferPayload{
+		Version:   1,
 		FromAgent: "alice",
 		ToAgent:   "bob",
 		Amount:    42,
@@ -784,6 +797,7 @@ func TestGetPayload_Transfer(t *testing.T) {
 
 func TestGetPayload_Generation(t *testing.T) {
 	payload := event.GenerationPayload{
+		Version:          1,
 		GeneratingAgent:  "gpu-agent",
 		BeneficiaryAgent: "client",
 		ClaimedValue:     1000,
@@ -805,6 +819,7 @@ func TestGetPayload_Generation(t *testing.T) {
 
 func TestComputeBodyCommitment_Deterministic(t *testing.T) {
 	payload := event.TransferPayload{
+		Version:   1,
 		FromAgent: "alice",
 		ToAgent:   "bob",
 		Amount:    1000,
@@ -832,8 +847,8 @@ func TestComputeBodyCommitment_Deterministic(t *testing.T) {
 }
 
 func TestComputeBodyCommitment_DiffersForDiffPayloads(t *testing.T) {
-	e1, _ := event.New(event.EventTypeTransfer, nil, event.TransferPayload{FromAgent: "alice", ToAgent: "bob", Amount: 100, Currency: "AET"}, "alice", nil, 0)
-	e2, _ := event.New(event.EventTypeTransfer, nil, event.TransferPayload{FromAgent: "alice", ToAgent: "bob", Amount: 200, Currency: "AET"}, "alice", nil, 0)
+	e1, _ := event.New(event.EventTypeTransfer, nil, event.TransferPayload{Version: 1, FromAgent: "alice", ToAgent: "bob", Amount: 100, Currency: "AET"}, "alice", nil, 0)
+	e2, _ := event.New(event.EventTypeTransfer, nil, event.TransferPayload{Version: 1, FromAgent: "alice", ToAgent: "bob", Amount: 200, Currency: "AET"}, "alice", nil, 0)
 
 	bc1, _ := event.ComputeBodyCommitment(e1)
 	bc2, _ := event.ComputeBodyCommitment(e2)
@@ -845,7 +860,7 @@ func TestComputeBodyCommitment_DiffersForDiffPayloads(t *testing.T) {
 // ── Fast Path: Header Projection ─────────────────────────────────────────────
 
 func TestProjectHeader_Deterministic(t *testing.T) {
-	payload := event.TransferPayload{FromAgent: "alice", ToAgent: "bob", Amount: 500, Currency: "AET"}
+	payload := event.TransferPayload{Version: 1, FromAgent: "alice", ToAgent: "bob", Amount: 500, Currency: "AET"}
 	e, _ := event.New(event.EventTypeTransfer, nil, payload, "alice", nil, 1000)
 
 	h1, err := event.ProjectHeader(e)
@@ -866,7 +881,7 @@ func TestProjectHeader_Deterministic(t *testing.T) {
 }
 
 func TestProjectHeader_PreservesEventID(t *testing.T) {
-	payload := event.TransferPayload{FromAgent: "alice", ToAgent: "bob", Amount: 750, Currency: "AET"}
+	payload := event.TransferPayload{Version: 1, FromAgent: "alice", ToAgent: "bob", Amount: 750, Currency: "AET"}
 	e, _ := event.New(event.EventTypeTransfer, nil, payload, "alice", nil, 0)
 
 	h, err := event.ProjectHeader(e)
@@ -879,8 +894,8 @@ func TestProjectHeader_PreservesEventID(t *testing.T) {
 }
 
 func TestProjectHeader_CopiesCausalFields(t *testing.T) {
-	parent, _ := event.New(event.EventTypeTransfer, nil, event.TransferPayload{FromAgent: "x", ToAgent: "y", Amount: 1, Currency: "AET"}, "x", nil, 0)
-	child, _ := event.New(event.EventTypeTransfer, []event.EventID{parent.ID}, event.TransferPayload{FromAgent: "y", ToAgent: "z", Amount: 2, Currency: "AET"}, "y", map[event.EventID]uint64{parent.ID: parent.CausalTimestamp}, 0)
+	parent, _ := event.New(event.EventTypeTransfer, nil, event.TransferPayload{Version: 1, FromAgent: "x", ToAgent: "y", Amount: 1, Currency: "AET"}, "x", nil, 0)
+	child, _ := event.New(event.EventTypeTransfer, []event.EventID{parent.ID}, event.TransferPayload{Version: 1, FromAgent: "y", ToAgent: "z", Amount: 2, Currency: "AET"}, "y", map[event.EventID]uint64{parent.ID: parent.CausalTimestamp}, 0)
 
 	h, _ := event.ProjectHeader(child)
 	if h.Type != child.Type {

@@ -14,6 +14,7 @@ import os
 
 from .client import AetherNetClient, AetherNetError, Evidence
 from .platform import AetherNetPlatform
+from .signing import canonical_bytes, canonical_hash
 from .worker import AgentWorker
 from .enterprise import Fleet
 
@@ -92,11 +93,31 @@ def quick_start(key_name="aethernet-quickstart", node=None):
     except Exception:
         pass
 
-    # Step 4: Check balance
+    # Step 4: Poll for balance (settlement may take a few seconds)
+    import time
+    poll_interval = 2
+    poll_timeout = 30
+    balance = 0
     try:
-        bal = requests.get(f"{node_url}/v1/agents/{agent_id}/balance", timeout=10).json()
-        balance = bal.get("balance", 0)
-        print(f"Balance: {balance:,} \u00b5AET")
+        deadline = time.monotonic() + poll_timeout
+        first_poll = True
+        while time.monotonic() < deadline:
+            bal = requests.get(f"{node_url}/v1/agents/{agent_id}/balance", timeout=10).json()
+            balance = bal.get("balance", 0)
+            if balance > 0:
+                break
+            if first_poll:
+                print("Waiting for settlement...", end="", flush=True)
+                first_poll = False
+            else:
+                print(".", end="", flush=True)
+            time.sleep(poll_interval)
+        if not first_poll:
+            print()  # newline after dots
+        if balance > 0:
+            print(f"Balance: {balance:,} \u00b5AET")
+        else:
+            print("Balance: pending (settlement may take a moment)")
     except Exception:
         print(f"Balance: check at {node_url}/v1/agents/{agent_id}/balance")
 
@@ -113,11 +134,13 @@ def quick_start(key_name="aethernet-quickstart", node=None):
     return client
 
 
-__version__ = "0.2.0"
+__version__ = "0.2.3"
 __all__ = [
     "AetherNetClient",
     "AetherNetError",
     "Evidence",
+    "canonical_bytes",
+    "canonical_hash",
     "quick_start",
     "AgentWorker",
     "Fleet",

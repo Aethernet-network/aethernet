@@ -12,12 +12,13 @@ import (
 
 func validTrajectoryPayload() event.TrajectoryCommitPayload {
 	return event.TrajectoryCommitPayload{
+		Version:        1,
 		TaskID:         "task-123",
 		Outcome:        event.OutcomeExploring,
 		CheckpointHash: "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
 		CheckpointSize: 1024,
 		ComputeCost:    50000,
-		QualityScore:   0.75,
+		QualityScoreBP: 7500,
 		CategoryHint:   "research",
 		BranchID:       "main",
 	}
@@ -93,24 +94,19 @@ func TestTrajectoryPayload_Validate_InvalidCheckpointSize(t *testing.T) {
 func TestTrajectoryPayload_Validate_QualityScoreRange(t *testing.T) {
 	p := validTrajectoryPayload()
 
-	p.QualityScore = -0.1
+	p.QualityScoreBP = 10001
 	if err := p.Validate(); err == nil {
-		t.Error("should reject quality_score < 0")
+		t.Error("should reject quality_score_bp > 10000")
 	}
 
-	p.QualityScore = 1.1
-	if err := p.Validate(); err == nil {
-		t.Error("should reject quality_score > 1")
-	}
-
-	p.QualityScore = 0.0
+	p.QualityScoreBP = 0
 	if err := p.Validate(); err != nil {
-		t.Errorf("quality_score 0.0 should be valid: %v", err)
+		t.Errorf("quality_score_bp 0 should be valid: %v", err)
 	}
 
-	p.QualityScore = 1.0
+	p.QualityScoreBP = 10000
 	if err := p.Validate(); err != nil {
-		t.Errorf("quality_score 1.0 should be valid: %v", err)
+		t.Errorf("quality_score_bp 10000 should be valid: %v", err)
 	}
 }
 
@@ -143,7 +139,7 @@ func TestTrajectoryCommit_DeterministicEventID(t *testing.T) {
 func TestTrajectoryCommit_EventIDChangesWithPayload(t *testing.T) {
 	p1 := validTrajectoryPayload()
 	p2 := validTrajectoryPayload()
-	p2.QualityScore = 0.5
+	p2.QualityScoreBP = 5000
 
 	ev1, _ := event.New(event.EventTypeTrajectoryCommit, nil, p1, "agent-1", nil, 0)
 	ev2, _ := event.New(event.EventTypeTrajectoryCommit, nil, p2, "agent-1", nil, 0)

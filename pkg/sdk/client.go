@@ -957,7 +957,7 @@ type TrajectoryCommitRequest struct {
 	ErrorDetail            string            `json:"error_detail,omitempty"`
 	IntermediateOutputHash string            `json:"intermediate_output_hash,omitempty"`
 	ComputeCost            uint64            `json:"compute_cost"`
-	QualityScore           float64           `json:"quality_score"`
+	QualityScoreBP         uint32            `json:"quality_score_bp"`
 	CategoryHint           string            `json:"category_hint,omitempty"`
 	BranchID               string            `json:"branch_id,omitempty"`
 }
@@ -972,14 +972,14 @@ type TrajectoryCommitResponse struct {
 
 // TrajectoryCommitNode is a single commit in the trajectory tree.
 type TrajectoryCommitNode struct {
-	EventID         string  `json:"event_id"`
-	TaskID          string  `json:"task_id"`
-	ParentCommitID  string  `json:"parent_commit_id,omitempty"`
-	Outcome         string  `json:"outcome"`
-	CheckpointHash  string  `json:"checkpoint_hash"`
-	CheckpointSize  int64   `json:"checkpoint_size"`
-	ComputeCost     uint64  `json:"compute_cost"`
-	QualityScore    float64 `json:"quality_score"`
+	EventID         string `json:"event_id"`
+	TaskID          string `json:"task_id"`
+	ParentCommitID  string `json:"parent_commit_id,omitempty"`
+	Outcome         string `json:"outcome"`
+	CheckpointHash  string `json:"checkpoint_hash"`
+	CheckpointSize  int64  `json:"checkpoint_size"`
+	ComputeCost     uint64 `json:"compute_cost"`
+	QualityScoreBP  uint32 `json:"quality_score_bp"`
 	CategoryHint    string  `json:"category_hint,omitempty"`
 	BranchID        string  `json:"branch_id,omitempty"`
 	CausalTimestamp uint64  `json:"causal_timestamp"`

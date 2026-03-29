@@ -31,7 +31,7 @@ func setupTrajectoryTest(t *testing.T) (*trajectory.Service, *dag.DAG, *tasks.Ta
 		t.Fatalf("PostTask: %v", err)
 	}
 
-	claimPayload := event.TaskClaimedPayload{TaskID: task.ID, ClaimerID: string(kp.AgentID())}
+	claimPayload := event.TaskClaimedPayload{Version: 1, TaskID: task.ID, ClaimerID: string(kp.AgentID())}
 	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, claimPayload, string(kp.AgentID()), nil, 0)
 	_ = d.Add(claimEv)
 	tm.ApplyDAGEvent(claimEv)
@@ -47,7 +47,7 @@ func TestTrajectoryCommit_SuccessfulEmission(t *testing.T) {
 		Outcome:             event.OutcomeExploring,
 		ApproachDescription: "Testing recursive approach",
 		ComputeCost:         10000,
-		QualityScore:        0.7,
+		QualityScoreBP:      7000,
 	})
 	if err != nil {
 		t.Fatalf("EmitCommit: %v", err)
@@ -80,7 +80,7 @@ func TestTrajectoryCommit_NonClaimerRejected(t *testing.T) {
 		Outcome:             event.OutcomeExploring,
 		ApproachDescription: "not the claimer",
 		ComputeCost:         1000,
-		QualityScore:        0.5,
+		QualityScoreBP:      5000,
 	})
 	if err == nil {
 		t.Fatal("should reject non-claimer")
@@ -98,7 +98,7 @@ func TestTrajectoryCommit_OversizedCheckpointRejected(t *testing.T) {
 	svc := trajectory.NewService(cfg, d, blob, nil, tm, kp)
 
 	task, _ := tm.PostTask(string(kp.AgentID()), "Task", "desc", "code", 100000)
-	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, event.TaskClaimedPayload{TaskID: task.ID, ClaimerID: string(kp.AgentID())}, string(kp.AgentID()), nil, 0)
+	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, event.TaskClaimedPayload{Version: 1, TaskID: task.ID, ClaimerID: string(kp.AgentID())}, string(kp.AgentID()), nil, 0)
 	_ = d.Add(claimEv)
 	tm.ApplyDAGEvent(claimEv)
 
@@ -107,7 +107,7 @@ func TestTrajectoryCommit_OversizedCheckpointRejected(t *testing.T) {
 		Outcome:             event.OutcomeExploring,
 		ApproachDescription: "This approach description is intentionally very long to exceed the 100-byte limit for testing purposes and should trigger rejection.",
 		ComputeCost:         1000,
-		QualityScore:        0.5,
+		QualityScoreBP:      5000,
 	})
 	if err == nil {
 		t.Fatal("should reject oversized checkpoint body")
@@ -125,7 +125,7 @@ func TestTrajectoryCommit_PerTaskLimitEnforced(t *testing.T) {
 	svc := trajectory.NewService(cfg, d, blob, nil, tm, kp)
 
 	task, _ := tm.PostTask(string(kp.AgentID()), "Task", "desc", "code", 100000)
-	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, event.TaskClaimedPayload{TaskID: task.ID, ClaimerID: string(kp.AgentID())}, string(kp.AgentID()), nil, 0)
+	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, event.TaskClaimedPayload{Version: 1, TaskID: task.ID, ClaimerID: string(kp.AgentID())}, string(kp.AgentID()), nil, 0)
 	_ = d.Add(claimEv)
 	tm.ApplyDAGEvent(claimEv)
 
@@ -137,7 +137,7 @@ func TestTrajectoryCommit_PerTaskLimitEnforced(t *testing.T) {
 			Outcome:             event.OutcomeExploring,
 			ApproachDescription: fmt.Sprintf("attempt %d", i),
 			ComputeCost:         uint64(1000 + i),
-			QualityScore:        0.5,
+			QualityScoreBP:      5000,
 		})
 		if err != nil {
 			t.Fatalf("commit %d: %v", i+1, err)
@@ -151,7 +151,7 @@ func TestTrajectoryCommit_PerTaskLimitEnforced(t *testing.T) {
 		Outcome:             event.OutcomeExploring,
 		ApproachDescription: "too many",
 		ComputeCost:         9999,
-		QualityScore:        0.5,
+		QualityScoreBP:      5000,
 	})
 	if err == nil {
 		t.Fatal("3rd commit should be rejected")
@@ -170,7 +170,7 @@ func TestTrajectoryCommit_RateLimitEnforced(t *testing.T) {
 	svc := trajectory.NewService(cfg, d, blob, nil, tm, kp)
 
 	task, _ := tm.PostTask(string(kp.AgentID()), "Task", "desc", "code", 100000)
-	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, event.TaskClaimedPayload{TaskID: task.ID, ClaimerID: string(kp.AgentID())}, string(kp.AgentID()), nil, 0)
+	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, event.TaskClaimedPayload{Version: 1, TaskID: task.ID, ClaimerID: string(kp.AgentID())}, string(kp.AgentID()), nil, 0)
 	_ = d.Add(claimEv)
 	tm.ApplyDAGEvent(claimEv)
 
@@ -182,7 +182,7 @@ func TestTrajectoryCommit_RateLimitEnforced(t *testing.T) {
 			Outcome:             event.OutcomeExploring,
 			ApproachDescription: fmt.Sprintf("fast %d", i),
 			ComputeCost:         uint64(2000 + i),
-			QualityScore:        0.5,
+			QualityScoreBP:      5000,
 		})
 		if err != nil {
 			t.Fatalf("commit %d: %v", i+1, err)
@@ -196,7 +196,7 @@ func TestTrajectoryCommit_RateLimitEnforced(t *testing.T) {
 		Outcome:             event.OutcomeExploring,
 		ApproachDescription: "too fast",
 		ComputeCost:         9999,
-		QualityScore:        0.5,
+		QualityScoreBP:      5000,
 	})
 	if err == nil {
 		t.Fatal("3rd in same minute should be rejected")
@@ -213,7 +213,7 @@ func TestTrajectoryCommit_RootCausalRefs(t *testing.T) {
 		Outcome:             event.OutcomeExploring,
 		ApproachDescription: "root commit",
 		ComputeCost:         1000,
-		QualityScore:        0.5,
+		QualityScoreBP:      5000,
 	})
 	if err != nil {
 		t.Fatalf("EmitCommit: %v", err)
@@ -238,7 +238,7 @@ func TestTrajectoryCommit_ChildCausalRefs(t *testing.T) {
 		Outcome:             event.OutcomeExploring,
 		ApproachDescription: "root",
 		ComputeCost:         1000,
-		QualityScore:        0.5,
+		QualityScoreBP:      5000,
 	})
 
 	childResp, err := svc.EmitCommit(context.Background(), kp.AgentID(), trajectory.CommitRequest{
@@ -247,7 +247,7 @@ func TestTrajectoryCommit_ChildCausalRefs(t *testing.T) {
 		Outcome:             event.OutcomeConverged,
 		ApproachDescription: "child",
 		ComputeCost:         2000,
-		QualityScore:        0.9,
+		QualityScoreBP:      9000,
 	})
 	if err != nil {
 		t.Fatalf("child: %v", err)
@@ -273,7 +273,7 @@ func TestTrajectoryCommit_BlobStoredBeforeEvent(t *testing.T) {
 		Outcome:             event.OutcomeExploring,
 		ApproachDescription: "blob stored test",
 		ComputeCost:         1000,
-		QualityScore:        0.5,
+		QualityScoreBP:      5000,
 	})
 	if err != nil {
 		t.Fatalf("EmitCommit: %v", err)
@@ -301,7 +301,7 @@ func TestGetTrajectories_DeterministicOrdering(t *testing.T) {
 			Outcome:             event.OutcomeExploring,
 			ApproachDescription: fmt.Sprintf("step %d", i),
 			ComputeCost:         uint64(1000 * (i + 1)),
-			QualityScore:        float64(i+1) * 0.2,
+			QualityScoreBP:      uint32((i + 1) * 2000),
 		})
 		if err != nil {
 			t.Fatalf("commit %d: %v", i, err)
@@ -336,7 +336,7 @@ func TestGetTrajectories_WithoutBodies(t *testing.T) {
 		Outcome:             event.OutcomeExploring,
 		ApproachDescription: "no bodies test",
 		ComputeCost:         1000,
-		QualityScore:        0.5,
+		QualityScoreBP:      5000,
 	})
 
 	tree, err := svc.GetTrajectories(ctx, taskID, false, "", 100)
@@ -361,7 +361,7 @@ func TestGetTrajectories_WithBodies(t *testing.T) {
 		ApproachDescription: "body included test",
 		Parameters:          map[string]string{"lr": "0.01"},
 		ComputeCost:         1000,
-		QualityScore:        0.5,
+		QualityScoreBP:      5000,
 	})
 
 	tree, err := svc.GetTrajectories(ctx, taskID, true, "", 100)
@@ -393,7 +393,7 @@ func TestGetTrajectories_MissingBlobGraceful(t *testing.T) {
 		Outcome:             event.OutcomeExploring,
 		ApproachDescription: "will delete blob",
 		ComputeCost:         1000,
-		QualityScore:        0.5,
+		QualityScoreBP:      5000,
 	})
 
 	// Manually fabricate a trajectory event with a bogus checkpoint hash
@@ -403,7 +403,7 @@ func TestGetTrajectories_MissingBlobGraceful(t *testing.T) {
 		Outcome:        event.OutcomeDeadEnd,
 		CheckpointHash: "0000000000000000000000000000000000000000000000000000000000000000",
 		CheckpointSize: 1,
-		QualityScore:   0.3,
+		QualityScoreBP: 3000,
 	}
 	task, _ := svc.TaskMgr().Get(taskID)
 	claimEv := event.EventID(task.ClaimEventID)
@@ -449,7 +449,7 @@ func TestGetTrajectories_BranchFilter(t *testing.T) {
 		ApproachDescription: "main branch",
 		BranchID:            "main",
 		ComputeCost:         1000,
-		QualityScore:        0.5,
+		QualityScoreBP:      5000,
 	})
 	svc.EmitCommit(ctx, kp.AgentID(), trajectory.CommitRequest{
 		TaskID:              taskID,
@@ -457,7 +457,7 @@ func TestGetTrajectories_BranchFilter(t *testing.T) {
 		ApproachDescription: "alt branch",
 		BranchID:            "alt",
 		ComputeCost:         2000,
-		QualityScore:        0.6,
+		QualityScoreBP:      6000,
 	})
 
 	// Filter by branch.
@@ -488,7 +488,7 @@ func TestGetTrajectories_LimitBounded(t *testing.T) {
 			Outcome:             event.OutcomeExploring,
 			ApproachDescription: fmt.Sprintf("step %d", i),
 			ComputeCost:         uint64(1000 + i),
-			QualityScore:        0.5,
+			QualityScoreBP:      5000,
 		})
 		lastID = string(resp.EventID)
 	}

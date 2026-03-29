@@ -66,6 +66,7 @@ func (c *Client) SetPublisher(p localPublisher) {
 // SettlementApplicator on every node.
 func (c *Client) SubmitTransfer(from, to crypto.AgentID, amount uint64, reason, taskID string) (event.EventID, error) {
 	payload := event.TransferPayload{
+		Version:   1,
 		FromAgent: string(from),
 		ToAgent:   string(to),
 		Amount:    amount,

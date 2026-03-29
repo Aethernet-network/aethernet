@@ -23,6 +23,38 @@ def canonicalize_json(data: dict) -> bytes:
     return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
+def canonical_bytes(data: dict) -> bytes:
+    """Return the raw JCS-canonicalized JSON bytes for a dict.
+
+    This is the same canonicalization used for AETHERNET-TX-V1 signing,
+    evidence hashes, and TxID computation. Useful for signature verification
+    where you need the raw bytes before hashing.
+
+    Args:
+        data: Any JSON-serializable dict
+
+    Returns:
+        UTF-8 encoded canonical JSON bytes
+    """
+    return canonicalize_json(data)
+
+
+def canonical_hash(data: dict) -> str:
+    """Compute SHA-256 hash of the JCS-canonicalized JSON representation.
+
+    This is the same canonicalization used for AETHERNET-TX-V1 signing,
+    evidence hashes, and TxID computation. Third-party verifiers should
+    use this function to ensure hash compatibility with the protocol.
+
+    Args:
+        data: Any JSON-serializable dict
+
+    Returns:
+        Hex-encoded SHA-256 hash of the canonical bytes
+    """
+    return hashlib.sha256(canonicalize_json(data)).hexdigest()
+
+
 def build_sign_bytes(
     chain_id: str,
     actor: str,

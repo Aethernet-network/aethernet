@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aethernet-sdk"
-version = "0.2.0"
+version = "0.2.3"
 description = "Python SDK for the AetherNet protocol — verified AI work settlement"
 readme = "README.md"
 license = {text = "MIT"}

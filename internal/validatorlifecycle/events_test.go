@@ -15,6 +15,7 @@ import (
 
 func TestValidatorGenesisSetPayload_Validate(t *testing.T) {
 	valid := &ValidatorGenesisSetPayload{
+		Version:              1,
 		EffectiveFromVersion: 1,
 		Seats: []GenesisSeatEntry{
 			{ValidatorID: "v1", OperatorAgentID: "op1", ConsensusPublicKey: "cpk1", BondedStake: 100_000},
@@ -25,19 +26,20 @@ func TestValidatorGenesisSetPayload_Validate(t *testing.T) {
 	}
 
 	// Empty seats.
-	empty := &ValidatorGenesisSetPayload{EffectiveFromVersion: 1}
+	empty := &ValidatorGenesisSetPayload{Version: 1, EffectiveFromVersion: 1}
 	if err := empty.Validate(); !errors.Is(err, ErrPayloadMissingGenesisSeats) {
 		t.Fatalf("expected ErrPayloadMissingGenesisSeats, got %v", err)
 	}
 
 	// Missing version.
-	noVer := &ValidatorGenesisSetPayload{Seats: valid.Seats}
+	noVer := &ValidatorGenesisSetPayload{Version: 1, Seats: valid.Seats}
 	if err := noVer.Validate(); !errors.Is(err, ErrPayloadMissingEffectiveVersion) {
 		t.Fatalf("expected ErrPayloadMissingEffectiveVersion, got %v", err)
 	}
 
 	// Missing operator key on a seat.
 	badSeat := &ValidatorGenesisSetPayload{
+		Version:              1,
 		EffectiveFromVersion: 1,
 		Seats:                []GenesisSeatEntry{{ValidatorID: "v1", ConsensusPublicKey: "cpk1", BondedStake: 100}},
 	}
@@ -47,6 +49,7 @@ func TestValidatorGenesisSetPayload_Validate(t *testing.T) {
 
 	// Duplicate validator IDs.
 	dup := &ValidatorGenesisSetPayload{
+		Version:              1,
 		EffectiveFromVersion: 1,
 		Seats: []GenesisSeatEntry{
 			{ValidatorID: "v1", OperatorAgentID: "op1", ConsensusPublicKey: "cpk1", BondedStake: 100},
@@ -60,7 +63,7 @@ func TestValidatorGenesisSetPayload_Validate(t *testing.T) {
 
 func TestValidatorJoinPayload_Validate(t *testing.T) {
 	valid := &ValidatorJoinPayload{
-		ValidatorID: "v1", OperatorAgentID: "op1", ConsensusPublicKey: "cpk1",
+		Version: 1, ValidatorID: "v1", OperatorAgentID: "op1", ConsensusPublicKey: "cpk1",
 		KeyEpoch: 1, BondedStake: 50_000, EffectiveFromVersion: 2,
 	}
 	if err := valid.Validate(); err != nil {
@@ -91,11 +94,11 @@ func TestValidatorJoinPayload_Validate(t *testing.T) {
 }
 
 func TestValidatorSuspendPayload_Validate(t *testing.T) {
-	valid := &ValidatorSuspendPayload{ValidatorID: "v1", Reason: "stake deficit", EffectiveFromVersion: 3}
+	valid := &ValidatorSuspendPayload{Version: 1, ValidatorID: "v1", Reason: "stake deficit", EffectiveFromVersion: 3}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid suspend should pass: %v", err)
 	}
-	noReason := &ValidatorSuspendPayload{ValidatorID: "v1", EffectiveFromVersion: 3}
+	noReason := &ValidatorSuspendPayload{Version: 1, ValidatorID: "v1", EffectiveFromVersion: 3}
 	if err := noReason.Validate(); !errors.Is(err, ErrPayloadMissingReason) {
 		t.Fatalf("expected ErrPayloadMissingReason, got %v", err)
 	}
@@ -103,7 +106,7 @@ func TestValidatorSuspendPayload_Validate(t *testing.T) {
 
 func TestValidatorExitPayload_Validate(t *testing.T) {
 	beginCD := &ValidatorExitPayload{
-		ValidatorID: "v1", Phase: ExitPhaseBeginCooldown,
+		Version: 1, ValidatorID: "v1", Phase: ExitPhaseBeginCooldown,
 		CooldownDuration: 100, EffectiveFromVersion: 4,
 	}
 	if err := beginCD.Validate(); err != nil {
@@ -111,7 +114,7 @@ func TestValidatorExitPayload_Validate(t *testing.T) {
 	}
 
 	completeExit := &ValidatorExitPayload{
-		ValidatorID: "v1", Phase: ExitPhaseCompleteExit, EffectiveFromVersion: 5,
+		Version: 1, ValidatorID: "v1", Phase: ExitPhaseCompleteExit, EffectiveFromVersion: 5,
 	}
 	if err := completeExit.Validate(); err != nil {
 		t.Fatalf("valid complete_exit should pass: %v", err)
@@ -119,7 +122,7 @@ func TestValidatorExitPayload_Validate(t *testing.T) {
 
 	// begin_cooldown without duration.
 	noDur := &ValidatorExitPayload{
-		ValidatorID: "v1", Phase: ExitPhaseBeginCooldown, EffectiveFromVersion: 4,
+		Version: 1, ValidatorID: "v1", Phase: ExitPhaseBeginCooldown, EffectiveFromVersion: 4,
 	}
 	if err := noDur.Validate(); !errors.Is(err, ErrPayloadMissingCooldownDuration) {
 		t.Fatalf("expected ErrPayloadMissingCooldownDuration, got %v", err)
@@ -127,7 +130,7 @@ func TestValidatorExitPayload_Validate(t *testing.T) {
 
 	// Invalid phase.
 	badPhase := &ValidatorExitPayload{
-		ValidatorID: "v1", Phase: "garbage", EffectiveFromVersion: 4,
+		Version: 1, ValidatorID: "v1", Phase: "garbage", EffectiveFromVersion: 4,
 	}
 	if err := badPhase.Validate(); !errors.Is(err, ErrPayloadInvalidExitPhase) {
 		t.Fatalf("expected ErrPayloadInvalidExitPhase, got %v", err)
@@ -136,7 +139,7 @@ func TestValidatorExitPayload_Validate(t *testing.T) {
 
 func TestValidatorKeyRotatePayload_Validate(t *testing.T) {
 	valid := &ValidatorKeyRotatePayload{
-		ValidatorID: "v1", OldConsensusKey: "old", NewConsensusKey: "new",
+		Version: 1, ValidatorID: "v1", OldConsensusKey: "old", NewConsensusKey: "new",
 		OldKeyEpoch: 1, NewKeyEpoch: 2, EffectiveFromVersion: 3,
 	}
 	if err := valid.Validate(); err != nil {
@@ -160,8 +163,8 @@ func TestValidatorKeyRotatePayload_Validate(t *testing.T) {
 
 func TestValidatorSlashAppliedPayload_Validate(t *testing.T) {
 	valid := &ValidatorSlashAppliedPayload{
-		ValidatorID: "v1", Offense: "fraudulent_approval", EvidenceRef: "ev-hash-1",
-		SlashPercent: 30.0, SlashAmount: 30_000, RemainingStake: 70_000,
+		Version: 1, ValidatorID: "v1", Offense: "fraudulent_approval", EvidenceRef: "ev-hash-1",
+		SlashPercentBP: 3000, SlashAmount: 30_000, RemainingStake: 70_000,
 		PermanentExclusion: false, Reason: "caught cheating",
 		EffectiveFromVersion: 5,
 	}
@@ -171,13 +174,13 @@ func TestValidatorSlashAppliedPayload_Validate(t *testing.T) {
 
 	// Invalid slash percent.
 	badPct := *valid
-	badPct.SlashPercent = 0
+	badPct.SlashPercentBP = 0
 	if err := badPct.Validate(); !errors.Is(err, ErrPayloadInvalidSlashPercent) {
 		t.Fatalf("expected ErrPayloadInvalidSlashPercent, got %v", err)
 	}
-	badPct.SlashPercent = 101
+	badPct.SlashPercentBP = 10001
 	if err := badPct.Validate(); !errors.Is(err, ErrPayloadInvalidSlashPercent) {
-		t.Fatalf("expected ErrPayloadInvalidSlashPercent for >100, got %v", err)
+		t.Fatalf("expected ErrPayloadInvalidSlashPercent for >10000, got %v", err)
 	}
 
 	// Missing evidence.
@@ -196,18 +199,18 @@ func TestValidatorSlashAppliedPayload_Validate(t *testing.T) {
 }
 
 func TestValidatorActivatePayload_Validate(t *testing.T) {
-	valid := &ValidatorActivatePayload{ValidatorID: "v1", EffectiveFromVersion: 2}
+	valid := &ValidatorActivatePayload{Version: 1, ValidatorID: "v1", EffectiveFromVersion: 2}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid activate should pass: %v", err)
 	}
-	noID := &ValidatorActivatePayload{EffectiveFromVersion: 2}
+	noID := &ValidatorActivatePayload{Version: 1, EffectiveFromVersion: 2}
 	if err := noID.Validate(); !errors.Is(err, ErrPayloadMissingValidatorID) {
 		t.Fatalf("expected ErrPayloadMissingValidatorID, got %v", err)
 	}
 }
 
 func TestValidatorResumePayload_Validate(t *testing.T) {
-	valid := &ValidatorResumePayload{ValidatorID: "v1", EffectiveFromVersion: 3}
+	valid := &ValidatorResumePayload{Version: 1, ValidatorID: "v1", EffectiveFromVersion: 3}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid resume should pass: %v", err)
 	}
@@ -219,7 +222,7 @@ func TestValidatorResumePayload_Validate(t *testing.T) {
 
 func TestPayload_CanonicalSerialization_Deterministic(t *testing.T) {
 	p := &ValidatorJoinPayload{
-		ValidatorID: "v-abc", OperatorAgentID: "op-abc", ConsensusPublicKey: "cpk-abc",
+		Version: 1, ValidatorID: "v-abc", OperatorAgentID: "op-abc", ConsensusPublicKey: "cpk-abc",
 		KeyEpoch: 1, BondedStake: 100_000, EffectiveFromVersion: 5,
 	}
 	data1, _ := json.Marshal(p)
@@ -231,8 +234,8 @@ func TestPayload_CanonicalSerialization_Deterministic(t *testing.T) {
 
 func TestPayload_RoundTrip(t *testing.T) {
 	original := &ValidatorSlashAppliedPayload{
-		ValidatorID: "v-rt", Offense: "collusion", EvidenceRef: "ev-123",
-		SlashPercent: 50.0, SlashAmount: 50_000, RemainingStake: 50_000,
+		Version: 1, ValidatorID: "v-rt", Offense: "collusion", EvidenceRef: "ev-123",
+		SlashPercentBP: 5000, SlashAmount: 50_000, RemainingStake: 50_000,
 		PermanentExclusion: true, Reason: "severe collusion",
 		EffectiveFromVersion: 10,
 	}
@@ -246,7 +249,7 @@ func TestPayload_RoundTrip(t *testing.T) {
 	}
 	if decoded.ValidatorID != original.ValidatorID ||
 		decoded.Offense != original.Offense ||
-		decoded.SlashPercent != original.SlashPercent ||
+		decoded.SlashPercentBP != original.SlashPercentBP ||
 		decoded.PermanentExclusion != original.PermanentExclusion {
 		t.Fatal("round-trip mismatch")
 	}
@@ -264,7 +267,7 @@ func TestLifecycleEvent_EventID_Deterministic(t *testing.T) {
 	agentID := string(kp.AgentID())
 
 	payload := ValidatorJoinPayload{
-		ValidatorID: "v-det", OperatorAgentID: crypto.AgentID(agentID),
+		Version: 1, ValidatorID: "v-det", OperatorAgentID: crypto.AgentID(agentID),
 		ConsensusPublicKey: crypto.AgentID(agentID),
 		KeyEpoch: 1, BondedStake: 100_000, EffectiveFromVersion: 1,
 	}
@@ -288,11 +291,11 @@ func TestLifecycleEvent_EventID_DiffersForDifferentPayloads(t *testing.T) {
 	agentID := string(kp.AgentID())
 
 	p1 := ValidatorJoinPayload{
-		ValidatorID: "v-1", OperatorAgentID: "op1", ConsensusPublicKey: "cpk1",
+		Version: 1, ValidatorID: "v-1", OperatorAgentID: "op1", ConsensusPublicKey: "cpk1",
 		KeyEpoch: 1, BondedStake: 100_000, EffectiveFromVersion: 1,
 	}
 	p2 := ValidatorJoinPayload{
-		ValidatorID: "v-2", OperatorAgentID: "op2", ConsensusPublicKey: "cpk2",
+		Version: 1, ValidatorID: "v-2", OperatorAgentID: "op2", ConsensusPublicKey: "cpk2",
 		KeyEpoch: 1, BondedStake: 200_000, EffectiveFromVersion: 1,
 	}
 
@@ -318,37 +321,38 @@ func TestLifecycleEvent_SignVerify(t *testing.T) {
 		payload interface{}
 	}{
 		{"genesis_set", event.EventTypeValidatorGenesisSet, ValidatorGenesisSetPayload{
+			Version:              1,
 			EffectiveFromVersion: 1,
 			Seats: []GenesisSeatEntry{
 				{ValidatorID: "v1", OperatorAgentID: crypto.AgentID(agentID), ConsensusPublicKey: crypto.AgentID(agentID), BondedStake: 100_000},
 			},
 		}},
 		{"join", event.EventTypeValidatorJoin, ValidatorJoinPayload{
-			ValidatorID: "v2", OperatorAgentID: crypto.AgentID(agentID), ConsensusPublicKey: crypto.AgentID(agentID),
+			Version: 1, ValidatorID: "v2", OperatorAgentID: crypto.AgentID(agentID), ConsensusPublicKey: crypto.AgentID(agentID),
 			KeyEpoch: 1, BondedStake: 50_000, EffectiveFromVersion: 2,
 		}},
 		{"activate", event.EventTypeValidatorActivate, ValidatorActivatePayload{
-			ValidatorID: "v2", EffectiveFromVersion: 3,
+			Version: 1, ValidatorID: "v2", EffectiveFromVersion: 3,
 		}},
 		{"suspend", event.EventTypeValidatorSuspend, ValidatorSuspendPayload{
-			ValidatorID: "v2", Reason: "stake deficit", EffectiveFromVersion: 4,
+			Version: 1, ValidatorID: "v2", Reason: "stake deficit", EffectiveFromVersion: 4,
 		}},
 		{"resume", event.EventTypeValidatorResume, ValidatorResumePayload{
-			ValidatorID: "v2", EffectiveFromVersion: 5,
+			Version: 1, ValidatorID: "v2", EffectiveFromVersion: 5,
 		}},
 		{"exit_begin", event.EventTypeValidatorExit, ValidatorExitPayload{
-			ValidatorID: "v2", Phase: ExitPhaseBeginCooldown, CooldownDuration: 100, EffectiveFromVersion: 6,
+			Version: 1, ValidatorID: "v2", Phase: ExitPhaseBeginCooldown, CooldownDuration: 100, EffectiveFromVersion: 6,
 		}},
 		{"exit_complete", event.EventTypeValidatorExit, ValidatorExitPayload{
-			ValidatorID: "v2", Phase: ExitPhaseCompleteExit, EffectiveFromVersion: 7,
+			Version: 1, ValidatorID: "v2", Phase: ExitPhaseCompleteExit, EffectiveFromVersion: 7,
 		}},
 		{"key_rotate", event.EventTypeValidatorKeyRotate, ValidatorKeyRotatePayload{
-			ValidatorID: "v2", OldConsensusKey: "old-key", NewConsensusKey: "new-key",
+			Version: 1, ValidatorID: "v2", OldConsensusKey: "old-key", NewConsensusKey: "new-key",
 			OldKeyEpoch: 1, NewKeyEpoch: 2, EffectiveFromVersion: 8,
 		}},
 		{"slash", event.EventTypeValidatorSlashApplied, ValidatorSlashAppliedPayload{
-			ValidatorID: "v3", Offense: "fraud", EvidenceRef: "ev-hash",
-			SlashPercent: 30, SlashAmount: 30_000, RemainingStake: 70_000,
+			Version: 1, ValidatorID: "v3", Offense: "fraud", EvidenceRef: "ev-hash",
+			SlashPercentBP: 3000, SlashAmount: 30_000, RemainingStake: 70_000,
 			PermanentExclusion: false, Reason: "caught", EffectiveFromVersion: 9,
 		}},
 	}
@@ -384,7 +388,7 @@ func TestExtractLifecycleEvent_Join(t *testing.T) {
 	agentID := string(kp.AgentID())
 
 	payload := ValidatorJoinPayload{
-		ValidatorID: "v-ext", OperatorAgentID: crypto.AgentID(agentID),
+		Version: 1, ValidatorID: "v-ext", OperatorAgentID: crypto.AgentID(agentID),
 		ConsensusPublicKey: crypto.AgentID(agentID),
 		KeyEpoch: 1, BondedStake: 100_000, EffectiveFromVersion: 1,
 	}
@@ -417,6 +421,7 @@ func TestExtractLifecycleEvent_GenesisSet(t *testing.T) {
 	agentID := string(kp.AgentID())
 
 	payload := ValidatorGenesisSetPayload{
+		Version:              1,
 		EffectiveFromVersion: 1,
 		Seats: []GenesisSeatEntry{
 			{ValidatorID: "g1", OperatorAgentID: "op1", ConsensusPublicKey: "cpk1", BondedStake: 100_000},
@@ -448,7 +453,7 @@ func TestExtractLifecycleEvent_Exit_BothPhases(t *testing.T) {
 
 	// Begin cooldown.
 	beginPayload := ValidatorExitPayload{
-		ValidatorID: "v-exit", Phase: ExitPhaseBeginCooldown,
+		Version: 1, ValidatorID: "v-exit", Phase: ExitPhaseBeginCooldown,
 		CooldownDuration: 50, EffectiveFromVersion: 5,
 	}
 	ev1, _ := event.New(event.EventTypeValidatorExit, nil, beginPayload, agentID, nil, 0)
@@ -465,7 +470,7 @@ func TestExtractLifecycleEvent_Exit_BothPhases(t *testing.T) {
 
 	// Complete exit.
 	completePayload := ValidatorExitPayload{
-		ValidatorID: "v-exit", Phase: ExitPhaseCompleteExit, EffectiveFromVersion: 6,
+		Version: 1, ValidatorID: "v-exit", Phase: ExitPhaseCompleteExit, EffectiveFromVersion: 6,
 	}
 	ev2, _ := event.New(event.EventTypeValidatorExit, nil, completePayload, agentID, nil, 0)
 	lc2, err := ExtractLifecycleEvent(ev2)
@@ -482,8 +487,8 @@ func TestExtractLifecycleEvent_Slash_PermanentExclusion(t *testing.T) {
 	agentID := string(kp.AgentID())
 
 	payload := ValidatorSlashAppliedPayload{
-		ValidatorID: "v-sl", Offense: "fraud", EvidenceRef: "ev-1",
-		SlashPercent: 100, SlashAmount: 100_000, RemainingStake: 0,
+		Version: 1, ValidatorID: "v-sl", Offense: "fraud", EvidenceRef: "ev-1",
+		SlashPercentBP: 10000, SlashAmount: 100_000, RemainingStake: 0,
 		PermanentExclusion: true, Reason: "fatal fraud",
 		EffectiveFromVersion: 10,
 	}
@@ -505,8 +510,8 @@ func TestExtractLifecycleEvent_Slash_Suspension(t *testing.T) {
 	agentID := string(kp.AgentID())
 
 	payload := ValidatorSlashAppliedPayload{
-		ValidatorID: "v-sl2", Offense: "dishonest_replay", EvidenceRef: "ev-2",
-		SlashPercent: 30, SlashAmount: 30_000, RemainingStake: 70_000,
+		Version: 1, ValidatorID: "v-sl2", Offense: "dishonest_replay", EvidenceRef: "ev-2",
+		SlashPercentBP: 3000, SlashAmount: 30_000, RemainingStake: 70_000,
 		PermanentExclusion: false, Reason: "minor offense",
 		EffectiveFromVersion: 11,
 	}
@@ -546,7 +551,7 @@ func TestFullRoundTrip_JoinThroughReducer(t *testing.T) {
 	agentID := string(kp.AgentID())
 
 	payload := ValidatorJoinPayload{
-		ValidatorID: ValidatorID("seat-rt"), OperatorAgentID: crypto.AgentID(agentID),
+		Version: 1, ValidatorID: ValidatorID("seat-rt"), OperatorAgentID: crypto.AgentID(agentID),
 		ConsensusPublicKey: crypto.AgentID(agentID),
 		KeyEpoch: 1, BondedStake: MinBondedStake, EffectiveFromVersion: 1,
 	}

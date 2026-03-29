@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/Aethernet-network/aethernet/internal/event"
+	"github.com/Aethernet-network/aethernet/internal/jcs"
 )
 
 // signable defines the fields of an event that are covered by the signature.
@@ -26,10 +27,9 @@ type signable struct {
 // CanonicalBytes returns the deterministic byte sequence of an event that is
 // both signed (by SignEvent) and hashed to produce the event ID (by event.ComputeID).
 //
-// The canonical form is the JSON encoding of the signable projection. Because
-// encoding/json serialises struct fields in declaration order and uses deterministic
-// key names, the output is identical across machines and Go versions for the same
-// event content.
+// The canonical form is the JCS (RFC 8785) canonicalization of the signable
+// projection. JCS ensures deterministic byte output regardless of struct field
+// order or language implementation.
 //
 // Callers can verify the relationship between signing and ID computation by checking:
 //
@@ -51,7 +51,11 @@ func CanonicalBytes(e *event.Event) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("crypto: failed to serialise event for signing: %w", err)
 	}
-	return data, nil
+	canonical, err := jcs.Canonicalize(data)
+	if err != nil {
+		return nil, fmt.Errorf("crypto: failed to canonicalize for signing: %w", err)
+	}
+	return canonical, nil
 }
 
 // SignEvent computes the canonical bytes of e, signs them with kp, and stores

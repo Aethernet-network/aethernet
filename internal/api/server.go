@@ -1393,6 +1393,7 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 
 	// Emit canonical TaskPosted event for cross-node propagation.
 	s.emitDAGEvent(event.EventTypeTaskPosted, event.TaskPostedPayload{
+		Version:         1,
 		TaskID:          task.ID,
 		PosterID:        posterID,
 		Title:           task.Title,
@@ -1538,6 +1539,7 @@ func (s *Server) handleClaimTask(w http.ResponseWriter, r *http.Request) {
 
 	// Emit DAG event — ApplyDAGEvent applies the state change locally.
 	s.emitDAGEvent(event.EventTypeTaskClaimed, event.TaskClaimedPayload{
+		Version:   1,
 		TaskID:    taskID,
 		ClaimerID: claimerID,
 	}, claimerID)
@@ -1595,6 +1597,7 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 
 	// Emit DAG event — ApplyDAGEvent applies the state change locally.
 	s.emitDAGEvent(event.EventTypeTaskSubmitted, event.TaskSubmittedPayload{
+		Version:    1,
 		TaskID:     taskID,
 		ClaimerID:  claimerID,
 		ResultHash: resultHash,
@@ -1684,6 +1687,7 @@ func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 
 	// Emit DAG event — ApplyDAGEvent applies the state change locally.
 	s.emitDAGEvent(event.EventTypeTaskApproved, event.TaskApprovedPayload{
+		Version:    1,
 		TaskID:     taskID,
 		ApproverID: approverID,
 	}, approverID)
@@ -1773,6 +1777,7 @@ func (s *Server) handleDisputeTask(w http.ResponseWriter, r *http.Request) {
 
 	// Emit DAG event — ApplyDAGEvent applies the state change locally.
 	s.emitDAGEvent(event.EventTypeTaskDisputed, event.TaskDisputedPayload{
+		Version:  1,
 		TaskID:   taskID,
 		PosterID: posterID,
 	}, posterID)
@@ -2247,8 +2252,9 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Create canonical Registration event so peer nodes learn about this agent.
 	regPayload := event.RegistrationPayload{
+		Version:   1,
 		AgentID:   string(regAgentID),
-		PublicKey: regPubKey,
+		PublicKey: hex.EncodeToString(regPubKey),
 	}
 	tips := s.dag.PrimaryTips()
 	priorTS := make(map[event.EventID]uint64, len(tips))
@@ -2451,6 +2457,7 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	payload := event.TransferPayload{
+		Version:   1,
 		FromAgent: string(fromAgentID),
 		ToAgent:   req.ToAgent,
 		Amount:    req.Amount,
@@ -2508,6 +2515,7 @@ func (s *Server) handleGeneration(w http.ResponseWriter, r *http.Request) {
 	}
 
 	payload := event.GenerationPayload{
+		Version:          1,
 		GeneratingAgent:  string(s.agentID),
 		BeneficiaryAgent: req.BeneficiaryAgent,
 		ClaimedValue:     req.ClaimedValue,

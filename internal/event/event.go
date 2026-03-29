@@ -20,7 +20,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
+
+	"github.com/Aethernet-network/aethernet/internal/jcs"
 )
 
 // EventType distinguishes the semantic role of an event in the causal DAG.
@@ -244,7 +245,9 @@ type eventCanonical struct {
 
 // ComputeID derives the content-addressed EventID from an event's canonical fields.
 // All canonical fields must be set on the event before calling this function.
-// The result is the hex-encoded SHA-256 of the JSON-marshaled canonical projection.
+// The result is the hex-encoded SHA-256 of the JCS-canonicalized (RFC 8785)
+// JSON representation of the canonical projection. JCS ensures deterministic
+// byte output regardless of struct field order or language implementation.
 func ComputeID(e *Event) (EventID, error) {
 	canon := eventCanonical{
 		Type:            e.Type,
@@ -258,7 +261,11 @@ func ComputeID(e *Event) (EventID, error) {
 	if err != nil {
 		return "", fmt.Errorf("event: failed to marshal canonical form: %w", err)
 	}
-	sum := sha256.Sum256(data)
+	canonical, err := jcs.Canonicalize(data)
+	if err != nil {
+		return "", fmt.Errorf("event: failed to canonicalize: %w", err)
+	}
+	sum := sha256.Sum256(canonical)
 	return EventID(hex.EncodeToString(sum[:])), nil
 }
 
@@ -449,6 +456,9 @@ func GetPayload[T any](e *Event) (T, error) {
 // Events of this type write to the Transfer Ledger — they record existing value
 // changing hands, not new value being created.
 type TransferPayload struct {
+	// Version is the payload schema version. Must be 1 for current protocol.
+	Version uint8 `json:"v"`
+
 	// FromAgent is the capability fingerprint of the sending agent.
 	FromAgent string `json:"from_agent"`
 
@@ -486,6 +496,9 @@ type TransferPayload struct {
 // into existence by relabeling a transfer as a generation. Every generation claim
 // must be backed by an EvidenceHash that attestors and verifiers can inspect.
 type GenerationPayload struct {
+	// Version is the payload schema version. Must be 1 for current protocol.
+	Version uint8 `json:"v"`
+
 	// GeneratingAgent is the capability fingerprint of the agent that performed
 	// the AI work producing the claimed value.
 	GeneratingAgent string `json:"generating_agent"`
@@ -517,16 +530,19 @@ type GenerationPayload struct {
 // StakedAmount proportional to the degree of incorrectness, creating a strong
 // incentive for honest assessment over collusive rubber-stamping.
 type AttestationPayload struct {
+	// Version is the payload schema version. Must be 1 for current protocol.
+	Version uint8 `json:"v"`
+
 	// AttestingAgent is the capability fingerprint of the agent making the claim.
 	AttestingAgent string `json:"attesting_agent"`
 
 	// TargetEventID is the EventID of the event being attested to.
 	TargetEventID EventID `json:"target_event_id"`
 
-	// ClaimedAccuracy is the attesting agent's confidence that the target event's
-	// claims are valid, expressed as a value in [0.0, 1.0].
-	// 1.0 = certain the event is correct; 0.0 = certain it is fraudulent.
-	ClaimedAccuracy float64 `json:"claimed_accuracy"`
+	// ClaimedAccuracyBP is the attesting agent's confidence that the target event's
+	// claims are valid, expressed in basis points [0, 10000].
+	// 10000 = certain the event is correct; 0 = certain it is fraudulent.
+	ClaimedAccuracyBP uint32 `json:"claimed_accuracy_bp"`
 
 	// StakedAmount is the micro-AET amount the attestor puts at risk.
 	// Higher stake amplifies the attestation's weight in the settlement calculus.
@@ -542,6 +558,9 @@ type AttestationPayload struct {
 // verifiers a larger reward and gives their verdict proportionally higher authority
 // in the settlement calculus. Incorrect verifications result in stake slashing.
 type VerificationPayload struct {
+	// Version is the payload schema version. Must be 1 for current protocol.
+	Version uint8 `json:"v"`
+
 	// VerifyingAgent is the capability fingerprint of the validator node.
 	VerifyingAgent string `json:"verifying_agent"`
 
@@ -569,6 +588,9 @@ type VerificationPayload struct {
 // the declared scope. This makes safe multi-agent orchestration hierarchies possible
 // without requiring full trust transfer between orchestrator and sub-agents.
 type DelegationPayload struct {
+	// Version is the payload schema version. Must be 1 for current protocol.
+	Version uint8 `json:"v"`
+
 	// DelegatorAgent is the capability fingerprint of the agent granting authority.
 	DelegatorAgent string `json:"delegator_agent"`
 
@@ -584,18 +606,19 @@ type DelegationPayload struct {
 	// delegate may not perform any categorized actions.
 	PermittedCategories []string `json:"permitted_categories"`
 
-	// ExpiresAt is the wall-clock time after which this delegation is void.
-	// Wall time is appropriate here: delegation expiry is a human-legible,
-	// real-world constraint (e.g., "valid for 24 hours") rather than a
-	// causal ordering concern — making it one of the few places AetherNet
-	// uses wall-clock time directly.
-	ExpiresAt time.Time `json:"expires_at"`
+	// ExpiresAt is the Unix timestamp (seconds) after which this delegation
+	// is void. Wall time is appropriate here: delegation expiry is a
+	// human-legible, real-world constraint (e.g., "valid for 24 hours").
+	ExpiresAt int64 `json:"expires_at"`
 }
 
 // RegistrationPayload propagates a validator identity across the network.
 type RegistrationPayload struct {
+	// Version is the payload schema version. Must be 1 for current protocol.
+	Version uint8 `json:"v"`
+
 	AgentID         string `json:"agent_id"`
-	PublicKey       []byte `json:"public_key"`
+	PublicKey       string `json:"public_key"`
 	ReputationScore uint64 `json:"reputation_score"`
 	StakedAmount    uint64 `json:"staked_amount"`
 }
@@ -604,6 +627,9 @@ type RegistrationPayload struct {
 // genesis bucket to a validator or node agent. Applied deterministically
 // by every node without consensus.
 type GenesisFundingPayload struct {
+	// Version is the payload schema version. Must be 1 for current protocol.
+	Version uint8 `json:"v"`
+
 	FromBucket string `json:"from_bucket"`
 	ToAgent    string `json:"to_agent"`
 	Amount     uint64 `json:"amount"`
@@ -614,6 +640,9 @@ type GenesisFundingPayload struct {
 
 // TaskPostedPayload carries the full task creation metadata.
 type TaskPostedPayload struct {
+	// Version is the payload schema version. Must be 1 for current protocol.
+	Version uint8 `json:"v"`
+
 	TaskID          string   `json:"task_id"`
 	PosterID        string   `json:"poster_id"`
 	Title           string   `json:"title"`
@@ -628,12 +657,16 @@ type TaskPostedPayload struct {
 
 // TaskClaimedPayload records an agent claiming a task.
 type TaskClaimedPayload struct {
+	Version uint8 `json:"v"`
+
 	TaskID    string `json:"task_id"`
 	ClaimerID string `json:"claimer_id"`
 }
 
 // TaskSubmittedPayload records an agent submitting work.
 type TaskSubmittedPayload struct {
+	Version uint8 `json:"v"`
+
 	TaskID     string `json:"task_id"`
 	ClaimerID  string `json:"claimer_id"`
 	ResultHash string `json:"result_hash"`
@@ -643,12 +676,17 @@ type TaskSubmittedPayload struct {
 
 // TaskApprovedPayload records a poster approving submitted work.
 type TaskApprovedPayload struct {
+	Version uint8 `json:"v"`
+
 	TaskID     string `json:"task_id"`
 	ApproverID string `json:"approver_id"`
 }
 
 // TaskDisputedPayload records a poster disputing submitted work.
 type TaskDisputedPayload struct {
+	Version uint8 `json:"v"`
+
 	TaskID   string `json:"task_id"`
 	PosterID string `json:"poster_id"`
 }
+

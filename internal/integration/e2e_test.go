@@ -562,6 +562,7 @@ func TestE2E_TransferConsensus(t *testing.T) {
 
 	// Build and submit the Transfer event.
 	payload := event.TransferPayload{
+		Version:   1,
 		FromAgent: string(agentA),
 		ToAgent:   string(agentB),
 		Amount:    transferAmt,

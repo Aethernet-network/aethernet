@@ -122,7 +122,7 @@ type CommitRequest struct {
 	ErrorDetail            string
 	IntermediateOutputHash string
 	ComputeCost            uint64
-	QualityScore           float64
+	QualityScoreBP         uint32
 	CategoryHint           string
 	BranchID               string
 }
@@ -204,13 +204,14 @@ func (s *Service) EmitCommit(ctx context.Context, actorID crypto.AgentID, req Co
 
 	// Construct lean payload.
 	payload := event.TrajectoryCommitPayload{
+		Version:        1,
 		TaskID:         req.TaskID,
 		ParentCommitID: req.ParentCommitID,
 		Outcome:        req.Outcome,
 		CheckpointHash: blobHash,
 		CheckpointSize: blobSize,
 		ComputeCost:    req.ComputeCost,
-		QualityScore:   req.QualityScore,
+		QualityScoreBP: req.QualityScoreBP,
 		CategoryHint:   req.CategoryHint,
 		BranchID:       req.BranchID,
 	}

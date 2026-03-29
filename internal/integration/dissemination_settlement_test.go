@@ -134,6 +134,7 @@ func buildFullNode(t *testing.T, minParticipants int) *fullNode {
 			})
 		}
 		sp := settlement.SettlementPayload{
+			Version:        1,
 			TargetEventID:  string(targetID),
 			Verdict:        string(consensusVerdict),
 			VerifiedValue:  verifiedValue,

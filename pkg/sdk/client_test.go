@@ -219,7 +219,7 @@ func TestTrajectoryCommitRequest_JSONRoundtrip(t *testing.T) {
 		Parameters:          map[string]string{"lr": "0.001"},
 		EvidenceSnippet:     "Loss decreased",
 		ComputeCost:         50000,
-		QualityScore:        0.75,
+		QualityScoreBP:      7500,
 		CategoryHint:        "research",
 		BranchID:            "main",
 	}
@@ -240,8 +240,8 @@ func TestTrajectoryCommitRequest_JSONRoundtrip(t *testing.T) {
 	if decoded.ParentCommitID != req.ParentCommitID {
 		t.Errorf("ParentCommitID = %q; want %q", decoded.ParentCommitID, req.ParentCommitID)
 	}
-	if decoded.QualityScore != req.QualityScore {
-		t.Errorf("QualityScore = %v; want %v", decoded.QualityScore, req.QualityScore)
+	if decoded.QualityScoreBP != req.QualityScoreBP {
+		t.Errorf("QualityScoreBP = %v; want %v", decoded.QualityScoreBP, req.QualityScoreBP)
 	}
 	if decoded.Parameters["lr"] != "0.001" {
 		t.Error("Parameters not preserved")

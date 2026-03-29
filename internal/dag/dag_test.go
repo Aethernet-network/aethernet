@@ -1170,11 +1170,12 @@ func TestAdd_GenesisUnsigned_Accepted(t *testing.T) {
 func makeTrajectoryGenesis(t *testing.T, agentID string) *event.Event {
 	t.Helper()
 	payload := event.TrajectoryCommitPayload{
+		Version:        1,
 		TaskID:         "task-1",
 		Outcome:        event.OutcomeExploring,
 		CheckpointHash: "0000000000000000000000000000000000000000000000000000000000000000",
 		CheckpointSize: 100,
-		QualityScore:   0.5,
+		QualityScoreBP: 5000,
 	}
 	e, err := event.New(event.EventTypeTrajectoryCommit, nil, payload, agentID, nil, 0)
 	if err != nil {
@@ -1223,11 +1224,12 @@ func TestPrimaryTips_FallsBackWhenOnlyTrajectoryTips(t *testing.T) {
 		t.Fatalf("Add traj1: %v", err)
 	}
 	traj2Payload := event.TrajectoryCommitPayload{
+		Version:        1,
 		TaskID:         "task-2",
 		Outcome:        event.OutcomeConverged,
 		CheckpointHash: "1111111111111111111111111111111111111111111111111111111111111111",
 		CheckpointSize: 200,
-		QualityScore:   0.8,
+		QualityScoreBP: 8000,
 	}
 	traj2, _ := event.New(event.EventTypeTrajectoryCommit, nil, traj2Payload, "agent-2", nil, 0)
 	if err := d.Add(traj2); err != nil {
@@ -1258,11 +1260,12 @@ func TestPrimaryTips_TrajectoryStillAffectsMechanicalTips(t *testing.T) {
 	// Add a trajectory commit referencing genesis as parent.
 	kp, _ := crypto.GenerateKeyPair()
 	trajPayload := event.TrajectoryCommitPayload{
+		Version:        1,
 		TaskID:         "task-1",
 		Outcome:        event.OutcomeExploring,
 		CheckpointHash: "2222222222222222222222222222222222222222222222222222222222222222",
 		CheckpointSize: 100,
-		QualityScore:   0.5,
+		QualityScoreBP: 5000,
 	}
 	traj, _ := event.New(event.EventTypeTrajectoryCommit,
 		[]event.EventID{genesis.ID}, trajPayload,

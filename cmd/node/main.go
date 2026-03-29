@@ -1193,6 +1193,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	nodeAgentBal, _ := stack.transfer.Balance(agentID)
 	if nodeAgentBal < nodeAgentMinBalance {
 		gfPayload := event.GenesisFundingPayload{
+			Version:    1,
 			FromBucket: genesis.BucketRewards,
 			ToAgent:    string(agentID),
 			Amount:     nodeAgentFundTarget,
@@ -1272,8 +1273,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	// Create a Registration event in the DAG so this node's identity
 	// propagates to all peers via P2P sync.
 	regPayload := event.RegistrationPayload{
+		Version:         1,
 		AgentID:         string(agentID),
-		PublicKey:       stack.kp.PublicKey,
+		PublicKey:       hex.EncodeToString(stack.kp.PublicKey),
 		ReputationScore: 5000,
 		StakedAmount:    actualStake,
 	}
@@ -1594,6 +1596,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			})
 		}
 		sp := settlement.SettlementPayload{
+			Version:        1,
 			TargetEventID:  string(targetID),
 			Verdict:        string(consensusVerdict),
 			VerifiedValue:  verifiedValue,
@@ -1674,7 +1677,11 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 				return
 			}
 			id := crypto.AgentID(rp.AgentID)
-			fp, err := identity.NewFingerprint(id, rp.PublicKey, nil)
+			pubKeyBytes, err := hex.DecodeString(rp.PublicKey)
+			if err != nil {
+				return
+			}
+			fp, err := identity.NewFingerprint(id, pubKeyBytes, nil)
 			if err != nil {
 				return
 			}
