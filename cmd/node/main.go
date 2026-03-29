@@ -1100,16 +1100,24 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	}
 	validatorlifecycle.LogSnapshotDigest(lifecycleReducer)
 
-	// Bind the genesis validator snapshot to the VotingRound so consensus
-	// reads vote eligibility and weight from the snapshot, not the identity
-	// registry alone. This must happen before engine.Start() so the first
-	// consensus round is snapshot-bound.
-	if stack.votingRound != nil {
+	// Bind the validator snapshot to the VotingRound only when a shared
+	// manifest was loaded (AETHERNET_VALIDATOR_MANIFEST). With a shared
+	// manifest, all nodes have the same snapshot containing all validator
+	// keys, so votes are correctly accepted across nodes.
+	//
+	// When using the auto-generated SingleNodeManifest (no shared manifest),
+	// do NOT bind the snapshot. The auto-manifest contains only this node's
+	// own key, which means peer votes would be rejected as "not in snapshot"
+	// because peer keys are not in the local snapshot. Without binding, the
+	// VotingRound falls back to the identity registry which contains all
+	// registered peers, allowing consensus to finalize.
+	manifestFromFile := os.Getenv("AETHERNET_VALIDATOR_MANIFEST") != ""
+	if stack.votingRound != nil && manifestFromFile {
 		stack.votingRound.SetValidatorSet(lifecycleReducer.Snapshot())
-		// Bind deterministic committee selection. The committee source reads
-		// from the Reducer on each call, so it always reflects the latest
-		// validator set (including post-genesis lifecycle events).
 		stack.votingRound.SetCommitteeSource(&reducerCommitteeSource{reducer: lifecycleReducer})
+		slog.Info("validator lifecycle: snapshot bound to VotingRound (shared manifest)")
+	} else if stack.votingRound != nil {
+		slog.Info("validator lifecycle: VotingRound using identity registry fallback (no shared manifest)")
 	}
 
 	// Create the authoritative local event publisher. Started with nil
