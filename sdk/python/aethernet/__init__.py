@@ -1,4 +1,14 @@
-"""AetherNet Python SDK."""
+"""AetherNet Python SDK — verified AI work settlement.
+
+Quick start::
+
+    from aethernet import quick_start
+    quick_start()
+
+This creates a persistent Ed25519 keypair, registers your agent on the
+testnet with AETHERNET-TX-V1 cryptographic signing, and confirms your
+onboarding grant.
+"""
 
 import os
 
@@ -8,56 +18,108 @@ from .worker import AgentWorker
 from .enterprise import Fleet
 
 
-def quick_start(
-    node_url: str = None,
-    agent_name: str = None,
-) -> AetherNetClient:
-    """Zero-config onboarding shortcut.
+def quick_start(key_name="aethernet-quickstart", node=None):
+    """Connect to AetherNet testnet, register, and verify.
 
-    Creates an :class:`AetherNetClient` pointed at *node_url*, calls
-    :meth:`~AetherNetClient.quick_start` to register and cache a local
-    keypair, and returns the ready-to-use client.
-
-    Example::
-
-        from aethernet import quick_start
-
-        client = quick_start()
-        print(client.balance())
+    Creates a persistent Ed25519 keypair, registers on the testnet using
+    AETHERNET-TX-V1 cryptographic signing, and confirms the onboarding
+    grant was received.
 
     Args:
-        node_url: AetherNet node URL. Reads ``AETHERNET_NODE`` env var,
-            falls back to the public testnet.
-        agent_name: Key file label (see :meth:`~AetherNetClient.quick_start`).
+        key_name: Name for the keypair file (default: "aethernet-quickstart").
+            Keys are stored at ``~/.aethernet/keys/<key_name>.json``.
+        node: Testnet URL (default: AETHERNET_NODE env var or
+            https://testnet.aethernet.network).
 
     Returns:
-        A connected :class:`AetherNetClient` with ``agent_id`` set.
+        A connected :class:`AetherNetClient` with ``signing_key`` and
+        ``agent_id`` set, ready for posting tasks and transacting.
     """
-    if node_url is None:
-        node_url = os.environ.get("AETHERNET_NODE", "https://testnet.aethernet.network")
-    client = AetherNetClient(node_url)
-    try:
-        result = client.quick_start(agent_name)
-    except AetherNetError as exc:
-        # 409 (already registered) or 429 (rate limit) are expected on
-        # repeated runs. The local key file has our agent_id, so we can
-        # continue — quick_start already loaded it into client.agent_id.
-        if exc.status_code not in (409, 429):
-            raise
-        result = {"agent_id": client.agent_id}
+    from .signing import get_or_create_keypair
+    from nacl.encoding import RawEncoder
 
-    agent_id = result.get("agent_id", client.agent_id or "unknown")
-    print(f"  Connected to {node_url}")
-    print(f"  Agent ID   : {agent_id}")
+    node_url = node or os.environ.get("AETHERNET_NODE", "https://testnet.aethernet.network")
+
+    print("AetherNet Quick Start")
+    print("=" * 40)
+    print()
+
+    # Step 1: Create cryptographic identity
+    print("Creating Ed25519 keypair...")
+    signing_key = get_or_create_keypair(key_name)
+    actor = signing_key.verify_key.encode(encoder=RawEncoder).hex()
+    print(f"  Agent ID: {actor[:16]}...")
+    print(f"  Keys saved to: ~/.aethernet/keys/{key_name}.json")
+    print()
+
+    # Step 2: Connect with TX-V1 signing
+    print(f"Connecting to {node_url}...")
+    client = AetherNetClient(node_url, signing_key=signing_key)
+
     try:
-        bal = client.balance()
-        print(f"  Balance    : {bal['balance']:,} {bal['currency']}")
+        resp = client.register()
+        agent_id = resp.get("agent_id", client.agent_id)
+        grant = resp.get("onboarding_allocation", 0)
+        address = resp.get("deposit_address", "")
+        print(f"  Registered: {agent_id[:16]}...")
+        if grant:
+            print(f"  Onboarding grant: {grant:,} \u00b5AET")
+        if address:
+            print(f"  Deposit address: {address}")
+        print()
+    except AetherNetError as exc:
+        if exc.status_code in (409, 429):
+            print("  Already registered (this is fine)")
+            agent_id = client.agent_id
+            print()
+        else:
+            print(f"  Registration failed: {exc}")
+            print()
+            return client
+    except Exception as e:
+        print(f"  Registration failed: {e}")
+        print()
+        return client
+
+    # Step 3: Check network status
+    import requests
+    try:
+        status = requests.get(f"{node_url}/v1/status", timeout=10).json()
+        print("Network status:")
+        print(f"  DAG size: {status.get('dag_size', 'unknown')} events")
+        print(f"  Peers: {status.get('peers', 'unknown')}")
+        print()
     except Exception:
         pass
-    print(f"  You're live.")
+
+    # Step 4: Check balance
+    try:
+        bal = requests.get(f"{node_url}/v1/agents/{agent_id}/balance", timeout=10).json()
+        balance = bal.get("balance", 0)
+        print(f"Balance: {balance:,} \u00b5AET")
+    except Exception:
+        print(f"Balance: check at {node_url}/v1/agents/{agent_id}/balance")
+
+    print()
+    print("Ready! You can now post tasks, register for routing, and transact.")
+    print()
+    print("Next steps:")
+    print("  from aethernet.signing import get_or_create_keypair")
+    print("  from aethernet.client import AetherNetClient")
+    print(f'  signing_key = get_or_create_keypair("{key_name}")')
+    print(f'  client = AetherNetClient("{node_url}", signing_key=signing_key)')
+    print('  client.post_task(title="...", description="...", category="research", budget=10000)')
 
     return client
 
 
-__version__ = "0.1.0"
-__all__ = ["AetherNetClient", "AetherNetError", "Evidence", "quick_start", "AgentWorker", "Fleet", "AetherNetPlatform"]
+__version__ = "0.2.0"
+__all__ = [
+    "AetherNetClient",
+    "AetherNetError",
+    "Evidence",
+    "quick_start",
+    "AgentWorker",
+    "Fleet",
+    "AetherNetPlatform",
+]
