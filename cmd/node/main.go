@@ -1178,6 +1178,11 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		"staked", stack.stakeManager.StakedAmount(testnetValidatorID),
 	)
 
+	// Emit canonical GenesisFunding DAG events for post-mint transfers
+	// (validator bootstrap, faucet pool). These are auditable — new nodes
+	// replay them from the DAG. Idempotent: skips if already emitted.
+	emitGenesisTransfers(stack.dag, pub, stack.kp, agentID, stack.transfer, stack.store)
+
 	// ── Node agent setup: fund, stake, register ────────────────────────────
 	// Each node's own agentID needs funds (for transfers), stake (for OCS
 	// MinStakeRequired), and identity registry entry (for vote weight).
@@ -1462,6 +1467,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	nodeCfg := network.DefaultNodeConfig(agentID)
 	nodeCfg.ListenAddr = p2pAddr
 	nodeCfg.KeyPair = stack.kp // Fix 1: wire keypair so P2P votes are signed
+	if stack.lifecycleReducer != nil {
+		nodeCfg.ManifestDigest = stack.lifecycleReducer.Snapshot().ComputeDigest()
+	}
 	nodeCfg.MaxPeers = cfg.Network.MaxPeers
 	nodeCfg.SyncInterval = cfg.Network.SyncInterval.Duration
 	nodeCfg.HandshakeTimeout = cfg.Network.HandshakeTimeout.Duration
@@ -2147,7 +2155,7 @@ func cmdStart() {
 		ecosystemBalance, _ := stack.transfer.Balance(crypto.AgentID(genesis.BucketEcosystem))
 		if foundersBalance == 0 || ecosystemBalance == 0 {
 			slog.Info("auto-genesis: seeding initial token supply")
-			seedGenesis(stack.transfer, stack.store)
+			seedGenesisMint(stack.transfer, stack.store)
 			fmt.Println("Auto-genesis: initial token supply seeded.")
 		}
 	}
@@ -2398,25 +2406,19 @@ type genesisStore interface {
 
 const genesisMarkerKey = "genesis_complete"
 
-// seedGenesis funds the six genesis allocation buckets using the provided
-// TransferLedger. It is called automatically on first start when the store has
-// no genesis allocation yet (Docker mode). It is also the implementation shared
-// by cmdGenesis to avoid code duplication.
-//
-// When s is non-nil, seedGenesis is idempotent: it checks for a
-// "meta:genesis_complete" marker and returns immediately if found, preventing
-// double-funding on repeated invocations.
-func seedGenesis(tl *ledger.TransferLedger, s genesisStore) {
+// seedGenesisMint creates the 6 genesis allocation buckets via FundAgent.
+// This is the ONLY code path that mints tokens from nothing. The mint cap is
+// set immediately after to prevent any future minting. Subsequent transfers
+// (validator funding, faucet) are emitted as GenesisFunding DAG events by
+// emitGenesisTransfers for auditability.
+func seedGenesisMint(tl *ledger.TransferLedger, s genesisStore) {
 	if s != nil {
 		data, _ := s.GetMeta(genesisMarkerKey)
 		if len(data) > 0 {
-			// Verify the treasury AND ecosystem buckets were actually funded. Either
-			// bucket being zero indicates a partial-wipe (ledger entries lost but the
-			// marker key survived), so we re-seed rather than leave balances at zero.
 			treasuryBal, _ := tl.Balance(crypto.AgentID(genesis.BucketTreasury))
 			ecosystemBal, _ := tl.Balance(crypto.AgentID(genesis.BucketEcosystem))
 			if treasuryBal > 0 && ecosystemBal > 0 {
-				slog.Info("auto-genesis: genesis already complete, skipping")
+				slog.Info("auto-genesis: genesis mint already complete, skipping")
 				return
 			}
 			slog.Warn("auto-genesis: genesis marker present but balances incomplete; re-seeding",
@@ -2441,30 +2443,80 @@ func seedGenesis(tl *ledger.TransferLedger, s genesisStore) {
 		}
 	}
 
-	// Fund the genesis testnet-validator from the rewards bucket.
-	// This is deterministic — every node seeds the same validator balance.
-	if err := tl.TransferFromBucket(
-		crypto.AgentID(genesis.BucketRewards),
-		crypto.AgentID(genesis.GenesisValidatorID),
-		genesis.GenesisValidatorFund,
-	); err != nil {
-		slog.Warn("auto-genesis: failed to fund genesis validator", "err", err)
+	if s != nil {
+		_ = s.PutMeta(genesisMarkerKey, []byte("1"))
+	}
+}
+
+// emitGenesisTransfers creates canonical GenesisFunding DAG events for
+// the post-mint transfers (validator bootstrap, faucet pool). These events
+// are auditable — new nodes replay them from the DAG to reach the same
+// ledger state. Called after the DAG, Publisher, and keypair are available.
+func emitGenesisTransfers(d *dag.DAG, pub *localpub.Publisher, kp *crypto.KeyPair, agentID crypto.AgentID, tl *ledger.TransferLedger, s genesisStore) {
+	// Skip if genesis transfers already emitted (idempotent via store marker).
+	const genesisTransfersKey = "genesis_transfers_emitted"
+	if s != nil {
+		if data, _ := s.GetMeta(genesisTransfersKey); len(data) > 0 {
+			return
+		}
 	}
 
-	// Testnet-only: fund the faucet bucket from ecosystem allocation.
+	// Validator bootstrap from rewards bucket.
+	validatorBal, _ := tl.Balance(crypto.AgentID(genesis.GenesisValidatorID))
+	if validatorBal == 0 {
+		emitGenesisFundingEvent(d, pub, kp, agentID,
+			genesis.BucketRewards, genesis.GenesisValidatorID,
+			genesis.GenesisValidatorFund, "validator-genesis")
+	}
+
+	// Testnet faucet from ecosystem bucket.
 	if os.Getenv("AETHERNET_TESTNET") == "true" {
-		if err := tl.TransferFromBucket(
-			crypto.AgentID(genesis.BucketEcosystem),
-			crypto.AgentID(genesis.BucketFaucet),
-			genesis.FaucetAllocation,
-		); err != nil {
-			slog.Warn("auto-genesis: failed to fund faucet bucket", "err", err)
+		faucetBal, _ := tl.Balance(crypto.AgentID(genesis.BucketFaucet))
+		if faucetBal == 0 {
+			emitGenesisFundingEvent(d, pub, kp, agentID,
+				genesis.BucketEcosystem, genesis.BucketFaucet,
+				genesis.FaucetAllocation, "faucet-pool")
 		}
 	}
 
 	if s != nil {
-		_ = s.PutMeta(genesisMarkerKey, []byte("1"))
+		_ = s.PutMeta(genesisTransfersKey, []byte("1"))
 	}
+}
+
+// emitGenesisFundingEvent creates and publishes a single GenesisFunding DAG event.
+func emitGenesisFundingEvent(d *dag.DAG, pub *localpub.Publisher, kp *crypto.KeyPair, agentID crypto.AgentID,
+	fromBucket, toAgent string, amount uint64, reason string) {
+	payload := event.GenesisFundingPayload{
+		Version:    1,
+		FromBucket: fromBucket,
+		ToAgent:    toAgent,
+		Amount:     amount,
+		Reason:     reason,
+	}
+	tips := d.Tips()
+	priorTS := make(map[event.EventID]uint64, len(tips))
+	for _, ref := range tips {
+		if ev, err := d.Get(ref); err == nil {
+			priorTS[ref] = ev.CausalTimestamp
+		}
+	}
+	ev, err := event.New(event.EventTypeGenesisFunding, tips, payload, string(agentID), priorTS, 0)
+	if err != nil {
+		slog.Warn("genesis: failed to create funding event", "to", toAgent, "err", err)
+		return
+	}
+	if kp != nil {
+		_ = crypto.SignEvent(ev, kp)
+	}
+	if pub != nil {
+		if err := pub.Publish(ev); err != nil {
+			slog.Warn("genesis: failed to publish funding event", "to", toAgent, "err", err)
+		}
+	} else if err := d.Add(ev); err != nil {
+		slog.Warn("genesis: failed to add funding event to DAG", "to", toAgent, "err", err)
+	}
+	slog.Info("genesis: emitted funding event", "to", toAgent, "amount", amount, "event_id", ev.ID)
 }
 
 // cmdGenesis seeds the initial token supply into the BadgerDB store by funding

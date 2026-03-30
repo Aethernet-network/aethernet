@@ -16,20 +16,35 @@ import (
 // Test helpers
 // ---------------------------------------------------------------------------
 
-// makeGenesis creates a genesis event (no causal references) for the given agent.
-// Genesis events are unsigned; the DAG allows this for bootstrap.
-func makeGenesis(t *testing.T, agentID string) *event.Event {
+// testKP returns a fresh Ed25519 keypair for test use.
+func testKP(t *testing.T) *crypto.KeyPair {
 	t.Helper()
+	kp, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return kp
+}
+
+// makeGenesis creates a signed genesis event (no causal references).
+// All events — including genesis — must be signed for DAG admission.
+func makeGenesis(t *testing.T, label string) *event.Event {
+	t.Helper()
+	kp := testKP(t)
+	aid := string(kp.AgentID())
 	e, err := event.New(
 		event.EventTypeTransfer,
 		nil,
-		event.TransferPayload{FromAgent: agentID, ToAgent: "sink", Amount: 1, Currency: "AET"},
-		agentID,
+		event.TransferPayload{FromAgent: aid, ToAgent: "sink", Amount: 1, Currency: "AET"},
+		aid,
 		nil,
 		0,
 	)
 	if err != nil {
-		t.Fatalf("makeGenesis(%q): %v", agentID, err)
+		t.Fatalf("makeGenesis(%q): %v", label, err)
+	}
+	if err := crypto.SignEvent(e, kp); err != nil {
+		t.Fatalf("makeGenesis(%q) sign: %v", label, err)
 	}
 	return e
 }
@@ -1098,6 +1113,7 @@ func TestAdd_UnsignedNonGenesis_Rejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("event.New: %v", err)
 	}
+	// Intentionally NOT signing the child event.
 
 	err = d.Add(child)
 	if err == nil {
@@ -1144,7 +1160,7 @@ func TestAdd_InvalidSignature_Rejected(t *testing.T) {
 func TestAdd_ValidSignature_Accepted(t *testing.T) {
 	// A properly signed non-genesis event must be accepted.
 	d := dag.New()
-	genesis := makeGenesis(t, "root")
+	genesis := makeGenesis(t, "root-valid")
 	mustAdd(t, d, genesis)
 
 	child := makeChild(t, "child", genesis)
@@ -1154,21 +1170,37 @@ func TestAdd_ValidSignature_Accepted(t *testing.T) {
 	}
 }
 
-func TestAdd_GenesisUnsigned_Accepted(t *testing.T) {
-	// Genesis events (no CausalRefs) are allowed unsigned for bootstrap.
+func TestAdd_GenesisUnsigned_Rejected(t *testing.T) {
+	// All events — including genesis — must be signed.
 	d := dag.New()
-	g := makeGenesis(t, "bootstrap")
-	err := d.Add(g)
+	e, err := event.New(
+		event.EventTypeTransfer,
+		nil,
+		event.TransferPayload{FromAgent: "bootstrap", ToAgent: "sink", Amount: 1, Currency: "AET"},
+		"bootstrap",
+		nil,
+		0,
+	)
 	if err != nil {
-		t.Fatalf("Add should accept unsigned genesis event, got: %v", err)
+		t.Fatalf("event.New: %v", err)
+	}
+
+	err = d.Add(e)
+	if err == nil {
+		t.Fatal("Add should reject unsigned genesis event, got nil")
+	}
+	if !errors.Is(err, dag.ErrMissingSignature) {
+		t.Errorf("want ErrMissingSignature, got: %v", err)
 	}
 }
 
 // ── PrimaryTips ──────────────────────────────────────────────────────────────
 
-// makeTrajectoryGenesis creates a genesis event of type TrajectoryCommit.
-func makeTrajectoryGenesis(t *testing.T, agentID string) *event.Event {
+// makeTrajectoryGenesis creates a signed genesis event of type TrajectoryCommit.
+func makeTrajectoryGenesis(t *testing.T, label string) *event.Event {
 	t.Helper()
+	kp := testKP(t)
+	aid := string(kp.AgentID())
 	payload := event.TrajectoryCommitPayload{
 		Version:        1,
 		TaskID:         "task-1",
@@ -1177,9 +1209,12 @@ func makeTrajectoryGenesis(t *testing.T, agentID string) *event.Event {
 		CheckpointSize: 100,
 		QualityScoreBP: 5000,
 	}
-	e, err := event.New(event.EventTypeTrajectoryCommit, nil, payload, agentID, nil, 0)
+	e, err := event.New(event.EventTypeTrajectoryCommit, nil, payload, aid, nil, 0)
 	if err != nil {
-		t.Fatalf("makeTrajectoryGenesis: %v", err)
+		t.Fatalf("makeTrajectoryGenesis(%q): %v", label, err)
+	}
+	if err := crypto.SignEvent(e, kp); err != nil {
+		t.Fatalf("makeTrajectoryGenesis(%q) sign: %v", label, err)
 	}
 	return e
 }
@@ -1223,6 +1258,8 @@ func TestPrimaryTips_FallsBackWhenOnlyTrajectoryTips(t *testing.T) {
 	if err := d.Add(traj1); err != nil {
 		t.Fatalf("Add traj1: %v", err)
 	}
+	kp2 := testKP(t)
+	aid2 := string(kp2.AgentID())
 	traj2Payload := event.TrajectoryCommitPayload{
 		Version:        1,
 		TaskID:         "task-2",
@@ -1231,7 +1268,8 @@ func TestPrimaryTips_FallsBackWhenOnlyTrajectoryTips(t *testing.T) {
 		CheckpointSize: 200,
 		QualityScoreBP: 8000,
 	}
-	traj2, _ := event.New(event.EventTypeTrajectoryCommit, nil, traj2Payload, "agent-2", nil, 0)
+	traj2, _ := event.New(event.EventTypeTrajectoryCommit, nil, traj2Payload, aid2, nil, 0)
+	_ = crypto.SignEvent(traj2, kp2)
 	if err := d.Add(traj2); err != nil {
 		t.Fatalf("Add traj2: %v", err)
 	}
@@ -1305,8 +1343,11 @@ func TestPrimaryTips_MixedTypes_MultipleNonTrajectory(t *testing.T) {
 	g1 := makeGenesis(t, "agent-1")
 	d.Add(g1)
 
-	g2Payload := event.TransferPayload{FromAgent: "agent-2", ToAgent: "sink", Amount: 2, Currency: "AET"}
-	g2, _ := event.New(event.EventTypeTransfer, nil, g2Payload, "agent-2", nil, 0)
+	kp2 := testKP(t)
+	aid2 := string(kp2.AgentID())
+	g2Payload := event.TransferPayload{FromAgent: aid2, ToAgent: "sink", Amount: 2, Currency: "AET"}
+	g2, _ := event.New(event.EventTypeTransfer, nil, g2Payload, aid2, nil, 0)
+	_ = crypto.SignEvent(g2, kp2)
 	d.Add(g2)
 
 	// Add a trajectory commit.

@@ -94,7 +94,7 @@ func (c *Collector) calculateFee(amount uint64) uint64 {
 }
 
 // SetStore attaches a persistence backend. When set, cumulative fee statistics
-// are loaded immediately and saved after every CollectFee call, so totals
+// are loaded immediately and saved after every fee collection call, so totals
 // survive node restarts. Call before the node starts processing transactions.
 func (c *Collector) SetStore(s feeStore) {
 	c.mu.Lock()
@@ -129,20 +129,12 @@ func CalculateFee(amount uint64) uint64 {
 	return amount * FeeBasisPoints / 10_000
 }
 
-// CollectFee splits a settlement fee between the validator (80%) and the
-// protocol treasury (20%). It credits both via FundAgent (which mints new tokens)
-// and tracks all splits internally for reporting via Stats.
-//
-// WARNING: FundAgent creates tokens from nothing, which inflates the total supply
-// and violates the supply invariant. This function MUST NOT be called in settlement,
-// escrow release, or fee redistribution paths. Use CollectFeeFromRecipient (which
-// moves existing tokens via TransferFromBucket) or TrackFee (stats-only, no ledger
-// writes) instead. CollectFee exists only for legacy callers that have not yet
-// migrated to the supply-invariant alternatives.
-//
-// Returns the total fee and the amount burned (always 0). Both are zero when
-// the fee rounds to zero (small transaction amounts).
-func (c *Collector) CollectFee(
+// collectFee is a legacy internal method that splits a settlement fee between
+// the validator and treasury via FundAgent (which mints new tokens). It
+// violates the supply invariant and MUST NOT be called in production settlement
+// paths. Use CollectFeeFromRecipient (moves existing tokens) or TrackFee
+// (stats-only) instead. Unexported to prevent accidental use.
+func (c *Collector) collectFee(
 	amount uint64,
 	validatorID crypto.AgentID,
 	treasuryID crypto.AgentID,
@@ -169,18 +161,17 @@ func (c *Collector) CollectFee(
 	c.persistStatsLocked()
 	c.mu.Unlock()
 
-	// Credit validator and treasury via FundAgent.
-	// NOTE: FundAgent mints new tokens — see the WARNING in the CollectFee doc.
-	// Callers in settlement paths should use CollectFeeFromRecipient instead.
+	// Credit validator and treasury via FundAgent (legacy — mints new tokens).
+	// Production settlement paths use CollectFeeFromRecipient instead.
 	if validatorAmount > 0 {
 		if err := c.transfer.FundAgent(validatorID, validatorAmount); err != nil {
-			slog.Error("fees: CollectFee: validator credit failed (supply invariant may be violated)",
+			slog.Error("fees: collectFee: validator credit failed (supply invariant may be violated)",
 				"validator", validatorID, "amount", validatorAmount, "err", err)
 		}
 	}
 	if treasuryAmount > 0 {
 		if err := c.transfer.FundAgent(treasuryID, treasuryAmount); err != nil {
-			slog.Error("fees: CollectFee: treasury credit failed (supply invariant may be violated)",
+			slog.Error("fees: collectFee: treasury credit failed (supply invariant may be violated)",
 				"treasury", treasuryID, "amount", treasuryAmount, "err", err)
 		}
 	}
@@ -188,7 +179,7 @@ func (c *Collector) CollectFee(
 }
 
 // TrackFee records fee statistics without minting new tokens. Use this instead
-// of CollectFee when the fee has already been distributed via escrow bucket
+// of collectFee when the fee has already been distributed via escrow bucket
 // transfers (e.g. ReleaseNet). This avoids double-crediting the validator and
 // treasury while still keeping the cumulative statistics accurate.
 func (c *Collector) TrackFee(fee, burned, treasury uint64) {
@@ -205,7 +196,7 @@ func (c *Collector) TrackFee(fee, burned, treasury uint64) {
 
 // CollectFeeFromRecipient deducts the settlement fee from recipientID's balance
 // and redistributes the splits to the validator and treasury via TransferFromBucket.
-// Unlike CollectFee, no new tokens are created — the fee is moved from the
+// Unlike the legacy collectFee, no new tokens are created — the fee is moved from the
 // transaction recipient's balance, preserving the total supply invariant.
 //
 // Returns the total fee deducted and the amount burned (always 0 — all fees

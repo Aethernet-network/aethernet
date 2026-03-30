@@ -33,6 +33,7 @@ func setupTrajectoryTest(t *testing.T) (*trajectory.Service, *dag.DAG, *tasks.Ta
 
 	claimPayload := event.TaskClaimedPayload{Version: 1, TaskID: task.ID, ClaimerID: string(kp.AgentID())}
 	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, claimPayload, string(kp.AgentID()), nil, 0)
+	_ = crypto.SignEvent(claimEv, kp)
 	_ = d.Add(claimEv)
 	tm.ApplyDAGEvent(claimEv)
 
@@ -99,6 +100,7 @@ func TestTrajectoryCommit_OversizedCheckpointRejected(t *testing.T) {
 
 	task, _ := tm.PostTask(string(kp.AgentID()), "Task", "desc", "code", 100000)
 	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, event.TaskClaimedPayload{Version: 1, TaskID: task.ID, ClaimerID: string(kp.AgentID())}, string(kp.AgentID()), nil, 0)
+	_ = crypto.SignEvent(claimEv, kp)
 	_ = d.Add(claimEv)
 	tm.ApplyDAGEvent(claimEv)
 
@@ -126,6 +128,7 @@ func TestTrajectoryCommit_PerTaskLimitEnforced(t *testing.T) {
 
 	task, _ := tm.PostTask(string(kp.AgentID()), "Task", "desc", "code", 100000)
 	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, event.TaskClaimedPayload{Version: 1, TaskID: task.ID, ClaimerID: string(kp.AgentID())}, string(kp.AgentID()), nil, 0)
+	_ = crypto.SignEvent(claimEv, kp)
 	_ = d.Add(claimEv)
 	tm.ApplyDAGEvent(claimEv)
 
@@ -171,6 +174,7 @@ func TestTrajectoryCommit_RateLimitEnforced(t *testing.T) {
 
 	task, _ := tm.PostTask(string(kp.AgentID()), "Task", "desc", "code", 100000)
 	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil, event.TaskClaimedPayload{Version: 1, TaskID: task.ID, ClaimerID: string(kp.AgentID())}, string(kp.AgentID()), nil, 0)
+	_ = crypto.SignEvent(claimEv, kp)
 	_ = d.Add(claimEv)
 	tm.ApplyDAGEvent(claimEv)
 

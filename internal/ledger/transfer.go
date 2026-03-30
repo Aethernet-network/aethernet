@@ -10,7 +10,9 @@
 package ledger
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -41,10 +43,9 @@ type transferPersistence interface {
 // without scanning all transfer entries.
 const mintedMetaKey = "ledger:total_minted"
 
-// fundCounter is a package-level monotonic counter used to generate unique IDs
-// for FundAgent entries. It replaces len(l.entries) which is non-deterministic
-// across restarts when entries are loaded from the store.
-var fundCounter atomic.Uint64
+// bucketCounter is a package-level monotonic counter for TransferFromBucket
+// entry IDs. Replaces len(l.entries) which is non-deterministic across restarts.
+var bucketCounter atomic.Uint64
 
 // Sentinel errors returned by TransferLedger methods.
 var (
@@ -407,11 +408,11 @@ func (l *TransferLedger) FundAgent(agentID crypto.AgentID, amount uint64) error 
 			ErrMintCapExceeded, l.totalMinted, amount, l.mintCap)
 	}
 
-	// Generate a unique, monotonic ID using an atomic counter instead of
-	// len(l.entries) which is non-deterministic across restarts (entries loaded
-	// from the store change the count before FundAgent is called).
-	n := fundCounter.Add(1)
-	eid := event.EventID(fmt.Sprintf("genesis:%s:%d:%d", agentID, amount, n))
+	// Content-addressed ID: deterministic across restarts and nodes.
+	// Same (agentID, amount) → same ID → idempotent on re-seed.
+	idInput := fmt.Sprintf("genesis-mint:%s:%d", agentID, amount)
+	h := sha256.Sum256([]byte(idInput))
+	eid := event.EventID(hex.EncodeToString(h[:]))
 	if _, exists := l.entries[eid]; exists {
 		return fmt.Errorf("%w: %s", ErrDuplicateEntry, eid)
 	}
@@ -468,7 +469,8 @@ func (l *TransferLedger) TransferFromBucket(fromID crypto.AgentID, toID crypto.A
 			ErrInsufficientBalance, fromID, available, amount)
 	}
 
-	eid := event.EventID(fmt.Sprintf("onboarding:%s:%s:%d:%d", fromID, toID, amount, len(l.entries)))
+	n := bucketCounter.Add(1)
+	eid := event.EventID(fmt.Sprintf("bucket:%s:%s:%d:%d", fromID, toID, amount, n))
 	if _, exists := l.entries[eid]; exists {
 		return fmt.Errorf("%w: %s", ErrDuplicateEntry, eid)
 	}

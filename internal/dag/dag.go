@@ -165,17 +165,15 @@ func (d *DAG) Add(e *event.Event) error {
 		}
 	}
 
-	// Signature enforcement: non-genesis events must be signed and verifiable.
-	// Genesis events (empty CausalRefs) are allowed unsigned as they bootstrap
-	// the DAG and typically pre-date key distribution.
-	isGenesis := len(e.CausalRefs) == 0
-	if !isGenesis {
-		if len(e.Signature) == 0 {
-			return fmt.Errorf("%w: %s", ErrMissingSignature, e.ID)
-		}
-		if !crypto.VerifyEvent(e) {
-			return fmt.Errorf("%w: %s", ErrInvalidSignature, e.ID)
-		}
+	// Signature enforcement: ALL events must be signed and verifiable,
+	// including genesis events (empty CausalRefs). Genesis events are signed
+	// by a key in the validator manifest. This prevents injection of unsigned
+	// events by unauthorized nodes.
+	if len(e.Signature) == 0 {
+		return fmt.Errorf("%w: %s", ErrMissingSignature, e.ID)
+	}
+	if !crypto.VerifyEvent(e) {
+		return fmt.Errorf("%w: %s", ErrInvalidSignature, e.ID)
 	}
 
 	// Commit phase — all preconditions are satisfied; mutate state.
@@ -296,10 +294,10 @@ func topoSort(events []*event.Event) (sorted []*event.Event, skipped []*event.Ev
 	return
 }
 
-// addFromStore inserts e into the in-memory DAG structures without signature
-// verification (events were already verified on first acceptance) and without
-// writing back to the store (we are loading FROM the store). Duplicate events
-// during replay are silently skipped — not an error.
+// addFromStore inserts e into the in-memory DAG structures, verifying the
+// EventID and signature for integrity. It does not write back to the store
+// (we are loading FROM the store). Duplicate events during replay are
+// silently skipped.
 func (d *DAG) addFromStore(e *event.Event) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -307,6 +305,24 @@ func (d *DAG) addFromStore(e *event.Event) error {
 	// Silently skip duplicates during replay.
 	if _, exists := d.events[e.ID]; exists {
 		return nil
+	}
+
+	// Verify EventID integrity: recompute from content and compare.
+	recomputed, err := event.ComputeID(e)
+	if err != nil {
+		return fmt.Errorf("dag: replay: failed to recompute EventID for %s: %w", e.ID, err)
+	}
+	if recomputed != e.ID {
+		return fmt.Errorf("dag: replay: EventID mismatch for %s: stored=%s computed=%s — possible store corruption",
+			e.ID, e.ID, recomputed)
+	}
+
+	// Verify signature: signed events must have valid signatures.
+	// Genesis events (empty CausalRefs) may be unsigned in legacy DAGs.
+	if len(e.Signature) > 0 {
+		if !crypto.VerifyEvent(e) {
+			return fmt.Errorf("%w: %s (detected during store replay)", ErrInvalidSignature, e.ID)
+		}
 	}
 
 	// Validate causal references. Topological sort guarantees parents are

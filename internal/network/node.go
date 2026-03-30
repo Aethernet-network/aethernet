@@ -56,6 +56,12 @@ type NodeConfig struct {
 	// with their private key to prove identity.
 	KeyPair *crypto.KeyPair
 
+	// ManifestDigest is the SHA-256 digest of this node's validator manifest
+	// snapshot. Included in every handshake. When both peers have non-empty
+	// digests, they must match — mismatched digests cause connection rejection.
+	// Empty string disables the check (development/single-node mode).
+	ManifestDigest string
+
 	// HandshakeTimeout is the deadline applied to the entire peer handshake
 	// exchange. Peers that do not complete in time are disconnected.
 	// Zero falls back to 30 seconds.
@@ -407,11 +413,12 @@ func (n *Node) Connect(address string) (*Peer, error) {
 		pubKey = n.config.KeyPair.PublicKey
 	}
 	hsPayload, err := json.Marshal(HandshakePayload{
-		AgentID:   n.config.AgentID,
-		Version:   n.config.Version,
-		TipCount:  len(tips),
-		Challenge: myChallenge,
-		PublicKey: pubKey,
+		AgentID:        n.config.AgentID,
+		Version:        n.config.Version,
+		TipCount:       len(tips),
+		Challenge:      myChallenge,
+		PublicKey:       pubKey,
+		ManifestDigest: n.config.ManifestDigest,
 	})
 	if err != nil {
 		conn.Close()
@@ -461,6 +468,16 @@ func (n *Node) Connect(address string) (*Peer, error) {
 			conn.Close()
 			return nil, errors.New("network: peer failed challenge-response verification")
 		}
+	}
+
+	// Manifest consistency check: reject peers with a different validator set.
+	// Both digests must be non-empty for the check to apply — empty digest
+	// means single-node / dev mode where no shared manifest is loaded.
+	if n.config.ManifestDigest != "" && theirHS.ManifestDigest != "" &&
+		n.config.ManifestDigest != theirHS.ManifestDigest {
+		conn.Close()
+		return nil, fmt.Errorf("network: validator manifest mismatch — local=%s remote=%s",
+			n.config.ManifestDigest, theirHS.ManifestDigest)
 	}
 
 	// Now send our response to their challenge.
@@ -921,6 +938,13 @@ func (n *Node) handleIncomingConn(conn net.Conn) error {
 
 	// Send our handshake response (with our challenge + response to theirs).
 	tips := n.dag.Tips()
+	// Manifest consistency check on the acceptor side.
+	if n.config.ManifestDigest != "" && theirHS.ManifestDigest != "" &&
+		n.config.ManifestDigest != theirHS.ManifestDigest {
+		return fmt.Errorf("network: validator manifest mismatch — local=%s remote=%s",
+			n.config.ManifestDigest, theirHS.ManifestDigest)
+	}
+
 	hsPayload, err := json.Marshal(HandshakePayload{
 		AgentID:           n.config.AgentID,
 		Version:           n.config.Version,
@@ -928,6 +952,7 @@ func (n *Node) handleIncomingConn(conn net.Conn) error {
 		Challenge:         myChallenge,
 		ChallengeResponse: challengeResp,
 		PublicKey:         pubKey,
+		ManifestDigest:    n.config.ManifestDigest,
 	})
 	if err != nil {
 		return fmt.Errorf("network: marshal handshake: %w", err)

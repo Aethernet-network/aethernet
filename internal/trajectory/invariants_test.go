@@ -62,6 +62,7 @@ func TestInvariant_DAGAddEnforcesAllChecksForTrajectory(t *testing.T) {
 	genesis, _ := event.New(event.EventTypeTransfer, nil,
 		event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
 		string(kp.AgentID()), nil, 0)
+	_ = crypto.SignEvent(genesis, kp)
 	d.Add(genesis)
 
 	// Create a trajectory commit referencing genesis.
@@ -116,6 +117,7 @@ func TestInvariant_DAGAppendOnlyWithTrajectory(t *testing.T) {
 	genesis, _ := event.New(event.EventTypeTransfer, nil,
 		event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
 		string(kp.AgentID()), nil, 0)
+	_ = crypto.SignEvent(genesis, kp)
 	d.Add(genesis)
 
 	traj, _ := event.New(event.EventTypeTrajectoryCommit, nil,
@@ -124,6 +126,7 @@ func TestInvariant_DAGAppendOnlyWithTrajectory(t *testing.T) {
 			CheckpointHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 			CheckpointSize: 100, QualityScoreBP: 5000, Version: 1,
 		}, string(kp.AgentID()), nil, 0)
+	_ = crypto.SignEvent(traj, kp)
 	d.Add(traj)
 
 	sizeBefore := d.Size()
@@ -207,16 +210,20 @@ func TestInvariant_PrimaryTipsDoesNotAffectMechanicalTips(t *testing.T) {
 	d := dag.New()
 
 	// Add both types.
+	kp1, _ := crypto.GenerateKeyPair()
+	kp2, _ := crypto.GenerateKeyPair()
 	transfer, _ := event.New(event.EventTypeTransfer, nil,
 		event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
-		"agent-1", nil, 0)
+		string(kp1.AgentID()), nil, 0)
+	_ = crypto.SignEvent(transfer, kp1)
 	d.Add(transfer)
 
 	traj, _ := event.New(event.EventTypeTrajectoryCommit, nil,
 		event.TrajectoryCommitPayload{
 			TaskID: "task-1", Outcome: event.OutcomeExploring,
 			CheckpointHash: "ffff", CheckpointSize: 100, QualityScoreBP: 5000, Version: 1,
-		}, "agent-2", nil, 0)
+		}, string(kp2.AgentID()), nil, 0)
+	_ = crypto.SignEvent(traj, kp2)
 	d.Add(traj)
 
 	// Tips() returns BOTH (mechanical tips unchanged).
@@ -251,6 +258,7 @@ func TestInvariant_EmitAndRetrieveRoundtrip(t *testing.T) {
 	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil,
 		event.TaskClaimedPayload{Version: 1, TaskID: task.ID, ClaimerID: string(kp.AgentID())},
 		string(kp.AgentID()), nil, 0)
+	_ = crypto.SignEvent(claimEv, kp)
 	d.Add(claimEv)
 	tm.ApplyDAGEvent(claimEv)
 
@@ -305,6 +313,7 @@ func TestInvariant_MissingBlobDoesNotCorruptDAG(t *testing.T) {
 		QualityScoreBP: 3000,
 	}
 	ev, _ := event.New(event.EventTypeTrajectoryCommit, nil, payload, string(kp.AgentID()), nil, 0)
+	_ = crypto.SignEvent(ev, kp)
 	d.Add(ev)
 
 	// The event is in the DAG regardless of blob existence.
@@ -335,6 +344,7 @@ func TestInvariant_TrajectorySigningUsesStandardPath(t *testing.T) {
 	genesis, _ := event.New(event.EventTypeTransfer, nil,
 		event.TransferPayload{FromAgent: "a", ToAgent: "b", Amount: 1, Currency: "AET"},
 		string(kp.AgentID()), nil, 0)
+	_ = crypto.SignEvent(genesis, kp)
 	d.Add(genesis)
 
 	payload := event.TrajectoryCommitPayload{
@@ -395,6 +405,7 @@ func TestInvariant_RetrievalOrderingDeterministic(t *testing.T) {
 	claimEv, _ := event.New(event.EventTypeTaskClaimed, nil,
 		event.TaskClaimedPayload{Version: 1, TaskID: task.ID, ClaimerID: string(kp.AgentID())},
 		string(kp.AgentID()), nil, 0)
+	_ = crypto.SignEvent(claimEv, kp)
 	d.Add(claimEv)
 	tm.ApplyDAGEvent(claimEv)
 

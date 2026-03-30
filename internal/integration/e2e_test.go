@@ -1489,9 +1489,9 @@ func TestE2E_FraudulentApprovalReplaySlash(t *testing.T) {
 	}
 
 	// Assert slash economics.
-	expectedSlash := uint64(float64(stakeAmt) * 0.30)
-	if result.SlashPercentage != 0.30 {
-		t.Errorf("SlashPercentage = %.2f; want 0.30", result.SlashPercentage)
+	expectedSlash := uint64(3000) * stakeAmt / 10000
+	if result.SlashPercentageBP != 3000 {
+		t.Errorf("SlashPercentageBP = %d; want 3000", result.SlashPercentageBP)
 	}
 	if result.SlashAmount != expectedSlash {
 		t.Errorf("SlashAmount = %d; want %d", result.SlashAmount, expectedSlash)
@@ -1635,8 +1635,8 @@ func TestE2E_ChallengeSucceeds(t *testing.T) {
 		t.Fatalf("Slash: %v", err)
 	}
 
-	if slashResult.SlashPercentage != 0.40 {
-		t.Errorf("SlashPercentage = %.2f; want 0.40", slashResult.SlashPercentage)
+	if slashResult.SlashPercentageBP != 4000 {
+		t.Errorf("SlashPercentageBP = %d; want 4000", slashResult.SlashPercentageBP)
 	}
 	if slashResult.CooldownDays != 60 {
 		t.Errorf("CooldownDays = %d; want 60", slashResult.CooldownDays)

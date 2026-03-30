@@ -75,8 +75,9 @@ type SlashResult struct {
 	ValidatorID string
 	// Offense is the protocol violation that triggered the slash.
 	Offense SlashOffense
-	// SlashPercentage is the fraction of stake that was burned (e.g. 0.30).
-	SlashPercentage float64
+	// SlashPercentageBP is the percentage of stake burned in basis points
+	// (e.g. 3000 = 30.00%). Integer arithmetic for cross-node determinism.
+	SlashPercentageBP uint32
 	// SlashAmount is the total µAET deducted from the validator's stake.
 	SlashAmount uint64
 	// RemainingStake is the validator's stake after deduction.
@@ -122,14 +123,14 @@ func NewSlashEngine(registry *ValidatorRegistry, cfg *config.ValidatorConfig) *S
 
 // offenseParams returns the slash fraction and cooldown duration for the
 // given offense. Returns ErrSlashUnknownOffense for unrecognised offenses.
-func (e *SlashEngine) offenseParams(offense SlashOffense) (pct float64, days int, err error) {
+func (e *SlashEngine) offenseParams(offense SlashOffense) (basisPoints uint32, days int, err error) {
 	switch offense {
 	case OffenseFraudulentApproval:
-		return e.cfg.SlashFraudulentApproval, e.cfg.CooldownTier1Days, nil
+		return e.cfg.SlashFraudulentApprovalBP, e.cfg.CooldownTier1Days, nil
 	case OffenseDishonestReplay:
-		return e.cfg.SlashDishonestReplay, e.cfg.CooldownTier2Days, nil
+		return e.cfg.SlashDishonestReplayBP, e.cfg.CooldownTier2Days, nil
 	case OffenseCollusion:
-		return e.cfg.SlashCollusion, e.cfg.CooldownTier3Days, nil
+		return e.cfg.SlashCollusionBP, e.cfg.CooldownTier3Days, nil
 	default:
 		return 0, 0, fmt.Errorf("%w: %q", ErrSlashUnknownOffense, offense)
 	}
@@ -144,16 +145,11 @@ func (e *SlashEngine) offenseParams(offense SlashOffense) (pct float64, days int
 //   - ErrSlashValidatorNotFound — validatorID not in registry
 //   - ErrSlashPermanentlyExcluded — validator is already permanently excluded
 func (e *SlashEngine) Slash(validatorID string, offense SlashOffense) (*SlashResult, error) {
-	pct, days, err := e.offenseParams(offense)
+	bp, days, err := e.offenseParams(offense)
 	if err != nil {
 		return nil, err
 	}
 
-	// Read current state to check for repeat-collusion condition before
-	// mutating. The subsequent ApplySlash call is atomic under the registry
-	// write lock, so this snapshot may be momentarily stale only in
-	// concurrent slash scenarios — an acceptable race for an operator-driven
-	// action.
 	v, err := e.registry.Get(validatorID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrSlashValidatorNotFound, validatorID)
@@ -162,15 +158,13 @@ func (e *SlashEngine) Slash(validatorID string, offense SlashOffense) (*SlashRes
 		return nil, fmt.Errorf("%w: %s", ErrSlashPermanentlyExcluded, validatorID)
 	}
 
-	// Determine whether this slash triggers permanent exclusion.
-	// Condition: offense is collusion AND repeat-exclusion is enabled AND the
-	// validator has at least one prior slash (SlashCount ≥ 1 before this one).
 	permanent := offense == OffenseCollusion &&
 		e.cfg.CollusionRepeatExclusion &&
 		v.SlashCount >= 1
 
-	// Compute slash and distribution amounts.
-	slashAmount := uint64(pct * float64(v.StakeAmount))
+	// Integer basis-point arithmetic for cross-node determinism.
+	// slashAmount = stakeAmount * basisPoints / 10000
+	slashAmount := v.StakeAmount * uint64(bp) / 10000
 	remaining := uint64(0)
 	if v.StakeAmount > slashAmount {
 		remaining = v.StakeAmount - slashAmount
@@ -185,7 +179,6 @@ func (e *SlashEngine) Slash(validatorID string, offense SlashOffense) (*SlashRes
 		cooldownUntil = time.Now().Add(time.Duration(days) * 24 * time.Hour)
 	}
 
-	// Delegate state mutation to the registry.
 	if _, err := e.registry.ApplySlash(validatorID, slashAmount, string(offense), cooldownUntil, permanent); err != nil {
 		return nil, fmt.Errorf("slash: apply failed for %s: %w", validatorID, err)
 	}
@@ -193,7 +186,7 @@ func (e *SlashEngine) Slash(validatorID string, offense SlashOffense) (*SlashRes
 	return &SlashResult{
 		ValidatorID:        validatorID,
 		Offense:            offense,
-		SlashPercentage:    pct,
+		SlashPercentageBP:  bp,
 		SlashAmount:        slashAmount,
 		RemainingStake:     remaining,
 		CooldownDays:       cooldownDays,

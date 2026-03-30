@@ -185,6 +185,11 @@ type HandshakePayload struct {
 	ChallengeResponse []byte `json:"challenge_response,omitempty"`
 	// PublicKey is the Ed25519 public key corresponding to AgentID.
 	PublicKey []byte `json:"public_key,omitempty"`
+	// ManifestDigest is the SHA-256 digest of the node's validator manifest
+	// snapshot. When both peers have non-empty digests, they must match —
+	// mismatched digests indicate the nodes are running different validator
+	// sets and cannot safely share consensus state.
+	ManifestDigest string `json:"manifest_digest,omitempty"`
 }
 
 // SyncBatchPayload carries a set of events sent in response to MsgRequestSync.

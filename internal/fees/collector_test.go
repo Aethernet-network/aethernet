@@ -28,17 +28,23 @@ func TestCalculateFee(t *testing.T) {
 	}
 }
 
-// TestCollectFee_Split verifies that a collected fee is split between validator
-// (80%) and treasury (20%) with no burn and no rounding loss.
-func TestCollectFee_Split(t *testing.T) {
+// TestCollectFeeFromRecipient_Split verifies that a collected fee is deducted
+// from the recipient and split between validator (80%) and treasury (20%).
+func TestCollectFeeFromRecipient_Split(t *testing.T) {
 	tl := ledger.NewTransferLedger()
+	recipientID := crypto.AgentID("test-recipient")
 	validatorID := crypto.AgentID("test-validator")
 	treasuryID := crypto.AgentID("test-treasury")
+
+	// Fund recipient so the fee can be deducted.
+	if err := tl.FundAgent(recipientID, 1_000_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
 
 	c := fees.NewCollector(tl)
 
 	const amount = 1_000_000 // fee = 1000
-	fee, burned := c.CollectFee(amount, validatorID, treasuryID)
+	fee, burned := c.CollectFeeFromRecipient(recipientID, amount, validatorID, treasuryID)
 	if fee != 1000 {
 		t.Fatalf("fee = %d, want 1000", fee)
 	}
@@ -67,22 +73,38 @@ func TestCollectFee_Split(t *testing.T) {
 		t.Errorf("treasury balance = %d, want %d", gotTreasury, wantTreasury)
 	}
 
+	// Recipient should have original balance minus the fee.
+	gotRecipient, err := tl.Balance(recipientID)
+	if err != nil {
+		t.Fatalf("recipient balance: %v", err)
+	}
+	wantRecipient := uint64(1_000_000 - 1000)
+	if gotRecipient != wantRecipient {
+		t.Errorf("recipient balance = %d, want %d", gotRecipient, wantRecipient)
+	}
+
 	// No rounding loss: validator + treasury + burned == fee.
 	if wantValidator+wantTreasury+wantBurned != fee {
 		t.Errorf("split sum %d != fee %d", wantValidator+wantTreasury+wantBurned, fee)
 	}
 }
 
-// TestCollectFee_Stats verifies cumulative stats after multiple fee collections.
-func TestCollectFee_Stats(t *testing.T) {
+// TestCollectFeeFromRecipient_Stats verifies cumulative stats after multiple collections.
+func TestCollectFeeFromRecipient_Stats(t *testing.T) {
 	tl := ledger.NewTransferLedger()
-	c := fees.NewCollector(tl)
-
+	recipientID := crypto.AgentID("r")
 	validatorID := crypto.AgentID("v")
 	treasuryID := crypto.AgentID("t")
 
+	// Fund enough for 3 rounds of fees.
+	if err := tl.FundAgent(recipientID, 3_000_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
+	c := fees.NewCollector(tl)
+
 	for i := 0; i < 3; i++ {
-		c.CollectFee(1_000_000, validatorID, treasuryID) // fee = 1000 each
+		c.CollectFeeFromRecipient(recipientID, 1_000_000, validatorID, treasuryID) // fee = 1000 each
 	}
 
 	collected, burned, treasury := c.Stats()

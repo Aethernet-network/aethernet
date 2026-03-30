@@ -55,10 +55,10 @@ func TestSlashEngine_FraudulentApproval(t *testing.T) {
 	if res.Offense != OffenseFraudulentApproval {
 		t.Errorf("Offense: got %q, want %q", res.Offense, OffenseFraudulentApproval)
 	}
-	if res.SlashPercentage != 0.30 {
-		t.Errorf("SlashPercentage: got %v, want 0.30", res.SlashPercentage)
+	if res.SlashPercentageBP != 3000 {
+		t.Errorf("SlashPercentageBP: got %d, want 3000", res.SlashPercentageBP)
 	}
-	want := uint64(0.30 * 100_000_000_000)
+	want := uint64(3000) * 100_000_000_000 / 10000
 	if res.SlashAmount != want {
 		t.Errorf("SlashAmount: got %d, want %d", res.SlashAmount, want)
 	}
@@ -99,8 +99,8 @@ func TestSlashEngine_DishonestReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Slash: %v", err)
 	}
-	if res.SlashPercentage != 0.40 {
-		t.Errorf("SlashPercentage: got %v, want 0.40", res.SlashPercentage)
+	if res.SlashPercentageBP != 4000 {
+		t.Errorf("SlashPercentageBP: got %d, want 4000", res.SlashPercentageBP)
 	}
 	if res.CooldownDays != 60 {
 		t.Errorf("CooldownDays: got %d, want 60", res.CooldownDays)
@@ -121,8 +121,8 @@ func TestSlashEngine_Collusion_First(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Slash: %v", err)
 	}
-	if res.SlashPercentage != 0.75 {
-		t.Errorf("SlashPercentage: got %v, want 0.75", res.SlashPercentage)
+	if res.SlashPercentageBP != 7500 {
+		t.Errorf("SlashPercentageBP: got %d, want 7500", res.SlashPercentageBP)
 	}
 	if res.CooldownDays != 180 {
 		t.Errorf("CooldownDays: got %d, want 180", res.CooldownDays)

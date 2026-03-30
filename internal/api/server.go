@@ -2313,7 +2313,10 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 					"agent_id", regAgentID, "allocation", allocation, "err", err)
 			}
 		} else {
-			// Fallback for tests without protocol client.
+			// Test-only fallback: direct ledger mutation when no protocol client
+			// is wired. In production, protoClient.SubmitGrant creates a canonical
+			// DAG event that settles through consensus, ensuring all nodes apply
+			// the same onboarding grant deterministically.
 			if err := s.transfer.TransferFromBucket(crypto.AgentID(genesis.BucketEcosystem), regAgentID, allocation); err == nil {
 				resp.OnboardingAllocation = allocation
 			} else {
@@ -2846,7 +2849,9 @@ func (s *Server) handleStake(w http.ResponseWriter, r *http.Request) {
 			Message:      "stake submitted — settles through consensus",
 		})
 	} else {
-		// Fallback for tests without protocol client.
+		// Test-only fallback: direct stake when no protocol client is wired.
+		// In production, protoClient.SubmitTransfer creates a canonical
+		// "stake-lock" DAG event that settles through consensus.
 		if err := s.stakeManager.Stake(agentID, req.Amount); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return

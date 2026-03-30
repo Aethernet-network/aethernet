@@ -285,16 +285,18 @@ type ValidatorConfig struct {
 
 	// --- Slashing ---
 
-	// SlashFraudulentApproval is the stake fraction (0–1) burned when a
-	// validator is found to have approved a fraudulent task result.
-	// Default: 0.30 (30%).
-	SlashFraudulentApproval float64 `json:"slash_fraudulent_approval"`
-	// SlashDishonestReplay is the stake fraction burned when a validator
-	// submitted a dishonest replay report. Default: 0.40 (40%).
-	SlashDishonestReplay float64 `json:"slash_dishonest_replay"`
-	// SlashCollusion is the stake fraction burned when a validator is found
-	// to have colluded with affiliated validators. Default: 0.75 (75%).
-	SlashCollusion float64 `json:"slash_collusion"`
+	// SlashFraudulentApprovalBP is the stake percentage burned in basis points
+	// when a validator approves a fraudulent task result.
+	// Default: 3000 (30.00%).
+	SlashFraudulentApprovalBP uint32 `json:"slash_fraudulent_approval_bp"`
+	// SlashDishonestReplayBP is the stake percentage burned in basis points
+	// when a validator submitted a dishonest replay report.
+	// Default: 4000 (40.00%).
+	SlashDishonestReplayBP uint32 `json:"slash_dishonest_replay_bp"`
+	// SlashCollusionBP is the stake percentage burned in basis points when
+	// a validator colluded with affiliated validators.
+	// Default: 7500 (75.00%).
+	SlashCollusionBP uint32 `json:"slash_collusion_bp"`
 	// CooldownTier1Days is the suspension duration (days) for
 	// FraudulentApproval offenses. Default: 30.
 	CooldownTier1Days int `json:"cooldown_tier1_days"`
@@ -634,9 +636,9 @@ func DefaultConfig() *ProtocolConfig {
 			ClusterPairwiseMinShared:                 50,
 			ClusterReplayRate:                        1.0,
 			// Slashing
-			SlashFraudulentApproval:  0.30,
-			SlashDishonestReplay:     0.40,
-			SlashCollusion:           0.75,
+			SlashFraudulentApprovalBP: 3000,
+			SlashDishonestReplayBP:   4000,
+			SlashCollusionBP:         7500,
 			CooldownTier1Days:        30,
 			CooldownTier2Days:        60,
 			CooldownTier3Days:        180,
