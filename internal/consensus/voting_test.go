@@ -115,7 +115,7 @@ func TestRegisterVote_CreatesRecord(t *testing.T) {
 	vr := newRound(reg)
 	eid := event.EventID("event-001")
 
-	if err := vr.RegisterVote(eid, "voter-a", true); err != nil {
+	if err := vr.RegisterVote(eid, "voter-a", true, 0); err != nil {
 		t.Fatalf("RegisterVote: %v", err)
 	}
 
@@ -137,10 +137,10 @@ func TestRegisterVote_DuplicateVote(t *testing.T) {
 	vr := newRound(reg)
 	eid := event.EventID("event-002")
 
-	if err := vr.RegisterVote(eid, "voter-dup", true); err != nil {
+	if err := vr.RegisterVote(eid, "voter-dup", true, 0); err != nil {
 		t.Fatalf("first RegisterVote: %v", err)
 	}
-	err := vr.RegisterVote(eid, "voter-dup", false)
+	err := vr.RegisterVote(eid, "voter-dup", false, 0)
 	if !errors.Is(err, consensus.ErrDuplicateVote) {
 		t.Errorf("want ErrDuplicateVote, got %v", err)
 	}
@@ -152,7 +152,7 @@ func TestRegisterVote_VoteRecorded(t *testing.T) {
 	vr := newRound(reg)
 	eid := event.EventID("event-003")
 
-	if err := vr.RegisterVote(eid, "voter-rec", true); err != nil {
+	if err := vr.RegisterVote(eid, "voter-rec", true, 0); err != nil {
 		t.Fatalf("RegisterVote: %v", err)
 	}
 
@@ -180,7 +180,7 @@ func TestTally_SingleVoter_NotFinalized(t *testing.T) {
 	vr := newRound(reg)
 	eid := event.EventID("event-solo")
 
-	if err := vr.RegisterVote(eid, "solo", true); err != nil {
+	if err := vr.RegisterVote(eid, "solo", true, 0); err != nil {
 		t.Fatalf("RegisterVote: %v", err)
 	}
 
@@ -203,7 +203,7 @@ func TestTally_ThreeYes_Finalized(t *testing.T) {
 	eid := event.EventID("event-three-yes")
 
 	for _, voter := range []crypto.AgentID{"v1", "v2", "v3"} {
-		if err := vr.RegisterVote(eid, voter, true); err != nil {
+		if err := vr.RegisterVote(eid, voter, true, 0); err != nil {
 			t.Fatalf("RegisterVote %s: %v", voter, err)
 		}
 	}
@@ -218,7 +218,8 @@ func TestTally_ThreeYes_Finalized(t *testing.T) {
 }
 
 func TestTally_TwoYesOneNo_NoFinalize(t *testing.T) {
-	// Equal weights: yesWeight/totalWeight = 2/3 = 0.6666… < 0.667 threshold.
+	// Equal weights: yesWeight/totalWeight = 2/3 ≈ 0.6666… < 0.667 threshold.
+	// float64(2)/float64(3) = 0.6666666666666666 which is strictly < 0.667.
 	reg := identity.NewRegistry()
 	registerAgent(t, reg, "va", 5000, 2000)
 	registerAgent(t, reg, "vb", 5000, 2000)
@@ -226,16 +227,16 @@ func TestTally_TwoYesOneNo_NoFinalize(t *testing.T) {
 	vr := newRound(reg)
 	eid := event.EventID("event-split")
 
-	_ = vr.RegisterVote(eid, "va", true)
-	_ = vr.RegisterVote(eid, "vb", true)
-	_ = vr.RegisterVote(eid, "vc", false) // one no vote
+	_ = vr.RegisterVote(eid, "va", true, 0)
+	_ = vr.RegisterVote(eid, "vb", true, 0)
+	_ = vr.RegisterVote(eid, "vc", false, 0) // one no vote
 
 	finalized, err := vr.IsFinalized(eid)
 	if err != nil {
 		t.Fatalf("IsFinalized: %v", err)
 	}
 	if finalized {
-		t.Error("want not finalized (2/3 = 0.6666 < 0.667 threshold), got finalized")
+		t.Error("want not finalized (2/3 = 0.6666… < 0.667 threshold), got finalized")
 	}
 }
 
@@ -254,7 +255,7 @@ func TestFinalOrder_Sequential(t *testing.T) {
 	// Finalize events one at a time in order.
 	for _, eid := range eids {
 		for _, voter := range voters {
-			if err := vr.RegisterVote(eid, voter, true); err != nil {
+			if err := vr.RegisterVote(eid, voter, true, 0); err != nil {
 				t.Fatalf("RegisterVote %s/%s: %v", eid, voter, err)
 			}
 		}
@@ -287,7 +288,7 @@ func TestIsFinalized_BeforeSupermajority(t *testing.T) {
 	vr := newRound(reg)
 	eid := event.EventID("event-before")
 
-	_ = vr.RegisterVote(eid, "p1", true) // only 1 of 3 required participants
+	_ = vr.RegisterVote(eid, "p1", true, 0) // only 1 of 3 required participants
 
 	finalized, err := vr.IsFinalized(eid)
 	if err != nil {
@@ -307,7 +308,7 @@ func TestIsFinalized_AfterSupermajority(t *testing.T) {
 	eid := event.EventID("event-after")
 
 	for _, voter := range []crypto.AgentID{"q1", "q2", "q3"} {
-		_ = vr.RegisterVote(eid, voter, true)
+		_ = vr.RegisterVote(eid, voter, true, 0)
 	}
 
 	finalized, err := vr.IsFinalized(eid)
@@ -325,7 +326,7 @@ func TestFinalOrder_ErrorForUnfinalized(t *testing.T) {
 	vr := newRound(reg)
 	eid := event.EventID("event-unfinalized")
 
-	_ = vr.RegisterVote(eid, "r1", true) // 1 vote, below MinParticipants=3
+	_ = vr.RegisterVote(eid, "r1", true, 0) // 1 vote, below MinParticipants=3
 
 	_, err := vr.FinalOrder(eid)
 	if !errors.Is(err, consensus.ErrNotFinalized) {
@@ -356,7 +357,7 @@ func TestConcurrent_SameEvent(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			id := crypto.AgentID(fmt.Sprintf("concurrent-voter-%02d", i))
-			_ = vr.RegisterVote(eid, id, false) // all no: yesWeight/totalWeight = 0
+			_ = vr.RegisterVote(eid, id, false, 0) // all no: yesWeight/totalWeight = 0
 		}(i)
 	}
 	wg.Wait()
@@ -392,7 +393,7 @@ func TestConcurrent_MultipleEvents(t *testing.T) {
 			eid := event.EventID(fmt.Sprintf("multi-event-%02d", i))
 			for j := 0; j < 3; j++ {
 				voter := crypto.AgentID(fmt.Sprintf("me-voter-%02d-%02d", i, j))
-				_ = vr.RegisterVote(eid, voter, true)
+				_ = vr.RegisterVote(eid, voter, true, 0)
 			}
 		}(i)
 	}
@@ -508,13 +509,13 @@ func TestSnapshot_VoteRejectedIfNotInSnapshot(t *testing.T) {
 	eid := event.EventID("test-event-snap")
 
 	// Eve is in the registry but NOT in the snapshot — should be rejected.
-	err := vr.RegisterVote(eid, "key-eve", true)
+	err := vr.RegisterVote(eid, "key-eve", true, 0)
 	if !errors.Is(err, consensus.ErrVoterNotInSnapshot) {
 		t.Fatalf("expected ErrVoterNotInSnapshot for eve, got: %v", err)
 	}
 
 	// Alice IS in the snapshot — should succeed.
-	if err := vr.RegisterVote(eid, "key-alice", true); err != nil {
+	if err := vr.RegisterVote(eid, "key-alice", true, 0); err != nil {
 		t.Fatalf("alice should be accepted: %v", err)
 	}
 }
@@ -584,7 +585,7 @@ func TestSnapshot_SameVotesSameDeterministicResult(t *testing.T) {
 		eid := event.EventID("deterministic-event")
 
 		for _, s := range seats {
-			_ = vr.RegisterVote(eid, s.key, true)
+			_ = vr.RegisterVote(eid, s.key, true, 0)
 		}
 
 		rec, err := vr.GetRecord(eid)
@@ -624,7 +625,7 @@ func TestSnapshot_RoundCapturesVersion(t *testing.T) {
 	vr.SetValidatorSet(snap)
 
 	eid := event.EventID("version-check")
-	if err := vr.RegisterVote(eid, "key-ver", true); err != nil {
+	if err := vr.RegisterVote(eid, "key-ver", true, 0); err != nil {
 		t.Fatalf("RegisterVote: %v", err)
 	}
 
@@ -670,7 +671,7 @@ func TestSnapshot_NoVersionWhenNoSnapshot(t *testing.T) {
 	vr := consensus.NewVotingRound(cfg, reg)
 
 	eid := event.EventID("no-snap-event")
-	_ = vr.RegisterVote(eid, "no-snap-voter", true)
+	_ = vr.RegisterVote(eid, "no-snap-voter", true, 0)
 
 	rec, err := vr.GetRecord(eid)
 	if err != nil {
@@ -730,15 +731,15 @@ func TestCommittee_OutOfCommitteeVoteRejected(t *testing.T) {
 	eid := event.EventID("committee-event")
 
 	// Alice and bob should succeed.
-	if err := vr.RegisterVote(eid, "key-alice", true); err != nil {
+	if err := vr.RegisterVote(eid, "key-alice", true, 0); err != nil {
 		t.Fatalf("alice (in committee) should succeed: %v", err)
 	}
-	if err := vr.RegisterVote(eid, "key-bob", true); err != nil {
+	if err := vr.RegisterVote(eid, "key-bob", true, 0); err != nil {
 		t.Fatalf("bob (in committee) should succeed: %v", err)
 	}
 
 	// Carol is in the snapshot but NOT in the committee.
-	err := vr.RegisterVote(eid, "key-carol", true)
+	err := vr.RegisterVote(eid, "key-carol", true, 0)
 	if !errors.Is(err, consensus.ErrVoterNotInCommittee) {
 		t.Fatalf("carol (out of committee) should get ErrVoterNotInCommittee, got: %v", err)
 	}
@@ -772,7 +773,7 @@ func TestCommittee_NoCommitteeSource_AllVotersAccepted(t *testing.T) {
 
 	eid := event.EventID("no-committee-event")
 	for _, key := range []crypto.AgentID{"key-x", "key-y", "key-z"} {
-		if err := vr.RegisterVote(eid, key, true); err != nil {
+		if err := vr.RegisterVote(eid, key, true, 0); err != nil {
 			t.Fatalf("voter %s should succeed without committee source: %v", key, err)
 		}
 	}
@@ -832,7 +833,399 @@ func TestCommittee_NilCommitteeReturn_DisablesFiltering(t *testing.T) {
 	vr.SetCommitteeSource(&staticCommittee{members: nil})
 
 	eid := event.EventID("nil-committee-event")
-	if err := vr.RegisterVote(eid, "key-a", true); err != nil {
+	if err := vr.RegisterVote(eid, "key-a", true, 0); err != nil {
 		t.Fatalf("nil committee should disable filtering: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BFT threshold tests (Fix 1: supermajority over total active weight)
+// ---------------------------------------------------------------------------
+
+func TestBFT_ThreeOfHundred_NotFinalized(t *testing.T) {
+	// 100 validators, only 3 vote approve. With BFT semantics, 3/100 < 2/3.
+	seats := make([]struct {
+		id    validatorlifecycle.ValidatorID
+		key   crypto.AgentID
+		stake uint64
+	}, 100)
+	for i := range seats {
+		seats[i] = struct {
+			id    validatorlifecycle.ValidatorID
+			key   crypto.AgentID
+			stake uint64
+		}{
+			validatorlifecycle.ValidatorID(fmt.Sprintf("seat-%03d", i)),
+			crypto.AgentID(fmt.Sprintf("key-%03d", i)),
+			100_000,
+		}
+	}
+	snap := buildSnapshot(t, seats)
+
+	reg := identity.NewRegistry()
+	cfg := &consensus.ConsensusConfig{
+		SupermajorityThreshold: 0.667,
+		MaxRounds:              200,
+		RoundTimeout:           5 * time.Second,
+		MinParticipants:        3,
+	}
+	vr := consensus.NewVotingRound(cfg, reg)
+	vr.SetValidatorSet(snap)
+
+	eid := event.EventID("bft-3of100")
+	for i := 0; i < 3; i++ {
+		key := crypto.AgentID(fmt.Sprintf("key-%03d", i))
+		_ = vr.RegisterVote(eid, key, true, 0)
+	}
+
+	finalized, _ := vr.IsFinalized(eid)
+	if finalized {
+		t.Error("3 approvals out of 100 total should NOT finalize (3/100 < 2/3)")
+	}
+}
+
+func TestBFT_SixtySevenOfHundred_Finalized(t *testing.T) {
+	// 100 validators, 67 vote approve. 67/100 = 0.67 >= 0.667.
+	seats := make([]struct {
+		id    validatorlifecycle.ValidatorID
+		key   crypto.AgentID
+		stake uint64
+	}, 100)
+	for i := range seats {
+		seats[i] = struct {
+			id    validatorlifecycle.ValidatorID
+			key   crypto.AgentID
+			stake uint64
+		}{
+			validatorlifecycle.ValidatorID(fmt.Sprintf("seat-%03d", i)),
+			crypto.AgentID(fmt.Sprintf("key-%03d", i)),
+			100_000,
+		}
+	}
+	snap := buildSnapshot(t, seats)
+
+	reg := identity.NewRegistry()
+	cfg := &consensus.ConsensusConfig{
+		SupermajorityThreshold: 0.667,
+		MaxRounds:              10,
+		RoundTimeout:           5 * time.Second,
+		MinParticipants:        3,
+	}
+	vr := consensus.NewVotingRound(cfg, reg)
+	vr.SetValidatorSet(snap)
+
+	eid := event.EventID("bft-67of100")
+	for i := 0; i < 67; i++ {
+		key := crypto.AgentID(fmt.Sprintf("key-%03d", i))
+		_ = vr.RegisterVote(eid, key, true, 0)
+	}
+
+	finalized, _ := vr.IsFinalized(eid)
+	if !finalized {
+		t.Error("67 approvals out of 100 total should finalize (67/100 >= 0.667)")
+	}
+	rec, _ := vr.GetRecord(eid)
+	if !rec.FinalVerdict {
+		t.Error("FinalVerdict should be true for approved event")
+	}
+}
+
+func TestBFT_SixtySixOfHundred_NotFinalized(t *testing.T) {
+	// 100 validators, 66 vote approve. 66/100 = 0.66 < 0.667.
+	seats := make([]struct {
+		id    validatorlifecycle.ValidatorID
+		key   crypto.AgentID
+		stake uint64
+	}, 100)
+	for i := range seats {
+		seats[i] = struct {
+			id    validatorlifecycle.ValidatorID
+			key   crypto.AgentID
+			stake uint64
+		}{
+			validatorlifecycle.ValidatorID(fmt.Sprintf("seat-%03d", i)),
+			crypto.AgentID(fmt.Sprintf("key-%03d", i)),
+			100_000,
+		}
+	}
+	snap := buildSnapshot(t, seats)
+
+	reg := identity.NewRegistry()
+	cfg := &consensus.ConsensusConfig{
+		SupermajorityThreshold: 0.667,
+		MaxRounds:              10,
+		RoundTimeout:           5 * time.Second,
+		MinParticipants:        3,
+	}
+	vr := consensus.NewVotingRound(cfg, reg)
+	vr.SetValidatorSet(snap)
+
+	eid := event.EventID("bft-66of100")
+	for i := 0; i < 66; i++ {
+		key := crypto.AgentID(fmt.Sprintf("key-%03d", i))
+		_ = vr.RegisterVote(eid, key, true, 0)
+	}
+
+	finalized, _ := vr.IsFinalized(eid)
+	if finalized {
+		t.Error("66 approvals out of 100 total should NOT finalize (66/100 < 0.667)")
+	}
+}
+
+func TestBFT_RejectionPath_ThirtyFourRejects(t *testing.T) {
+	// 100 validators, 34 vote reject. noWeight = 34/100 = 0.34 > 0.333.
+	// Approval is mathematically impossible → finalize as rejected.
+	seats := make([]struct {
+		id    validatorlifecycle.ValidatorID
+		key   crypto.AgentID
+		stake uint64
+	}, 100)
+	for i := range seats {
+		seats[i] = struct {
+			id    validatorlifecycle.ValidatorID
+			key   crypto.AgentID
+			stake uint64
+		}{
+			validatorlifecycle.ValidatorID(fmt.Sprintf("seat-%03d", i)),
+			crypto.AgentID(fmt.Sprintf("key-%03d", i)),
+			100_000,
+		}
+	}
+	snap := buildSnapshot(t, seats)
+
+	reg := identity.NewRegistry()
+	cfg := &consensus.ConsensusConfig{
+		SupermajorityThreshold: 0.667,
+		MaxRounds:              10,
+		RoundTimeout:           5 * time.Second,
+		MinParticipants:        3,
+	}
+	vr := consensus.NewVotingRound(cfg, reg)
+	vr.SetValidatorSet(snap)
+
+	eid := event.EventID("bft-reject-34of100")
+	for i := 0; i < 34; i++ {
+		key := crypto.AgentID(fmt.Sprintf("key-%03d", i))
+		_ = vr.RegisterVote(eid, key, false, 0)
+	}
+
+	finalized, _ := vr.IsFinalized(eid)
+	if !finalized {
+		t.Error("34 rejections out of 100 should finalize as rejected (34/100 > 1/3)")
+	}
+	rec, _ := vr.GetRecord(eid)
+	if rec.FinalVerdict {
+		t.Error("FinalVerdict should be false for rejected event")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bound snapshot tests (Fix 2)
+// ---------------------------------------------------------------------------
+
+func TestBFT_BoundSnapshot_NewValidatorNoWeight(t *testing.T) {
+	// Create snapshot with 3 validators.
+	snap := buildSnapshot(t, []struct {
+		id    validatorlifecycle.ValidatorID
+		key   crypto.AgentID
+		stake uint64
+	}{
+		{"seat-1", "key-a", 100_000},
+		{"seat-2", "key-b", 100_000},
+		{"seat-3", "key-c", 100_000},
+	})
+
+	reg := identity.NewRegistry()
+	cfg := &consensus.ConsensusConfig{
+		SupermajorityThreshold: 0.667,
+		MaxRounds:              10,
+		RoundTimeout:           5 * time.Second,
+		MinParticipants:        1,
+	}
+	vr := consensus.NewVotingRound(cfg, reg)
+	vr.SetValidatorSet(snap)
+
+	eid := event.EventID("bound-snap-test")
+
+	// First vote opens the round and binds the snapshot.
+	_ = vr.RegisterVote(eid, "key-a", true, 0)
+
+	// Now replace snapshot with one that includes a new validator.
+	snap2 := buildSnapshot(t, []struct {
+		id    validatorlifecycle.ValidatorID
+		key   crypto.AgentID
+		stake uint64
+	}{
+		{"seat-1", "key-a", 100_000},
+		{"seat-2", "key-b", 100_000},
+		{"seat-3", "key-c", 100_000},
+		{"seat-4", "key-d", 100_000},
+	})
+	vr.SetValidatorSet(snap2)
+
+	// key-d is in the NEW snapshot but NOT in the bound snapshot.
+	// The fast-path eligibility check passes (current snapshot), but
+	// the tally uses the bound snapshot where key-d has zero weight.
+	_ = vr.RegisterVote(eid, "key-d", true, 0)
+
+	rec, _ := vr.GetRecord(eid)
+	// TotalActiveWeight should be 300_000 (3 validators from bound snapshot)
+	if rec.TotalActiveWeight != 300_000 {
+		t.Errorf("TotalActiveWeight = %d; want 300000 (from bound snapshot)", rec.TotalActiveWeight)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Verified value aggregation tests (Fix 5)
+// ---------------------------------------------------------------------------
+
+func TestBFT_VerifiedValue_WeightedMedian(t *testing.T) {
+	// 3 validators with different stakes and verified values.
+	snap := buildSnapshot(t, []struct {
+		id    validatorlifecycle.ValidatorID
+		key   crypto.AgentID
+		stake uint64
+	}{
+		{"seat-1", "key-a", 100_000},
+		{"seat-2", "key-b", 200_000},
+		{"seat-3", "key-c", 300_000},
+	})
+
+	reg := identity.NewRegistry()
+	cfg := &consensus.ConsensusConfig{
+		SupermajorityThreshold: 0.667,
+		MaxRounds:              10,
+		RoundTimeout:           5 * time.Second,
+		MinParticipants:        1,
+	}
+	vr := consensus.NewVotingRound(cfg, reg)
+	vr.SetValidatorSet(snap)
+
+	eid := event.EventID("verified-value-test")
+
+	// Votes: a=100 (weight 100k), b=200 (weight 200k), c=300 (weight 300k)
+	// Total approve weight = 600k. Threshold at 300k.
+	// Sorted by value: 100(100k), 200(200k), 300(300k)
+	// Cumulative: 100k, 300k, 600k. First to exceed 300k threshold = 300k → value 300
+	// Wait: threshold = 600k/2 = 300k. cumW > 300k at 300(300k): cumW=600k. So median = 300.
+	// Actually: after 100(100k) cumW=100k. After 200(200k) cumW=300k. 300k is NOT > 300k.
+	// After 300(300k) cumW=600k > 300k → median = 300.
+	_ = vr.RegisterVote(eid, "key-a", true, 100)
+	_ = vr.RegisterVote(eid, "key-b", true, 200)
+	_ = vr.RegisterVote(eid, "key-c", true, 300)
+
+	rec, _ := vr.GetRecord(eid)
+	if !rec.Finalized {
+		t.Fatal("should be finalized")
+	}
+	if rec.FinalVerifiedValue != 300 {
+		t.Errorf("FinalVerifiedValue = %d; want 300 (weighted median)", rec.FinalVerifiedValue)
+	}
+}
+
+func TestBFT_VerifiedValue_DeterministicOrder(t *testing.T) {
+	// Same 3 votes registered in different order → same result.
+	for _, order := range [][]int{{0, 1, 2}, {2, 1, 0}, {1, 0, 2}} {
+		snap := buildSnapshot(t, []struct {
+			id    validatorlifecycle.ValidatorID
+			key   crypto.AgentID
+			stake uint64
+		}{
+			{"seat-1", "key-a", 100_000},
+			{"seat-2", "key-b", 200_000},
+			{"seat-3", "key-c", 300_000},
+		})
+
+		reg := identity.NewRegistry()
+		cfg := &consensus.ConsensusConfig{
+			SupermajorityThreshold: 0.667,
+			MaxRounds:              10,
+			RoundTimeout:           5 * time.Second,
+			MinParticipants:        1,
+		}
+		vr := consensus.NewVotingRound(cfg, reg)
+		vr.SetValidatorSet(snap)
+
+		eid := event.EventID("order-test")
+		votes := []struct {
+			key   crypto.AgentID
+			value uint64
+		}{
+			{"key-a", 100},
+			{"key-b", 200},
+			{"key-c", 300},
+		}
+		for _, i := range order {
+			_ = vr.RegisterVote(eid, votes[i].key, true, votes[i].value)
+		}
+
+		rec, _ := vr.GetRecord(eid)
+		if rec.FinalVerifiedValue != 300 {
+			t.Errorf("order %v: FinalVerifiedValue = %d; want 300", order, rec.FinalVerifiedValue)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Once-guard tests (Fix 4)
+// ---------------------------------------------------------------------------
+
+func TestBFT_MarkCallbackFired_ExactlyOnce(t *testing.T) {
+	snap := buildSnapshot(t, []struct {
+		id    validatorlifecycle.ValidatorID
+		key   crypto.AgentID
+		stake uint64
+	}{
+		{"seat-1", "key-a", 100_000},
+		{"seat-2", "key-b", 100_000},
+		{"seat-3", "key-c", 100_000},
+	})
+
+	reg := identity.NewRegistry()
+	cfg := &consensus.ConsensusConfig{
+		SupermajorityThreshold: 0.667,
+		MaxRounds:              10,
+		RoundTimeout:           5 * time.Second,
+		MinParticipants:        1,
+	}
+	vr := consensus.NewVotingRound(cfg, reg)
+	vr.SetValidatorSet(snap)
+
+	eid := event.EventID("once-guard-test")
+	_ = vr.RegisterVote(eid, "key-a", true, 0)
+	_ = vr.RegisterVote(eid, "key-b", true, 0)
+	_ = vr.RegisterVote(eid, "key-c", true, 0)
+
+	// First call should return true.
+	if !vr.MarkCallbackFired(eid) {
+		t.Error("first MarkCallbackFired should return true")
+	}
+	// Second call should return false.
+	if vr.MarkCallbackFired(eid) {
+		t.Error("second MarkCallbackFired should return false")
+	}
+	// Concurrent calls: only one should succeed.
+	var wg sync.WaitGroup
+	var fired int64
+	var mu sync.Mutex
+	// Use a new round for concurrent test.
+	eid2 := event.EventID("once-guard-concurrent")
+	_ = vr.RegisterVote(eid2, "key-a", true, 0)
+	_ = vr.RegisterVote(eid2, "key-b", true, 0)
+	_ = vr.RegisterVote(eid2, "key-c", true, 0)
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if vr.MarkCallbackFired(eid2) {
+				mu.Lock()
+				fired++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if fired != 1 {
+		t.Errorf("exactly 1 concurrent MarkCallbackFired should succeed, got %d", fired)
 	}
 }

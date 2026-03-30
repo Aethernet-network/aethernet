@@ -40,6 +40,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sort"
 	"sync"
 	"time"
 
@@ -118,6 +119,11 @@ type ValidatorSetSource interface {
 	// version. Consensus rounds record this version at open time so votes
 	// for already-open rounds are evaluated against the correct snapshot.
 	SetVersion() uint64
+
+	// ActiveWeight returns the sum of weights of all participating seats in
+	// the snapshot. Used as the BFT denominator: finalization requires
+	// yesWeight >= 2/3 of ActiveWeight.
+	ActiveWeight() uint64
 }
 
 // ErrVoterNotInSnapshot is returned when a voter's key is not found in the
@@ -171,6 +177,19 @@ type VoteRecord struct {
 	// was bound at record creation time (backward compatibility).
 	ValidatorSetVersion uint64
 
+	// BoundSnapshot is the validator set snapshot captured when this record
+	// was created. All weight computations for this round use this snapshot,
+	// guaranteeing that every node processing the same votes computes the
+	// same tally regardless of when validator set changes propagate. Nil
+	// when no snapshot was bound at record creation time (backward compat).
+	BoundSnapshot ValidatorSetSource
+
+	// TotalActiveWeight is the sum of weights of ALL eligible validators in
+	// the BoundSnapshot. The BFT supermajority threshold is computed against
+	// this value, not just the weight of voters who actually voted. Zero
+	// when no snapshot was bound (falls back to received-vote weight).
+	TotalActiveWeight uint64
+
 	// Round is the number of completed tally iterations for this event.
 	// It starts at 1 and increments after each TallyVotes call that does not
 	// reach a supermajority. When Round exceeds MaxRounds the event is
@@ -180,23 +199,46 @@ type VoteRecord struct {
 	// Votes maps each voter's AgentID to their boolean verdict (true = yes).
 	Votes map[crypto.AgentID]bool
 
+	// VerifiedValues maps each voter to the verifiedValue they submitted.
+	// Used at finalization to compute a deterministic consensus-aggregated
+	// verified value (stake-weighted median of approve votes).
+	VerifiedValues map[crypto.AgentID]uint64
+
 	// TotalWeight is the sum of all voters' computed weights from the most
-	// recent tally. Recomputed on every TallyVotes call from the live registry.
+	// recent tally. Recomputed on every TallyVotes call.
 	TotalWeight uint64
 
 	// YesWeight is the sum of weights of voters who voted yes, from the most
 	// recent tally.
 	YesWeight uint64
 
-	// Finalized is true once YesWeight/TotalWeight >= SupermajorityThreshold
-	// and at least MinParticipants voters have participated. Once true it
-	// never reverts.
+	// NoWeight is the sum of weights of voters who voted no, from the most
+	// recent tally. Used for the rejection path: when NoWeight exceeds 1/3
+	// of TotalActiveWeight, approval is mathematically impossible.
+	NoWeight uint64
+
+	// Finalized is true once a BFT threshold is met (approval or rejection).
+	// Once true it never reverts.
 	Finalized bool
+
+	// FinalVerdict is the consensus outcome. Only meaningful when Finalized
+	// is true. True means the event was approved; false means rejected.
+	FinalVerdict bool
+
+	// FinalVerifiedValue is the deterministic consensus-aggregated verified
+	// value computed from all approve votes' verified values at finalization
+	// time (stake-weighted median). Only meaningful when Finalized is true.
+	FinalVerifiedValue uint64
 
 	// FinalOrder is the global ordering sequence number assigned at the moment
 	// of finalization. Reflects the order in which events were finalized within
 	// this VotingRound. Zero means the event is not yet finalized.
 	FinalOrder uint64
+
+	// CallbackFired is true once the finalization callback has been invoked.
+	// Prevents duplicate callback invocations from concurrent vote paths.
+	// Protected by VotingRound's mutex.
+	CallbackFired bool
 
 	// CreatedAt is the wall-clock time the VoteRecord was first created.
 	CreatedAt time.Time
@@ -328,7 +370,7 @@ func (vr *VotingRound) LoadPersistedVotes(p VotePersistence) error {
 			// RegisterVote will attempt to look up the voter in the registry.
 			// Voters that are no longer registered are silently skipped
 			// (consistent with tallyVotesLocked's missing-voter handling).
-			_ = vr.RegisterVote(event.EventID(eid), crypto.AgentID(v.VoterID), v.Verdict)
+			_ = vr.RegisterVote(event.EventID(eid), crypto.AgentID(v.VoterID), v.Verdict, 0)
 		}
 	}
 	return nil
@@ -395,22 +437,24 @@ func (vr *VotingRound) computeWeightFromRegistry(agentID crypto.AgentID) (uint64
 // RegisterVote records a vote from voterID for the given eventID and immediately
 // triggers a tally. It creates a new VoteRecord on first vote for an event.
 //
+// The verifiedValue parameter is the voter's assessment of the event's economic
+// value. At finalization, a deterministic consensus value is computed from all
+// approve votes (stake-weighted median).
+//
 // Returns:
 //   - ErrAlreadyFinalized if the event is already finalized.
 //   - ErrRoundExhausted if the event has exceeded MaxRounds without supermajority.
 //   - ErrDuplicateVote if voterID has already voted for this event.
 //   - An error if voterID is not registered in the identity registry.
-func (vr *VotingRound) RegisterVote(eventID event.EventID, voterID crypto.AgentID, vote bool) error {
-	// Validate registry membership before acquiring vr.mu — unregistered agents
+func (vr *VotingRound) RegisterVote(eventID event.EventID, voterID crypto.AgentID, vote bool, verifiedValue uint64) error {
+	// Fast-path eligibility check before acquiring vr.mu — unregistered agents
 	// are rejected early without contending on the write lock.
 	if _, err := vr.computeWeight(voterID); err != nil {
 		return fmt.Errorf("consensus: voter %s not eligible: %w", voterID, err)
 	}
 
 	// Committee membership check: when a committee source is configured,
-	// only committee members may vote for a specific round. This is checked
-	// before acquiring the write lock to avoid contention from non-committee
-	// voters.
+	// only committee members may vote for a specific round.
 	if vr.committeeSource != nil {
 		committee := vr.committeeSource.SelectForRound(eventID)
 		if committee != nil && !committee[voterID] {
@@ -424,15 +468,19 @@ func (vr *VotingRound) RegisterVote(eventID event.EventID, voterID crypto.AgentI
 	record, exists := vr.records[eventID]
 	if !exists {
 		record = &VoteRecord{
-			EventID:   eventID,
-			Round:     1,
-			Votes:     make(map[crypto.AgentID]bool),
-			CreatedAt: time.Now(),
+			EventID:        eventID,
+			Round:          1,
+			Votes:          make(map[crypto.AgentID]bool),
+			VerifiedValues: make(map[crypto.AgentID]uint64),
+			CreatedAt:      time.Now(),
 		}
-		// Capture the validator set version at round-open time so all
-		// votes for this event are evaluated against the same snapshot.
+		// Bind the current validator set snapshot at round-open time.
+		// All weight computations for this round use this snapshot,
+		// guaranteeing deterministic tally results across nodes.
 		if vr.validatorSet != nil {
+			record.BoundSnapshot = vr.validatorSet
 			record.ValidatorSetVersion = vr.validatorSet.SetVersion()
+			record.TotalActiveWeight = vr.validatorSet.ActiveWeight()
 		}
 		vr.records[eventID] = record
 	}
@@ -449,31 +497,22 @@ func (vr *VotingRound) RegisterVote(eventID event.EventID, voterID crypto.AgentI
 	}
 
 	record.Votes[voterID] = vote
+	record.VerifiedValues[voterID] = verifiedValue
 
-	// Write-through persistence: persist this vote before tallying so a crash
-	// after write but before finalization can be recovered on restart (HIGH-6).
+	// Write-through persistence.
 	if vr.persistence != nil {
 		if err := vr.persistence.PutVote(string(eventID), string(voterID), vote); err != nil {
-			// Non-fatal: consensus continues in-memory; log at warn level.
-			// A restarted node may miss this vote but will still converge
-			// once the other peers re-broadcast their votes.
-			_ = err // caller can check vr.tallyVotesLocked outcome
+			_ = err
 		}
 	}
 
-	return vr.tallyVotesLocked(record)
+	return vr.tallyVotesLocked(record, false)
 }
 
-// TallyVotes recomputes YesWeight and TotalWeight for eventID from the current
-// registry state and checks whether a supermajority has been reached.
-//
-// If the supermajority condition is satisfied (YesWeight/TotalWeight >=
-// SupermajorityThreshold AND at least MinParticipants have voted), the event is
-// marked Finalized and assigned the next FinalOrder sequence number.
-//
-// If the condition is not met, Round increments. Once Round exceeds MaxRounds
-// the event is permanently failed: subsequent RegisterVote calls return
-// ErrRoundExhausted and Finalized remains false.
+// TallyVotes recomputes weights for eventID and checks for supermajority.
+// Unlike the tally triggered by RegisterVote, this explicit call increments
+// the round counter when supermajority is not reached. Used by timeout-driven
+// orchestrators. Once Round exceeds MaxRounds the event is permanently failed.
 func (vr *VotingRound) TallyVotes(eventID event.EventID) error {
 	vr.mu.Lock()
 	defer vr.mu.Unlock()
@@ -482,14 +521,14 @@ func (vr *VotingRound) TallyVotes(eventID event.EventID) error {
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrEventNotFound, eventID)
 	}
-	return vr.tallyVotesLocked(record)
+	return vr.tallyVotesLocked(record, true)
 }
 
 // tallyVotesLocked is the internal tally implementation. It must be called
-// with vr.mu held for writing. It recomputes weights from the registry,
-// checks the supermajority condition, and either finalizes the event or
-// advances the round counter.
-func (vr *VotingRound) tallyVotesLocked(record *VoteRecord) error {
+// with vr.mu held for writing. It recomputes weights from the bound snapshot,
+// checks the BFT supermajority condition against total active weight, and
+// either finalizes the event (approval or rejection) or advances the round.
+func (vr *VotingRound) tallyVotesLocked(record *VoteRecord, advanceRound bool) error {
 	if record.Finalized {
 		return nil // already decided; tally is a no-op
 	}
@@ -497,50 +536,147 @@ func (vr *VotingRound) tallyVotesLocked(record *VoteRecord) error {
 		return nil // permanently failed; further tallies are no-ops
 	}
 
-	// Recompute weights from registry state. The virtual voting invariant:
-	// any correct node with the same registry state will compute the same
-	// weights and therefore reach the same conclusion independently.
-	var totalWeight, yesWeight uint64
+	// Recompute weights using the BOUND snapshot for determinism.
+	// All correct nodes with the same bound snapshot and same votes compute
+	// the same weights and reach the same conclusion independently.
+	var totalWeight, yesWeight, noWeight uint64
 	for voterID, yesVote := range record.Votes {
-		w, err := vr.computeWeight(voterID)
+		w, err := vr.computeWeightForRecord(record, voterID)
 		if err != nil {
-			// Voter disappeared from registry between vote registration and tally.
-			// Their vote is silently excluded from weight computation. This is
-			// safe: all correct nodes would skip the same missing voter.
-			continue
+			continue // voter not in bound snapshot — excluded
 		}
 		totalWeight += w
 		if yesVote {
 			yesWeight += w
+		} else {
+			noWeight += w
 		}
 	}
 
 	record.TotalWeight = totalWeight
 	record.YesWeight = yesWeight
+	record.NoWeight = noWeight
 
 	numVoters := len(record.Votes)
 
-	// Supermajority condition: enough participants AND enough weighted support.
-	if numVoters >= vr.config.MinParticipants && totalWeight > 0 {
-		ratio := float64(yesWeight) / float64(totalWeight)
-		if ratio >= vr.config.SupermajorityThreshold {
+	// BFT denominator: total active weight from the bound snapshot.
+	// When no snapshot is bound (backward compat), fall back to received vote weight.
+	denominator := record.TotalActiveWeight
+	if denominator == 0 {
+		denominator = totalWeight
+	}
+
+	if numVoters >= vr.config.MinParticipants && denominator > 0 {
+		// Approval: yesWeight >= 2/3 of total active weight.
+		yesRatio := float64(yesWeight) / float64(denominator)
+		if yesRatio >= vr.config.SupermajorityThreshold {
 			record.Finalized = true
+			record.FinalVerdict = true
+			record.FinalVerifiedValue = computeWeightedMedian(record)
 			vr.orderSeq++
 			record.FinalOrder = vr.orderSeq
-			// Delete persisted votes now that the event is finalized — they
-			// must not be reloaded on restart since the event is already settled.
 			if vr.persistence != nil {
 				_ = vr.persistence.DeleteVotes(string(record.EventID))
 			}
 			return nil
 		}
+
+		// Rejection: noWeight > 1/3 of total active weight → approval is
+		// mathematically impossible. Only applies when we have a bound snapshot
+		// (TotalActiveWeight > 0) so we know the true denominator. Without a
+		// snapshot we don't know how many validators haven't voted yet.
+		if record.TotalActiveWeight > 0 {
+			noRatio := float64(noWeight) / float64(denominator)
+			if noRatio > (1.0 - vr.config.SupermajorityThreshold) {
+				record.Finalized = true
+				record.FinalVerdict = false
+				record.FinalVerifiedValue = 0
+				vr.orderSeq++
+				record.FinalOrder = vr.orderSeq
+				if vr.persistence != nil {
+					_ = vr.persistence.DeleteVotes(string(record.EventID))
+				}
+				return nil
+			}
+		}
 	}
 
-	// No supermajority yet. Advance the round counter. When Round exceeds
-	// MaxRounds the event is permanently failed on the next RegisterVote or
-	// TallyVotes call.
-	record.Round++
+	if advanceRound {
+		record.Round++
+	}
 	return nil
+}
+
+// computeWeightForRecord returns the voting weight for voterID using the
+// record's bound snapshot. Falls back to the current snapshot or registry
+// when no snapshot was bound at round-open time (backward compatibility).
+func (vr *VotingRound) computeWeightForRecord(record *VoteRecord, voterID crypto.AgentID) (uint64, error) {
+	if record.BoundSnapshot != nil {
+		w, eligible := record.BoundSnapshot.VoteWeightByKey(voterID)
+		if !eligible {
+			return 0, fmt.Errorf("%w: %s", ErrVoterNotInSnapshot, voterID)
+		}
+		return w, nil
+	}
+	// Fallback: no bound snapshot (backward compat for tests without lifecycle).
+	return vr.computeWeight(voterID)
+}
+
+// weightedValue pairs a verified value with its voter's stake weight.
+type weightedValue struct {
+	value  uint64
+	weight uint64
+}
+
+// computeWeightedMedian computes the stake-weighted median of all approve
+// votes' verified values. Deterministic: same votes → same result regardless
+// of vote arrival order. Only approve votes (Votes[id] == true) contribute.
+func computeWeightedMedian(record *VoteRecord) uint64 {
+	var entries []weightedValue
+	for voterID, approved := range record.Votes {
+		if !approved {
+			continue
+		}
+		val := record.VerifiedValues[voterID]
+		// Use bound snapshot for weight if available, otherwise skip.
+		var w uint64
+		if record.BoundSnapshot != nil {
+			wt, ok := record.BoundSnapshot.VoteWeightByKey(voterID)
+			if ok {
+				w = wt
+			}
+		}
+		if w == 0 {
+			w = 1 // equal weight fallback when no snapshot
+		}
+		entries = append(entries, weightedValue{value: val, weight: w})
+	}
+	if len(entries) == 0 {
+		return 0
+	}
+
+	// Sort by value for determinism.
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].value != entries[j].value {
+			return entries[i].value < entries[j].value
+		}
+		return entries[i].weight < entries[j].weight
+	})
+
+	// Accumulate weight until > 50% of total approve weight.
+	var totalW uint64
+	for _, e := range entries {
+		totalW += e.weight
+	}
+	threshold := totalW / 2
+	var cumW uint64
+	for _, e := range entries {
+		cumW += e.weight
+		if cumW > threshold {
+			return e.value
+		}
+	}
+	return entries[len(entries)-1].value
 }
 
 // IsFinalized reports whether eventID has reached a finalized supermajority.
@@ -586,14 +722,35 @@ func (vr *VotingRound) GetRecord(eventID event.EventID) (*VoteRecord, error) {
 		return nil, fmt.Errorf("%w: %s", ErrEventNotFound, eventID)
 	}
 
-	// Deep copy: the Votes map must be duplicated so the caller cannot race
-	// with concurrent RegisterVote calls on the original.
+	// Deep copy: maps must be duplicated so the caller cannot race with
+	// concurrent RegisterVote calls on the original.
 	copied := *record
 	copied.Votes = make(map[crypto.AgentID]bool, len(record.Votes))
 	for k, v := range record.Votes {
 		copied.Votes[k] = v
 	}
+	copied.VerifiedValues = make(map[crypto.AgentID]uint64, len(record.VerifiedValues))
+	for k, v := range record.VerifiedValues {
+		copied.VerifiedValues[k] = v
+	}
 	return &copied, nil
+}
+
+// MarkCallbackFired atomically marks the finalization callback as fired for
+// the given event. Returns true if this is the first call (the caller should
+// fire the callback). Returns false if the callback was already fired or the
+// event is not finalized. This guarantees exactly-once callback invocation
+// regardless of how many concurrent vote paths detect finalization.
+func (vr *VotingRound) MarkCallbackFired(eventID event.EventID) bool {
+	vr.mu.Lock()
+	defer vr.mu.Unlock()
+
+	record, ok := vr.records[eventID]
+	if !ok || !record.Finalized || record.CallbackFired {
+		return false
+	}
+	record.CallbackFired = true
+	return true
 }
 
 // FinalizedCount returns the number of events that have reached a finalized

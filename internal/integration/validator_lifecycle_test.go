@@ -118,7 +118,7 @@ func TestIntegration_SnapshotBoundSettlement(t *testing.T) {
 
 	// All 3 genesis validators vote yes.
 	for _, key := range []crypto.AgentID{"key-n1", "key-n2", "key-n3"} {
-		if err := vr.RegisterVote(eid, key, true); err != nil {
+		if err := vr.RegisterVote(eid, key, true, 0); err != nil {
 			t.Fatalf("vote from %s: %v", key, err)
 		}
 	}
@@ -167,11 +167,11 @@ func TestIntegration_JoinNotEligibleForOldRounds(t *testing.T) {
 	// be able to vote — they joined after this snapshot.
 	eid := event.EventID("old-round")
 	for _, key := range []crypto.AgentID{"key-n1", "key-n2"} {
-		_ = preJoinVR.RegisterVote(eid, key, true)
+		_ = preJoinVR.RegisterVote(eid, key, true, 0)
 	}
 
 	// New validator tries to vote on the old round.
-	err = preJoinVR.RegisterVote(eid, "key-n4", true)
+	err = preJoinVR.RegisterVote(eid, "key-n4", true, 0)
 	if err == nil {
 		t.Fatal("new validator should NOT be eligible for pre-join round")
 	}
@@ -216,7 +216,7 @@ func TestIntegration_ExitOldVotesValid(t *testing.T) {
 	// New round on post-exit snapshot: only node-2 and node-3 can vote.
 	postExitVR := snapshotVotingRound(t, postExitSnap)
 	eid := event.EventID("post-exit-round")
-	err := postExitVR.RegisterVote(eid, "key-n1", true)
+	err := postExitVR.RegisterVote(eid, "key-n1", true, 0)
 	if err == nil {
 		t.Fatal("exited node-1 should be rejected in post-exit round")
 	}
@@ -294,19 +294,19 @@ func TestIntegration_KeyRotationAcrossRoundBoundary(t *testing.T) {
 
 	// Pre-rotation round: old key valid, new key invalid.
 	oldRound := event.EventID("old-round-kr")
-	if err := preRotateVR.RegisterVote(oldRound, "key-n1", true); err != nil {
+	if err := preRotateVR.RegisterVote(oldRound, "key-n1", true, 0); err != nil {
 		t.Fatalf("old key should be valid for pre-rotate round: %v", err)
 	}
-	if err := preRotateVR.RegisterVote(oldRound, "key-n1-new", true); err == nil {
+	if err := preRotateVR.RegisterVote(oldRound, "key-n1-new", true, 0); err == nil {
 		t.Fatal("new key should NOT be valid for pre-rotate round")
 	}
 
 	// Post-rotation round: new key valid, old key invalid.
 	newRound := event.EventID("new-round-kr")
-	if err := postRotateVR.RegisterVote(newRound, "key-n1-new", true); err != nil {
+	if err := postRotateVR.RegisterVote(newRound, "key-n1-new", true, 0); err != nil {
 		t.Fatalf("new key should be valid for post-rotate round: %v", err)
 	}
-	if err := postRotateVR.RegisterVote(newRound, "key-n1", true); err == nil {
+	if err := postRotateVR.RegisterVote(newRound, "key-n1", true, 0); err == nil {
 		t.Fatal("old key should NOT be valid for post-rotate round")
 	}
 }
@@ -495,7 +495,7 @@ func TestIntegration_IdentityExistsButNoSeat(t *testing.T) {
 	eid := event.EventID("outsider-round")
 
 	// Outsider has high rep/stake in the registry but NO seat in snapshot.
-	err := vr.RegisterVote(eid, "key-outsider", true)
+	err := vr.RegisterVote(eid, "key-outsider", true, 0)
 	if err == nil {
 		t.Fatal("outsider should be REJECTED despite having identity in registry")
 	}
@@ -504,7 +504,7 @@ func TestIntegration_IdentityExistsButNoSeat(t *testing.T) {
 	}
 
 	// Genesis validator IS accepted.
-	if err := vr.RegisterVote(eid, "key-n1", true); err != nil {
+	if err := vr.RegisterVote(eid, "key-n1", true, 0); err != nil {
 		t.Fatalf("genesis validator should be accepted: %v", err)
 	}
 }

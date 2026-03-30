@@ -348,7 +348,7 @@ func (e *Engine) processVoteInternal(result VerificationResult, broadcast bool) 
 	}
 
 	// Register the vote in the consensus round.
-	err := e.voting.RegisterVote(result.EventID, result.VerifierID, result.Verdict)
+	err := e.voting.RegisterVote(result.EventID, result.VerifierID, result.Verdict, result.VerifiedValue)
 	if err != nil {
 		// Acceptable non-fatal conditions: duplicate vote, already finalized,
 		// round exhausted. The event will be settled by the deadline sweep.
@@ -360,36 +360,33 @@ func (e *Engine) processVoteInternal(result VerificationResult, broadcast bool) 
 		e.broadcastVote(result.EventID, result.Verdict, result.VerifierID)
 	}
 
-	// Check whether this vote triggered a supermajority.
-	finalized, ferr := e.voting.IsFinalized(result.EventID)
-	if ferr != nil || !finalized {
-		return nil // awaiting more votes
+	// Exactly-once finalization guard: MarkCallbackFired returns true only
+	// for the first caller that detects finalization for this event. This
+	// prevents duplicate onFinalized calls when concurrent vote paths both
+	// see the record as finalized.
+	if !e.voting.MarkCallbackFired(result.EventID) {
+		return nil // not finalized, or another path already fired the callback
 	}
 
-	// Supermajority reached — read the consensus result.
+	// BFT supermajority reached — read the deterministic consensus result.
 	rec, ferr := e.voting.GetRecord(result.EventID)
 	if ferr != nil {
 		return nil
 	}
-	consensusVerdict := rec.TotalWeight > 0 &&
-		float64(rec.YesWeight)/float64(rec.TotalWeight) >= 0.667
 
 	// Clear from OCS pending (metrics only — no ledger mutation).
 	_ = e.ProcessResult(VerificationResult{
 		EventID:       result.EventID,
-		Verdict:       consensusVerdict,
-		VerifiedValue: result.VerifiedValue,
+		Verdict:       rec.FinalVerdict,
+		VerifiedValue: rec.FinalVerifiedValue,
 		VerifierID:    "",
-		Reason:        "consensus: supermajority finalized",
+		Reason:        "consensus: BFT finalized",
 		Timestamp:     result.Timestamp,
 	})
 
-	// Fire the finalization handler to create the Settlement event and
-	// call the settlement applicator. This is the authoritative path —
-	// settlement creation is inevitable once consensus finalizes,
-	// regardless of which vote delivery path triggered the supermajority.
+	// Fire the finalization handler to create the Settlement event.
 	if e.onFinalized != nil {
-		e.onFinalized(result.EventID, consensusVerdict, result.VerifiedValue, rec.FinalOrder)
+		e.onFinalized(result.EventID, rec.FinalVerdict, rec.FinalVerifiedValue, rec.FinalOrder)
 	}
 
 	return nil
@@ -758,54 +755,26 @@ func (e *Engine) checkExpired() {
 		)
 	}
 	for _, id := range expired {
+		// Expiry is cleanup, NOT consensus. The BFT threshold is the ONLY
+		// path to finalization. Expired events are removed from pending with
+		// a false verdict (no settlement). Escrow returns are handled by the
+		// settlement applicator when it sees a rejected/missing settlement.
 		if e.voting != nil {
-			// Consensus mode: inspect accumulated votes to make a majority
-			// decision rather than always rejecting on timeout.
 			rec, recErr := e.voting.GetRecord(id)
-			if recErr != nil {
-				// No votes at all — conservative reject.
-				slog.Warn("ocs: event expired with zero votes — rejecting",
-					"event_id", id,
-					"reason", "timeout_no_votes",
-				)
-				_ = e.ProcessResult(VerificationResult{
-					EventID:   id,
-					Verdict:   false,
-					Reason:    "consensus: timeout with no votes",
-					Timestamp: now,
-				})
+			if recErr == nil && rec.Finalized {
+				// Already finalized by BFT — skip.
 				continue
 			}
-			if rec.Finalized {
-				// Already finalized by consensus — idempotency in ProcessResult
-				// will silently skip this. Skip the call to avoid log noise.
-				continue
-			}
-			// Has votes but not yet a supermajority. Use a simple head-count
-			// majority: if more yes votes than no votes, accept; otherwise reject.
-			var yesCount, noCount int
-			for _, vote := range rec.Votes {
-				if vote {
-					yesCount++
-				} else {
-					noCount++
-				}
-			}
-			verdict := yesCount > noCount
-			_ = e.ProcessResult(VerificationResult{
-				EventID:   id,
-				Verdict:   verdict,
-				Reason:    "consensus: timeout majority decision",
-				Timestamp: now,
-			})
-		} else {
-			_ = e.ProcessResult(VerificationResult{
-				EventID:   id,
-				Verdict:   false,
-				Reason:    "verification deadline exceeded",
-				Timestamp: now,
-			})
 		}
+		slog.Warn("ocs: event expired without BFT consensus — removing from pending",
+			"event_id", id,
+		)
+		_ = e.ProcessResult(VerificationResult{
+			EventID:   id,
+			Verdict:   false,
+			Reason:    "consensus: expired without BFT supermajority",
+			Timestamp: now,
+		})
 	}
 }
 

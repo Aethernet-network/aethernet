@@ -158,3 +158,11 @@ func (vs *ValidatorSnapshot) VoteWeightByKey(operatorKey crypto.AgentID) (uint64
 func (vs *ValidatorSnapshot) SetVersion() uint64 {
 	return uint64(vs.Version)
 }
+
+// ActiveWeight returns the sum of weights of all participating seats in this
+// snapshot. Used by consensus to compute the BFT supermajority threshold over
+// total active weight, not just received-vote weight.
+// Satisfies consensus.ValidatorSetSource.
+func (vs *ValidatorSnapshot) ActiveWeight() uint64 {
+	return vs.TotalActiveWeight
+}
