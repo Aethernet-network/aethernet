@@ -36,6 +36,13 @@ var (
 	ErrPayloadMissingEffectiveVersion = errors.New("validatorlifecycle: effective_from_version is required")
 	ErrPayloadMissingCooldownDuration = errors.New("validatorlifecycle: cooldown_duration must be > 0 for begin_cooldown")
 	ErrPayloadInvalidExitPhase        = errors.New("validatorlifecycle: exit_phase must be begin_cooldown or complete_exit")
+
+	// Recovery-specific errors.
+	ErrPayloadMissingRecoveryKey     = errors.New("validatorlifecycle: recovery_public_key is required")
+	ErrPayloadMissingNewPublicKey    = errors.New("validatorlifecycle: new_public_key is required")
+	ErrPayloadMissingRequestedAt     = errors.New("validatorlifecycle: requested_at is required")
+	ErrPayloadMissingEffectiveAfter  = errors.New("validatorlifecycle: effective_after is required")
+	ErrPayloadMissingRotationEventID = errors.New("validatorlifecycle: rotation_event_id is required")
 )
 
 // ---------------------------------------------------------------------------
@@ -349,6 +356,142 @@ func (p *ValidatorSlashAppliedPayload) Validate() error {
 }
 
 // ---------------------------------------------------------------------------
+// Recovery Key Set Payload
+// ---------------------------------------------------------------------------
+
+// ValidatorRecoveryKeySetPayload establishes or updates the recovery authority
+// for a validator seat. This event is signed by the current operational key
+// (the seat operator pre-commits a cold recovery key). Once set, the recovery
+// key can authorize emergency key rotation and seat suspension without the
+// operational key.
+type ValidatorRecoveryKeySetPayload struct {
+	Version            uint8       `json:"v"`
+	ValidatorID        ValidatorID `json:"validator_id"`
+	RecoveryPublicKey  crypto.AgentID `json:"recovery_public_key"`
+	RequestedAt        int64       `json:"requested_at"`
+}
+
+func (p *ValidatorRecoveryKeySetPayload) Validate() error {
+	if p.ValidatorID == "" {
+		return ErrPayloadMissingValidatorID
+	}
+	if p.RecoveryPublicKey == "" {
+		return ErrPayloadMissingRecoveryKey
+	}
+	if p.RequestedAt <= 0 {
+		return ErrPayloadMissingRequestedAt
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Emergency Suspend Payload
+// ---------------------------------------------------------------------------
+
+// ValidatorEmergencySuspendPayload is a recovery-authorized request to suspend
+// a validator seat for future eligibility. This event is signed by the recovery
+// key (NOT the operational key). The Reducer validates that the signer matches
+// the seat's pre-committed recovery key. A compromised operational key cannot
+// cancel or override this suspension.
+type ValidatorEmergencySuspendPayload struct {
+	Version           uint8          `json:"v"`
+	ValidatorID       ValidatorID    `json:"validator_id"`
+	RecoveryPublicKey crypto.AgentID `json:"recovery_public_key"`
+	Reason            string         `json:"reason"`
+	RequestedAt       int64          `json:"requested_at"`
+}
+
+func (p *ValidatorEmergencySuspendPayload) Validate() error {
+	if p.ValidatorID == "" {
+		return ErrPayloadMissingValidatorID
+	}
+	if p.RecoveryPublicKey == "" {
+		return ErrPayloadMissingRecoveryKey
+	}
+	if p.Reason == "" {
+		return ErrPayloadMissingReason
+	}
+	if p.RequestedAt <= 0 {
+		return ErrPayloadMissingRequestedAt
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Recovery Rotate Payload
+// ---------------------------------------------------------------------------
+
+// ValidatorRecoveryRotatePayload is a recovery-authorized request to rotate the
+// validator's operational key. Signed by the recovery key. The new key takes
+// effect at the next validator set version (EffectiveFromVersion), consistent
+// with normal key rotation semantics. The EffectiveAfter timestamp provides
+// an optional delay window; the Reducer applies the rotation when the event
+// is processed (delay is informational for operators, not enforced by the
+// state machine — DAG causal ordering is the authority).
+type ValidatorRecoveryRotatePayload struct {
+	Version              uint8          `json:"v"`
+	ValidatorID          ValidatorID    `json:"validator_id"`
+	RecoveryPublicKey    crypto.AgentID `json:"recovery_public_key"`
+	NewPublicKey         crypto.AgentID `json:"new_public_key"`
+	RequestedAt          int64          `json:"requested_at"`
+	EffectiveAfter       int64          `json:"effective_after"`
+	EffectiveFromVersion uint64         `json:"effective_from_version"`
+}
+
+func (p *ValidatorRecoveryRotatePayload) Validate() error {
+	if p.ValidatorID == "" {
+		return ErrPayloadMissingValidatorID
+	}
+	if p.RecoveryPublicKey == "" {
+		return ErrPayloadMissingRecoveryKey
+	}
+	if p.NewPublicKey == "" {
+		return ErrPayloadMissingNewPublicKey
+	}
+	if p.RequestedAt <= 0 {
+		return ErrPayloadMissingRequestedAt
+	}
+	if p.EffectiveAfter <= 0 {
+		return ErrPayloadMissingEffectiveAfter
+	}
+	if p.EffectiveFromVersion == 0 {
+		return ErrPayloadMissingEffectiveVersion
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Recovery Rotate Cancel Payload
+// ---------------------------------------------------------------------------
+
+// ValidatorRecoveryRotateCancelPayload cancels a pending recovery-authorized
+// key rotation. Signed by the recovery key. The RotationEventID references the
+// original ValidatorRecoveryRotate event to cancel.
+type ValidatorRecoveryRotateCancelPayload struct {
+	Version           uint8          `json:"v"`
+	ValidatorID       ValidatorID    `json:"validator_id"`
+	RecoveryPublicKey crypto.AgentID `json:"recovery_public_key"`
+	RotationEventID   string         `json:"rotation_event_id"`
+	RequestedAt       int64          `json:"requested_at"`
+}
+
+func (p *ValidatorRecoveryRotateCancelPayload) Validate() error {
+	if p.ValidatorID == "" {
+		return ErrPayloadMissingValidatorID
+	}
+	if p.RecoveryPublicKey == "" {
+		return ErrPayloadMissingRecoveryKey
+	}
+	if p.RotationEventID == "" {
+		return ErrPayloadMissingRotationEventID
+	}
+	if p.RequestedAt <= 0 {
+		return ErrPayloadMissingRequestedAt
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // DAG Event ↔ LifecycleEvent Conversion
 // ---------------------------------------------------------------------------
 
@@ -374,6 +517,14 @@ func ExtractLifecycleEvent(ev *event.Event) ([]LifecycleEvent, error) {
 		return extractKeyRotate(ev)
 	case event.EventTypeValidatorSlashApplied:
 		return extractSlash(ev)
+	case event.EventTypeValidatorRecoveryKeySet:
+		return extractRecoveryKeySet(ev)
+	case event.EventTypeValidatorEmergencySuspend:
+		return extractEmergencySuspend(ev)
+	case event.EventTypeValidatorRecoveryRotate:
+		return extractRecoveryRotate(ev)
+	case event.EventTypeValidatorRecoveryRotateCancel:
+		return extractRecoveryRotateCancel(ev)
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrUnsupportedEvent, ev.Type)
 	}
@@ -528,5 +679,108 @@ func extractSlash(ev *event.Event) ([]LifecycleEvent, error) {
 		SlashAmount:        p.SlashAmount,
 		PermanentExclusion: p.PermanentExclusion,
 		CooldownDuration:   p.CooldownDuration,
+	}}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Recovery Event Extractors
+// ---------------------------------------------------------------------------
+
+// ErrRecoverySignerMismatch is returned when a recovery-authorized event's
+// DAG signer (ev.AgentID) does not match the payload's recovery_public_key.
+// This ensures the event was actually signed by the recovery key holder,
+// not merely claiming the correct recovery key in the payload.
+var ErrRecoverySignerMismatch = errors.New("validatorlifecycle: event signer does not match recovery_public_key")
+
+func extractRecoveryKeySet(ev *event.Event) ([]LifecycleEvent, error) {
+	p, err := event.GetPayload[ValidatorRecoveryKeySetPayload](ev)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+	// RecoveryKeySet is signed by the operational key (the operator pre-commits
+	// a recovery authority). No signer-vs-recovery-key check needed here —
+	// the operational key is the authority for this event type.
+	return []LifecycleEvent{{
+		Kind:        EventRecoveryKeySet,
+		EventID:     string(ev.ID),
+		CausalTS:    ev.CausalTimestamp,
+		SeatID:      p.ValidatorID,
+		RecoveryKey: p.RecoveryPublicKey,
+		RequestedAt: p.RequestedAt,
+	}}, nil
+}
+
+func extractEmergencySuspend(ev *event.Event) ([]LifecycleEvent, error) {
+	p, err := event.GetPayload[ValidatorEmergencySuspendPayload](ev)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+	// Signer must be the recovery key: ev.AgentID == payload.RecoveryPublicKey.
+	// dag.Add already verified the signature against ev.AgentID, so this
+	// confirms the event was signed by the actual recovery key holder.
+	if crypto.AgentID(ev.AgentID) != p.RecoveryPublicKey {
+		return nil, fmt.Errorf("%w: signer=%s recovery_key=%s", ErrRecoverySignerMismatch, ev.AgentID, p.RecoveryPublicKey)
+	}
+	return []LifecycleEvent{{
+		Kind:        EventEmergencySuspend,
+		EventID:     string(ev.ID),
+		CausalTS:    ev.CausalTimestamp,
+		SeatID:      p.ValidatorID,
+		RecoveryKey: p.RecoveryPublicKey,
+		Reason:      p.Reason,
+		RequestedAt: p.RequestedAt,
+	}}, nil
+}
+
+func extractRecoveryRotate(ev *event.Event) ([]LifecycleEvent, error) {
+	p, err := event.GetPayload[ValidatorRecoveryRotatePayload](ev)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+	// Signer must be the recovery key.
+	if crypto.AgentID(ev.AgentID) != p.RecoveryPublicKey {
+		return nil, fmt.Errorf("%w: signer=%s recovery_key=%s", ErrRecoverySignerMismatch, ev.AgentID, p.RecoveryPublicKey)
+	}
+	return []LifecycleEvent{{
+		Kind:           EventRecoveryRotate,
+		EventID:        string(ev.ID),
+		CausalTS:       ev.CausalTimestamp,
+		SeatID:         p.ValidatorID,
+		RecoveryKey:    p.RecoveryPublicKey,
+		NewPublicKey:   p.NewPublicKey,
+		RequestedAt:    p.RequestedAt,
+		EffectiveAfter: p.EffectiveAfter,
+	}}, nil
+}
+
+func extractRecoveryRotateCancel(ev *event.Event) ([]LifecycleEvent, error) {
+	p, err := event.GetPayload[ValidatorRecoveryRotateCancelPayload](ev)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+	// Signer must be the recovery key.
+	if crypto.AgentID(ev.AgentID) != p.RecoveryPublicKey {
+		return nil, fmt.Errorf("%w: signer=%s recovery_key=%s", ErrRecoverySignerMismatch, ev.AgentID, p.RecoveryPublicKey)
+	}
+	return []LifecycleEvent{{
+		Kind:            EventRecoveryRotateCancel,
+		EventID:         string(ev.ID),
+		CausalTS:        ev.CausalTimestamp,
+		SeatID:          p.ValidatorID,
+		RecoveryKey:     p.RecoveryPublicKey,
+		RotationEventID: p.RotationEventID,
+		RequestedAt:     p.RequestedAt,
 	}}, nil
 }

@@ -488,12 +488,24 @@ func applyLifecycleEventFromSync(ev *event.Event, reducer *validatorlifecycle.Re
 			continue
 		}
 		applied = true
-		slog.Info("validator lifecycle: applied",
+		logFields := []any{
 			"kind", lc.Kind,
 			"seat_id", lc.SeatID,
 			"event_id", ev.ID,
 			"version", reducer.Version(),
-		)
+		}
+		// Recovery-specific log enrichment.
+		switch lc.Kind {
+		case validatorlifecycle.EventRecoveryKeySet:
+			logFields = append(logFields, "recovery_key_configured", true)
+		case validatorlifecycle.EventEmergencySuspend:
+			logFields = append(logFields, "recovery_action", "emergency_suspend", "reason", lc.Reason)
+		case validatorlifecycle.EventRecoveryRotate:
+			logFields = append(logFields, "recovery_action", "key_rotation", "new_key_prefix", string(lc.NewPublicKey)[:min(16, len(lc.NewPublicKey))])
+		case validatorlifecycle.EventRecoveryRotateCancel:
+			logFields = append(logFields, "recovery_action", "rotation_cancel", "target_event", lc.RotationEventID)
+		}
+		slog.Info("validator lifecycle: applied", logFields...)
 	}
 	// Rebind the VotingRound's snapshot if any lifecycle events were applied.
 	if applied && vr != nil {
@@ -555,7 +567,11 @@ func isLifecycleEventType(t event.EventType) bool {
 		event.EventTypeValidatorResume,
 		event.EventTypeValidatorExit,
 		event.EventTypeValidatorKeyRotate,
-		event.EventTypeValidatorSlashApplied:
+		event.EventTypeValidatorSlashApplied,
+		event.EventTypeValidatorRecoveryKeySet,
+		event.EventTypeValidatorEmergencySuspend,
+		event.EventTypeValidatorRecoveryRotate,
+		event.EventTypeValidatorRecoveryRotateCancel:
 		return true
 	default:
 		return false
@@ -1762,7 +1778,11 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			event.EventTypeValidatorResume,
 			event.EventTypeValidatorExit,
 			event.EventTypeValidatorKeyRotate,
-			event.EventTypeValidatorSlashApplied:
+			event.EventTypeValidatorSlashApplied,
+			event.EventTypeValidatorRecoveryKeySet,
+			event.EventTypeValidatorEmergencySuspend,
+			event.EventTypeValidatorRecoveryRotate,
+			event.EventTypeValidatorRecoveryRotateCancel:
 			applyLifecycleEventFromSync(ev, stack.lifecycleReducer, stack.votingRound)
 		}
 	})
@@ -1857,6 +1877,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	apiSrv.SetEconomics(stack.walletMgr, stack.stakeManager, stack.feeCollector)
 	apiSrv.SetMinTaskBudget(cfg.Tasks.MinTaskBudget)
 	apiSrv.SetProtocolClient(stack.protoClient)
+	if stack.lifecycleReducer != nil {
+		apiSrv.SetLifecycleReducer(stack.lifecycleReducer)
+	}
 	// Wire canary calibration endpoints. Only available when the store is present.
 	if canaryMgr != nil {
 		apiSrv.SetCalibrationStore(canaryMgr)

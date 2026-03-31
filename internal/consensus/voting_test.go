@@ -1229,3 +1229,247 @@ func TestBFT_MarkCallbackFired_ExactlyOnce(t *testing.T) {
 		t.Errorf("exactly 1 concurrent MarkCallbackFired should succeed, got %d", fired)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Recovery: open-round stability and future-snapshot eligibility
+// ---------------------------------------------------------------------------
+
+// setupRecoveryReducer creates a Reducer with 3 active seats via the genesis
+// manifest path (which bypasses PendingJoin → Probationary → Active manually).
+func setupRecoveryReducer(t *testing.T) (*validatorlifecycle.Reducer, []struct {
+	id  validatorlifecycle.ValidatorID
+	key crypto.AgentID
+}) {
+	t.Helper()
+	entries := []validatorlifecycle.GenesisManifestEntry{
+		{ValidatorID: "seat-r1", OperatorAgentID: "key-r1", ConsensusPublicKey: "key-r1", KeyEpoch: 1, BondedStake: 100_000, InitialStatus: validatorlifecycle.SeatActive},
+		{ValidatorID: "seat-r2", OperatorAgentID: "key-r2", ConsensusPublicKey: "key-r2", KeyEpoch: 1, BondedStake: 100_000, InitialStatus: validatorlifecycle.SeatActive},
+		{ValidatorID: "seat-r3", OperatorAgentID: "key-r3", ConsensusPublicKey: "key-r3", KeyEpoch: 1, BondedStake: 100_000, InitialStatus: validatorlifecycle.SeatActive},
+	}
+	manifest := &validatorlifecycle.GenesisManifest{Entries: entries}
+	r, err := validatorlifecycle.SeedReducerFromManifest(manifest)
+	if err != nil {
+		t.Fatalf("seed reducer: %v", err)
+	}
+	seats := []struct {
+		id  validatorlifecycle.ValidatorID
+		key crypto.AgentID
+	}{
+		{"seat-r1", "key-r1"},
+		{"seat-r2", "key-r2"},
+		{"seat-r3", "key-r3"},
+	}
+	return r, seats
+}
+
+func TestRecovery_OpenRound_OldSnapshot_AcceptsOldKey(t *testing.T) {
+	r, seats := setupRecoveryReducer(t)
+
+	// Take snapshot BEFORE any recovery action.
+	snapBefore := r.Snapshot()
+
+	// Set recovery key on seat-r1.
+	_ = r.Apply(validatorlifecycle.LifecycleEvent{
+		Kind: validatorlifecycle.EventRecoveryKeySet, EventID: "rks-1",
+		CausalTS: 10, SeatID: seats[0].id, RecoveryKey: "cold-key-1",
+	})
+
+	// Recovery-rotate seat-r1's key.
+	_ = r.Apply(validatorlifecycle.LifecycleEvent{
+		Kind: validatorlifecycle.EventRecoveryRotate, EventID: "rr-1",
+		CausalTS: 15, SeatID: seats[0].id, RecoveryKey: "cold-key-1",
+		NewPublicKey: "key-r1-new", RequestedAt: 1700000000, EffectiveAfter: 1700000300,
+	})
+
+	// Open a round bound to the OLD snapshot.
+	reg := identity.NewRegistry()
+	cfg := &consensus.ConsensusConfig{
+		SupermajorityThreshold: 0.667,
+		MaxRounds:              10,
+		RoundTimeout:           5 * time.Second,
+		MinParticipants:        1,
+	}
+	vr := consensus.NewVotingRound(cfg, reg)
+	vr.SetValidatorSet(snapBefore)
+
+	eid := event.EventID("open-round-old-snap")
+
+	// OLD key should still be accepted in the old-snapshot round.
+	err := vr.RegisterVote(eid, "key-r1", true, 0)
+	if err != nil {
+		t.Fatalf("old key should be accepted in old-snapshot round: %v", err)
+	}
+
+	// NEW key should NOT be accepted in the old-snapshot round (wasn't in snapshot).
+	err = vr.RegisterVote(eid, "key-r1-new", true, 0)
+	if err == nil {
+		t.Fatal("new key should NOT be accepted in old-snapshot round")
+	}
+}
+
+func TestRecovery_NewRound_AfterSuspension_ExcludesSeat(t *testing.T) {
+	r, seats := setupRecoveryReducer(t)
+
+	// Set recovery key.
+	_ = r.Apply(validatorlifecycle.LifecycleEvent{
+		Kind: validatorlifecycle.EventRecoveryKeySet, EventID: "rks-2",
+		CausalTS: 10, SeatID: seats[0].id, RecoveryKey: "cold-key-2",
+	})
+
+	// Emergency suspend seat-r1.
+	_ = r.Apply(validatorlifecycle.LifecycleEvent{
+		Kind: validatorlifecycle.EventEmergencySuspend, EventID: "es-2",
+		CausalTS: 15, SeatID: seats[0].id, RecoveryKey: "cold-key-2",
+		Reason: "compromise",
+	})
+
+	// Take snapshot AFTER suspension.
+	snapAfter := r.Snapshot()
+
+	reg := identity.NewRegistry()
+	cfg := &consensus.ConsensusConfig{
+		SupermajorityThreshold: 0.667,
+		MaxRounds:              10,
+		RoundTimeout:           5 * time.Second,
+		MinParticipants:        1,
+	}
+	vr := consensus.NewVotingRound(cfg, reg)
+	vr.SetValidatorSet(snapAfter)
+
+	eid := event.EventID("new-round-post-suspend")
+
+	// Suspended seat should be rejected.
+	err := vr.RegisterVote(eid, seats[0].key, true, 0)
+	if err == nil {
+		t.Fatal("suspended seat should be ineligible in new-round snapshot")
+	}
+
+	// Other seats should still be eligible.
+	err = vr.RegisterVote(eid, seats[1].key, true, 0)
+	if err != nil {
+		t.Fatalf("active seat should still be eligible: %v", err)
+	}
+}
+
+func TestRecovery_NewRound_AfterRotation_RequiresNewKey(t *testing.T) {
+	r, seats := setupRecoveryReducer(t)
+
+	// Set recovery key.
+	_ = r.Apply(validatorlifecycle.LifecycleEvent{
+		Kind: validatorlifecycle.EventRecoveryKeySet, EventID: "rks-3",
+		CausalTS: 10, SeatID: seats[0].id, RecoveryKey: "cold-key-3",
+	})
+
+	// Recovery-rotate.
+	_ = r.Apply(validatorlifecycle.LifecycleEvent{
+		Kind: validatorlifecycle.EventRecoveryRotate, EventID: "rr-3",
+		CausalTS: 15, SeatID: seats[0].id, RecoveryKey: "cold-key-3",
+		NewPublicKey: "key-r1-rotated", RequestedAt: 1700000000, EffectiveAfter: 1700000300,
+	})
+
+	// Take snapshot AFTER rotation.
+	snapAfter := r.Snapshot()
+
+	reg := identity.NewRegistry()
+	cfg := &consensus.ConsensusConfig{
+		SupermajorityThreshold: 0.667,
+		MaxRounds:              10,
+		RoundTimeout:           5 * time.Second,
+		MinParticipants:        1,
+	}
+	vr := consensus.NewVotingRound(cfg, reg)
+	vr.SetValidatorSet(snapAfter)
+
+	eid := event.EventID("new-round-post-rotate")
+
+	// Old (compromised) key must be rejected.
+	err := vr.RegisterVote(eid, "key-r1", true, 0)
+	if err == nil {
+		t.Fatal("old compromised key must be rejected in new-round snapshot after rotation")
+	}
+
+	// New key must be accepted.
+	err = vr.RegisterVote(eid, "key-r1-rotated", true, 0)
+	if err != nil {
+		t.Fatalf("new key should be accepted in post-rotation snapshot: %v", err)
+	}
+}
+
+func TestRecovery_SnapshotImmutability_AfterRecoveryActions(t *testing.T) {
+	r, seats := setupRecoveryReducer(t)
+
+	// Take snapshot BEFORE recovery.
+	snapBefore := r.Snapshot()
+	weightBefore, eligibleBefore := snapBefore.VoteWeightByKey(seats[0].key)
+
+	// Set recovery key + emergency suspend.
+	_ = r.Apply(validatorlifecycle.LifecycleEvent{
+		Kind: validatorlifecycle.EventRecoveryKeySet, EventID: "rks-imm",
+		CausalTS: 10, SeatID: seats[0].id, RecoveryKey: "cold-imm",
+	})
+	_ = r.Apply(validatorlifecycle.LifecycleEvent{
+		Kind: validatorlifecycle.EventEmergencySuspend, EventID: "es-imm",
+		CausalTS: 15, SeatID: seats[0].id, RecoveryKey: "cold-imm",
+		Reason: "compromise",
+	})
+
+	// The OLD snapshot must be unchanged.
+	weightAfter, eligibleAfter := snapBefore.VoteWeightByKey(seats[0].key)
+	if weightBefore != weightAfter || eligibleBefore != eligibleAfter {
+		t.Fatalf("old snapshot mutated: weight %d→%d eligible %v→%v",
+			weightBefore, weightAfter, eligibleBefore, eligibleAfter)
+	}
+}
+
+func TestRecovery_VoteRecords_NotMutated(t *testing.T) {
+	r, seats := setupRecoveryReducer(t)
+	snapBefore := r.Snapshot()
+	versionBefore := snapBefore.SetVersion()
+
+	reg := identity.NewRegistry()
+	cfg := &consensus.ConsensusConfig{
+		SupermajorityThreshold: 0.667,
+		MaxRounds:              10,
+		RoundTimeout:           5 * time.Second,
+		MinParticipants:        1,
+	}
+	vr := consensus.NewVotingRound(cfg, reg)
+	vr.SetValidatorSet(snapBefore)
+
+	eid := event.EventID("vote-record-immutable")
+	if err := vr.RegisterVote(eid, seats[0].key, true, 0); err != nil {
+		t.Fatalf("vote r1: %v", err)
+	}
+	if err := vr.RegisterVote(eid, seats[1].key, true, 0); err != nil {
+		t.Fatalf("vote r2: %v", err)
+	}
+
+	rec1, _ := vr.GetRecord(eid)
+	voteCount1 := len(rec1.Votes)
+
+	// Now suspend seat-r1 via recovery.
+	_ = r.Apply(validatorlifecycle.LifecycleEvent{
+		Kind: validatorlifecycle.EventRecoveryKeySet, EventID: "rks-vrec",
+		CausalTS: 20, SeatID: seats[0].id, RecoveryKey: "cold-vrec",
+	})
+	_ = r.Apply(validatorlifecycle.LifecycleEvent{
+		Kind: validatorlifecycle.EventEmergencySuspend, EventID: "es-vrec",
+		CausalTS: 25, SeatID: seats[0].id, RecoveryKey: "cold-vrec",
+		Reason: "compromise",
+	})
+
+	// Rebind to new snapshot (simulating what the sync handler does).
+	snapAfter := r.Snapshot()
+	vr.SetValidatorSet(snapAfter)
+
+	// The existing vote record must be unchanged.
+	rec2, _ := vr.GetRecord(eid)
+	if len(rec2.Votes) != voteCount1 {
+		t.Fatalf("vote record mutated: %d → %d votes", voteCount1, len(rec2.Votes))
+	}
+	// The bound snapshot on the record should still be the original.
+	if rec2.ValidatorSetVersion != versionBefore {
+		t.Fatalf("vote record snapshot version changed: %d → %d",
+			versionBefore, rec2.ValidatorSetVersion)
+	}
+}

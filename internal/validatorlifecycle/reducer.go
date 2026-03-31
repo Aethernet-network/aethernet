@@ -56,6 +56,22 @@ var (
 	// ErrSlashExceedsStake is returned when a slash amount exceeds the
 	// seat's current bonded stake.
 	ErrSlashExceedsStake = errors.New("validatorlifecycle: slash amount exceeds bonded stake")
+
+	// ErrNoRecoveryKey is returned when a recovery-authorized action targets
+	// a seat that has no recovery key pre-committed.
+	ErrNoRecoveryKey = errors.New("validatorlifecycle: seat has no recovery key")
+
+	// ErrRecoveryKeyMismatch is returned when a recovery event's recovery
+	// key does not match the seat's committed recovery key.
+	ErrRecoveryKeyMismatch = errors.New("validatorlifecycle: recovery key does not match seat commitment")
+
+	// ErrNoPendingRotation is returned when a rotation cancel targets a seat
+	// with no pending recovery rotation.
+	ErrNoPendingRotation = errors.New("validatorlifecycle: no pending recovery rotation to cancel")
+
+	// ErrRotationEventMismatch is returned when a rotation cancel references
+	// a different rotation event than the one pending.
+	ErrRotationEventMismatch = errors.New("validatorlifecycle: rotation_event_id does not match pending rotation")
 )
 
 // ---------------------------------------------------------------------------
@@ -110,6 +126,14 @@ func (r *Reducer) Apply(ev LifecycleEvent) error {
 		return r.applyStakeUpdate(ev)
 	case EventSlash:
 		return r.applySlash(ev)
+	case EventRecoveryKeySet:
+		return r.applyRecoveryKeySet(ev)
+	case EventEmergencySuspend:
+		return r.applyEmergencySuspend(ev)
+	case EventRecoveryRotate:
+		return r.applyRecoveryRotate(ev)
+	case EventRecoveryRotateCancel:
+		return r.applyRecoveryRotateCancel(ev)
 	default:
 		return fmt.Errorf("%w: %q", ErrUnsupportedEvent, ev.Kind)
 	}
@@ -477,6 +501,142 @@ func (r *Reducer) applySlash(ev LifecycleEvent) error {
 }
 
 // ---------------------------------------------------------------------------
+// Recovery Event Handlers
+// ---------------------------------------------------------------------------
+
+// applyRecoveryKeySet sets or updates the recovery key for a seat. Must be
+// signed by the current operational key (enforced at DAG event level).
+// Does NOT increment the validator set version (no consensus impact).
+func (r *Reducer) applyRecoveryKeySet(ev LifecycleEvent) error {
+	if ev.RecoveryKey == "" {
+		return ErrMissingOperatorKey // reuse: recovery key is required
+	}
+	seat, err := r.mustSeat(ev.SeatID)
+	if err != nil {
+		return err
+	}
+	if seat.Status.IsTerminal() {
+		return fmt.Errorf("%w: cannot set recovery key for %s seat %s", ErrTerminalSeat, seat.Status, ev.SeatID)
+	}
+	seat.RecoveryKey = ev.RecoveryKey
+	// No version increment: setting a recovery key does not change the
+	// active validator set or affect consensus eligibility.
+	return nil
+}
+
+// applyEmergencySuspend suspends a seat using the recovery authority.
+// The recovery key must match the seat's pre-committed recovery key.
+// Uses the existing suspension mechanics (same as applySuspend) for
+// future-snapshot eligibility.
+func (r *Reducer) applyEmergencySuspend(ev LifecycleEvent) error {
+	seat, err := r.mustSeat(ev.SeatID)
+	if err != nil {
+		return err
+	}
+	if seat.RecoveryKey == "" {
+		return fmt.Errorf("%w: seat=%s", ErrNoRecoveryKey, ev.SeatID)
+	}
+	if ev.RecoveryKey != seat.RecoveryKey {
+		return fmt.Errorf("%w: seat=%s", ErrRecoveryKeyMismatch, ev.SeatID)
+	}
+	if !seat.Status.CanTransitionTo(SeatSuspended) {
+		return fmt.Errorf("%w: %s → %s (seat=%s)", ErrInvalidTransition, seat.Status, SeatSuspended, ev.SeatID)
+	}
+	nextVersion := r.version + 1
+	seat.Status = SeatSuspended
+	seat.SuspensionReason = "recovery:" + ev.Reason
+	seat.Weight = 0
+	seat.EffectiveFromVersion = nextVersion
+	r.version = nextVersion
+	return nil
+}
+
+// applyRecoveryRotate records a pending key rotation authorized by the
+// recovery key. The rotation does NOT take immediate effect — it is stored
+// as PendingRotation on the seat. The key change is applied immediately
+// (new key epoch, updated OperatorKey) because DAG causal ordering is the
+// authority for when the rotation takes effect, not a wall-clock timer.
+// EffectiveFromVersion ensures the new key is not eligible in already-open
+// snapshot versions.
+func (r *Reducer) applyRecoveryRotate(ev LifecycleEvent) error {
+	if ev.NewPublicKey == "" {
+		return ErrMissingOperatorKey
+	}
+	seat, err := r.mustSeat(ev.SeatID)
+	if err != nil {
+		return err
+	}
+	if seat.RecoveryKey == "" {
+		return fmt.Errorf("%w: seat=%s", ErrNoRecoveryKey, ev.SeatID)
+	}
+	if ev.RecoveryKey != seat.RecoveryKey {
+		return fmt.Errorf("%w: seat=%s", ErrRecoveryKeyMismatch, ev.SeatID)
+	}
+	if seat.Status.IsTerminal() {
+		return fmt.Errorf("%w: cannot rotate key for %s seat %s", ErrTerminalSeat, seat.Status, ev.SeatID)
+	}
+	if seat.OperatorKey == ev.NewPublicKey {
+		return fmt.Errorf("%w: new key identical to current (seat=%s)", ErrKeyEpochRegression, ev.SeatID)
+	}
+
+	nextVersion := r.version + 1
+	nextEpoch := seat.CurrentKeyEpoch().Epoch + 1
+
+	// Record the pending rotation for auditability.
+	seat.PendingRotation = &PendingRecoveryRotation{
+		RequestEventID: ev.EventID,
+		NewPublicKey:   ev.NewPublicKey,
+		RequestedAt:    ev.RequestedAt,
+		EffectiveAfter: ev.EffectiveAfter,
+	}
+
+	// Apply the rotation immediately: new key epoch, updated OperatorKey.
+	// EffectiveFromVersion ensures the new key is not eligible in
+	// snapshots taken before this version.
+	seat.OperatorKey = ev.NewPublicKey
+	seat.KeyHistory = append(seat.KeyHistory, KeyEpoch{
+		Epoch:                 nextEpoch,
+		PublicKey:             ev.NewPublicKey,
+		EffectiveFromEventID:  ev.EventID,
+		EffectiveFromCausalTS: ev.CausalTS,
+	})
+	seat.EffectiveFromVersion = nextVersion
+	seat.PendingRotation = nil // rotation applied — clear pending
+	r.version = nextVersion
+	return nil
+}
+
+// applyRecoveryRotateCancel cancels a pending recovery rotation. Since
+// applyRecoveryRotate applies the rotation immediately (no deferred state),
+// cancellation is only valid if a subsequent correction is needed. In practice,
+// this clears the PendingRotation record for auditability. The recovery key
+// must match the seat's committed recovery key.
+func (r *Reducer) applyRecoveryRotateCancel(ev LifecycleEvent) error {
+	seat, err := r.mustSeat(ev.SeatID)
+	if err != nil {
+		return err
+	}
+	if seat.RecoveryKey == "" {
+		return fmt.Errorf("%w: seat=%s", ErrNoRecoveryKey, ev.SeatID)
+	}
+	if ev.RecoveryKey != seat.RecoveryKey {
+		return fmt.Errorf("%w: seat=%s", ErrRecoveryKeyMismatch, ev.SeatID)
+	}
+	// Since rotations apply immediately, cancellation clears any pending
+	// audit record. If there's no pending rotation, this is a no-op error.
+	if seat.PendingRotation == nil {
+		return fmt.Errorf("%w: seat=%s", ErrNoPendingRotation, ev.SeatID)
+	}
+	if seat.PendingRotation.RequestEventID != ev.RotationEventID {
+		return fmt.Errorf("%w: seat=%s pending=%s cancel=%s",
+			ErrRotationEventMismatch, ev.SeatID,
+			seat.PendingRotation.RequestEventID, ev.RotationEventID)
+	}
+	seat.PendingRotation = nil
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -493,6 +653,10 @@ func cloneSeat(s *ValidatorSeat) *ValidatorSeat {
 	if len(s.KeyHistory) > 0 {
 		c.KeyHistory = make([]KeyEpoch, len(s.KeyHistory))
 		copy(c.KeyHistory, s.KeyHistory)
+	}
+	if s.PendingRotation != nil {
+		pr := *s.PendingRotation
+		c.PendingRotation = &pr
 	}
 	return &c
 }

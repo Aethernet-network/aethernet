@@ -76,6 +76,7 @@ import (
 	svcregistry "github.com/Aethernet-network/aethernet/internal/registry"
 	"github.com/Aethernet-network/aethernet/internal/replay"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
+	"github.com/Aethernet-network/aethernet/internal/validatorlifecycle"
 	"github.com/Aethernet-network/aethernet/internal/verification"
 	"github.com/Aethernet-network/aethernet/internal/router"
 	"github.com/Aethernet-network/aethernet/internal/staking"
@@ -266,6 +267,11 @@ type Server struct {
 	enableL2    bool
 	enableL3    bool
 	explorerDir string // path to serve the explorer UI from; "" disables it
+
+	// lifecycleReducer provides read-only access to the validator seat state.
+	// Set via SetLifecycleReducer after construction. Used by the validator
+	// status endpoint to expose seat recovery configuration and lifecycle state.
+	lifecycleReducer lifecycleReducerReader
 
 	// protoClient is the canonical protocol interface for token movement.
 	// Set via SetProtocolClient after construction.
@@ -486,6 +492,11 @@ func (s *Server) registerL3Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/admin/calibration/agents", s.handleAdminCalibrationAgents)
 	// Admin calibration query — per-actor canary accuracy rollup.
 	mux.HandleFunc("GET /v1/admin/calibration/{actor_id}", s.handleAdminCalibration)
+	// Validator recovery and status endpoints.
+	mux.HandleFunc("GET /v1/validator/{seat_id}", s.handleGetValidatorSeat)
+	mux.HandleFunc("GET /v1/validator", s.handleListValidatorSeats)
+	mux.HandleFunc("POST /v1/validator/recovery-key", s.handleSetRecoveryKey)
+	mux.HandleFunc("POST /v1/validator/recovery-event", s.handleRecoveryEvent)
 	// Developer platform API key management.
 	mux.HandleFunc("POST /v1/platform/keys", s.handleGenerateKey)
 	mux.HandleFunc("GET /v1/platform/keys/{key}", s.handleGetKey)
@@ -554,6 +565,20 @@ type protoClientInterface interface {
 // SetProtocolClient wires the protocol client into the server. Call before Start.
 func (s *Server) SetProtocolClient(pc protoClientInterface) {
 	s.protoClient = pc
+}
+
+// lifecycleReducerReader provides read-only access to validator seat state.
+// Satisfied by *validatorlifecycle.Reducer.
+type lifecycleReducerReader interface {
+	Seat(id validatorlifecycle.ValidatorID) (*validatorlifecycle.ValidatorSeat, error)
+	AllSeats() []*validatorlifecycle.ValidatorSeat
+	Version() validatorlifecycle.ValidatorSetVersion
+}
+
+// SetLifecycleReducer wires the validator lifecycle reducer for read-only
+// status queries. Call after the reducer is seeded.
+func (s *Server) SetLifecycleReducer(r lifecycleReducerReader) {
+	s.lifecycleReducer = r
 }
 
 // SetPublisher wires the authoritative local event publisher. When set,
@@ -3216,6 +3241,9 @@ func (s *Server) handlePostRegistry(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "service registry not enabled")
 		return
 	}
+	if s.checkTxIDSeen(w, r) {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req registryListingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -3251,9 +3279,12 @@ func (s *Server) handlePostRegistry(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Accept any agent_id from the body; fall back to the node's own identity.
+	// Use verified signer identity when signature-authenticated.
+	// An agent can only create listings for itself (signer=actor enforcement).
 	agentID := crypto.AgentID(req.AgentID)
-	if agentID == "" {
+	if authAgent := getAuthAgent(r); authAgent != "" {
+		agentID = authAgent
+	} else if agentID == "" {
 		agentID = s.agentID
 	}
 
@@ -3458,6 +3489,203 @@ func (s *Server) handleUnstake(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
+// Validator Status Handlers
+// ---------------------------------------------------------------------------
+
+// validatorSeatView is the API-safe summary of a validator seat. It exposes
+// lifecycle state and recovery configuration WITHOUT leaking the full recovery
+// public key — only a boolean indicating whether one is configured. The recovery
+// public key is already on-chain (in DAG event payloads) but we avoid redundant
+// exposure in summary views.
+type validatorSeatView struct {
+	ID                 string `json:"id"`
+	Status             string `json:"status"`
+	OperatorKeyPrefix  string `json:"operator_key_prefix"`
+	KeyEpoch           uint64 `json:"key_epoch"`
+	StakeAmount        uint64 `json:"stake_amount"`
+	Weight             uint64 `json:"weight"`
+	RecoveryConfigured bool   `json:"recovery_configured"`
+	PendingRotation    bool   `json:"pending_rotation"`
+	SuspensionReason   string `json:"suspension_reason,omitempty"`
+	IsGenesis          bool   `json:"is_genesis,omitempty"`
+	SetVersion         uint64 `json:"effective_from_version"`
+}
+
+func seatToView(s *validatorlifecycle.ValidatorSeat) validatorSeatView {
+	keyPrefix := string(s.OperatorKey)
+	if len(keyPrefix) > 16 {
+		keyPrefix = keyPrefix[:16] + "..."
+	}
+	return validatorSeatView{
+		ID:                 string(s.ID),
+		Status:             string(s.Status),
+		OperatorKeyPrefix:  keyPrefix,
+		KeyEpoch:           s.CurrentKeyEpoch().Epoch,
+		StakeAmount:        s.StakeAmount,
+		Weight:             s.Weight,
+		RecoveryConfigured: s.HasRecoveryKey(),
+		PendingRotation:    s.HasPendingRotation(),
+		SuspensionReason:   s.SuspensionReason,
+		IsGenesis:          s.IsGenesis,
+		SetVersion:         uint64(s.EffectiveFromVersion),
+	}
+}
+
+// handleGetValidatorSeat handles GET /v1/validator/{seat_id}.
+func (s *Server) handleGetValidatorSeat(w http.ResponseWriter, r *http.Request) {
+	if s.lifecycleReducer == nil {
+		writeError(w, http.StatusNotImplemented, "validator lifecycle not enabled")
+		return
+	}
+	seatID := r.PathValue("seat_id")
+	if seatID == "" {
+		writeError(w, http.StatusBadRequest, "seat_id required")
+		return
+	}
+	seat, err := s.lifecycleReducer.Seat(validatorlifecycle.ValidatorID(seatID))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "validator seat not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, seatToView(seat))
+}
+
+// handleListValidatorSeats handles GET /v1/validator.
+func (s *Server) handleListValidatorSeats(w http.ResponseWriter, r *http.Request) {
+	if s.lifecycleReducer == nil {
+		writeError(w, http.StatusNotImplemented, "validator lifecycle not enabled")
+		return
+	}
+	allSeats := s.lifecycleReducer.AllSeats()
+	views := make([]validatorSeatView, len(allSeats))
+	for i, seat := range allSeats {
+		views[i] = seatToView(seat)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version": uint64(s.lifecycleReducer.Version()),
+		"count":   len(views),
+		"seats":   views,
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Validator Recovery Handlers
+// ---------------------------------------------------------------------------
+
+// handleSetRecoveryKey handles POST /v1/validator/recovery-key.
+// Sets or updates the recovery authority for a validator seat. Signed by the
+// current operational key (the node's own key). The recovery_public_key in the
+// payload is the pre-committed cold key that can authorize emergency actions.
+func (s *Server) handleSetRecoveryKey(w http.ResponseWriter, r *http.Request) {
+	if s.checkTxIDSeen(w, r) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
+	var req struct {
+		ValidatorID       string `json:"validator_id"`
+		RecoveryPublicKey string `json:"recovery_public_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.ValidatorID == "" {
+		writeError(w, http.StatusBadRequest, "validator_id is required")
+		return
+	}
+	if req.RecoveryPublicKey == "" {
+		writeError(w, http.StatusBadRequest, "recovery_public_key is required")
+		return
+	}
+
+	payload := validatorlifecycle.ValidatorRecoveryKeySetPayload{
+		Version:           1,
+		ValidatorID:       validatorlifecycle.ValidatorID(req.ValidatorID),
+		RecoveryPublicKey: crypto.AgentID(req.RecoveryPublicKey),
+		RequestedAt:       time.Now().Unix(),
+	}
+
+	// Emit via the authoritative local publication path. The event is signed
+	// by the node's operational key (s.kp) — consistent with RecoveryKeySet
+	// being an operational-key action.
+	eventID := s.emitDAGEvent(event.EventTypeValidatorRecoveryKeySet, payload, string(s.agentID))
+	if eventID == "" {
+		writeError(w, http.StatusInternalServerError, "failed to publish recovery key set event")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"event_id":     string(eventID),
+		"validator_id": req.ValidatorID,
+		"status":       "recovery_key_set",
+	})
+}
+
+// handleRecoveryEvent handles POST /v1/validator/recovery-event.
+// Accepts a pre-constructed, pre-signed DAG event for recovery-authorized
+// actions (emergency suspend, recovery rotate, recovery rotate cancel).
+// The caller signs the event client-side with their recovery key. The server
+// validates the payload and publishes via the authoritative local publication
+// path. This preserves the invariant that recovery events are signed by the
+// recovery key, not the node's operational key.
+func (s *Server) handleRecoveryEvent(w http.ResponseWriter, r *http.Request) {
+	if s.checkTxIDSeen(w, r) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
+	var ev event.Event
+	if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid event JSON: "+err.Error())
+		return
+	}
+
+	// Only accept recovery-authorized event types.
+	switch ev.Type {
+	case event.EventTypeValidatorEmergencySuspend,
+		event.EventTypeValidatorRecoveryRotate,
+		event.EventTypeValidatorRecoveryRotateCancel:
+		// OK — accepted recovery event types.
+	default:
+		writeError(w, http.StatusBadRequest, "only recovery-authorized event types accepted")
+		return
+	}
+
+	// Verify the event has a signature (caller signed it client-side).
+	if len(ev.Signature) == 0 {
+		writeError(w, http.StatusBadRequest, "event must be signed by the recovery key")
+		return
+	}
+
+	// Verify the signature is valid. dag.Add will also check, but early
+	// rejection gives a better error message.
+	if !crypto.VerifyEvent(&ev) {
+		writeError(w, http.StatusBadRequest, "invalid event signature")
+		return
+	}
+
+	// Publish through the authoritative local event publisher.
+	// dag.Add verifies signature, causal refs, EventID.
+	// ExtractLifecycleEvent verifies signer == recovery_public_key.
+	// Reducer.Apply verifies recovery_public_key == seat.RecoveryKey.
+	if s.publisher != nil {
+		if err := s.publisher.Publish(&ev); err != nil {
+			writeError(w, http.StatusBadRequest, "publish failed: "+err.Error())
+			return
+		}
+	} else if err := s.dag.Add(&ev); err != nil {
+		writeError(w, http.StatusBadRequest, "dag.Add failed: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"event_id": string(ev.ID),
+		"type":     string(ev.Type),
+		"status":   "published",
+	})
+}
+
+// ---------------------------------------------------------------------------
 // Developer Platform Handlers
 // ---------------------------------------------------------------------------
 
@@ -3466,6 +3694,15 @@ func (s *Server) handleUnstake(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGenerateKey(w http.ResponseWriter, r *http.Request) {
 	if s.platformKeys == nil {
 		writeError(w, http.StatusNotImplemented, "platform API keys not enabled")
+		return
+	}
+	if s.checkTxIDSeen(w, r) {
+		return
+	}
+	// Require either TX-V1 signature or API key authentication.
+	if getAuthAgent(r) == "" && !s.isAuthenticated(r) {
+		writeCodedError(w, http.StatusUnauthorized, "unauthorized",
+			"TX-V1 signature or API key required to generate platform keys", "")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
@@ -3557,6 +3794,9 @@ func (s *Server) handleRouterRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "task router not enabled")
 		return
 	}
+	if s.checkTxIDSeen(w, r) {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req struct {
 		AgentID       string               `json:"agent_id"`
@@ -3581,8 +3821,14 @@ func (s *Server) handleRouterRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Signer=actor enforcement: authenticated agent can only register itself.
+	agentID := crypto.AgentID(req.AgentID)
+	if authAgent := getAuthAgent(r); authAgent != "" {
+		agentID = authAgent
+	}
+
 	cap := router.AgentCapability{
-		AgentID:       crypto.AgentID(req.AgentID),
+		AgentID:       agentID,
 		Categories:    req.Categories,
 		Tags:          req.Tags,
 		Description:   req.Description,
@@ -3596,7 +3842,7 @@ func (s *Server) handleRouterRegister(w http.ResponseWriter, r *http.Request) {
 
 	s.taskRouter.RegisterCapability(cap)
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"agent_id":   req.AgentID,
+		"agent_id":   string(agentID),
 		"categories": req.Categories,
 		"status":     "registered",
 	})
@@ -3609,10 +3855,21 @@ func (s *Server) handleRouterUnregister(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotImplemented, "task router not enabled")
 		return
 	}
+	if s.checkTxIDSeen(w, r) {
+		return
+	}
 	agentID := r.PathValue("agent_id")
 	if agentID == "" {
 		writeError(w, http.StatusBadRequest, "agent_id required")
 		return
+	}
+	// Signer=actor enforcement: only the agent itself can unregister.
+	if authAgent := getAuthAgent(r); authAgent != "" {
+		if string(authAgent) != agentID {
+			writeCodedError(w, http.StatusForbidden, "forbidden",
+				"signer does not match target agent_id", "")
+			return
+		}
 	}
 	s.taskRouter.UnregisterCapability(crypto.AgentID(agentID))
 	writeJSON(w, http.StatusOK, map[string]string{"agent_id": agentID, "status": "unregistered"})
@@ -3625,10 +3882,21 @@ func (s *Server) handleRouterAvailability(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotImplemented, "task router not enabled")
 		return
 	}
+	if s.checkTxIDSeen(w, r) {
+		return
+	}
 	agentID := r.PathValue("agent_id")
 	if agentID == "" {
 		writeError(w, http.StatusBadRequest, "agent_id required")
 		return
+	}
+	// Signer=actor enforcement: only the agent itself can change its availability.
+	if authAgent := getAuthAgent(r); authAgent != "" {
+		if string(authAgent) != agentID {
+			writeCodedError(w, http.StatusForbidden, "forbidden",
+				"signer does not match target agent_id", "")
+			return
+		}
 	}
 	var req struct {
 		Available bool `json:"available"`

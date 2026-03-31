@@ -14,11 +14,11 @@ FROM golang:1.25-alpine AS builder
 RUN apk add --no-cache git
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+COPY vendor/ vendor/
 COPY . .
-RUN CGO_ENABLED=0 go build -o /aethernet ./cmd/node
-RUN CGO_ENABLED=0 go build -o /aet ./cmd/aet
-RUN CGO_ENABLED=0 go build -o /marketplace ./cmd/marketplace
+RUN CGO_ENABLED=0 go build -mod=vendor -o /aethernet ./cmd/node
+RUN CGO_ENABLED=0 go build -mod=vendor -o /aet ./cmd/aet
+RUN CGO_ENABLED=0 go build -mod=vendor -o /marketplace ./cmd/marketplace
 
 # Run stage
 FROM alpine:3.20

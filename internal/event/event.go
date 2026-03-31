@@ -126,6 +126,26 @@ const (
 	// EventTypeValidatorSlashApplied records a slash applied to a seat.
 	// May result in suspension, cooldown, or permanent exclusion.
 	EventTypeValidatorSlashApplied EventType = "ValidatorSlashApplied"
+
+	// Validator recovery events — enable key-compromise response without
+	// requiring the compromised operational key.
+
+	// EventTypeValidatorRecoveryKeySet establishes or updates the recovery
+	// authority for a validator seat. Signed by the current operational key.
+	EventTypeValidatorRecoveryKeySet EventType = "ValidatorRecoveryKeySet"
+
+	// EventTypeValidatorEmergencySuspend is a recovery-authorized request to
+	// suspend a validator seat for future eligibility. Signed by the recovery key.
+	EventTypeValidatorEmergencySuspend EventType = "ValidatorEmergencySuspend"
+
+	// EventTypeValidatorRecoveryRotate is a recovery-authorized request to
+	// rotate the validator operational key. The new key takes effect in the
+	// next validator set version. Signed by the recovery key.
+	EventTypeValidatorRecoveryRotate EventType = "ValidatorRecoveryRotate"
+
+	// EventTypeValidatorRecoveryRotateCancel cancels a pending recovery-
+	// authorized key rotation. Signed by the recovery key.
+	EventTypeValidatorRecoveryRotateCancel EventType = "ValidatorRecoveryRotateCancel"
 )
 
 // SettlementState tracks an event's position in the Optimistic Capability Settlement

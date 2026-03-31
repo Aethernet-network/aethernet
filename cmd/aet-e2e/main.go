@@ -72,7 +72,7 @@ func newSigningTransport(inner http.RoundTripper) *signingTransport {
 		privateKey: priv,
 		publicKey:  pub,
 		actorHex:   hex.EncodeToString(pub),
-		chainID:    auth.DefaultChainID(),
+		chainID:    "aethernet-testnet-1",
 	}
 }
 

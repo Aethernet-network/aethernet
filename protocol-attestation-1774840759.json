@@ -1,0 +1,39 @@
+{
+  "attestation": {
+    "attestation_version": 1,
+    "protocol": "AetherNet",
+    "protocol_version": "0.1.0-testnet",
+    "timestamp_utc": "2026-03-30T03:19:19.733626+00:00",
+    "timestamp_unix": 1774840759,
+    "git_commit": "bb604a9f975aada64e3dd025a0e28a73e5bbe074",
+    "git_branch": "main",
+    "codebase_stats": {
+      "go_lines": "92287 total",
+      "packages": "55",
+      "tracked_source_files": 347
+    },
+    "root_hash": "436d0f19f017b8089ea02970dcb9a495d4b6aa6d55edcb0e80dc9532e7718546",
+    "key_file_hashes": {
+      "cmd/node/main.go": "9973939400eec6020f94595348725dfadcee615d42ac41cda362d11300e73592",
+      "internal/ocs/engine.go": "956c21085775320d34e183b21af86e6cd3c91b8a1ae074ba7ffad13cd1ba1f65",
+      "internal/consensus/voting.go": "f43aa4fa91583afead91a301514270ddf8374b71a80c9352daa0262b9314b11c",
+      "internal/dag/dag.go": "d161c810401cd2593593457b8dca310427c9f140857a2c118daf8e716f0ea876",
+      "internal/event/event.go": "c0a833be2a98b61e3fa3042eff9844b6b421a8731cf4dc124fdafa63e7653d93",
+      "internal/ledger/transfer.go": "bfb6f3c6b9eafdb7dde424299048c18e8c00ba82eb73b2a7961cb81fcf527004",
+      "internal/ledger/generation.go": "fe106aefd8892130b6c6b5cba28daa4ac05cb0465c9ac700b8f0176260456661",
+      "internal/settlement/applicator.go": "1a6e02fb2e96323df29c0045d19a6e999dfc9c0ac34e21ec203de250a1d43128",
+      "internal/auth/transaction.go": "f9b15851c73c4df4e0d3054be197341686bbc701dbaf54b2b7484602d990e9c6",
+      "internal/validatorlifecycle/reducer.go": "e61cbb8e565600255bfe9e0dc496cfbaf51638ae327d02a06fd5dc85ff97b59e",
+      "internal/localpub/publisher.go": "148d05d36f286650416bd6078ceab477b7161c7e804c15c712e5a0ad9997ba80",
+      "internal/trajectory/service.go": "f02c7edf77e2bbd0db6265b178f4851ce4872cd3f3c945b723f0d0b80bba0cb8",
+      "internal/network/node.go": "f2d535fae3848560d11bcb8f7394d70ade27365ec17bc72bb9cc858b6683ffb2"
+    },
+    "claim": "This attestation certifies that the AetherNet protocol codebase, as identified by the root hash and individual file hashes above, existed in this exact form at the stated timestamp. The attestation is signed with an Ed25519 key from the AetherNet testnet validator set."
+  },
+  "signature": {
+    "algorithm": "Ed25519",
+    "public_key": "cf82321335ecb6065a3335ec529d3787346095a0659ea068f616c0a210676d3e",
+    "canonical_sha256": "d30a63224744fefb730445e9146d738d9de7e7ecb27f7b1889ccfabd32873aad",
+    "signature_hex": "c90cf24d82ad7a938c308c8a790459124c5fadb1cad22147321654927b821e0a80de40b3686fcf882c43f89ac49a7a4a15311e5c405934de5bb7aba519cda709"
+  }
+}

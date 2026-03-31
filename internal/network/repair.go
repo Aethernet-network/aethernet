@@ -257,6 +257,12 @@ func (n *Node) handleRepairRequest(peer *Peer, payload []byte) {
 // Feeds received events through the standard dag.Add path (with signature
 // verification and causal ref checks) and retries any children that were
 // blocked waiting for these parents.
+//
+// Recursive repair: when a repaired event ALSO has missing parents (the
+// causal chain is deeper than one level), the event is tracked in the
+// IngestManager and enqueued for its own repair cycle. This ensures the
+// full causal chain is resolved regardless of depth — critical for
+// multi-node concurrent startup where events reference divergent tips.
 func (n *Node) handleRepairResponse(peer *Peer, payload []byte) {
 	var resp RepairResponse
 	if err := json.Unmarshal(payload, &resp); err != nil {
@@ -284,7 +290,13 @@ func (n *Node) handleRepairResponse(peer *Peer, payload []byte) {
 		}
 
 		if err := n.dag.Add(ev); err != nil {
-			if !errors.Is(err, dag.ErrDuplicateEvent) {
+			if errors.Is(err, dag.ErrMissingCausalRef) && n.ingest != nil {
+				// Recursive repair: this repaired event itself has missing
+				// parents deeper in the causal chain. Track it in the ingest
+				// pipeline so it gets its own repair cycle, just like events
+				// that fail during initial materialization.
+				n.trackForRecursiveRepair(ev, peer.AgentID)
+			} else if !errors.Is(err, dag.ErrDuplicateEvent) {
 				slog.Debug("repair: dag.Add failed",
 					"event_id", ev.ID, "err", err)
 			}
@@ -305,6 +317,62 @@ func (n *Node) handleRepairResponse(peer *Peer, payload []byte) {
 		if ps := peer.EnsureScore(); ps != nil {
 			ps.RecordValidRepair()
 		}
+	}
+}
+
+// trackForRecursiveRepair admits a repair-received event into the ingest
+// pipeline for its own repair cycle. The event has already been signature-
+// verified but dag.Add failed because its parents are missing. We store it
+// at StageValidated (ready for materialization once parents arrive) and
+// enqueue it for repair, which will recursively fetch its missing ancestors.
+func (n *Node) trackForRecursiveRepair(ev *event.Event, sourcePeer crypto.AgentID) {
+	// Skip if already tracked (prevents duplicate tracking from concurrent repairs).
+	if n.ingest.IsTracked(ev.ID) {
+		return
+	}
+
+	// Build a minimal EventHeader for the tracking entry.
+	bc, _ := event.ComputeBodyCommitment(ev)
+	hdr := EventHeader{
+		EventID:        ev.ID,
+		Type:           ev.Type,
+		CausalRefs:     ev.CausalRefs,
+		AgentID:        ev.AgentID,
+		CausalTimestamp: ev.CausalTimestamp,
+		StakeAmount:    ev.StakeAmount,
+		BodyCommitment: bc,
+		Signature:      ev.Signature,
+	}
+
+	// Admit into tracking.
+	if !n.ingest.AdmitHeader(sourcePeer, hdr) {
+		return // already tracked or capacity full
+	}
+
+	// Store the full event as body-available and reconstructed.
+	n.ingest.SetBodyAvailable(ev.ID, ev.Payload)
+	n.ingest.SetReconstructedEvent(ev.ID, ev)
+
+	// Advance to Validated (it's already signature-verified).
+	n.ingest.MarkCompleted(ev.ID)
+	n.ingest.MarkValidated(ev.ID)
+
+	// Identify missing parents and enqueue for repair.
+	missing := make(map[event.EventID]struct{})
+	for _, ref := range ev.CausalRefs {
+		if _, getErr := n.dag.Get(ref); getErr != nil {
+			missing[ref] = struct{}{}
+		}
+	}
+	if len(missing) > 0 {
+		n.ingest.SetMissingParents(ev.ID, missing)
+		n.ingest.EnqueueRepair(ev.ID)
+		slog.Info("repair: recursive repair — event has missing grandparents",
+			"event_id", ev.ID,
+			"type", ev.Type,
+			"missing_ancestors", len(missing),
+			"source_peer", sourcePeer,
+		)
 	}
 }
 

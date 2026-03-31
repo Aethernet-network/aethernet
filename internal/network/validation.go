@@ -71,15 +71,14 @@ func ReconstructEvent(t *EventTracking) (*event.Event, error) {
 // signature verification, EventID consistency, and type-specific validation.
 // This is advisory — dag.Add still enforces its own checks independently.
 func ValidateEvent(e *event.Event) error {
-	// Signature verification. Genesis events (empty CausalRefs) may be unsigned.
-	isGenesis := len(e.CausalRefs) == 0
-	if !isGenesis {
-		if len(e.Signature) == 0 {
-			return fmt.Errorf("%w: missing signature on non-genesis event %s", ErrValidationBadSignature, e.ID)
-		}
-		if !crypto.VerifyEvent(e) {
-			return fmt.Errorf("%w: event %s", ErrValidationBadSignature, e.ID)
-		}
+	// Signature verification. ALL events must be signed, including genesis
+	// events (empty CausalRefs). Consistent with dag.Add which requires
+	// valid signatures on every event (Phase 4, Fix 5).
+	if len(e.Signature) == 0 {
+		return fmt.Errorf("%w: missing signature on event %s", ErrValidationBadSignature, e.ID)
+	}
+	if !crypto.VerifyEvent(e) {
+		return fmt.Errorf("%w: event %s", ErrValidationBadSignature, e.ID)
 	}
 
 	// Type-specific validation.

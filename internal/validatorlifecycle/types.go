@@ -190,6 +190,26 @@ type KeyEpoch struct {
 // Validator Seat
 // ---------------------------------------------------------------------------
 
+// PendingRecoveryRotation records a recovery-authorized key rotation that
+// has been requested but may not yet have taken effect. Stored on the seat
+// so the Reducer can apply or cancel it deterministically. Cleared when
+// the rotation is applied or cancelled.
+type PendingRecoveryRotation struct {
+	// RequestEventID is the DAG event that requested the rotation.
+	RequestEventID string `json:"request_event_id"`
+
+	// NewPublicKey is the replacement operational key.
+	NewPublicKey crypto.AgentID `json:"new_public_key"`
+
+	// RequestedAt is the Unix timestamp when the rotation was requested.
+	RequestedAt int64 `json:"requested_at"`
+
+	// EffectiveAfter is the Unix timestamp after which the rotation
+	// takes effect. Informational — the Reducer applies the rotation
+	// when it processes the event; DAG causal ordering is the authority.
+	EffectiveAfter int64 `json:"effective_after"`
+}
+
 // ValidatorSeat is the canonical state of a single validator seat. All fields
 // are deterministically derived from DAG events via the Reducer.
 type ValidatorSeat struct {
@@ -206,6 +226,19 @@ type ValidatorSeat struct {
 	// KeyHistory tracks all key epochs for this seat in chronological order.
 	// The last entry is the current epoch.
 	KeyHistory []KeyEpoch `json:"key_history"`
+
+	// RecoveryKey is the optional pre-committed recovery authority for this
+	// seat. When set, this key can authorize emergency key rotation and
+	// seat suspension without the operational key. Set via a
+	// ValidatorRecoveryKeySet DAG event signed by the current operational key.
+	// Empty string means no recovery authority is configured.
+	RecoveryKey crypto.AgentID `json:"recovery_key,omitempty"`
+
+	// PendingRotation records a recovery-authorized key rotation that has
+	// been requested. Nil when no rotation is pending. Cleared when the
+	// rotation is applied (via Reducer processing the next snapshot version)
+	// or cancelled (via a ValidatorRecoveryRotateCancel event).
+	PendingRotation *PendingRecoveryRotation `json:"pending_rotation,omitempty"`
 
 	// StakeAmount is the current staked amount in µAET.
 	StakeAmount uint64 `json:"stake_amount"`
@@ -262,6 +295,18 @@ type ValidatorSeat struct {
 // MinBondedStake is the minimum stake (µAET) required to join the validator
 // set. Below this threshold, join events are rejected.
 const MinBondedStake uint64 = 10_000_000_000 // 10,000 AET
+
+// HasRecoveryKey returns true if a recovery authority is configured for
+// this seat.
+func (s *ValidatorSeat) HasRecoveryKey() bool {
+	return s.RecoveryKey != ""
+}
+
+// HasPendingRotation returns true if a recovery-authorized key rotation
+// is pending for this seat.
+func (s *ValidatorSeat) HasPendingRotation() bool {
+	return s.PendingRotation != nil
+}
 
 // CurrentKeyEpoch returns the most recent key epoch, or a zero-value
 // KeyEpoch if no keys have been registered.
@@ -426,8 +471,12 @@ const (
 	EventExit          LifecycleEventKind = "validator_exit"
 	EventExclude       LifecycleEventKind = "validator_exclude"
 	EventRotateKey     LifecycleEventKind = "validator_rotate_key"
-	EventStakeUpdate   LifecycleEventKind = "validator_stake_update"
-	EventSlash         LifecycleEventKind = "validator_slash"
+	EventStakeUpdate          LifecycleEventKind = "validator_stake_update"
+	EventSlash                LifecycleEventKind = "validator_slash"
+	EventRecoveryKeySet       LifecycleEventKind = "validator_recovery_key_set"
+	EventEmergencySuspend     LifecycleEventKind = "validator_emergency_suspend"
+	EventRecoveryRotate       LifecycleEventKind = "validator_recovery_rotate"
+	EventRecoveryRotateCancel LifecycleEventKind = "validator_recovery_rotate_cancel"
 )
 
 // LifecycleEvent is the input to the Reducer. It wraps the minimum data
@@ -475,4 +524,22 @@ type LifecycleEvent struct {
 	// PermanentExclusion indicates whether a slash permanently excludes the
 	// seat (terminal) versus temporarily suspending it with cooldown.
 	PermanentExclusion bool `json:"permanent_exclusion,omitempty"`
+
+	// RecoveryKey is the pre-committed recovery authority public key.
+	// Used by EventRecoveryKeySet. Also carried by emergency suspend
+	// and recovery rotate events for validation against the seat's
+	// committed recovery key.
+	RecoveryKey crypto.AgentID `json:"recovery_key,omitempty"`
+
+	// NewPublicKey is the replacement operational key for recovery rotation.
+	NewPublicKey crypto.AgentID `json:"new_public_key,omitempty"`
+
+	// RequestedAt is the Unix timestamp of the recovery request.
+	RequestedAt int64 `json:"requested_at,omitempty"`
+
+	// EffectiveAfter is the Unix timestamp after which a rotation takes effect.
+	EffectiveAfter int64 `json:"effective_after,omitempty"`
+
+	// RotationEventID references the original rotation event for cancellation.
+	RotationEventID string `json:"rotation_event_id,omitempty"`
 }

@@ -211,7 +211,7 @@ func TestDiff_DetectsChanges(t *testing.T) {
 
 	delta := Diff(snapBefore, snapAfter)
 	if delta.FromVersion != snapBefore.Version {
-		t.Fatalf("wrong FromVersion")
+		t.Fatalf("wrong FromVersion %d", delta.FromVersion)
 	}
 	if delta.ToVersion != snapAfter.Version {
 		t.Fatalf("wrong ToVersion")
@@ -221,5 +221,158 @@ func TestDiff_DetectsChanges(t *testing.T) {
 	}
 	if len(delta.Activated) != 1 {
 		t.Fatalf("expected 1 activated, got %d", len(delta.Activated))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Recovery Authority Snapshot Tests
+// ---------------------------------------------------------------------------
+
+func TestSnapshot_RecoveryKeyPreserved(t *testing.T) {
+	r := NewReducer()
+	_ = r.Apply(joinEvent("j1", "k1", 100_000, 1))
+	s1 := DeriveValidatorID("j1")
+
+	// Manually set recovery key to simulate a RecoveryKeySet event.
+	r.seats[s1].RecoveryKey = "recovery-key-abc"
+
+	snap := r.Snapshot()
+	seat := snap.Seats[s1]
+	if seat.RecoveryKey != "recovery-key-abc" {
+		t.Fatalf("snapshot should preserve recovery key, got %q", seat.RecoveryKey)
+	}
+}
+
+func TestSnapshot_PendingRotationDoesNotAffectEligibility(t *testing.T) {
+	// A seat with a pending recovery rotation should still be eligible in
+	// the current snapshot — the rotation hasn't taken effect yet.
+	r := NewReducer()
+	_ = r.Apply(joinEvent("j1", "k1", 100_000, 1))
+	s1 := DeriveValidatorID("j1")
+
+	// Make the seat active.
+	r.seats[s1].Status = SeatActive
+	r.seats[s1].Weight = 100_000
+	r.seats[s1].EffectiveFromVersion = r.version
+
+	// Set a pending rotation — should NOT affect eligibility.
+	r.seats[s1].PendingRotation = &PendingRecoveryRotation{
+		RequestEventID: "rot-event-1",
+		NewPublicKey:   "new-key-xyz",
+		RequestedAt:    1700000000,
+		EffectiveAfter: 1700000300,
+	}
+
+	snap := r.Snapshot()
+	if snap.ActiveSeatCount != 1 {
+		t.Fatalf("pending rotation should not affect active seat count, got %d", snap.ActiveSeatCount)
+	}
+	if snap.TotalActiveWeight != 100_000 {
+		t.Fatalf("pending rotation should not affect weight, got %d", snap.TotalActiveWeight)
+	}
+
+	// The pending rotation should be in the snapshot for auditability.
+	seat := snap.Seats[s1]
+	if !seat.HasPendingRotation() {
+		t.Fatal("snapshot should preserve pending rotation")
+	}
+	if seat.PendingRotation.NewPublicKey != "new-key-xyz" {
+		t.Fatalf("pending rotation new key mismatch: %q", seat.PendingRotation.NewPublicKey)
+	}
+
+	// Verify the current operator key is unchanged.
+	w, eligible := snap.VoteWeightByKey("k1")
+	if !eligible || w != 100_000 {
+		t.Fatalf("current key should still be eligible: weight=%d eligible=%v", w, eligible)
+	}
+}
+
+func TestSnapshot_SuspendedSeatExcludedFromActiveWeight(t *testing.T) {
+	r := NewReducer()
+	_ = r.Apply(joinEvent("j1", "k1", 100_000, 1))
+	_ = r.Apply(joinEvent("j2", "k2", 200_000, 2))
+	s1 := DeriveValidatorID("j1")
+	s2 := DeriveValidatorID("j2")
+
+	// Make both active.
+	r.seats[s1].Status = SeatActive
+	r.seats[s1].Weight = 100_000
+	r.seats[s1].EffectiveFromVersion = r.version
+	r.seats[s2].Status = SeatActive
+	r.seats[s2].Weight = 200_000
+	r.seats[s2].EffectiveFromVersion = r.version
+
+	// Suspend s1 (simulating emergency recovery suspend).
+	_ = r.Apply(LifecycleEvent{
+		Kind:     EventSuspend,
+		EventID:  "suspend-1",
+		CausalTS: 10,
+		SeatID:   s1,
+		Reason:   "recovery:key_compromise",
+	})
+
+	snap := r.Snapshot()
+	if snap.ActiveSeatCount != 1 {
+		t.Fatalf("suspended seat should be excluded: active=%d", snap.ActiveSeatCount)
+	}
+	if snap.TotalActiveWeight != 200_000 {
+		t.Fatalf("suspended seat weight should be excluded: total=%d", snap.TotalActiveWeight)
+	}
+
+	// s1 should not be vote-eligible.
+	_, eligible := snap.VoteWeightByKey("k1")
+	if eligible {
+		t.Fatal("suspended seat should not be vote-eligible")
+	}
+
+	// s2 should still be eligible.
+	w, eligible := snap.VoteWeightByKey("k2")
+	if !eligible || w != 200_000 {
+		t.Fatalf("active seat should be eligible: weight=%d eligible=%v", w, eligible)
+	}
+}
+
+func TestSnapshot_PendingRotationDeepCopy(t *testing.T) {
+	r := NewReducer()
+	_ = r.Apply(joinEvent("j1", "k1", 100_000, 1))
+	s1 := DeriveValidatorID("j1")
+
+	r.seats[s1].PendingRotation = &PendingRecoveryRotation{
+		RequestEventID: "rot-1",
+		NewPublicKey:   "new-k",
+		RequestedAt:    1700000000,
+		EffectiveAfter: 1700000300,
+	}
+
+	snap := r.Snapshot()
+
+	// Mutate the reducer's pending rotation after snapshot.
+	r.seats[s1].PendingRotation.NewPublicKey = "mutated"
+
+	// Snapshot should be decoupled.
+	if snap.Seats[s1].PendingRotation.NewPublicKey != "new-k" {
+		t.Fatal("snapshot pending rotation should be decoupled from reducer mutations")
+	}
+}
+
+func TestSeat_HasRecoveryKey(t *testing.T) {
+	seat := &ValidatorSeat{}
+	if seat.HasRecoveryKey() {
+		t.Fatal("empty recovery key should return false")
+	}
+	seat.RecoveryKey = "some-key"
+	if !seat.HasRecoveryKey() {
+		t.Fatal("set recovery key should return true")
+	}
+}
+
+func TestSeat_HasPendingRotation(t *testing.T) {
+	seat := &ValidatorSeat{}
+	if seat.HasPendingRotation() {
+		t.Fatal("nil pending rotation should return false")
+	}
+	seat.PendingRotation = &PendingRecoveryRotation{RequestEventID: "r1"}
+	if !seat.HasPendingRotation() {
+		t.Fatal("set pending rotation should return true")
 	}
 }

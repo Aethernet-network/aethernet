@@ -308,6 +308,298 @@ func TestLifecycleEvent_EventID_DiffersForDifferentPayloads(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Recovery Payload Validation Tests
+// ---------------------------------------------------------------------------
+
+func TestValidatorRecoveryKeySetPayload_Validate(t *testing.T) {
+	valid := &ValidatorRecoveryKeySetPayload{
+		Version:           1,
+		ValidatorID:       "seat-abc",
+		RecoveryPublicKey: "deadbeef01234567deadbeef01234567deadbeef01234567deadbeef01234567",
+		RequestedAt:       1700000000,
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid recovery key set should pass: %v", err)
+	}
+
+	// Missing validator_id.
+	noID := *valid
+	noID.ValidatorID = ""
+	if err := noID.Validate(); !errors.Is(err, ErrPayloadMissingValidatorID) {
+		t.Fatalf("expected ErrPayloadMissingValidatorID, got %v", err)
+	}
+	// Missing recovery_public_key.
+	noKey := *valid
+	noKey.RecoveryPublicKey = ""
+	if err := noKey.Validate(); !errors.Is(err, ErrPayloadMissingRecoveryKey) {
+		t.Fatalf("expected ErrPayloadMissingRecoveryKey, got %v", err)
+	}
+	// Missing requested_at.
+	noTS := *valid
+	noTS.RequestedAt = 0
+	if err := noTS.Validate(); !errors.Is(err, ErrPayloadMissingRequestedAt) {
+		t.Fatalf("expected ErrPayloadMissingRequestedAt, got %v", err)
+	}
+}
+
+func TestValidatorEmergencySuspendPayload_Validate(t *testing.T) {
+	valid := &ValidatorEmergencySuspendPayload{
+		Version:           1,
+		ValidatorID:       "seat-abc",
+		RecoveryPublicKey: "deadbeef01234567deadbeef01234567deadbeef01234567deadbeef01234567",
+		Reason:            "key_compromise",
+		RequestedAt:       1700000000,
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid emergency suspend should pass: %v", err)
+	}
+
+	noID := *valid
+	noID.ValidatorID = ""
+	if err := noID.Validate(); !errors.Is(err, ErrPayloadMissingValidatorID) {
+		t.Fatalf("expected ErrPayloadMissingValidatorID, got %v", err)
+	}
+	noKey := *valid
+	noKey.RecoveryPublicKey = ""
+	if err := noKey.Validate(); !errors.Is(err, ErrPayloadMissingRecoveryKey) {
+		t.Fatalf("expected ErrPayloadMissingRecoveryKey, got %v", err)
+	}
+	noReason := *valid
+	noReason.Reason = ""
+	if err := noReason.Validate(); !errors.Is(err, ErrPayloadMissingReason) {
+		t.Fatalf("expected ErrPayloadMissingReason, got %v", err)
+	}
+	noTS := *valid
+	noTS.RequestedAt = 0
+	if err := noTS.Validate(); !errors.Is(err, ErrPayloadMissingRequestedAt) {
+		t.Fatalf("expected ErrPayloadMissingRequestedAt, got %v", err)
+	}
+}
+
+func TestValidatorRecoveryRotatePayload_Validate(t *testing.T) {
+	valid := &ValidatorRecoveryRotatePayload{
+		Version:              1,
+		ValidatorID:          "seat-abc",
+		RecoveryPublicKey:    "aabb0011aabb0011aabb0011aabb0011aabb0011aabb0011aabb0011aabb0011",
+		NewPublicKey:         "ccdd0011ccdd0011ccdd0011ccdd0011ccdd0011ccdd0011ccdd0011ccdd0011",
+		RequestedAt:          1700000000,
+		EffectiveAfter:       1700000300,
+		EffectiveFromVersion: 5,
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid recovery rotate should pass: %v", err)
+	}
+
+	noID := *valid
+	noID.ValidatorID = ""
+	if err := noID.Validate(); !errors.Is(err, ErrPayloadMissingValidatorID) {
+		t.Fatalf("expected ErrPayloadMissingValidatorID, got %v", err)
+	}
+	noRecovKey := *valid
+	noRecovKey.RecoveryPublicKey = ""
+	if err := noRecovKey.Validate(); !errors.Is(err, ErrPayloadMissingRecoveryKey) {
+		t.Fatalf("expected ErrPayloadMissingRecoveryKey, got %v", err)
+	}
+	noNewKey := *valid
+	noNewKey.NewPublicKey = ""
+	if err := noNewKey.Validate(); !errors.Is(err, ErrPayloadMissingNewPublicKey) {
+		t.Fatalf("expected ErrPayloadMissingNewPublicKey, got %v", err)
+	}
+	noTS := *valid
+	noTS.RequestedAt = 0
+	if err := noTS.Validate(); !errors.Is(err, ErrPayloadMissingRequestedAt) {
+		t.Fatalf("expected ErrPayloadMissingRequestedAt, got %v", err)
+	}
+	noEffective := *valid
+	noEffective.EffectiveAfter = 0
+	if err := noEffective.Validate(); !errors.Is(err, ErrPayloadMissingEffectiveAfter) {
+		t.Fatalf("expected ErrPayloadMissingEffectiveAfter, got %v", err)
+	}
+	noVer := *valid
+	noVer.EffectiveFromVersion = 0
+	if err := noVer.Validate(); !errors.Is(err, ErrPayloadMissingEffectiveVersion) {
+		t.Fatalf("expected ErrPayloadMissingEffectiveVersion, got %v", err)
+	}
+}
+
+func TestValidatorRecoveryRotateCancelPayload_Validate(t *testing.T) {
+	valid := &ValidatorRecoveryRotateCancelPayload{
+		Version:           1,
+		ValidatorID:       "seat-abc",
+		RecoveryPublicKey: "aabb0011aabb0011aabb0011aabb0011aabb0011aabb0011aabb0011aabb0011",
+		RotationEventID:   "rotation-event-123",
+		RequestedAt:       1700000000,
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid recovery rotate cancel should pass: %v", err)
+	}
+
+	noID := *valid
+	noID.ValidatorID = ""
+	if err := noID.Validate(); !errors.Is(err, ErrPayloadMissingValidatorID) {
+		t.Fatalf("expected ErrPayloadMissingValidatorID, got %v", err)
+	}
+	noRecovKey := *valid
+	noRecovKey.RecoveryPublicKey = ""
+	if err := noRecovKey.Validate(); !errors.Is(err, ErrPayloadMissingRecoveryKey) {
+		t.Fatalf("expected ErrPayloadMissingRecoveryKey, got %v", err)
+	}
+	noRotID := *valid
+	noRotID.RotationEventID = ""
+	if err := noRotID.Validate(); !errors.Is(err, ErrPayloadMissingRotationEventID) {
+		t.Fatalf("expected ErrPayloadMissingRotationEventID, got %v", err)
+	}
+	noTS := *valid
+	noTS.RequestedAt = 0
+	if err := noTS.Validate(); !errors.Is(err, ErrPayloadMissingRequestedAt) {
+		t.Fatalf("expected ErrPayloadMissingRequestedAt, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Recovery Payload JSON Round-Trip Tests
+// ---------------------------------------------------------------------------
+
+func TestRecoveryKeySetPayload_RoundTrip(t *testing.T) {
+	original := &ValidatorRecoveryKeySetPayload{
+		Version:           1,
+		ValidatorID:       "seat-rt",
+		RecoveryPublicKey: "aabbccddee",
+		RequestedAt:       1700000000,
+	}
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded ValidatorRecoveryKeySetPayload
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if decoded.ValidatorID != original.ValidatorID ||
+		decoded.RecoveryPublicKey != original.RecoveryPublicKey ||
+		decoded.RequestedAt != original.RequestedAt ||
+		decoded.Version != original.Version {
+		t.Fatal("round-trip mismatch")
+	}
+}
+
+func TestEmergencySuspendPayload_RoundTrip(t *testing.T) {
+	original := &ValidatorEmergencySuspendPayload{
+		Version:           1,
+		ValidatorID:       "seat-rt",
+		RecoveryPublicKey: "aabbccddee",
+		Reason:            "key_compromise",
+		RequestedAt:       1700000000,
+	}
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded ValidatorEmergencySuspendPayload
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if decoded.ValidatorID != original.ValidatorID ||
+		decoded.RecoveryPublicKey != original.RecoveryPublicKey ||
+		decoded.Reason != original.Reason ||
+		decoded.RequestedAt != original.RequestedAt {
+		t.Fatal("round-trip mismatch")
+	}
+}
+
+func TestRecoveryRotatePayload_RoundTrip(t *testing.T) {
+	original := &ValidatorRecoveryRotatePayload{
+		Version:              1,
+		ValidatorID:          "seat-rt",
+		RecoveryPublicKey:    "aabb",
+		NewPublicKey:         "ccdd",
+		RequestedAt:          1700000000,
+		EffectiveAfter:       1700000300,
+		EffectiveFromVersion: 10,
+	}
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded ValidatorRecoveryRotatePayload
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if decoded.ValidatorID != original.ValidatorID ||
+		decoded.RecoveryPublicKey != original.RecoveryPublicKey ||
+		decoded.NewPublicKey != original.NewPublicKey ||
+		decoded.RequestedAt != original.RequestedAt ||
+		decoded.EffectiveAfter != original.EffectiveAfter ||
+		decoded.EffectiveFromVersion != original.EffectiveFromVersion {
+		t.Fatal("round-trip mismatch")
+	}
+}
+
+func TestRecoveryRotateCancelPayload_RoundTrip(t *testing.T) {
+	original := &ValidatorRecoveryRotateCancelPayload{
+		Version:           1,
+		ValidatorID:       "seat-rt",
+		RecoveryPublicKey: "aabb",
+		RotationEventID:   "ev-rot-123",
+		RequestedAt:       1700000000,
+	}
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded ValidatorRecoveryRotateCancelPayload
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if decoded.ValidatorID != original.ValidatorID ||
+		decoded.RecoveryPublicKey != original.RecoveryPublicKey ||
+		decoded.RotationEventID != original.RotationEventID ||
+		decoded.RequestedAt != original.RequestedAt {
+		t.Fatal("round-trip mismatch")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Recovery Payload Canonical Serialization Tests
+// ---------------------------------------------------------------------------
+
+func TestRecoveryPayload_CanonicalSerialization_Deterministic(t *testing.T) {
+	payloads := []interface{}{
+		&ValidatorRecoveryKeySetPayload{Version: 1, ValidatorID: "s1", RecoveryPublicKey: "rk1", RequestedAt: 1700000000},
+		&ValidatorEmergencySuspendPayload{Version: 1, ValidatorID: "s1", RecoveryPublicKey: "rk1", Reason: "compromise", RequestedAt: 1700000000},
+		&ValidatorRecoveryRotatePayload{Version: 1, ValidatorID: "s1", RecoveryPublicKey: "rk1", NewPublicKey: "nk1", RequestedAt: 1700000000, EffectiveAfter: 1700000300, EffectiveFromVersion: 5},
+		&ValidatorRecoveryRotateCancelPayload{Version: 1, ValidatorID: "s1", RecoveryPublicKey: "rk1", RotationEventID: "ev-1", RequestedAt: 1700000000},
+	}
+	for i, p := range payloads {
+		d1, _ := json.Marshal(p)
+		d2, _ := json.Marshal(p)
+		if string(d1) != string(d2) {
+			t.Fatalf("payload %d: serialization not deterministic", i)
+		}
+	}
+}
+
+func TestRecoveryPayload_EventID_Deterministic(t *testing.T) {
+	kp, _ := crypto.GenerateKeyPair()
+	agentID := string(kp.AgentID())
+
+	p1 := ValidatorRecoveryKeySetPayload{Version: 1, ValidatorID: "s1", RecoveryPublicKey: "rk1", RequestedAt: 1700000000}
+	p2 := ValidatorRecoveryKeySetPayload{Version: 1, ValidatorID: "s2", RecoveryPublicKey: "rk2", RequestedAt: 1700000001}
+
+	ev1, _ := event.New(event.EventTypeValidatorRecoveryKeySet, nil, p1, agentID, nil, 0)
+	ev2, _ := event.New(event.EventTypeValidatorRecoveryKeySet, nil, p2, agentID, nil, 0)
+
+	if ev1.ID == ev2.ID {
+		t.Fatal("different recovery payloads should produce different EventIDs")
+	}
+	// Same payload → same ID.
+	ev1b, _ := event.New(event.EventTypeValidatorRecoveryKeySet, nil, p1, agentID, nil, 0)
+	if ev1.ID != ev1b.ID {
+		t.Fatal("same recovery payload should produce same EventID")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Sign/Verify Compatibility
 // ---------------------------------------------------------------------------
 
@@ -589,5 +881,260 @@ func TestFullRoundTrip_JoinThroughReducer(t *testing.T) {
 	}
 	if seat.OperatorKey != crypto.AgentID(agentID) {
 		t.Fatalf("expected operator key %s, got %s", agentID, seat.OperatorKey)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Recovery Auth Validation Tests
+// ---------------------------------------------------------------------------
+
+func TestExtractEmergencySuspend_SignerMatchesRecoveryKey(t *testing.T) {
+	recoveryKP, _ := crypto.GenerateKeyPair()
+	recoveryID := string(recoveryKP.AgentID())
+
+	payload := ValidatorEmergencySuspendPayload{
+		Version:           1,
+		ValidatorID:       "seat-auth",
+		RecoveryPublicKey: crypto.AgentID(recoveryID),
+		Reason:            "compromise",
+		RequestedAt:       1700000000,
+	}
+
+	// Create event signed by the recovery key.
+	ev, err := event.New(event.EventTypeValidatorEmergencySuspend, nil, payload, recoveryID, nil, 0)
+	if err != nil {
+		t.Fatalf("create event: %v", err)
+	}
+	_ = crypto.SignEvent(ev, recoveryKP)
+
+	// Extraction should succeed — signer matches recovery key.
+	lcEvents, err := ExtractLifecycleEvent(ev)
+	if err != nil {
+		t.Fatalf("extract should succeed when signer matches: %v", err)
+	}
+	if len(lcEvents) != 1 || lcEvents[0].Kind != EventEmergencySuspend {
+		t.Fatalf("unexpected lifecycle events: %+v", lcEvents)
+	}
+}
+
+func TestExtractEmergencySuspend_WrongSigner_Rejected(t *testing.T) {
+	attackerKP, _ := crypto.GenerateKeyPair()
+	attackerID := string(attackerKP.AgentID())
+
+	// Payload claims a different recovery key than the signer.
+	payload := ValidatorEmergencySuspendPayload{
+		Version:           1,
+		ValidatorID:       "seat-auth",
+		RecoveryPublicKey: "legitimate-recovery-key-not-attacker",
+		Reason:            "compromise",
+		RequestedAt:       1700000000,
+	}
+
+	ev, _ := event.New(event.EventTypeValidatorEmergencySuspend, nil, payload, attackerID, nil, 0)
+	_ = crypto.SignEvent(ev, attackerKP)
+
+	// Extraction should fail — signer doesn't match recovery key.
+	_, err := ExtractLifecycleEvent(ev)
+	if !errors.Is(err, ErrRecoverySignerMismatch) {
+		t.Fatalf("expected ErrRecoverySignerMismatch, got %v", err)
+	}
+}
+
+func TestExtractRecoveryRotate_SignerMatchesRecoveryKey(t *testing.T) {
+	recoveryKP, _ := crypto.GenerateKeyPair()
+	recoveryID := string(recoveryKP.AgentID())
+
+	payload := ValidatorRecoveryRotatePayload{
+		Version:              1,
+		ValidatorID:          "seat-auth",
+		RecoveryPublicKey:    crypto.AgentID(recoveryID),
+		NewPublicKey:         "new-hot-key",
+		RequestedAt:          1700000000,
+		EffectiveAfter:       1700000300,
+		EffectiveFromVersion: 5,
+	}
+
+	ev, _ := event.New(event.EventTypeValidatorRecoveryRotate, nil, payload, recoveryID, nil, 0)
+	_ = crypto.SignEvent(ev, recoveryKP)
+
+	lcEvents, err := ExtractLifecycleEvent(ev)
+	if err != nil {
+		t.Fatalf("extract should succeed: %v", err)
+	}
+	if lcEvents[0].NewPublicKey != "new-hot-key" {
+		t.Fatalf("wrong new key: %q", lcEvents[0].NewPublicKey)
+	}
+}
+
+func TestExtractRecoveryRotate_WrongSigner_Rejected(t *testing.T) {
+	attackerKP, _ := crypto.GenerateKeyPair()
+
+	payload := ValidatorRecoveryRotatePayload{
+		Version:              1,
+		ValidatorID:          "seat-auth",
+		RecoveryPublicKey:    "real-recovery-key",
+		NewPublicKey:         "attacker-key",
+		RequestedAt:          1700000000,
+		EffectiveAfter:       1700000300,
+		EffectiveFromVersion: 5,
+	}
+
+	ev, _ := event.New(event.EventTypeValidatorRecoveryRotate, nil, payload, string(attackerKP.AgentID()), nil, 0)
+	_ = crypto.SignEvent(ev, attackerKP)
+
+	_, err := ExtractLifecycleEvent(ev)
+	if !errors.Is(err, ErrRecoverySignerMismatch) {
+		t.Fatalf("expected ErrRecoverySignerMismatch, got %v", err)
+	}
+}
+
+func TestExtractRecoveryRotateCancel_WrongSigner_Rejected(t *testing.T) {
+	attackerKP, _ := crypto.GenerateKeyPair()
+
+	payload := ValidatorRecoveryRotateCancelPayload{
+		Version:           1,
+		ValidatorID:       "seat-auth",
+		RecoveryPublicKey: "real-recovery-key",
+		RotationEventID:   "rot-1",
+		RequestedAt:       1700000000,
+	}
+
+	ev, _ := event.New(event.EventTypeValidatorRecoveryRotateCancel, nil, payload, string(attackerKP.AgentID()), nil, 0)
+	_ = crypto.SignEvent(ev, attackerKP)
+
+	_, err := ExtractLifecycleEvent(ev)
+	if !errors.Is(err, ErrRecoverySignerMismatch) {
+		t.Fatalf("expected ErrRecoverySignerMismatch, got %v", err)
+	}
+}
+
+func TestExtractRecoveryKeySet_NoSignerCheck(t *testing.T) {
+	// RecoveryKeySet is signed by the operational key, NOT the recovery key.
+	// No signer-vs-recovery-key check — the operational key is the authority.
+	opKP, _ := crypto.GenerateKeyPair()
+	opID := string(opKP.AgentID())
+
+	payload := ValidatorRecoveryKeySetPayload{
+		Version:           1,
+		ValidatorID:       "seat-auth",
+		RecoveryPublicKey: "totally-different-recovery-key",
+		RequestedAt:       1700000000,
+	}
+
+	ev, _ := event.New(event.EventTypeValidatorRecoveryKeySet, nil, payload, opID, nil, 0)
+	_ = crypto.SignEvent(ev, opKP)
+
+	// Should succeed — no signer-vs-recovery-key check for RecoveryKeySet.
+	lcEvents, err := ExtractLifecycleEvent(ev)
+	if err != nil {
+		t.Fatalf("RecoveryKeySet should not check signer vs recovery key: %v", err)
+	}
+	if lcEvents[0].RecoveryKey != "totally-different-recovery-key" {
+		t.Fatalf("wrong recovery key: %q", lcEvents[0].RecoveryKey)
+	}
+}
+
+func TestNormalKeyRotate_StillRequiresHotKey(t *testing.T) {
+	// Normal (non-recovery) key rotation still uses the existing path.
+	// Verify it doesn't accept a recovery key as signer.
+	kp, _ := crypto.GenerateKeyPair()
+	agentID := string(kp.AgentID())
+
+	payload := ValidatorKeyRotatePayload{
+		Version:              1,
+		ValidatorID:          "seat-normal",
+		OldConsensusKey:      crypto.AgentID(agentID),
+		NewConsensusKey:      "new-key",
+		OldKeyEpoch:          1,
+		NewKeyEpoch:          2,
+		EffectiveFromVersion: 5,
+	}
+
+	ev, _ := event.New(event.EventTypeValidatorKeyRotate, nil, payload, agentID, nil, 0)
+	_ = crypto.SignEvent(ev, kp)
+
+	// Normal extraction should succeed.
+	lcEvents, err := ExtractLifecycleEvent(ev)
+	if err != nil {
+		t.Fatalf("normal key rotate should succeed: %v", err)
+	}
+	if lcEvents[0].Kind != EventRotateKey {
+		t.Fatalf("expected EventRotateKey, got %q", lcEvents[0].Kind)
+	}
+}
+
+func TestRecoveryFullPipeline_EndToEnd(t *testing.T) {
+	// Full pipeline: create keypairs, DAG events, extract, apply to Reducer.
+	opKP, _ := crypto.GenerateKeyPair()
+	recovKP, _ := crypto.GenerateKeyPair()
+	newHotKP, _ := crypto.GenerateKeyPair()
+
+	opID := string(opKP.AgentID())
+	recovID := string(recovKP.AgentID())
+	newHotID := string(newHotKP.AgentID())
+
+	// Setup: create seat with operational key.
+	r := NewReducer()
+	_ = r.Apply(LifecycleEvent{
+		Kind: EventJoin, EventID: "j-e2e", CausalTS: 1,
+		SeatID: "seat-e2e", OperatorKey: crypto.AgentID(opID),
+		StakeAmount: 100_000, IsGenesis: true,
+	})
+	r.seats["seat-e2e"].Status = SeatActive
+	r.seats["seat-e2e"].Weight = 100_000
+	r.seats["seat-e2e"].EffectiveFromVersion = r.version
+
+	// Step 1: Set recovery key (signed by operational key).
+	rksPayload := ValidatorRecoveryKeySetPayload{
+		Version: 1, ValidatorID: "seat-e2e",
+		RecoveryPublicKey: crypto.AgentID(recovID), RequestedAt: 1700000000,
+	}
+	rksEv, _ := event.New(event.EventTypeValidatorRecoveryKeySet, nil, rksPayload, opID, nil, 0)
+	_ = crypto.SignEvent(rksEv, opKP)
+	rksLCEvents, err := ExtractLifecycleEvent(rksEv)
+	if err != nil {
+		t.Fatalf("extract recovery key set: %v", err)
+	}
+	for _, lc := range rksLCEvents {
+		if err := r.Apply(lc); err != nil {
+			t.Fatalf("apply recovery key set: %v", err)
+		}
+	}
+
+	// Step 2: Recovery-authorized key rotation (signed by recovery key).
+	rrPayload := ValidatorRecoveryRotatePayload{
+		Version: 1, ValidatorID: "seat-e2e",
+		RecoveryPublicKey: crypto.AgentID(recovID),
+		NewPublicKey: crypto.AgentID(newHotID),
+		RequestedAt: 1700000100, EffectiveAfter: 1700000400,
+		EffectiveFromVersion: uint64(r.Version()) + 1,
+	}
+	rrEv, _ := event.New(event.EventTypeValidatorRecoveryRotate, nil, rrPayload, recovID, nil, 0)
+	_ = crypto.SignEvent(rrEv, recovKP)
+	rrLCEvents, err := ExtractLifecycleEvent(rrEv)
+	if err != nil {
+		t.Fatalf("extract recovery rotate: %v", err)
+	}
+	for _, lc := range rrLCEvents {
+		if err := r.Apply(lc); err != nil {
+			t.Fatalf("apply recovery rotate: %v", err)
+		}
+	}
+
+	// Verify: new key is now the operator key.
+	seat, _ := r.Seat("seat-e2e")
+	if seat.OperatorKey != crypto.AgentID(newHotID) {
+		t.Fatalf("expected new hot key, got %q", seat.OperatorKey)
+	}
+
+	// Verify: old key is no longer eligible in new snapshots.
+	snap := r.Snapshot()
+	_, eligible := snap.VoteWeightByKey(crypto.AgentID(opID))
+	if eligible {
+		t.Fatal("old operational key should not be eligible after recovery rotation")
+	}
+	w, eligible := snap.VoteWeightByKey(crypto.AgentID(newHotID))
+	if !eligible || w == 0 {
+		t.Fatal("new key should be eligible in new snapshot")
 	}
 }

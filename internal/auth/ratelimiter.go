@@ -16,17 +16,25 @@ type EndpointLimit struct {
 // DefaultLimits returns the production rate limits per endpoint.
 func DefaultLimits() map[string]EndpointLimit {
 	return map[string]EndpointLimit{
+		// L1: Core protocol
 		"/v1/agents":        {PerAgentPerHr: 0, PerIPPerHr: 3, GlobalPerHr: 30},
 		"/v1/faucet":        {PerAgentPerHr: 1, PerIPPerHr: 3, GlobalPerHr: 84},
+		"/v1/transfer":      {PerAgentPerHr: 120, PerIPPerHr: 300, GlobalPerHr: 3000},
+		"/v1/stake":         {PerAgentPerHr: 20, PerIPPerHr: 100, GlobalPerHr: 500},
+		"/v1/unstake":       {PerAgentPerHr: 20, PerIPPerHr: 100, GlobalPerHr: 500},
+		// L2: Coordination
+		"/v1/registry":              {PerAgentPerHr: 10, PerIPPerHr: 20, GlobalPerHr: 200},
+		"/v1/router/register":       {PerAgentPerHr: 10, PerIPPerHr: 20, GlobalPerHr: 200},
+		"/v1/router/unregister":     {PerAgentPerHr: 10, PerIPPerHr: 20, GlobalPerHr: 200},
+		"/v1/router/availability":   {PerAgentPerHr: 60, PerIPPerHr: 200, GlobalPerHr: 2000},
+		"/v1/platform/keys":         {PerAgentPerHr: 5, PerIPPerHr: 10, GlobalPerHr: 50},
+		// L3: Application
 		"/v1/tasks":         {PerAgentPerHr: 20, PerIPPerHr: 50, GlobalPerHr: 500},
 		"/v1/tasks/claim":   {PerAgentPerHr: 60, PerIPPerHr: 200, GlobalPerHr: 2000},
 		"/v1/tasks/submit":  {PerAgentPerHr: 60, PerIPPerHr: 200, GlobalPerHr: 2000},
 		"/v1/tasks/approve": {PerAgentPerHr: 60, PerIPPerHr: 200, GlobalPerHr: 2000},
 		"/v1/tasks/dispute": {PerAgentPerHr: 10, PerIPPerHr: 50, GlobalPerHr: 200},
 		"/v1/tasks/cancel":  {PerAgentPerHr: 20, PerIPPerHr: 50, GlobalPerHr: 500},
-		"/v1/transfer":      {PerAgentPerHr: 120, PerIPPerHr: 300, GlobalPerHr: 3000},
-		"/v1/stake":         {PerAgentPerHr: 20, PerIPPerHr: 100, GlobalPerHr: 500},
-		"/v1/unstake":       {PerAgentPerHr: 20, PerIPPerHr: 100, GlobalPerHr: 500},
 		"/v1/challenge":     {PerAgentPerHr: 10, PerIPPerHr: 50, GlobalPerHr: 200},
 	}
 }

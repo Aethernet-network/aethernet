@@ -399,6 +399,14 @@ func (av *AutoValidator) processSubmittedTasks() {
 		if task.SubmittedAt > cutoff {
 			continue // submitted too recently
 		}
+		// Structural pre-check: log garbage submissions but let the existing
+		// evidence scoring pipeline make the final decision. The structural
+		// check provides early warning logging, not a separate dispute path.
+		_, structuralPass, rejectReason := av.verifyTaskSubmission(task)
+		if !structuralPass {
+			slog.Warn("auto-validator: task failed structural verification",
+				"task_id", task.ID, "claimer", task.ClaimerID, "reason", rejectReason)
+		}
 		// Use the structured evidence stored at submission time when available —
 		// it carries OutputPreview, Metrics, and the correct OutputType/OutputSize
 		// that the auto-validator's verifiers rely on for quality scoring.
@@ -868,14 +876,152 @@ func (av *AutoValidator) processPending() {
 		if _, done := av.voted[item.EventID]; done {
 			continue // already voted — do not emit duplicate
 		}
-		slog.Info("auto-validator: voting on pending event",
-			"event_id", item.EventID,
-			"event_type", item.EventType,
-			"amount", item.Amount,
-		)
-		av.emitVote(item.EventID, string(settlement.VerdictAccepted), item.Amount)
+		verdict, verifiedValue, reason := av.verifyPendingEvent(item)
+		verdictStr := string(settlement.VerdictAccepted)
+		if !verdict {
+			verdictStr = string(settlement.VerdictRejected)
+			slog.Warn("auto-validator: rejected event",
+				"event_id", item.EventID,
+				"event_type", item.EventType,
+				"reason", reason,
+			)
+		} else {
+			slog.Info("auto-validator: approved event",
+				"event_id", item.EventID,
+				"event_type", item.EventType,
+				"verified_value", verifiedValue,
+			)
+		}
+		av.emitVote(item.EventID, verdictStr, verifiedValue)
 		av.voted[item.EventID] = struct{}{}
 	}
+}
+
+// verifyPendingEvent performs structural verification on a pending event.
+// Returns (approved, verifiedValue, rejectionReason). This is NOT AI-quality
+// verification — it catches garbage submissions, missing evidence, and
+// invalid references. Think bouncer checking IDs, not judge evaluating cases.
+func (av *AutoValidator) verifyPendingEvent(item *ocs.PendingItem) (bool, uint64, string) {
+	switch item.EventType {
+	case event.EventTypeTransfer:
+		return av.verifyTransfer(item)
+	case event.EventTypeGeneration:
+		return av.verifyGeneration(item)
+	case event.EventTypeTaskSettlement:
+		return av.verifyTaskSettlement(item)
+	default:
+		// Default approve for event types we don't specifically verify.
+		return true, item.Amount, ""
+	}
+}
+
+func (av *AutoValidator) verifyTransfer(item *ocs.PendingItem) (bool, uint64, string) {
+	if item.Amount == 0 {
+		return false, 0, "transfer amount is zero"
+	}
+	if item.AgentID == item.RecipientID {
+		return false, 0, "self-transfer: sender equals recipient"
+	}
+	return true, item.Amount, ""
+}
+
+func (av *AutoValidator) verifyGeneration(item *ocs.PendingItem) (bool, uint64, string) {
+	if item.Amount == 0 {
+		return false, 0, "generation claimed value is zero"
+	}
+	// Check the actual event payload for evidence hash.
+	if av.dag != nil {
+		ev, err := av.dag.Get(item.EventID)
+		if err == nil {
+			gp, err := event.GetPayload[event.GenerationPayload](ev)
+			if err == nil && gp.EvidenceHash == "" {
+				return false, 0, "generation missing evidence hash"
+			}
+		}
+	}
+	return true, item.Amount, ""
+}
+
+func (av *AutoValidator) verifyTaskSettlement(item *ocs.PendingItem) (bool, uint64, string) {
+	// TaskSettlement events are created by the autovalidator itself after
+	// evidence scoring. They carry the already-computed score. Approve them.
+	return true, item.Amount, ""
+}
+
+// verifyTaskSubmission performs structural checks on a submitted task.
+// Called from processSubmittedTasks when evaluating a task's evidence.
+// Returns a quality score in basis points (0-10000) and whether the
+// submission passes structural requirements.
+func (av *AutoValidator) verifyTaskSubmission(task *tasks.Task) (scoreBP uint32, pass bool, reason string) {
+	// Check 1: Task must be in submitted status.
+	if task.Status != tasks.TaskStatusSubmitted {
+		return 0, false, "task not in submitted status"
+	}
+
+	// Check 2: Claimer must be set.
+	if task.ClaimerID == "" {
+		return 0, false, "no claimer on task"
+	}
+
+	// Check 3: Evidence hash present.
+	if task.ResultHash == "" {
+		return 0, false, "missing evidence hash (result_hash)"
+	}
+
+	// Check 4: Content not empty (from ResultContent or SubmittedEvidence).
+	contentLen := len(task.ResultContent)
+	if task.SubmittedEvidence != nil && task.SubmittedEvidence.OutputPreview != "" {
+		contentLen = max(contentLen, len(task.SubmittedEvidence.OutputPreview))
+	}
+	if contentLen < 50 {
+		return 0, false, "content too short (< 50 characters)"
+	}
+
+	// Compute structural quality score (basis points 0-10000).
+	var score uint32
+
+	// Base: 5000 for meeting structural requirements.
+	score = 5000
+
+	// +1000 for evidence hash present (already checked above).
+	score += 1000
+
+	// +1000 for content > 500 characters.
+	if contentLen > 500 {
+		score += 1000
+	}
+
+	// +1000 for content > 2000 characters.
+	if contentLen > 2000 {
+		score += 1000
+	}
+
+	// +1000 per acceptance criterion met (up to 2000 max).
+	criteriaBonus := uint32(0)
+	if len(task.Contract.RequiredChecks) > 0 && task.SubmittedEvidence != nil {
+		for _, check := range task.Contract.RequiredChecks {
+			switch check {
+			case "has_output":
+				if contentLen > 0 {
+					criteriaBonus += 1000
+				}
+			case "hash_valid":
+				if task.ResultHash != "" {
+					criteriaBonus += 1000
+				}
+			}
+			if criteriaBonus >= 2000 {
+				break
+			}
+		}
+	}
+	score += criteriaBonus
+
+	if score > 10000 {
+		score = 10000
+	}
+
+	return score, true, ""
 }
 
 // emitVote creates a VerificationVote DAG event and adds it to the DAG.

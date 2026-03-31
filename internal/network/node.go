@@ -1077,6 +1077,9 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 			if sh != nil {
 				sh(&e)
 			}
+		} else if errors.Is(err, dag.ErrMissingCausalRef) {
+			slog.Debug("network: V1 event deferred — missing causal refs, will retry on next sync",
+				"event_id", e.ID, "type", e.Type, "peer", peer.AgentID)
 		}
 
 	case MsgRequestSync:
@@ -1132,14 +1135,33 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		n.mu.RLock()
 		sh := n.syncHandler
 		n.mu.RUnlock()
+		// First pass: insert all events, collecting those that fail due to
+		// missing causal refs for a retry pass.
+		var deferred []*event.Event
 		for _, e := range batch.Events {
 			if !crypto.VerifyEvent(e) {
 				slog.Warn("network: dropping MsgSyncBatch event with invalid signature",
 					"event_id", e.ID, "agent", e.AgentID, "peer", peer.AgentID)
 				continue
 			}
-			if err := n.dag.Add(e); err == nil && sh != nil {
-				sh(e)
+			if err := n.dag.Add(e); err == nil {
+				if sh != nil {
+					sh(e)
+				}
+			} else if errors.Is(err, dag.ErrMissingCausalRef) {
+				deferred = append(deferred, e)
+			}
+		}
+		// Second pass: retry deferred events (a parent may have been in the
+		// same batch but sorted after its child despite timestamp ordering).
+		for _, e := range deferred {
+			if err := n.dag.Add(e); err == nil {
+				if sh != nil {
+					sh(e)
+				}
+			} else {
+				slog.Debug("network: MsgSyncBatch event still missing parents after retry",
+					"event_id", e.ID, "type", e.Type, "peer", peer.AgentID)
 			}
 		}
 
