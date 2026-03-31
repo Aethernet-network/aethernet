@@ -624,6 +624,25 @@ func getAuthAgent(r *http.Request) crypto.AgentID {
 	return ""
 }
 
+// resolveActor returns the authoritative actor identity for a write request.
+// Priority: TX-V1 signer → node identity (test fallback).
+// If bodyID is non-empty and differs from the resolved actor, returns an error
+// (catches misconfigured clients that send a body ID mismatching the signer).
+func (s *Server) resolveActor(r *http.Request, bodyID string) (string, error) {
+	if authAgent := getAuthAgent(r); authAgent != "" {
+		actor := string(authAgent)
+		if bodyID != "" && bodyID != actor {
+			return "", fmt.Errorf("signer %s does not match declared identity %s", actor[:min(16, len(actor))], bodyID[:min(16, len(bodyID))])
+		}
+		return actor, nil
+	}
+	// Fallback for tests without TX-V1 signing.
+	if bodyID != "" {
+		return bodyID, nil
+	}
+	return string(s.agentID), nil
+}
+
 // getTxID returns the verified TxID from a TX-V1 signed request, or empty.
 func getTxID(r *http.Request) string {
 	if vtx, ok := r.Context().Value(txContextKey).(*auth.VerifiedTx); ok {
@@ -1341,12 +1360,11 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	// Signer = actor: if request is signature-authenticated, the signer IS the poster.
-	posterID := req.PosterID
-	if authAgent := getAuthAgent(r); authAgent != "" {
-		posterID = string(authAgent)
-	} else if posterID == "" {
-		posterID = string(s.agentID)
+	// Signer = actor: the cryptographic signer IS the poster.
+	posterID, err := s.resolveActor(r, req.PosterID)
+	if err != nil {
+		writeCodedError(w, http.StatusForbidden, "signer_mismatch", err.Error(), "")
+		return
 	}
 
 	// I4: Enforce minimum task budget.
@@ -1524,15 +1542,15 @@ func (s *Server) handleClaimTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	// Signer = actor: if signature-authenticated, the signer IS the claimer.
-	claimerID := req.AgentID
-	if authAgent := getAuthAgent(r); authAgent != "" {
-		claimerID = string(authAgent)
-	} else if claimerID == "" {
-		claimerID = req.ClaimerID
+	// Signer = actor: the cryptographic signer IS the claimer.
+	bodyID := req.AgentID
+	if bodyID == "" {
+		bodyID = req.ClaimerID
 	}
-	if claimerID == "" {
-		claimerID = string(s.agentID)
+	claimerID, err := s.resolveActor(r, bodyID)
+	if err != nil {
+		writeCodedError(w, http.StatusForbidden, "signer_mismatch", err.Error(), "")
+		return
 	}
 
 	taskID := r.PathValue("id")
@@ -1589,14 +1607,22 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	claimerID := req.ClaimerID
-	if authAgent := getAuthAgent(r); authAgent != "" {
-		claimerID = string(authAgent)
-	} else if claimerID == "" {
-		claimerID = string(s.agentID)
+	claimerID, err := s.resolveActor(r, req.ClaimerID)
+	if err != nil {
+		writeCodedError(w, http.StatusForbidden, "signer_mismatch", err.Error(), "")
+		return
 	}
 
 	taskID := r.PathValue("id")
+
+	// Authorization: signer must be the task's claimer.
+	if taskBefore, tErr := s.taskMgr.Get(taskID); tErr == nil {
+		if taskBefore.ClaimerID != "" && taskBefore.ClaimerID != claimerID {
+			writeCodedError(w, http.StatusForbidden, "not_claimer",
+				"only the task claimer can submit results", "")
+			return
+		}
+	}
 
 	// If structured evidence is provided, use its hash; otherwise fall back to
 	// the legacy result_hash field.
@@ -1689,11 +1715,10 @@ func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	approverID := req.ApproverID
-	if authAgent := getAuthAgent(r); authAgent != "" {
-		approverID = string(authAgent)
-	} else if approverID == "" {
-		approverID = string(s.agentID)
+	approverID, err := s.resolveActor(r, req.ApproverID)
+	if err != nil {
+		writeCodedError(w, http.StatusForbidden, "signer_mismatch", err.Error(), "")
+		return
 	}
 
 	taskID := r.PathValue("id")
@@ -1702,6 +1727,13 @@ func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 	taskBefore, err := s.taskMgr.Get(taskID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	// Authorization: only the poster can approve.
+	if taskBefore.PosterID != "" && taskBefore.PosterID != approverID {
+		writeCodedError(w, http.StatusForbidden, "not_poster",
+			"only the task poster can approve", "")
 		return
 	}
 
@@ -1786,11 +1818,10 @@ func (s *Server) handleDisputeTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	posterID := req.PosterID
-	if authAgent := getAuthAgent(r); authAgent != "" {
-		posterID = string(authAgent)
-	} else if posterID == "" {
-		posterID = string(s.agentID)
+	posterID, err := s.resolveActor(r, req.PosterID)
+	if err != nil {
+		writeCodedError(w, http.StatusForbidden, "signer_mismatch", err.Error(), "")
+		return
 	}
 
 	taskID := r.PathValue("id")
@@ -1828,11 +1859,10 @@ func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	posterID := req.PosterID
-	if authAgent := getAuthAgent(r); authAgent != "" {
-		posterID = string(authAgent)
-	} else if posterID == "" {
-		posterID = string(s.agentID)
+	posterID, err := s.resolveActor(r, req.PosterID)
+	if err != nil {
+		writeCodedError(w, http.StatusForbidden, "signer_mismatch", err.Error(), "")
+		return
 	}
 
 	taskID := r.PathValue("id")
@@ -1874,11 +1904,10 @@ func (s *Server) handleCreateSubtask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	claimerID := req.ClaimerID
-	if authAgent := getAuthAgent(r); authAgent != "" {
-		claimerID = string(authAgent)
-	} else if claimerID == "" {
-		claimerID = string(s.agentID)
+	claimerID, err := s.resolveActor(r, req.ClaimerID)
+	if err != nil {
+		writeCodedError(w, http.StatusForbidden, "signer_mismatch", err.Error(), "")
+		return
 	}
 
 	parentID := r.PathValue("id")
