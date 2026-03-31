@@ -2067,7 +2067,7 @@ type APIError struct {
 func corsHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-Aethernet-Agent-ID, X-Aethernet-Timestamp, X-Aethernet-Nonce, X-Aethernet-Signature")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-Aethernet-Agent-ID, X-Aethernet-Timestamp, X-Aethernet-Nonce, X-Aethernet-Signature, X-AetherNet-Version, X-AetherNet-Chain-ID, X-AetherNet-Actor, X-AetherNet-Created, X-AetherNet-Expires, X-AetherNet-Nonce, X-AetherNet-Signature")
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
