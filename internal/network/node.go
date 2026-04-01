@@ -1019,25 +1019,40 @@ func (n *Node) handleIncomingConn(conn net.Conn) error {
 // propagate events via the fast path, V1 peers receive legacy sync.
 func (n *Node) syncLoop() {
 	defer n.wg.Done()
-	ticker := time.NewTicker(n.config.SyncInterval)
+
+	interval := n.config.SyncInterval
+	if interval <= 0 {
+		interval = 10 * time.Second
+	}
+	slog.Info("sync: syncLoop STARTED", "interval", interval)
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-n.ctx.Done():
+			slog.Info("sync: syncLoop exiting (context cancelled)")
 			return
 		case <-ticker.C:
 			n.mu.RLock()
 			peers := make([]*Peer, 0, len(n.peers))
 			for _, p := range n.peers {
-				if n.config.EnableLegacySync || p.IsLegacySyncOnly() {
-					peers = append(peers, p)
-				}
+				peers = append(peers, p)
 			}
 			n.mu.RUnlock()
 
+			dagSize := n.dag.Size()
+			slog.Info("sync: tick",
+				"peers", len(peers),
+				"local_dag", dagSize,
+			)
+
 			for _, p := range peers {
-				_ = p.Send(Message{Type: MsgRequestSync})
+				if err := p.Send(Message{Type: MsgRequestSync}); err != nil {
+					slog.Warn("sync: failed to send MsgRequestSync",
+						"peer", p.AgentID, "err", err)
+				}
 			}
 		}
 	}
@@ -1084,22 +1099,19 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 
 	case MsgRequestSync:
 		// Rate-limit per-peer sync requests: allow at most one every 10 seconds.
-		// A misbehaving peer that sends continuous MsgRequestSync messages would
-		// otherwise force the node to serialise its full DAG on every message,
-		// causing significant CPU and memory pressure (NEW-6).
 		if !peer.AllowSyncRequest() {
-			slog.Debug("network: dropping MsgRequestSync from peer exceeding sync rate",
-				"peer", peer.AgentID)
 			return
 		}
 		// Respond with all known events, batched to stay within the per-message
 		// size limit. Each batch carries at most syncBatchSize events (~100).
-		// Without batching, a 7000-event DAG serialises to ~10 MB and exceeds
-		// the 4 MB per-message limit, killing the connection on the receiver.
 		events := n.dag.All()
 		sort.Slice(events, func(i, j int) bool {
 			return events[i].CausalTimestamp < events[j].CausalTimestamp
 		})
+		slog.Info("sync: responding to sync request",
+			"peer", peer.AgentID,
+			"events", len(events),
+		)
 		for i := 0; i < len(events); i += syncBatchSize {
 			end := i + syncBatchSize
 			if end > len(events) {
@@ -1113,56 +1125,65 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 				return // peer disconnected or buffer full — stop sending
 			}
 		}
-		if len(events) > syncBatchSize {
-			slog.Debug("network: sync batch sent",
-				"peer", peer.AgentID,
-				"total_events", len(events),
-				"batches", (len(events)+syncBatchSize-1)/syncBatchSize,
-			)
-		}
 
 	case MsgSyncBatch:
-		// Sort by CausalTimestamp before inserting so parents always arrive
-		// before their children, satisfying dag.Add's causal-ref precondition.
-		// Events already present are silently skipped (ErrDuplicateEvent).
 		var batch SyncBatchPayload
 		if err := json.Unmarshal(msg.Payload, &batch); err != nil {
 			return
 		}
+		// Sort by CausalTimestamp so parents generally arrive before children.
 		sort.Slice(batch.Events, func(i, j int) bool {
 			return batch.Events[i].CausalTimestamp < batch.Events[j].CausalTimestamp
 		})
+
 		n.mu.RLock()
 		sh := n.syncHandler
 		n.mu.RUnlock()
-		// First pass: insert all events, collecting those that fail due to
-		// missing causal refs for a retry pass.
-		var deferred []*event.Event
+
+		// Verify signatures once upfront to avoid re-verifying on retries.
+		var verified []*event.Event
 		for _, e := range batch.Events {
 			if !crypto.VerifyEvent(e) {
-				slog.Warn("network: dropping MsgSyncBatch event with invalid signature",
-					"event_id", e.ID, "agent", e.AgentID, "peer", peer.AgentID)
 				continue
 			}
-			if err := n.dag.Add(e); err == nil {
-				if sh != nil {
-					sh(e)
-				}
-			} else if errors.Is(err, dag.ErrMissingCausalRef) {
-				deferred = append(deferred, e)
-			}
+			verified = append(verified, e)
 		}
-		// Second pass: retry deferred events (a parent may have been in the
-		// same batch but sorted after its child despite timestamp ordering).
-		for _, e := range deferred {
-			if err := n.dag.Add(e); err == nil {
-				if sh != nil {
-					sh(e)
+
+		// Multi-pass insertion: keep retrying events with missing causal
+		// refs until no more progress is made. Each pass resolves one
+		// level of the causal chain, so deep chains (common during
+		// concurrent multi-node startup) converge in a single batch
+		// reception rather than requiring multiple sync cycles.
+		added := 0
+		pending := verified
+		for len(pending) > 0 {
+			var stillPending []*event.Event
+			progress := false
+			for _, e := range pending {
+				if err := n.dag.Add(e); err == nil {
+					added++
+					progress = true
+					if sh != nil {
+						sh(e)
+					}
+				} else if errors.Is(err, dag.ErrMissingCausalRef) {
+					stillPending = append(stillPending, e)
 				}
-			} else {
-				slog.Debug("network: MsgSyncBatch event still missing parents after retry",
-					"event_id", e.ID, "type", e.Type, "peer", peer.AgentID)
+				// Duplicates and other errors are silently dropped.
 			}
+			if !progress {
+				break // No events added this pass — remaining are truly unresolvable
+			}
+			pending = stillPending
+		}
+
+		if added > 0 || len(pending) > 0 {
+			slog.Info("sync: batch processed",
+				"peer", peer.AgentID,
+				"received", len(batch.Events),
+				"added", added,
+				"unresolvable", len(pending),
+			)
 		}
 
 	case MsgEventHeader:
