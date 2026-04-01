@@ -31,7 +31,7 @@ func NewVerifierRegistry() *VerifierRegistry {
 		verifiers:     make(map[string]VerifierInterface),
 		fallback:      NewKeywordVerifier(),
 		codeThresh:    0.65, // static analysis tops out at ~0.71 for good code
-		dataThresh:    0.70,
+		dataThresh:    0.60,
 		contentThresh: 0.50,
 		defaultThresh: 0.60,
 	}
