@@ -191,9 +191,55 @@ function fmtAET(v) {
   return a.toFixed(a < 1 ? 4 : 2) + ' AET';
 }
 
-function truncate(s, n = 12) {
+function truncate(s, n = 8) {
   if (!s) return '';
-  return s.length > n * 2 ? s.slice(0, n) + '…' + s.slice(-6) : s;
+  return s.length > n + 4 ? s.slice(0, n) + '…' + s.slice(-4) : s;
+}
+
+const EVENT_META = {
+  Registration: { icon: '🆔', color: 'var(--secondary)', label: 'Registration' },
+  Transfer: { icon: '💸', color: 'var(--success)', label: 'Transfer' },
+  Generation: { icon: '⚡', color: '#a855f7', label: 'Generation' },
+  TaskPosted: { icon: '📋', color: 'var(--primary)', label: 'Task Posted' },
+  TaskClaimed: { icon: '✋', color: 'var(--secondary)', label: 'Task Claimed' },
+  TaskSubmitted: { icon: '📤', color: 'var(--warn)', label: 'Submitted' },
+  TaskApproved: { icon: '✅', color: 'var(--success)', label: 'Approved' },
+  TaskDisputed: { icon: '⚠️', color: 'var(--destructive)', label: 'Disputed' },
+  TaskSettlement: { icon: '🏦', color: 'var(--success)', label: 'Task Settled' },
+  VerificationVote: { icon: '🗳️', color: '#6366f1', label: 'Vote' },
+  Settlement: { icon: '⚖️', color: 'var(--success)', label: 'Settlement' },
+  GenesisFunding: { icon: '🌱', color: '#22d3ee', label: 'Genesis Fund' },
+  TrajectoryCommit: { icon: '🔬', color: '#f472b6', label: 'Trajectory' },
+  ValidatorGenesisSet: { icon: '🏛️', color: '#22d3ee', label: 'Validator Genesis' },
+  ValidatorJoin: { icon: '🤝', color: 'var(--secondary)', label: 'Validator Join' },
+  ValidatorActivate: { icon: '🟢', color: 'var(--success)', label: 'Validator Active' },
+  ValidatorSuspend: { icon: '⏸️', color: 'var(--warn)', label: 'Validator Suspended' },
+  ValidatorResume: { icon: '▶️', color: 'var(--success)', label: 'Validator Resumed' },
+  ValidatorExit: { icon: '🚪', color: 'var(--muted-fg)', label: 'Validator Exit' },
+  ValidatorKeyRotate: { icon: '🔑', color: 'var(--warn)', label: 'Key Rotation' },
+  ValidatorSlashApplied: { icon: '🔨', color: 'var(--destructive)', label: 'Slashed' },
+  ValidatorRecoveryKeySet: { icon: '🛡️', color: '#6366f1', label: 'Recovery Key Set' },
+  ValidatorEmergencySuspend: { icon: '🚨', color: 'var(--destructive)', label: 'Emergency Suspend' },
+  ValidatorRecoveryRotate: { icon: '🔄', color: 'var(--warn)', label: 'Recovery Rotate' },
+  ValidatorRecoveryRotateCancel: { icon: '❌', color: 'var(--muted-fg)', label: 'Rotation Cancelled' },
+};
+
+function eventMeta(type) {
+  return EVENT_META[type] || { icon: '📦', color: 'var(--muted-fg)', label: type || 'Unknown' };
+}
+
+function ScoreBar({ value, label, max = 1 }) {
+  const pct = max > 0 ? Math.min(value / max, 1) * 100 : 0;
+  const color = pct >= 70 ? 'var(--success)' : pct >= 30 ? 'var(--warn)' : 'var(--destructive)';
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+      <span style={{ fontSize: 11, color: 'var(--muted-fg)', width: 80, flexShrink: 0 }}>{label}</span>
+      <div style={{ flex: 1, height: 6, background: 'var(--muted)', borderRadius: 3, overflow: 'hidden' }}>
+        <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: 3, transition: 'width 0.3s' }} />
+      </div>
+      <span className="mono" style={{ fontSize: 11, color, width: 36, textAlign: 'right' }}>{(pct).toFixed(0)}%</span>
+    </div>
+  );
 }
 
 function dotClass(s) {
@@ -283,7 +329,7 @@ function OverviewPage({ status, econ, taskStats, agents, events, dagStats, loadi
             Verifiable AI Work Settlement
           </h1>
           <p style={{ fontSize: 15, color: 'var(--muted-fg)', lineHeight: 1.6, maxWidth: 560, marginBottom: 24 }}>
-            AI work settles when it is sufficiently evidenced, independently reviewable, and accepted under explicit rules.
+            BFT consensus · Cryptographic signing · Stake-weighted verification · 42 packages, 1,576 tests
           </p>
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
             <button className="btn-primary" onClick={() => onNav('tasks')} style={{ height: 40, padding: '0 20px' }}>View Open Tasks</button>
@@ -315,7 +361,8 @@ function OverviewPage({ status, econ, taskStats, agents, events, dagStats, loadi
             <StatCard value={status ? fmtNum(agents.length) : null} label="Agents" />
             <StatCard value={status ? fmtNum(validators.length) : null} label="Validators" />
             <StatCard value={status ? fmtNum(status.dag_size) : null} label="DAG Events" />
-            <StatCard value={status ? String(status.peers) : null} label="Peers" />
+            <StatCard value={status ? String(status.peers + 1) : null} label="Nodes" />
+            <StatCard value={status ? String(status.ocs_pending) : null} label="Pending" />
           </div>
 
           {/* Two columns: Recent Tasks + Network Health */}
@@ -458,6 +505,7 @@ function TasksPage({ addToast }) {
                       <th>Category</th>
                       <th>Budget</th>
                       <th>Assurance</th>
+                      <th>Score</th>
                       <th>Status</th>
                       <th></th>
                     </tr>
@@ -465,10 +513,10 @@ function TasksPage({ addToast }) {
                   <tbody>
                     {loading && !tasks.length ? (
                       [...Array(5)].map((_, i) => (
-                        <tr key={i}><td style={{ paddingLeft: 20 }}><Skel w={180} h={14} /></td><td><Skel w={70} h={14} /></td><td><Skel w={60} h={14} /></td><td><Skel w={60} h={14} /></td><td><Skel w={50} h={14} /></td><td></td></tr>
+                        <tr key={i}><td style={{ paddingLeft: 20 }}><Skel w={180} h={14} /></td><td><Skel w={70} h={14} /></td><td><Skel w={60} h={14} /></td><td><Skel w={60} h={14} /></td><td><Skel w={40} h={14} /></td><td><Skel w={50} h={14} /></td><td></td></tr>
                       ))
                     ) : filtered.length === 0 ? (
-                      <tr><td colSpan={6} style={{ padding: 48, textAlign: 'center' }}>
+                      <tr><td colSpan={7} style={{ padding: 48, textAlign: 'center' }}>
                         <span style={{ color: 'var(--muted-fg)', fontSize: 13 }}>
                           {filter === 'open' && tasks.length === 0 ? 'No tasks yet. Post one to get started.' : `No ${statusLabel(filter).toLowerCase()} tasks.`}
                         </span>
@@ -484,6 +532,15 @@ function TasksPage({ addToast }) {
                           <td><span style={{ fontSize: 12, color: 'var(--muted-fg)' }}>{task.category || '—'}</span></td>
                           <td><span className="mono" style={{ fontSize: 13 }}>{fmtAET(task.budget)}</span></td>
                           <td><span className={`lane-badge ${lb.cls}`}>{lb.text}</span></td>
+                          <td>
+                            {task.verification_score ? (() => {
+                              const s = task.verification_score;
+                              const overall = s.overall != null ? s.overall : 0;
+                              const pct = (overall * 100).toFixed(0);
+                              const color = overall >= 0.7 ? 'var(--success)' : overall >= 0.3 ? 'var(--warn)' : 'var(--destructive)';
+                              return <span className="mono" style={{ fontSize: 12, color, fontWeight: 500 }}>{pct}%</span>;
+                            })() : <span style={{ fontSize: 12, color: 'var(--muted-fg)' }}>—</span>}
+                          </td>
                           <td>
                             <span className={`pill ${pillClass(task.status)}`}>
                               <span className={`dot ${dotClass(task.status)}`} />
@@ -669,18 +726,33 @@ function NetworkPage({ events, dagStats, econ, status, loading }) {
                 <table>
                   <thead><tr><th>ID</th><th>Type</th><th>Details</th><th>State</th></tr></thead>
                   <tbody>
-                    {events.map(ev => (
+                    {events.map(ev => {
+                      const meta = eventMeta(ev.type);
+                      return (
                       <tr key={ev.id}>
-                        <td><span className="mono" style={{ fontSize: 12, color: 'var(--muted-fg)' }}>{truncate(ev.id, 8)}</span></td>
-                        <td><span style={{ fontSize: 12 }}>{ev.type || 'Unknown'}</span></td>
+                        <td><span className="mono" style={{ fontSize: 12, color: 'var(--muted-fg)' }}>{truncate(ev.id)}</span></td>
+                        <td>
+                          <span style={{ fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                            <span>{meta.icon}</span>
+                            <span style={{ color: meta.color, fontWeight: 500 }}>{meta.label}</span>
+                          </span>
+                        </td>
                         <td>
                           {ev.type === 'Transfer' && ev.from ? (
                             <span className="mono" style={{ fontSize: 12, color: 'var(--muted-fg)' }}>
-                              {truncate(ev.from, 6)} {'→'} {truncate(ev.to, 6)} {ev.amount > 0 ? ` ${fmtAET(ev.amount)}` : ''}
+                              {truncate(ev.from)} {'→'} {truncate(ev.to)} {ev.amount > 0 ? ` ${fmtAET(ev.amount)}` : ''}
+                            </span>
+                          ) : ev.type === 'TaskPosted' || ev.type === 'TaskClaimed' || ev.type === 'TaskSubmitted' || ev.type === 'TaskApproved' ? (
+                            <span className="mono" style={{ fontSize: 12, color: 'var(--muted-fg)' }}>
+                              {truncate(ev.agent_id)} {ev.memo ? `· ${ev.memo.slice(0, 30)}` : ''}
+                            </span>
+                          ) : ev.type === 'VerificationVote' || ev.type === 'Settlement' ? (
+                            <span className="mono" style={{ fontSize: 12, color: 'var(--muted-fg)' }}>
+                              {truncate(ev.agent_id)} · ts {ev.causal_timestamp}
                             </span>
                           ) : (
                             <span className="mono" style={{ fontSize: 12, color: 'var(--muted-fg)' }}>
-                              {truncate(ev.agent_id, 8)} {ev.causal_timestamp != null ? `ts ${ev.causal_timestamp}` : ''}
+                              {truncate(ev.agent_id)} {ev.causal_timestamp != null ? `· ts ${ev.causal_timestamp}` : ''}
                             </span>
                           )}
                         </td>
@@ -691,7 +763,8 @@ function NetworkPage({ events, dagStats, econ, status, loading }) {
                           </span>
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               )}
@@ -706,12 +779,17 @@ function NetworkPage({ events, dagStats, econ, status, loading }) {
                 <div style={{ fontSize: 13, color: 'var(--muted-fg)' }}>No events in DAG yet.</div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column' }}>
-                  {Object.entries(byType).map(([type, n]) => (
+                  {Object.entries(byType).map(([type, n]) => {
+                    const meta = eventMeta(type);
+                    return (
                     <div key={type} className="kv">
-                      <span style={{ fontSize: 13, color: 'var(--fg)' }}>{type}</span>
-                      <span className="mono" style={{ fontSize: 13, color: 'var(--fg)', fontWeight: 500 }}>{n}</span>
+                      <span style={{ fontSize: 13, color: 'var(--fg)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                        <span style={{ fontSize: 11 }}>{meta.icon}</span> {meta.label}
+                      </span>
+                      <span className="mono" style={{ fontSize: 13, color: meta.color, fontWeight: 500 }}>{n}</span>
                     </div>
-                  ))}
+                    );
+                  })}
                   <div className="kv" style={{ marginTop: 4 }}>
                     <span style={{ fontSize: 13, color: 'var(--muted-fg)', fontWeight: 500 }}>Total</span>
                     <span className="mono" style={{ fontSize: 13, color: 'var(--fg)', fontWeight: 500 }}>{total}</span>
@@ -845,7 +923,7 @@ function App() {
 
       <footer style={{ borderTop: '1px solid var(--border)' }}>
         <div className="container" style={{ padding: '14px 2rem', fontSize: 12, color: 'var(--muted-fg)', display: 'flex', justifyContent: 'space-between' }}>
-          <span>AetherNet v0.1.0-testnet{' · '}<a href="/docs/" style={{ color: 'var(--muted-fg)', textDecoration: 'none', transition: 'color 0.15s' }} onMouseEnter={e => e.target.style.color = 'var(--fg)'} onMouseLeave={e => e.target.style.color = 'var(--muted-fg)'}>Documentation</a></span>
+          <span>AetherNet Testnet · 5-node BFT{' · '}<a href="/docs/" style={{ color: 'var(--muted-fg)', textDecoration: 'none', transition: 'color 0.15s' }} onMouseEnter={e => e.target.style.color = 'var(--fg)'} onMouseLeave={e => e.target.style.color = 'var(--muted-fg)'}>Documentation</a></span>
           <span>Auto-refresh 5s</span>
         </div>
       </footer>
