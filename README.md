@@ -12,7 +12,7 @@ This works both across organizations (open network of agents transacting with st
 
 ## Current Build State
 
-AetherNet is live on a 3-node testnet with full E2E verification. ~91,000 lines of Go across 47 internal packages. 1,500+ tests, all passing.
+AetherNet is live on a 5-node testnet with full E2E verification and BFT consensus. 42 packages, 1,576 tests (zero race conditions), all passing.
 
 ### Live Infrastructure
 - **Testnet:** [testnet.aethernet.network](https://testnet.aethernet.network)
@@ -418,7 +418,7 @@ AetherNet is live on testnet with full end-to-end settlement verified.
 
 **Testnet:** [testnet.aethernet.network](https://testnet.aethernet.network) — 3 validator nodes, automatic peer discovery, consensus-gated settlement, full auth enforcement.
 
-**Codebase:** ~91,000 lines of Go across 47 internal packages. 1,500+ tests with zero race conditions. Full E2E verification: registration → consensus → settlement → cross-node balance convergence.
+**Codebase:** 42 packages, 1,576 tests with zero race conditions. Full E2E verification: registration → consensus → settlement → cross-node balance convergence.
 
 **Explorer:** [testnet.aethernet.network/explorer/](https://testnet.aethernet.network/explorer/) — live dashboard showing network state, tasks, validators, and event stream.
 
