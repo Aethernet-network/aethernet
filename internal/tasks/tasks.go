@@ -48,6 +48,10 @@ const (
 // complete quickly without waiting for the full period.
 const DefaultClaimDeadline = 10 * time.Minute
 
+// MaxRejections is the maximum number of times a task's submissions can be
+// rejected before the task is permanently closed as failed.
+const MaxRejections = 3
+
 // MinTaskBudget is the minimum budget (in micro-AET) for a task posted via
 // the HTTP API. This ensures fees are non-trivial and guards against spam.
 // 100,000 µAET = 0.1 AET.
@@ -208,6 +212,11 @@ type Task struct {
 	// "recognized" (credit issued), "held" (credit withheld pending replay),
 	// "denied" (credit permanently withheld after a disputed replay).
 	GenerationStatus string `json:"generation_status,omitempty"`
+
+	// RejectionCount tracks how many times this task's submissions have been
+	// rejected by the autovalidator (score below PassThreshold). After
+	// MaxRejections, the task is closed as failed and budget returned to poster.
+	RejectionCount int `json:"rejection_count,omitempty"`
 
 	// AssuranceFee is the protocol fee charged for the assurance service (µAET).
 	// Zero for unassured tasks (LaneNone).
@@ -1185,6 +1194,50 @@ func (m *TaskManager) ReleaseTask(taskID string) (formerClaimerID string, err er
 	task.ClaimDeadline = 0
 	m.persist(task)
 	return formerClaimerID, nil
+}
+
+// RejectSubmission rejects a submitted task because verification failed.
+// Increments the rejection counter, clears the claimer, and transitions back
+// to Open so another agent can try. If the rejection count reaches
+// MaxRejections, the task is closed as Cancelled (budget returned to poster).
+// Returns the former claimer ID and whether the task was permanently closed.
+func (m *TaskManager) RejectSubmission(taskID string) (formerClaimerID string, closed bool, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return "", false, fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
+	}
+	if task.Status != TaskStatusSubmitted {
+		return "", false, fmt.Errorf("%w: %s (status: %s)", ErrTaskNotSubmitted, taskID, task.Status)
+	}
+
+	task.RejectionCount++
+	formerClaimerID = task.ClaimerID
+
+	if task.RejectionCount >= MaxRejections {
+		// Permanently close — too many failed attempts.
+		task.Status = TaskStatusCancelled
+		task.CompletedAt = time.Now().UnixNano()
+		m.persist(task)
+		return formerClaimerID, true, nil
+	}
+
+	// Reopen for another agent to try.
+	task.Status = TaskStatusOpen
+	task.ClaimerID = ""
+	task.ClaimedAt = 0
+	task.ClaimDeadline = 0
+	task.SubmittedAt = 0
+	task.ResultHash = ""
+	task.ResultNote = ""
+	task.ResultContent = ""
+	task.ResultURI = ""
+	task.SubmittedEvidence = nil
+	task.VerificationScore = nil
+	m.persist(task)
+	return formerClaimerID, false, nil
 }
 
 // Get returns a copy of the task by ID. Returns ErrTaskNotFound when absent.

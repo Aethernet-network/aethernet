@@ -456,13 +456,30 @@ func (av *AutoValidator) processSubmittedTasks() {
 		}
 
 		if !passed {
-			slog.Info("auto-validator: task below threshold — settling with reduced value",
-				"task_id", task.ID, "score", score.Overall, "threshold", evidence.PassThreshold)
-			// Settle with the reduced score rather than holding indefinitely.
-			// The verified value is proportional to the score, so the worker
-			// receives less for poor evidence. The poster's budget is still
-			// released (they posted the task and someone completed it), but
-			// the generation ledger entry reflects the reduced quality.
+			// Reject: score below threshold. Reopen the task for another agent.
+			formerClaimer, closed, err := av.taskMgr.RejectSubmission(task.ID)
+			if err != nil {
+				slog.Warn("auto-validator: could not reject submission", "task_id", task.ID, "err", err)
+				continue
+			}
+			if closed {
+				slog.Info("auto-settlement: task failed permanently — max rejections reached",
+					"task_id", task.ID, "score", score.Overall, "threshold", evidence.PassThreshold,
+					"rejections", tasks.MaxRejections)
+				// Return escrowed budget to poster.
+				if av.escrowMgr != nil {
+					_ = av.escrowMgr.Refund(task.ID)
+				}
+			} else {
+				slog.Info("auto-settlement: task rejected — below threshold, reopened",
+					"task_id", task.ID, "score", score.Overall, "threshold", evidence.PassThreshold,
+					"former_claimer", formerClaimer, "rejection_count", task.RejectionCount+1)
+			}
+			// Penalize the worker's reputation for low-quality submission.
+			if av.reputationMgr != nil && formerClaimer != "" {
+				av.reputationMgr.RecordFailure(crypto.AgentID(formerClaimer), task.Category)
+			}
+			continue
 		}
 
 		// Determine whether the replay coordinator wants to verify this task
