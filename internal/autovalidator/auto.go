@@ -456,9 +456,13 @@ func (av *AutoValidator) processSubmittedTasks() {
 		}
 
 		if !passed {
-			slog.Info("auto-validator: task held below threshold",
+			slog.Info("auto-validator: task below threshold — settling with reduced value",
 				"task_id", task.ID, "score", score.Overall, "threshold", evidence.PassThreshold)
-			continue
+			// Settle with the reduced score rather than holding indefinitely.
+			// The verified value is proportional to the score, so the worker
+			// receives less for poor evidence. The poster's budget is still
+			// released (they posted the task and someone completed it), but
+			// the generation ledger entry reflects the reduced quality.
 		}
 
 		// Determine whether the replay coordinator wants to verify this task
@@ -494,6 +498,13 @@ func (av *AutoValidator) processSubmittedTasks() {
 			}
 		}
 
+		slog.Info("auto-settlement: settling task via verification",
+			"task_id", task.ID,
+			"claimer", task.ClaimerID,
+			"score", score.Overall,
+			"budget", task.Budget,
+			"passed_threshold", passed,
+		)
 		av.settleTask(task, score, holdGeneration)
 
 		// Schedule the replay job after settlement so the task is in Completed
