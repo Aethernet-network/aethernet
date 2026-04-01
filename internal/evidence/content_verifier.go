@@ -43,7 +43,15 @@ func (cv *ContentVerifier) Verify(ev *Evidence, taskTitle, taskDescription strin
 	relevance := cv.scoreTopicRelevance(content, taskTitle, taskDescription)
 	formatting := cv.scoreFormatting(content)
 
-	overall := language*0.20 + completeness*0.30 + relevance*0.30 + formatting*0.20
+	// Multi-dimensional quality analysis: scores substance (argument structure,
+	// claim density, source grounding, information density) alongside structure.
+	// This replaces the old (language + formatting) / 2 which couldn't distinguish
+	// substantive research from filler.
+	profile := analyzeContentQuality(content)
+	quality := profile.computeQuality()
+
+	// Weighted composite: quality (substance) gets 25% weight.
+	overall := quality*0.25 + completeness*0.25 + relevance*0.25 + language*0.15 + formatting*0.10
 
 	// Cap overall when content is clearly off-topic.
 	if topicTermFraction(content, taskTitle, taskDescription) < 0.25 {
@@ -55,7 +63,7 @@ func (cv *ContentVerifier) Verify(ev *Evidence, taskTitle, taskDescription strin
 	score := &Score{
 		Relevance:    relevance,
 		Completeness: completeness,
-		Quality:      (language + formatting) / 2,
+		Quality:      quality,
 		Overall:      overall,
 	}
 	return score, overall >= contentPassThreshold
