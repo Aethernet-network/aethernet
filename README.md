@@ -99,6 +99,23 @@ All write endpoints require AETHERNET-TX-V1 Ed25519 signing. Read endpoints requ
 
 ---
 
+## Research
+
+AetherNet's protocol design is grounded in original research produced by AetherNet Labs. These papers formalize the theoretical foundations underlying the protocol's verification, settlement, and causal structure.
+
+### Verified Causal Structures (VCS)
+A formal framework for causal reasoning over empirically attested computational graphs. Introduces Compound Verification Depth (CVD) — a confidence measure with proven monotonic strengthening, structural decomposability, and adversarial robustness. Demonstrates that Pearl's complete causal hierarchy (association, intervention, counterfactual) is computable over a VCS with formal guarantees. Proves exact counterfactual computability for re-derivable computations.
+
+### Causal Economics
+Formalizes the emergent economic properties of the protocol's dual ledger architecture — provenance money, compound verification, and value conservation laws. Introduces the Genesis Bridge for human-originated knowledge entering the causal chain, and trajectory events as the economics of negative knowledge.
+
+### Computational Interference via Verified Causal DAG
+Identifies a structural mapping between quantum computation and verified causal DAG computation. Shows that parallel exploration with interference-based convergence is achievable on classical hardware through economic incentives, with compound speedup that grows with collective exploration.
+
+Research inquiries: research@aethernet.network
+
+---
+
 ## The thesis
 
 The core insight is not "AI agents paying each other."
