@@ -22,6 +22,7 @@ type Evidence struct {
 	Metrics       map[string]string `json:"metrics,omitempty"`
 	OutputPreview string            `json:"output_preview,omitempty"`
 	OutputURL     string            `json:"output_url,omitempty"`
+	ResultContent string            `json:"result_content,omitempty"`
 
 	// GenesisChain lists parent evidence hashes that this output derived from.
 	// When an agent consumes verified output from another task as input, that

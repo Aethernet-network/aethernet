@@ -422,6 +422,11 @@ func (av *AutoValidator) processSubmittedTasks() {
 				OutputURL:  task.ResultURI,
 			}
 		}
+		// Inject the full result content so the verifier scores the actual
+		// work, not just the 500-char OutputPreview cap from the SDK.
+		if task.ResultContent != "" && ev.ResultContent == "" {
+			ev.ResultContent = task.ResultContent
+		}
 		score, passed, observedGates := av.verifyEvidence(ev, task.Title, task.Description, task.Budget, task.Category)
 		_ = av.taskMgr.SetVerificationScore(task.ID, score)
 
