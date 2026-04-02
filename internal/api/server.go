@@ -1683,9 +1683,16 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		blobData, _ := json.Marshal(blob)
 		if hash, _, err := s.blobStore.Put(context.Background(), blobData); err == nil {
 			evidenceBodyHash = hash
+			slog.Info("evidence: blob stored",
+				"task_id", taskID, "hash", hash, "size", len(blobData),
+				"has_evidence", req.Evidence != nil, "has_content", req.ResultContent != "")
 		} else {
 			slog.Warn("submit: failed to store evidence blob", "task_id", taskID, "err", err)
 		}
+	} else {
+		slog.Debug("submit: skipping blob store",
+			"task_id", taskID, "blob_store_nil", s.blobStore == nil,
+			"evidence_nil", req.Evidence == nil, "content_empty", req.ResultContent == "")
 	}
 
 	// Emit DAG event — ApplyDAGEvent applies the state change locally.
