@@ -1128,17 +1128,29 @@ func (m *TaskManager) applyTaskSubmitted(tp event.TaskSubmittedPayload) {
 	// nodes get the full evidence — the DAG event carries only the hash,
 	// the blob contains the actual evidence object and result content.
 	if tp.EvidenceBodyHash != "" && m.evidenceBlobFetcher != nil && task.SubmittedEvidence == nil {
-		go m.fetchEvidenceBlob(tp.TaskID, tp.EvidenceBodyHash)
+		m.fetchEvidenceBlob(tp.TaskID, tp.EvidenceBodyHash)
 	}
 }
 
 // fetchEvidenceBlob retrieves an evidence blob from the blobstore and stores
-// it locally. Called asynchronously from applyTaskSubmitted so it doesn't
-// block DAG replay.
+// it locally. Called synchronously from applyTaskSubmitted — the blob is
+// typically already in the local BlobStore (piggybacked in the sync batch),
+// so this is a fast local read. Retries up to 3 times with 500ms delay for
+// the rare case where the blob hasn't arrived yet.
 func (m *TaskManager) fetchEvidenceBlob(taskID, blobHash string) {
-	data, err := m.evidenceBlobFetcher(blobHash)
+	var data []byte
+	var err error
+	for i := 0; i < 3; i++ {
+		data, err = m.evidenceBlobFetcher(blobHash)
+		if err == nil {
+			break
+		}
+		if i < 2 {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
 	if err != nil {
-		slog.Debug("fetchEvidenceBlob: blob not yet available",
+		slog.Debug("fetchEvidenceBlob: blob not available after retries",
 			"task_id", taskID, "hash", blobHash[:min(16, len(blobHash))], "err", err)
 		return
 	}
