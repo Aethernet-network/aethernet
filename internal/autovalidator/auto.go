@@ -425,6 +425,17 @@ func (av *AutoValidator) processSubmittedTasks() {
 		score, passed, observedGates := av.verifyEvidence(ev, task.Title, task.Description, task.Budget, task.Category)
 		_ = av.taskMgr.SetVerificationScore(task.ID, score)
 
+		slog.Info("auto-settlement: score breakdown",
+			"task_id", task.ID,
+			"overall", score.Overall,
+			"quality", score.Quality,
+			"completeness", score.Completeness,
+			"relevance", score.Relevance,
+			"passed", passed,
+			"category", task.Category,
+			"content_len", len(ev.Summary)+len(ev.OutputPreview),
+		)
+
 		// Canary evaluation: check whether this task is a protocol-internal
 		// measurement canary. When a canary record is found, emit a
 		// CalibrationSignal comparing the worker's result to ground truth.
