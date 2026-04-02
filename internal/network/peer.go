@@ -197,7 +197,8 @@ type HandshakePayload struct {
 // causal references are missing are silently skipped (the DAG enforces referential
 // integrity and returns ErrMissingCausalRef in those cases).
 type SyncBatchPayload struct {
-	Events []*event.Event `json:"events"`
+	Events []*event.Event    `json:"events"`
+	Blobs  map[string][]byte `json:"blobs,omitempty"`
 }
 
 // Peer represents a single remote node connection. It is safe for concurrent use

@@ -1840,8 +1840,10 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			)
 			trajSvc.SetPublisher(pub)
 			apiSrv.SetTrajectoryService(trajSvc)
-			// Wire blobstore to API server and TaskManager for evidence propagation.
+			// Wire blobstore to API server, TaskManager, and Network node
+			// for evidence propagation across all nodes.
 			apiSrv.SetBlobStore(blobStore)
+			node.SetBlobStore(blobStore)
 			stack.taskMgr.SetEvidenceBlobFetcher(func(hash string) ([]byte, error) {
 				return blobStore.Get(context.Background(), hash)
 			})

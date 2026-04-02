@@ -238,6 +238,11 @@ type Node struct {
 	// mesh manages bounded relay target selection using peer scoring and diversity.
 	mesh *MeshManager
 
+	// blobStore is optional content-addressed storage for evidence blobs.
+	// When set, MsgRequestSync responses include blobs referenced by
+	// TaskSubmitted events, and MsgSyncBatch receivers store received blobs.
+	blobStore nodeBlobStore
+
 	// overload tracks the node's current load level for backpressure signaling.
 	overload OverloadState
 
@@ -648,6 +653,19 @@ func (n *Node) SetSyncHandler(fn func(ev *event.Event)) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.syncHandler = fn
+}
+
+// nodeBlobStore is the minimal blob storage interface used by the sync layer.
+type nodeBlobStore interface {
+	Put(ctx context.Context, data []byte) (hash string, size int64, err error)
+	Get(ctx context.Context, hash string) ([]byte, error)
+}
+
+// SetBlobStore wires content-addressed blob storage for evidence propagation.
+func (n *Node) SetBlobStore(bs nodeBlobStore) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.blobStore = bs
 }
 
 // BroadcastVote sends a signed MsgVote to all currently connected peers.
@@ -1117,7 +1135,31 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 			if end > len(events) {
 				end = len(events)
 			}
-			payload, err := json.Marshal(SyncBatchPayload{Events: events[i:end]})
+			batch := SyncBatchPayload{Events: events[i:end]}
+
+			// Attach evidence blobs for TaskSubmitted events so receivers
+			// get the full evidence body alongside the DAG event.
+			if n.blobStore != nil {
+				for _, ev := range batch.Events {
+					if ev.Type != event.EventTypeTaskSubmitted {
+						continue
+					}
+					tp, err := event.GetPayload[event.TaskSubmittedPayload](ev)
+					if err != nil || tp.EvidenceBodyHash == "" {
+						continue
+					}
+					data, err := n.blobStore.Get(context.Background(), tp.EvidenceBodyHash)
+					if err != nil {
+						continue
+					}
+					if batch.Blobs == nil {
+						batch.Blobs = make(map[string][]byte)
+					}
+					batch.Blobs[tp.EvidenceBodyHash] = data
+				}
+			}
+
+			payload, err := json.Marshal(batch)
 			if err != nil {
 				return
 			}
@@ -1131,6 +1173,21 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		if err := json.Unmarshal(msg.Payload, &batch); err != nil {
 			return
 		}
+
+		// Store any piggybacked evidence blobs BEFORE processing events,
+		// so the TaskManager's applyTaskSubmitted can find them when it
+		// calls the blob fetcher.
+		if n.blobStore != nil && len(batch.Blobs) > 0 {
+			for hash, data := range batch.Blobs {
+				if _, _, err := n.blobStore.Put(context.Background(), data); err != nil {
+					slog.Debug("sync: failed to store piggybacked blob",
+						"hash", hash, "err", err)
+				}
+			}
+			slog.Info("sync: stored piggybacked evidence blobs",
+				"count", len(batch.Blobs), "peer", peer.AgentID)
+		}
+
 		// Sort by CausalTimestamp so parents generally arrive before children.
 		sort.Slice(batch.Events, func(i, j int) bool {
 			return batch.Events[i].CausalTimestamp < batch.Events[j].CausalTimestamp
