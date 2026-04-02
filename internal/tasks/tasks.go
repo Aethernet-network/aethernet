@@ -293,6 +293,11 @@ type TaskManager struct {
 	claimDeadline   time.Duration // default: DefaultClaimDeadline (10 min)
 	maxCompletedAge time.Duration // default: MaxCompletedAge (7 days)
 
+	// evidenceBlobFetcher is the optional blob fetcher for evidence bodies.
+	// When set, applyTaskSubmitted fetches the evidence blob referenced by
+	// EvidenceBodyHash and stores it locally via SetSubmittedEvidence.
+	evidenceBlobFetcher func(hash string) ([]byte, error)
+
 	// canaryInj is the optional canary injection hook. When non-nil and
 	// ShouldInject() returns true, PostTask probabilistically links a canary
 	// record to the newly created task. Nil by default — backward compatible.
@@ -324,6 +329,13 @@ func (m *TaskManager) SetClaimDeadline(d time.Duration) {
 	m.mu.Lock()
 	m.claimDeadline = d
 	m.mu.Unlock()
+}
+
+// SetEvidenceBlobFetcher wires a function that retrieves evidence blobs by
+// content hash. When set, applyTaskSubmitted fetches evidence referenced by
+// EvidenceBodyHash in the DAG event and stores it locally.
+func (m *TaskManager) SetEvidenceBlobFetcher(fn func(hash string) ([]byte, error)) {
+	m.evidenceBlobFetcher = fn
 }
 
 // SetMaxCompletedAge overrides how long completed/cancelled tasks stay in memory
@@ -1111,6 +1123,44 @@ func (m *TaskManager) applyTaskSubmitted(tp event.TaskSubmittedPayload) {
 	task.Status = TaskStatusSubmitted
 	task.SubmittedAt = time.Now().UnixNano()
 	m.persist(task)
+
+	// Fetch evidence body from blobstore if available. This is how remote
+	// nodes get the full evidence — the DAG event carries only the hash,
+	// the blob contains the actual evidence object and result content.
+	if tp.EvidenceBodyHash != "" && m.evidenceBlobFetcher != nil && task.SubmittedEvidence == nil {
+		go m.fetchEvidenceBlob(tp.TaskID, tp.EvidenceBodyHash)
+	}
+}
+
+// fetchEvidenceBlob retrieves an evidence blob from the blobstore and stores
+// it locally. Called asynchronously from applyTaskSubmitted so it doesn't
+// block DAG replay.
+func (m *TaskManager) fetchEvidenceBlob(taskID, blobHash string) {
+	data, err := m.evidenceBlobFetcher(blobHash)
+	if err != nil {
+		slog.Debug("fetchEvidenceBlob: blob not yet available",
+			"task_id", taskID, "hash", blobHash[:min(16, len(blobHash))], "err", err)
+		return
+	}
+
+	var blob struct {
+		Evidence      *evidence.Evidence `json:"evidence,omitempty"`
+		ResultContent string             `json:"result_content,omitempty"`
+		Encrypted     bool               `json:"encrypted,omitempty"`
+	}
+	if err := json.Unmarshal(data, &blob); err != nil {
+		slog.Warn("fetchEvidenceBlob: invalid blob data", "task_id", taskID, "err", err)
+		return
+	}
+
+	if blob.Evidence != nil {
+		m.SetSubmittedEvidence(taskID, blob.Evidence)
+	}
+	if blob.ResultContent != "" {
+		_ = m.SetResultContent(taskID, blob.ResultContent, blob.Encrypted)
+	}
+	slog.Info("evidence: blob fetched and applied",
+		"task_id", taskID, "hash", blobHash[:min(16, len(blobHash))])
 }
 
 func (m *TaskManager) applyTaskApproved(tp event.TaskApprovedPayload) {

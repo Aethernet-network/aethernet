@@ -268,6 +268,11 @@ type Server struct {
 	enableL3    bool
 	explorerDir string // path to serve the explorer UI from; "" disables it
 
+	// blobStore provides content-addressed storage for evidence bodies.
+	// When set, handleSubmitTask stores evidence in the blobstore and includes
+	// the content hash in the DAG event, enabling cross-node evidence propagation.
+	blobStore evidenceBlobStore
+
 	// lifecycleReducer provides read-only access to the validator seat state.
 	// Set via SetLifecycleReducer after construction. Used by the validator
 	// status endpoint to expose seat recovery configuration and lifecycle state.
@@ -565,6 +570,17 @@ type protoClientInterface interface {
 // SetProtocolClient wires the protocol client into the server. Call before Start.
 func (s *Server) SetProtocolClient(pc protoClientInterface) {
 	s.protoClient = pc
+}
+
+// evidenceBlobStore is the content-addressed blob storage interface for evidence bodies.
+type evidenceBlobStore interface {
+	Put(ctx context.Context, data []byte) (hash string, size int64, err error)
+	Get(ctx context.Context, hash string) ([]byte, error)
+}
+
+// SetBlobStore wires content-addressed blob storage for evidence bodies.
+func (s *Server) SetBlobStore(bs evidenceBlobStore) {
+	s.blobStore = bs
 }
 
 // lifecycleReducerReader provides read-only access to validator seat state.
@@ -1282,6 +1298,15 @@ type submitTaskRequest struct {
 	ResultEncrypted bool               `json:"result_encrypted,omitempty"` // true when content is ciphertext
 }
 
+// evidenceBlob is the serialization format for evidence bodies stored in the
+// blobstore. Contains the full evidence object and result content so other
+// nodes can reconstruct the complete submission from the blob hash in the DAG.
+type evidenceBlob struct {
+	Evidence      *evidence.Evidence `json:"evidence,omitempty"`
+	ResultContent string             `json:"result_content,omitempty"`
+	Encrypted     bool               `json:"encrypted,omitempty"`
+}
+
 type approveTaskRequest struct {
 	ApproverID string `json:"approver_id,omitempty"`
 }
@@ -1646,17 +1671,35 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Store evidence body in blobstore so it propagates to all nodes.
+	// The blob hash is included in the DAG event payload.
+	var evidenceBodyHash string
+	if s.blobStore != nil && (req.Evidence != nil || req.ResultContent != "") {
+		blob := evidenceBlob{
+			Evidence:      req.Evidence,
+			ResultContent: req.ResultContent,
+			Encrypted:     req.ResultEncrypted,
+		}
+		blobData, _ := json.Marshal(blob)
+		if hash, _, err := s.blobStore.Put(context.Background(), blobData); err == nil {
+			evidenceBodyHash = hash
+		} else {
+			slog.Warn("submit: failed to store evidence blob", "task_id", taskID, "err", err)
+		}
+	}
+
 	// Emit DAG event — ApplyDAGEvent applies the state change locally.
 	s.emitDAGEvent(event.EventTypeTaskSubmitted, event.TaskSubmittedPayload{
-		Version:    1,
-		TaskID:     taskID,
-		ClaimerID:  claimerID,
-		ResultHash: resultHash,
-		ResultNote: resultNote,
-		ResultURI:  resultURI,
+		Version:          1,
+		TaskID:           taskID,
+		ClaimerID:        claimerID,
+		ResultHash:       resultHash,
+		ResultNote:       resultNote,
+		ResultURI:        resultURI,
+		EvidenceBodyHash: evidenceBodyHash,
 	}, claimerID)
 
-	// Store evidence and result content after state change (node-local metadata).
+	// Store evidence locally (also applied on other nodes via ApplyDAGEvent + blob fetch).
 	if req.Evidence != nil {
 		s.taskMgr.SetSubmittedEvidence(taskID, req.Evidence)
 	}

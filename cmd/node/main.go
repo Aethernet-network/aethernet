@@ -1840,7 +1840,12 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			)
 			trajSvc.SetPublisher(pub)
 			apiSrv.SetTrajectoryService(trajSvc)
-			slog.Info("trajectory service wired", "blob_dir", blobDir)
+			// Wire blobstore to API server and TaskManager for evidence propagation.
+			apiSrv.SetBlobStore(blobStore)
+			stack.taskMgr.SetEvidenceBlobFetcher(func(hash string) ([]byte, error) {
+				return blobStore.Get(context.Background(), hash)
+			})
+			slog.Info("trajectory + evidence blob service wired", "blob_dir", blobDir)
 		}
 		if stack.discoveryEngine != nil {
 			apiSrv.SetDiscoveryEngine(stack.discoveryEngine)

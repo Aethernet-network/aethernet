@@ -687,11 +687,12 @@ type TaskClaimedPayload struct {
 type TaskSubmittedPayload struct {
 	Version uint8 `json:"v"`
 
-	TaskID     string `json:"task_id"`
-	ClaimerID  string `json:"claimer_id"`
-	ResultHash string `json:"result_hash"`
-	ResultNote string `json:"result_note,omitempty"`
-	ResultURI  string `json:"result_uri,omitempty"`
+	TaskID           string `json:"task_id"`
+	ClaimerID        string `json:"claimer_id"`
+	ResultHash       string `json:"result_hash"`
+	ResultNote       string `json:"result_note,omitempty"`
+	ResultURI        string `json:"result_uri,omitempty"`
+	EvidenceBodyHash string `json:"evidence_body_hash,omitempty"`
 }
 
 // TaskApprovedPayload records a poster approving submitted work.
