@@ -1042,7 +1042,8 @@ func (n *Node) syncLoop() {
 	if interval <= 0 {
 		interval = 10 * time.Second
 	}
-	slog.Info("sync: syncLoop STARTED", "interval", interval)
+	slog.Info("sync: syncLoop STARTED", "interval", interval,
+		"enable_legacy_sync", n.config.EnableLegacySync)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -1053,20 +1054,33 @@ func (n *Node) syncLoop() {
 			slog.Info("sync: syncLoop exiting (context cancelled)")
 			return
 		case <-ticker.C:
+			// Snapshot peer list under lock; sends happen outside.
 			n.mu.RLock()
-			peers := make([]*Peer, 0, len(n.peers))
+			var targets []*Peer
+			var legacyCount, fastpathCount int
 			for _, p := range n.peers {
-				peers = append(peers, p)
+				if p.SupportsFastPath() {
+					fastpathCount++
+					if n.config.EnableLegacySync {
+						targets = append(targets, p)
+					}
+				} else {
+					legacyCount++
+					targets = append(targets, p)
+				}
 			}
 			n.mu.RUnlock()
 
-			dagSize := n.dag.Size()
 			slog.Info("sync: tick",
-				"peers", len(peers),
-				"local_dag", dagSize,
+				"local_dag", n.dag.Size(),
+				"legacy_sync_targets", legacyCount,
+				"fastpath_peers", fastpathCount,
+				"sync_requests_sent", len(targets),
+				"enable_legacy_sync", n.config.EnableLegacySync,
 			)
 
-			for _, p := range peers {
+			// Send outside lock.
+			for _, p := range targets {
 				if err := p.Send(Message{Type: MsgRequestSync}); err != nil {
 					slog.Warn("sync: failed to send MsgRequestSync",
 						"peer", p.AgentID, "err", err)
