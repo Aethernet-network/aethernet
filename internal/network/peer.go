@@ -209,6 +209,11 @@ type SyncRequestPayload struct {
 // sync response. Prevents unbounded DAG serialization.
 const MaxLegacySyncEventsPerResponse = 500
 
+// MaxInlineFastPathBlobBytes is the maximum size of a blob that may be
+// attached as a sidecar in an EventBody response. Blobs larger than this
+// must be fetched via MsgBlobRequest/MsgBlobResponse (Prompt 5).
+const MaxInlineFastPathBlobBytes = 64 * 1024 // 64 KiB
+
 type SyncBatchPayload struct {
 	Events []*event.Event `json:"events"`
 }

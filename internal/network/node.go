@@ -239,8 +239,8 @@ type Node struct {
 	mesh *MeshManager
 
 	// blobStore is optional content-addressed storage for evidence blobs.
-	// When set, MsgRequestSync responses include blobs referenced by
-	// TaskSubmitted events, and MsgSyncBatch receivers store received blobs.
+	// When set, body-plane responses attach small blobs as sidecars for
+	// TaskSubmitted events, and receivers verify + store them before completion.
 	blobStore nodeBlobStore
 
 	// overload tracks the node's current load level for backpressure signaling.

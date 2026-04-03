@@ -187,6 +187,8 @@ func (n *Node) maybeRequestBody(id event.EventID) {
 
 // handleBodyRequest processes an incoming MsgBodyRequest from a peer.
 // Looks up the event in the local DAG and responds with the body payload.
+// For TaskSubmitted events with an EvidenceBodyHash, attaches the blob as
+// a sidecar if it is locally available and within MaxInlineFastPathBlobBytes.
 func (n *Node) handleBodyRequest(peer *Peer, payload []byte) {
 	var ref BodyRef
 	if err := json.Unmarshal(payload, &ref); err != nil {
@@ -210,6 +212,10 @@ func (n *Node) handleBodyRequest(peer *Peer, payload []byte) {
 	}
 
 	body := EventBody{EventID: ref.EventID, Payload: ev.Payload}
+
+	// Attach evidence blob sidecar for TaskSubmitted events.
+	body.AttachedBlobs = n.collectAttachedBlobs(ev)
+
 	data, err := json.Marshal(body)
 	if err != nil {
 		return
@@ -217,8 +223,51 @@ func (n *Node) handleBodyRequest(peer *Peer, payload []byte) {
 	SafeSend(peer, Message{Type: MsgEventBody, Payload: data})
 }
 
+// collectAttachedBlobs returns blobs referenced by the event that are locally
+// available and within MaxInlineFastPathBlobBytes. Currently supports
+// TaskSubmitted events with an EvidenceBodyHash.
+//
+// Must NOT be called while holding n.mu — blobstore reads must not occur
+// under broad locks.
+func (n *Node) collectAttachedBlobs(ev *event.Event) map[string][]byte {
+	n.mu.RLock()
+	bs := n.blobStore
+	n.mu.RUnlock()
+	if bs == nil {
+		return nil
+	}
+
+	if ev.Type != event.EventTypeTaskSubmitted {
+		return nil
+	}
+
+	tp, err := event.GetPayload[event.TaskSubmittedPayload](ev)
+	if err != nil || tp.EvidenceBodyHash == "" {
+		return nil
+	}
+
+	data, err := bs.Get(context.Background(), tp.EvidenceBodyHash)
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+
+	if len(data) > MaxInlineFastPathBlobBytes {
+		slog.Debug("fastpath: blob too large for inline sidecar",
+			"event_id", ev.ID,
+			"hash", tp.EvidenceBodyHash,
+			"size", len(data),
+			"max", MaxInlineFastPathBlobBytes,
+		)
+		return nil
+	}
+
+	return map[string][]byte{tp.EvidenceBodyHash: data}
+}
+
 // handleBodyResponse processes an incoming MsgEventBody from a peer.
 // Verifies the body commitment and advances the event to Completed.
+// If attached blobs are present, verifies each against its content hash
+// and stores valid ones in the blobstore before completing the body.
 func (n *Node) handleBodyResponse(peer *Peer, payload []byte) {
 	var body EventBody
 	if err := json.Unmarshal(payload, &body); err != nil {
@@ -227,6 +276,13 @@ func (n *Node) handleBodyResponse(peer *Peer, payload []byte) {
 
 	if n.ingest == nil {
 		return
+	}
+
+	// Verify and store attached blobs BEFORE completing the body, so the
+	// blobstore has the evidence blob available when downstream processing
+	// (autovalidator) runs.
+	if len(body.AttachedBlobs) > 0 {
+		n.processAttachedBlobs(peer, body.EventID, body.AttachedBlobs)
 	}
 
 	if err := n.ingest.CompleteBody(body.EventID, body.Payload); err != nil {
@@ -241,5 +297,53 @@ func (n *Node) handleBodyResponse(peer *Peer, payload []byte) {
 		if ps := peer.EnsureScore(); ps != nil {
 			ps.RecordValidBody()
 		}
+	}
+}
+
+// processAttachedBlobs verifies each attached blob against its content hash
+// and stores valid ones in the local blobstore. Corrupt blobs are logged and
+// rejected without affecting event completion.
+func (n *Node) processAttachedBlobs(peer *Peer, eventID event.EventID, blobs map[string][]byte) {
+	n.mu.RLock()
+	bs := n.blobStore
+	n.mu.RUnlock()
+	if bs == nil {
+		return
+	}
+
+	for hash, data := range blobs {
+		// Verify content hash. Evidence body hashes are bare hex SHA-256
+		// (no "sha256:" prefix), matching blobstore.FSStore.Put output.
+		sum := sha256.Sum256(data)
+		got := hex.EncodeToString(sum[:])
+		if got != hash {
+			slog.Warn("fastpath: attached blob hash mismatch — rejecting",
+				"event_id", eventID,
+				"expected_hash", hash,
+				"computed_hash", got,
+				"peer", peer.AgentID,
+				"size", len(data),
+			)
+			if ps := peer.PeerScore(); ps != nil {
+				ps.RecordInvalidBody()
+			}
+			continue
+		}
+
+		if _, _, err := bs.Put(context.Background(), data); err != nil {
+			slog.Warn("fastpath: failed to store attached blob",
+				"event_id", eventID,
+				"hash", hash,
+				"err", err,
+			)
+			continue
+		}
+
+		slog.Info("fastpath: stored attached evidence blob",
+			"event_id", eventID,
+			"hash", hash,
+			"size", len(data),
+			"peer", peer.AgentID,
+		)
 	}
 }

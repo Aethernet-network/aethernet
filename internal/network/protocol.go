@@ -105,9 +105,16 @@ type CheckpointSummary struct {
 // EventBody carries the payload for a previously announced event header.
 // Body transfer is receiver-driven: the recipient sends a BodyRequest after
 // receiving the header, and the sender responds with EventBody.
+//
+// AttachedBlobs is an optional sidecar for small content-addressed blobs
+// referenced by the event (e.g. evidence bodies for TaskSubmitted events).
+// The key is the content hash; the value is the raw blob bytes. Only blobs
+// that are locally available and within MaxInlineFastPathBlobBytes are
+// attached. Receivers MUST verify each blob against its hash before storing.
 type EventBody struct {
-	EventID event.EventID   `json:"event_id"`
-	Payload json.RawMessage `json:"payload"`
+	EventID       event.EventID      `json:"event_id"`
+	Payload       json.RawMessage    `json:"payload"`
+	AttachedBlobs map[string][]byte  `json:"attached_blobs,omitempty"`
 }
 
 // ── Repair/Proof Plane ───────────────────────────────────────────────────────
