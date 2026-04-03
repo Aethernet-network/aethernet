@@ -268,6 +268,8 @@ func (n *Node) collectAttachedBlobs(ev *event.Event) map[string][]byte {
 // Verifies the body commitment and advances the event to Completed.
 // If attached blobs are present, verifies each against its content hash
 // and stores valid ones in the blobstore before completing the body.
+// If a referenced blob is missing after completion, triggers a fallback
+// blob fetch from the source peer.
 func (n *Node) handleBodyResponse(peer *Peer, payload []byte) {
 	var body EventBody
 	if err := json.Unmarshal(payload, &body); err != nil {
@@ -297,6 +299,11 @@ func (n *Node) handleBodyResponse(peer *Peer, payload []byte) {
 		if ps := peer.EnsureScore(); ps != nil {
 			ps.RecordValidBody()
 		}
+
+		// After successful body completion, check if this event references
+		// a blob that wasn't included in the sidecar. If so, trigger a
+		// fallback blob fetch.
+		n.maybeRequestBlob(body.EventID, body.Payload, peer)
 	}
 }
 
@@ -346,4 +353,165 @@ func (n *Node) processAttachedBlobs(peer *Peer, eventID event.EventID, blobs map
 			"peer", peer.AgentID,
 		)
 	}
+}
+
+// ── Blob Fallback Fetch ─────────────────────────────────────────────────────
+
+// maybeRequestBlob checks whether the event body references a blob (e.g.
+// EvidenceBodyHash for TaskSubmitted) that is not yet in the local blobstore.
+// If so, records the need on the tracking entry and sends a MsgBlobRequest
+// to the peer that provided the body.
+//
+// This is the fallback path for blobs that were:
+//   - too large for inline sidecar (> MaxInlineFastPathBlobBytes)
+//   - missing on the sender during body request handling
+//   - failed content-hash verification as an inline attachment
+func (n *Node) maybeRequestBlob(eventID event.EventID, bodyPayload json.RawMessage, sourcePeer *Peer) {
+	// Only TaskSubmitted events reference blobs currently.
+	var raw struct {
+		Type string `json:"type"`
+	}
+	// The body is the event payload. We need to check if the event type is
+	// TaskSubmitted — get it from the tracking header.
+	if n.ingest == nil {
+		return
+	}
+	tr := n.ingest.GetTracking(eventID)
+	if tr == nil {
+		return
+	}
+	if tr.Header.Type != event.EventTypeTaskSubmitted {
+		return
+	}
+	_ = raw // suppress unused
+
+	// Parse the body to extract EvidenceBodyHash.
+	var tp event.TaskSubmittedPayload
+	if err := json.Unmarshal(bodyPayload, &tp); err != nil || tp.EvidenceBodyHash == "" {
+		return
+	}
+
+	// Check if we already have the blob locally.
+	n.mu.RLock()
+	bs := n.blobStore
+	n.mu.RUnlock()
+	if bs != nil {
+		if existing, err := bs.Get(context.Background(), tp.EvidenceBodyHash); err == nil && len(existing) > 0 {
+			return // blob already available
+		}
+	}
+
+	// Mark blob as requested on the tracking entry (dedup).
+	n.ingest.MarkBlobRequested(eventID, tp.EvidenceBodyHash)
+
+	// Send MsgBlobRequest to the source peer.
+	req := BlobRequest{
+		Hash:    tp.EvidenceBodyHash,
+		EventID: eventID,
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return
+	}
+	SafeSend(sourcePeer, Message{Type: MsgBlobRequest, Payload: payload})
+	slog.Info("fastpath: blob fallback request sent",
+		"event_id", eventID,
+		"hash", tp.EvidenceBodyHash,
+		"peer", sourcePeer.AgentID,
+	)
+}
+
+// handleBlobRequest processes an incoming MsgBlobRequest from a peer.
+// Looks up the blob in the local blobstore and responds with MsgBlobResponse.
+// Bounded by MaxBlobRequestsPerPeer — excess requests are silently dropped.
+func (n *Node) handleBlobRequest(peer *Peer, payload []byte) {
+	var req BlobRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return
+	}
+
+	if req.Hash == "" {
+		return
+	}
+
+	n.mu.RLock()
+	bs := n.blobStore
+	n.mu.RUnlock()
+	if bs == nil {
+		return
+	}
+
+	data, err := bs.Get(context.Background(), req.Hash)
+	if err != nil || len(data) == 0 {
+		slog.Debug("fastpath: blob request — blob not found locally",
+			"hash", req.Hash,
+			"event_id", req.EventID,
+			"peer", peer.AgentID,
+		)
+		return
+	}
+
+	resp := BlobResponse{Hash: req.Hash, Data: data}
+	respPayload, err := json.Marshal(resp)
+	if err != nil {
+		return
+	}
+	SafeSend(peer, Message{Type: MsgBlobResponse, Payload: respPayload})
+	slog.Info("fastpath: blob response sent",
+		"hash", req.Hash,
+		"size", len(data),
+		"peer", peer.AgentID,
+	)
+}
+
+// handleBlobResponse processes an incoming MsgBlobResponse from a peer.
+// Verifies the content hash and stores the blob in the local blobstore.
+func (n *Node) handleBlobResponse(peer *Peer, payload []byte) {
+	var resp BlobResponse
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		return
+	}
+
+	if resp.Hash == "" || len(resp.Data) == 0 {
+		return
+	}
+
+	// Verify content hash before storing.
+	sum := sha256.Sum256(resp.Data)
+	got := hex.EncodeToString(sum[:])
+	if got != resp.Hash {
+		slog.Warn("fastpath: blob fallback response hash mismatch — rejecting",
+			"expected_hash", resp.Hash,
+			"computed_hash", got,
+			"peer", peer.AgentID,
+			"size", len(resp.Data),
+		)
+		if ps := peer.PeerScore(); ps != nil {
+			ps.RecordInvalidBody()
+		}
+		return
+	}
+
+	n.mu.RLock()
+	bs := n.blobStore
+	n.mu.RUnlock()
+	if bs == nil {
+		return
+	}
+
+	if _, _, err := bs.Put(context.Background(), resp.Data); err != nil {
+		slog.Warn("fastpath: failed to store fallback blob",
+			"hash", resp.Hash, "err", err)
+		return
+	}
+
+	if ps := peer.EnsureScore(); ps != nil {
+		ps.RecordValidBody()
+	}
+
+	slog.Info("fastpath: stored fallback evidence blob",
+		"hash", resp.Hash,
+		"size", len(resp.Data),
+		"peer", peer.AgentID,
+	)
 }

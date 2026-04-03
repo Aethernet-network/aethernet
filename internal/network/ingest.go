@@ -271,6 +271,21 @@ func (im *IngestManager) GetReconstructedEvent(id event.EventID) *event.Event {
 	return t.Reconstructed
 }
 
+// MarkBlobRequested records that a fallback blob fetch has been initiated
+// for this event. Sets BlobHash and BlobRequested to prevent duplicate
+// requests. Returns false if the event is not tracked or already requested.
+func (im *IngestManager) MarkBlobRequested(id event.EventID, blobHash string) bool {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+	t, ok := im.tracked[id]
+	if !ok || t.BlobRequested {
+		return false
+	}
+	t.BlobRequested = true
+	t.BlobHash = blobHash
+	return true
+}
+
 // TrackedCount returns the number of events currently in the pipeline.
 func (im *IngestManager) TrackedCount() int {
 	im.mu.RLock()

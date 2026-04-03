@@ -109,6 +109,17 @@ type EventTracking struct {
 	// event's missing parents. Prevents duplicate repair requests.
 	RepairRequested bool
 
+	// BlobRequested is true when a fallback blob fetch has been initiated
+	// for this event's referenced blob (e.g. EvidenceBodyHash). Prevents
+	// duplicate blob requests for the same event.
+	BlobRequested bool
+
+	// BlobHash stores the content-addressed hash of the blob this event
+	// references (e.g. EvidenceBodyHash for TaskSubmitted). Empty if the
+	// event does not reference any blob. Set during body completion when
+	// the sidecar was absent and a fallback fetch is needed.
+	BlobHash string
+
 	// RelayCount tracks how many peers this header has been relayed to.
 	RelayCount int
 }

@@ -1334,6 +1334,14 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		// Body response: verify commitment and advance to Completed.
 		n.handleBodyResponse(peer, msg.Payload)
 
+	case MsgBlobRequest:
+		// Fallback blob fetch: peer needs a specific blob.
+		n.handleBlobRequest(peer, msg.Payload)
+
+	case MsgBlobResponse:
+		// Fallback blob response: verify and store.
+		n.handleBlobResponse(peer, msg.Payload)
+
 	case MsgRepairRequest:
 		// Targeted repair: peer needs specific missing events.
 		n.handleRepairRequest(peer, msg.Payload)

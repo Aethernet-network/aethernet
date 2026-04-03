@@ -34,6 +34,8 @@ const (
 	// Body plane.
 	MsgEventBody       MessageType = "v2_event_body"
 	MsgBodyRequest     MessageType = "v2_body_request"
+	MsgBlobRequest     MessageType = "v2_blob_request"
+	MsgBlobResponse    MessageType = "v2_blob_response"
 
 	// Repair/proof plane.
 	MsgRepairRequest   MessageType = "v2_repair_request"
@@ -116,6 +118,25 @@ type EventBody struct {
 	Payload       json.RawMessage    `json:"payload"`
 	AttachedBlobs map[string][]byte  `json:"attached_blobs,omitempty"`
 }
+
+// BlobRequest asks a peer for a specific content-addressed blob.
+// Used as fallback when the blob was not included in the body-plane sidecar
+// (too large, missing on sender, or failed content-hash verification).
+type BlobRequest struct {
+	Hash    string        `json:"hash"`
+	EventID event.EventID `json:"event_id,omitempty"` // context hint for logging
+}
+
+// BlobResponse carries a blob in response to a BlobRequest.
+// The receiver MUST verify the content hash before storing.
+type BlobResponse struct {
+	Hash string `json:"hash"`
+	Data []byte `json:"data"`
+}
+
+// MaxBlobRequestsPerPeer caps concurrent outstanding blob requests to a
+// single peer to prevent unbounded request storms.
+const MaxBlobRequestsPerPeer = 5
 
 // ── Repair/Proof Plane ───────────────────────────────────────────────────────
 

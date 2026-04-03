@@ -167,7 +167,7 @@ func HandleHelloV2(p *Peer, payload []byte) bool {
 func IsV2Message(msgType MessageType) bool {
 	switch msgType {
 	case MsgEventHeader, MsgFrontier, MsgWindowDigest, MsgCheckpoint,
-		MsgEventBody, MsgBodyRequest,
+		MsgEventBody, MsgBodyRequest, MsgBlobRequest, MsgBlobResponse,
 		MsgRepairRequest, MsgRepairResponse,
 		MsgHelloV2, MsgPeerStatus, MsgAckHint, MsgNackMissing, MsgOverloaded:
 		return true
