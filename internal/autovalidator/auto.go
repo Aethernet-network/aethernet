@@ -1095,6 +1095,13 @@ func (av *AutoValidator) verifyTaskSubmission(task *tasks.Task) (scoreBP uint32,
 // emitVote creates a VerificationVote DAG event and adds it to the DAG.
 // The vote propagates to all peers via normal DAG sync. The auto-validator
 // never calls ProcessResult — all settlement is consensus-gated.
+//
+// Parent selection: the vote references ONLY the target event as its causal
+// parent, not the full DAG tip set. This ensures the vote can materialize on
+// any remote node that has the target event — it does not depend on the
+// voter's other recent events having propagated first. The target event is
+// guaranteed to be in the local DAG (it came from OCS pending), and it is
+// the only semantically necessary parent for vote validity.
 func (av *AutoValidator) emitVote(targetEventID event.EventID, verdict string, verifiedValue uint64) {
 	votePayload := settlement.VerificationVotePayload{
 		Version:       1,
@@ -1105,17 +1112,22 @@ func (av *AutoValidator) emitVote(targetEventID event.EventID, verdict string, v
 		Timestamp:     time.Now().Unix(),
 	}
 
-	tips := av.dag.Tips()
-	priorTS := make(map[event.EventID]uint64, len(tips))
-	for _, ref := range tips {
-		if ev, err := av.dag.Get(ref); err == nil {
-			priorTS[ref] = ev.CausalTimestamp
-		}
+	// Use only the target event as the causal parent. This ensures the vote
+	// materializes on remote nodes as soon as they have the target event,
+	// without waiting for the voter's other recent events (other votes,
+	// settlements, registrations) to propagate. Using dag.Tips() here caused
+	// votes to reference the voter's latest tip, which remote nodes often
+	// didn't have yet — blocking materialization and causing the vote to miss
+	// the 30-second OCS expiry window.
+	refs := []event.EventID{targetEventID}
+	priorTS := map[event.EventID]uint64{}
+	if targetEv, err := av.dag.Get(targetEventID); err == nil {
+		priorTS[targetEventID] = targetEv.CausalTimestamp
 	}
 
 	voteEvent, err := event.New(
 		event.EventTypeVerificationVote,
-		tips,
+		refs,
 		votePayload,
 		string(av.validatorID),
 		priorTS,

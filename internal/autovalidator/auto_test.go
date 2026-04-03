@@ -31,21 +31,32 @@ func TestAutoValidator_ProcessesPending(t *testing.T) {
 	}
 	defer eng.Stop()
 
-	// Fund the sender so the OCS balance check passes.
-	senderID := crypto.AgentID("alice")
-	if err := tl.FundAgent(senderID, 100_000); err != nil {
-		t.Fatalf("fund sender: %v", err)
-	}
+	// Wire a DAG and keypair so emitVote can create vote events.
+	d := dag.New()
+	kp, _ := crypto.GenerateKeyPair()
+	validatorID := kp.AgentID()
 
+	// Create and sign the target event so it can be added to the DAG.
+	// The vote will reference this event as its causal parent.
+	aliceKP, _ := crypto.GenerateKeyPair()
 	payload := event.TransferPayload{
-		FromAgent: "alice",
+		FromAgent: string(aliceKP.AgentID()),
 		ToAgent:   "bob",
 		Amount:    1_000,
 		Currency:  "AET",
 	}
-	ev, err := event.New(event.EventTypeTransfer, nil, payload, "alice", nil, 1_000)
+	ev, err := event.New(event.EventTypeTransfer, nil, payload, string(aliceKP.AgentID()), nil, 1_000)
 	if err != nil {
 		t.Fatalf("create event: %v", err)
+	}
+	_ = crypto.SignEvent(ev, aliceKP)
+	if err := d.Add(ev); err != nil {
+		t.Fatalf("dag.Add target event: %v", err)
+	}
+
+	// Fund the sender and submit to OCS.
+	if err := tl.FundAgent(aliceKP.AgentID(), 100_000); err != nil {
+		t.Fatalf("fund sender: %v", err)
 	}
 	if err := eng.Submit(ev); err != nil {
 		t.Fatalf("submit event: %v", err)
@@ -55,11 +66,6 @@ func TestAutoValidator_ProcessesPending(t *testing.T) {
 		t.Fatalf("expected 1 pending item before auto-validation, got %d", count)
 	}
 
-	// Wire a DAG and keypair so emitVote can create vote events.
-	d := dag.New()
-	kp, _ := crypto.GenerateKeyPair()
-	validatorID := kp.AgentID()
-
 	av := autovalidator.NewAutoValidator(eng, validatorID, 50*time.Millisecond)
 	av.SetDAG(d)
 	av.SetKeyPair(kp)
@@ -67,15 +73,16 @@ func TestAutoValidator_ProcessesPending(t *testing.T) {
 	defer av.Stop()
 
 	// Wait for the auto-validator to emit at least one vote event.
+	// The DAG starts with 1 event (the target); we wait for size > 1.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if d.Size() > 0 {
+		if d.Size() > 1 {
 			break
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
 
-	if d.Size() == 0 {
+	if d.Size() <= 1 {
 		t.Fatal("expected at least one VerificationVote event in DAG after auto-validation")
 	}
 

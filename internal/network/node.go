@@ -1309,6 +1309,16 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 			return
 		}
 		if n.ingest != nil {
+			// Skip events already in the local DAG. This prevents header
+			// relay amplification when the V1 Broadcast delivers the full
+			// event before the V2 header relay reaches us. Without this
+			// check, the header would be admitted, relayed to our peers,
+			// who relay to their peers, creating O(n^2) traffic for events
+			// that are already fully materialized.
+			if _, dagErr := n.dag.Get(hdr.EventID); dagErr == nil {
+				return // already in DAG — no need to track or relay
+			}
+
 			if n.ingest.AdmitHeader(peer.AgentID, hdr) {
 				n.ingest.EnqueueRelay(hdr.EventID)
 				if ps := peer.EnsureScore(); ps != nil {
