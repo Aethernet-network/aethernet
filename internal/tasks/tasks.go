@@ -218,6 +218,17 @@ type Task struct {
 	// MaxRejections, the task is closed as failed and budget returned to poster.
 	RejectionCount int `json:"rejection_count,omitempty"`
 
+	// EvidenceBodyHash is the content-addressed hash of the evidence blob
+	// referenced by the TaskSubmitted DAG event. Empty when no blob was
+	// attached (legacy submissions). Set during applyTaskSubmitted.
+	EvidenceBodyHash string `json:"evidence_body_hash,omitempty"`
+
+	// EvidenceReady indicates that the evidence blob referenced by
+	// EvidenceBodyHash is locally available and verified. When false and
+	// EvidenceBodyHash is non-empty, the autovalidator must not score the
+	// task — the evidence is still being fetched.
+	EvidenceReady bool `json:"evidence_ready,omitempty"`
+
 	// AssuranceFee is the protocol fee charged for the assurance service (µAET).
 	// Zero for unassured tasks (LaneNone).
 	AssuranceFee uint64 `json:"assurance_fee,omitempty"`
@@ -765,6 +776,48 @@ func (m *TaskManager) SetResultContent(taskID, content string, encrypted bool) e
 	return nil
 }
 
+// SetEvidenceBodyHash records the evidence blob hash on a task and sets
+// EvidenceReady=false (blob not yet fetched). Used when applying a
+// TaskSubmitted DAG event where the hash is known but the blob may not
+// have arrived yet. No-op if the task does not exist.
+func (m *TaskManager) SetEvidenceBodyHash(taskID, hash string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return
+	}
+	task.EvidenceBodyHash = hash
+	if hash == "" {
+		task.EvidenceReady = true
+	} else {
+		task.EvidenceReady = false
+	}
+	m.persist(task)
+}
+
+// MarkEvidenceReady sets EvidenceReady=true on a task, indicating the evidence
+// blob is locally available and verified. Called after fetchEvidenceBlob
+// successfully decodes the blob, or when a blob arrives via the Fast Path body
+// plane or fallback fetch and is stored in the blobstore.
+func (m *TaskManager) MarkEvidenceReady(taskID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return
+	}
+	if task.EvidenceReady {
+		return // idempotent
+	}
+	task.EvidenceReady = true
+	m.persist(task)
+	slog.Info("tasks: evidence marked ready",
+		"task_id", taskID,
+		"evidence_hash", task.EvidenceBodyHash,
+	)
+}
+
 // SetVerificationScore stores the evidence quality score on a task.
 // Returns ErrTaskNotFound when the task doesn't exist.
 func (m *TaskManager) SetVerificationScore(taskID string, score *evidence.Score) error {
@@ -1122,6 +1175,14 @@ func (m *TaskManager) applyTaskSubmitted(tp event.TaskSubmittedPayload) {
 	task.ResultURI = tp.ResultURI
 	task.Status = TaskStatusSubmitted
 	task.SubmittedAt = time.Now().UnixNano()
+
+	// Record evidence body hash. If no blob is referenced, evidence is
+	// ready immediately (legacy submissions, no blob to fetch).
+	task.EvidenceBodyHash = tp.EvidenceBodyHash
+	if tp.EvidenceBodyHash == "" {
+		task.EvidenceReady = true
+	}
+
 	m.persist(task)
 
 	// Fetch evidence body from blobstore if available. This is how remote
@@ -1171,6 +1232,10 @@ func (m *TaskManager) fetchEvidenceBlob(taskID, blobHash string) {
 	if blob.ResultContent != "" {
 		_ = m.SetResultContent(taskID, blob.ResultContent, blob.Encrypted)
 	}
+
+	// Mark evidence as ready — the blob is locally available and decoded.
+	m.MarkEvidenceReady(taskID)
+
 	slog.Info("evidence: blob fetched and applied",
 		"task_id", taskID, "hash", blobHash[:min(16, len(blobHash))])
 }

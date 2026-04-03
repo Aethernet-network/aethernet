@@ -388,6 +388,18 @@ func (av *AutoValidator) Stop() {
 	av.once.Do(func() { close(av.stop) })
 }
 
+// Tick runs one iteration of the autovalidator loop synchronously.
+// Intended for testing — production uses the background goroutine via Start().
+func (av *AutoValidator) Tick() {
+	av.processPending()
+	if av.taskMgr != nil {
+		av.processSubmittedTasks()
+		av.processExpiredClaims()
+		av.processDisputedTasks()
+		av.processStuckHeld()
+	}
+}
+
 // processSubmittedTasks assesses submitted marketplace tasks using the evidence
 // Verifier. Tasks that pass the quality threshold are auto-approved; those below
 // are held for manual review with a log message. Only tasks older than taskStaleness
@@ -399,6 +411,18 @@ func (av *AutoValidator) processSubmittedTasks() {
 		if task.SubmittedAt > cutoff {
 			continue // submitted too recently
 		}
+
+		// Evidence readiness gate: never score a task whose evidence blob
+		// has not yet arrived. The task stays in Submitted state until the
+		// blob propagates via Fast Path body plane or fallback fetch.
+		if task.EvidenceBodyHash != "" && !task.EvidenceReady {
+			slog.Debug("auto-validator: skipping task — evidence not ready",
+				"task_id", task.ID,
+				"evidence_hash", task.EvidenceBodyHash,
+			)
+			continue
+		}
+
 		// Structural pre-check: log garbage submissions but let the existing
 		// evidence scoring pipeline make the final decision. The structural
 		// check provides early warning logging, not a separate dispute path.
