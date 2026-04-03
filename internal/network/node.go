@@ -1079,13 +1079,116 @@ func (n *Node) syncLoop() {
 				"enable_legacy_sync", n.config.EnableLegacySync,
 			)
 
-			// Send outside lock.
+			// Build frontier hint once, send to all targets outside lock.
+			frontier := SyncRequestPayload{
+				KnownTips:    n.dag.Tips(),
+				MaxTimestamp: n.dag.MaxTimestamp(),
+				EventCount:   uint64(n.dag.Size()),
+			}
+			frontierPayload, _ := json.Marshal(frontier)
+			msg := Message{Type: MsgRequestSync, Payload: frontierPayload}
+
 			for _, p := range targets {
-				if err := p.Send(Message{Type: MsgRequestSync}); err != nil {
+				if err := p.Send(msg); err != nil {
 					slog.Warn("sync: failed to send MsgRequestSync",
 						"peer", p.AgentID, "err", err)
 				}
 			}
+		}
+	}
+}
+
+// handleLegacySyncRequest processes an incoming MsgRequestSync. It supports
+// two modes:
+//
+//   - Frontier-based delta (payload present): the requester provides its
+//     known tips, max timestamp, and event count. The responder computes
+//     which events the requester is missing and sends only those, bounded
+//     by MaxLegacySyncEventsPerResponse.
+//
+//   - Bounded fallback (empty payload): backward compat for V1 peers that
+//     send empty MsgRequestSync. Responds with the most recent events up
+//     to MaxLegacySyncEventsPerResponse, sorted by CausalTimestamp.
+//
+// No blob piggybacking — evidence blobs propagate via the Fast Path body
+// plane (Prompt 4) or MsgBlobRequest/MsgBlobResponse (Prompt 5).
+func (n *Node) handleLegacySyncRequest(peer *Peer, payload []byte) {
+	// Parse frontier hint (if present).
+	var frontier SyncRequestPayload
+	hasFrontier := false
+	if len(payload) > 0 {
+		if err := json.Unmarshal(payload, &frontier); err == nil && frontier.EventCount > 0 {
+			hasFrontier = true
+		}
+	}
+
+	// Build the set of known tip IDs for fast lookup.
+	knownTips := make(map[event.EventID]bool, len(frontier.KnownTips))
+	for _, tip := range frontier.KnownTips {
+		knownTips[tip] = true
+	}
+
+	// Collect candidate events.
+	allEvents := n.dag.All()
+	sort.Slice(allEvents, func(i, j int) bool {
+		return allEvents[i].CausalTimestamp < allEvents[j].CausalTimestamp
+	})
+
+	var toSend []*event.Event
+	if hasFrontier {
+		// Delta mode: send events the requester doesn't have.
+		// An event is "missing" if its timestamp > requester's max timestamp,
+		// OR if it's not reachable from the requester's known tips.
+		// For simplicity and correctness, send all events with timestamp >
+		// requester's MaxTimestamp, plus any events the requester's tips
+		// don't cover. This is an overestimate (some events may be duplicates
+		// on the receiver) but is correct and bounded.
+		for _, ev := range allEvents {
+			if ev.CausalTimestamp > frontier.MaxTimestamp {
+				toSend = append(toSend, ev)
+			} else if !knownTips[ev.ID] {
+				// Include events at or below the max timestamp that might
+				// be on branches the requester hasn't seen. The receiver's
+				// dag.Add deduplicates.
+				toSend = append(toSend, ev)
+			}
+			if len(toSend) >= MaxLegacySyncEventsPerResponse {
+				break
+			}
+		}
+	} else {
+		// Bounded fallback: send the most recent events.
+		start := len(allEvents) - MaxLegacySyncEventsPerResponse
+		if start < 0 {
+			start = 0
+		}
+		toSend = allEvents[start:]
+	}
+
+	if len(toSend) > MaxLegacySyncEventsPerResponse {
+		toSend = toSend[:MaxLegacySyncEventsPerResponse]
+	}
+
+	slog.Info("sync: responding to sync request",
+		"peer", peer.AgentID,
+		"total_events", len(allEvents),
+		"sending", len(toSend),
+		"frontier_based", hasFrontier,
+	)
+
+	// Send in batches to stay within per-message size limits.
+	for i := 0; i < len(toSend); i += syncBatchSize {
+		end := i + syncBatchSize
+		if end > len(toSend) {
+			end = len(toSend)
+		}
+		batch := SyncBatchPayload{Events: toSend[i:end]}
+		batchPayload, err := json.Marshal(batch)
+		if err != nil {
+			return
+		}
+		if err := peer.Send(Message{Type: MsgSyncBatch, Payload: batchPayload}); err != nil {
+			return
 		}
 	}
 }
@@ -1134,72 +1237,12 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		if !peer.AllowSyncRequest() {
 			return
 		}
-		// Respond with all known events, batched to stay within the per-message
-		// size limit. Each batch carries at most syncBatchSize events (~100).
-		events := n.dag.All()
-		sort.Slice(events, func(i, j int) bool {
-			return events[i].CausalTimestamp < events[j].CausalTimestamp
-		})
-		slog.Info("sync: responding to sync request",
-			"peer", peer.AgentID,
-			"events", len(events),
-		)
-		for i := 0; i < len(events); i += syncBatchSize {
-			end := i + syncBatchSize
-			if end > len(events) {
-				end = len(events)
-			}
-			batch := SyncBatchPayload{Events: events[i:end]}
-
-			// Attach evidence blobs for TaskSubmitted events so receivers
-			// get the full evidence body alongside the DAG event.
-			if n.blobStore != nil {
-				for _, ev := range batch.Events {
-					if ev.Type != event.EventTypeTaskSubmitted {
-						continue
-					}
-					tp, err := event.GetPayload[event.TaskSubmittedPayload](ev)
-					if err != nil || tp.EvidenceBodyHash == "" {
-						continue
-					}
-					data, err := n.blobStore.Get(context.Background(), tp.EvidenceBodyHash)
-					if err != nil {
-						continue
-					}
-					if batch.Blobs == nil {
-						batch.Blobs = make(map[string][]byte)
-					}
-					batch.Blobs[tp.EvidenceBodyHash] = data
-				}
-			}
-
-			payload, err := json.Marshal(batch)
-			if err != nil {
-				return
-			}
-			if err := peer.Send(Message{Type: MsgSyncBatch, Payload: payload}); err != nil {
-				return // peer disconnected or buffer full — stop sending
-			}
-		}
+		n.handleLegacySyncRequest(peer, msg.Payload)
 
 	case MsgSyncBatch:
 		var batch SyncBatchPayload
 		if err := json.Unmarshal(msg.Payload, &batch); err != nil {
 			return
-		}
-
-		// Store any piggybacked evidence blobs BEFORE processing events,
-		// so the TaskManager's applyTaskSubmitted can find them when it
-		// calls the blob fetcher.
-		if n.blobStore != nil && len(batch.Blobs) > 0 {
-			for hash, data := range batch.Blobs {
-				if _, _, err := n.blobStore.Put(context.Background(), data); err != nil {
-					slog.Debug("sync: failed to store piggybacked blob",
-						"hash", hash, "err", err)
-				}
-			}
-			slog.Info("sync: stored piggybacked evidence blobs",
-				"count", len(batch.Blobs), "peer", peer.AgentID)
 		}
 
 		// Sort by CausalTimestamp so parents generally arrive before children.

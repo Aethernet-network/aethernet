@@ -196,9 +196,21 @@ type HandshakePayload struct {
 // The receiving node attempts to add each event to its local DAG; events whose
 // causal references are missing are silently skipped (the DAG enforces referential
 // integrity and returns ErrMissingCausalRef in those cases).
+// SyncRequestPayload carries frontier hints from the requester so the
+// responder can compute a delta instead of sending the full DAG.
+// Empty/nil payload (backward compat) triggers a bounded fallback response.
+type SyncRequestPayload struct {
+	KnownTips    []event.EventID `json:"known_tips,omitempty"`
+	MaxTimestamp uint64          `json:"max_timestamp,omitempty"`
+	EventCount   uint64          `json:"event_count,omitempty"`
+}
+
+// MaxLegacySyncEventsPerResponse caps the total events in a single legacy
+// sync response. Prevents unbounded DAG serialization.
+const MaxLegacySyncEventsPerResponse = 500
+
 type SyncBatchPayload struct {
-	Events []*event.Event    `json:"events"`
-	Blobs  map[string][]byte `json:"blobs,omitempty"`
+	Events []*event.Event `json:"events"`
 }
 
 // Peer represents a single remote node connection. It is safe for concurrent use
