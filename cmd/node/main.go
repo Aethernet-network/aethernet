@@ -1493,15 +1493,10 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	nodeCfg.VoteMaxAge = cfg.Network.VoteMaxAge
 	nodeCfg.MaxMessageBytes = cfg.Network.P2PMaxMessageBytes
 	node := network.NewNode(nodeCfg, stack.dag)
-	if err := node.Start(); err != nil {
-		slog.Error("failed to start network listener", "addr", p2pAddr, "err", err)
-		stack.engine.Stop()
-		os.Exit(1)
-	}
 
 	// Wire the network disseminator onto the publisher. Before this point,
 	// startup events (genesis funding, registration) were published to the
-	// DAG only. After this, all new events are broadcast to peers immediately.
+	// DAG only. After node.Start(), all new events are broadcast to peers.
 	pub.SetDisseminator(node)
 	if stack.autoVal != nil {
 		stack.autoVal.SetPublisher(pub)
@@ -1718,6 +1713,18 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		"queue_size", recognition.DefaultQueueSize,
 		"workers", recognition.DefaultWorkers,
 	)
+
+	// ── Start network node ────────────────────────────────────────────────
+	// MUST happen AFTER SetOnCommit + commitBus.Start() so that events
+	// arriving from peers fire the recognition hook. Starting the node
+	// before the hook is set causes events to enter the DAG without
+	// notifying the recognition fabric — the root cause of the production
+	// "no commit events dispatched" bug.
+	if err := node.Start(); err != nil {
+		slog.Error("failed to start network listener", "addr", p2pAddr, "err", err)
+		stack.engine.Stop()
+		os.Exit(1)
+	}
 
 	// ── DAG sync handler ────────────────────────────────────────────────────
 	// Routes event types NOT yet migrated to the recognition fabric.
