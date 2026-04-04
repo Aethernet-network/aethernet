@@ -469,6 +469,37 @@ func (d *DAG) PrimaryTips() []event.EventID {
 	return primary
 }
 
+// LocalTips returns the current DAG tips authored by the given agent,
+// excluding TrajectoryCommit events. This is the recommended parent
+// selection set for locally-created events — it ensures new events only
+// reference parents that this node has already broadcast, preventing
+// materialization stalls on remote nodes that may not yet have third-party
+// tip events synced from other sources.
+//
+// If the agent has no current tips (e.g., first event after startup),
+// LocalTips returns an empty slice. Callers should treat an empty result
+// the same as a genesis event (CausalTimestamp will be 1).
+func (d *DAG) LocalTips(agentID string) []event.EventID {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	local := make([]event.EventID, 0, 4)
+	for id := range d.tips {
+		ev, ok := d.events[id]
+		if !ok {
+			continue
+		}
+		if ev.AgentID != agentID {
+			continue
+		}
+		if ev.Type == event.EventTypeTrajectoryCommit {
+			continue
+		}
+		local = append(local, id)
+	}
+	return local
+}
+
 // Size returns the number of events currently stored in the DAG.
 func (d *DAG) Size() int {
 	d.mu.RLock()

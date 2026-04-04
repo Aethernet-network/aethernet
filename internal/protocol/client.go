@@ -16,6 +16,7 @@ import (
 // dagReader provides tip selection and event lookup for constructing new events.
 type dagReader interface {
 	Tips() []event.EventID
+	LocalTips(agentID string) []event.EventID
 	Get(event.EventID) (*event.Event, error)
 }
 
@@ -102,7 +103,7 @@ func (c *Client) SubmitGrant(fromBucket string, toAgent crypto.AgentID, amount u
 }
 
 func (c *Client) submitTransferPayload(payload event.TransferPayload) (event.EventID, error) {
-	tips := c.dag.Tips()
+	tips := c.dag.LocalTips(string(c.agentID))
 	priorTS := make(map[event.EventID]uint64, len(tips))
 	for _, ref := range tips {
 		if ev, err := c.dag.Get(ref); err == nil {

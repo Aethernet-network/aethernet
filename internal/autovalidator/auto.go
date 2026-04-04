@@ -794,7 +794,7 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score, hol
 			ScoreBP:        scoreBP,
 			HoldGeneration: holdGeneration,
 		}
-		tips := av.dag.Tips()
+		tips := av.dag.LocalTips(string(av.validatorID))
 		priorTS := make(map[event.EventID]uint64, len(tips))
 		for _, ref := range tips {
 			if ev, err := av.dag.Get(ref); err == nil {

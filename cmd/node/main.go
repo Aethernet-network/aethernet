@@ -1221,15 +1221,15 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			Amount:     nodeAgentFundTarget,
 			Reason:     "node-bootstrap",
 		}
-		tips := stack.dag.Tips()
-		priorTS := make(map[event.EventID]uint64, len(tips))
-		for _, ref := range tips {
+		gfTips := stack.dag.LocalTips(string(agentID))
+		priorTS := make(map[event.EventID]uint64, len(gfTips))
+		for _, ref := range gfTips {
 			if te, err := stack.dag.Get(ref); err == nil {
 				priorTS[ref] = te.CausalTimestamp
 			}
 		}
 		gfEv, err := event.New(
-			event.EventTypeGenesisFunding, tips, gfPayload,
+			event.EventTypeGenesisFunding, gfTips, gfPayload,
 			string(agentID), priorTS, 0,
 		)
 		if err == nil {
@@ -1301,7 +1301,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		ReputationScore: 5000,
 		StakedAmount:    actualStake,
 	}
-	if regEv, err := event.New(event.EventTypeRegistration, stack.dag.Tips(), regPayload, string(agentID), nil, 0); err == nil {
+	if regEv, err := event.New(event.EventTypeRegistration, stack.dag.LocalTips(string(agentID)), regPayload, string(agentID), nil, 0); err == nil {
 		_ = crypto.SignEvent(regEv, stack.kp)
 		if pubErr := pub.Publish(regEv); pubErr == nil {
 			slog.Info("startStack: registration event published", "agent_id", agentID)
@@ -1625,16 +1625,17 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		}
 		sp.SortAttestations()
 
-		// Create the Settlement DAG event.
-		tips := stack.dag.Tips()
-		priorTS := make(map[event.EventID]uint64, len(tips))
-		for _, ref := range tips {
+		// Create the Settlement DAG event. Use LocalTips to avoid referencing
+		// third-party tips that remote nodes may not have yet.
+		localTips := stack.dag.LocalTips(string(agentID))
+		priorTS := make(map[event.EventID]uint64, len(localTips))
+		for _, ref := range localTips {
 			if te, err := stack.dag.Get(ref); err == nil {
 				priorTS[ref] = te.CausalTimestamp
 			}
 		}
 		settlementEv, err := event.New(
-			event.EventTypeSettlement, tips, sp,
+			event.EventTypeSettlement, localTips, sp,
 			string(agentID), priorTS, 0,
 		)
 		if err != nil {

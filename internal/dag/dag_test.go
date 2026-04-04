@@ -1367,3 +1367,122 @@ func TestPrimaryTips_MixedTypes_MultipleNonTrajectory(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// LocalTips
+// ---------------------------------------------------------------------------
+
+func TestLocalTips_FiltersToOwnAgent(t *testing.T) {
+	d := dag.New()
+
+	// Create events from two different agents.
+	kpA := testKP(t)
+	aidA := string(kpA.AgentID())
+	evA, _ := event.New(event.EventTypeTransfer, nil,
+		event.TransferPayload{FromAgent: aidA, ToAgent: "sink", Amount: 1, Currency: "AET"},
+		aidA, nil, 0)
+	_ = crypto.SignEvent(evA, kpA)
+	if err := d.Add(evA); err != nil {
+		t.Fatalf("Add evA: %v", err)
+	}
+
+	kpB := testKP(t)
+	aidB := string(kpB.AgentID())
+	evB, _ := event.New(event.EventTypeTransfer, nil,
+		event.TransferPayload{FromAgent: aidB, ToAgent: "sink", Amount: 2, Currency: "AET"},
+		aidB, nil, 0)
+	_ = crypto.SignEvent(evB, kpB)
+	if err := d.Add(evB); err != nil {
+		t.Fatalf("Add evB: %v", err)
+	}
+
+	// Both are tips.
+	if len(d.Tips()) != 2 {
+		t.Fatalf("Tips() = %d; want 2", len(d.Tips()))
+	}
+
+	// LocalTips for agent A should return only evA.
+	localA := d.LocalTips(aidA)
+	if len(localA) != 1 {
+		t.Fatalf("LocalTips(A) = %d; want 1", len(localA))
+	}
+	if localA[0] != evA.ID {
+		t.Errorf("LocalTips(A)[0] = %q; want %q", localA[0], evA.ID)
+	}
+
+	// LocalTips for agent B should return only evB.
+	localB := d.LocalTips(aidB)
+	if len(localB) != 1 {
+		t.Fatalf("LocalTips(B) = %d; want 1", len(localB))
+	}
+	if localB[0] != evB.ID {
+		t.Errorf("LocalTips(B)[0] = %q; want %q", localB[0], evB.ID)
+	}
+}
+
+func TestLocalTips_ExcludesTrajectoryCommits(t *testing.T) {
+	d := dag.New()
+
+	kp := testKP(t)
+	aid := string(kp.AgentID())
+
+	// Add a normal event.
+	evNormal, _ := event.New(event.EventTypeTransfer, nil,
+		event.TransferPayload{FromAgent: aid, ToAgent: "sink", Amount: 1, Currency: "AET"},
+		aid, nil, 0)
+	_ = crypto.SignEvent(evNormal, kp)
+	if err := d.Add(evNormal); err != nil {
+		t.Fatalf("Add normal: %v", err)
+	}
+
+	// Add a trajectory commit from the same agent.
+	trajPayload := event.TrajectoryCommitPayload{
+		Version:        1,
+		TaskID:         "task-1",
+		Outcome:        event.OutcomeExploring,
+		CheckpointHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		CheckpointSize: 100,
+		QualityScoreBP: 5000,
+	}
+	evTraj, _ := event.New(event.EventTypeTrajectoryCommit, nil, trajPayload, aid, nil, 0)
+	_ = crypto.SignEvent(evTraj, kp)
+	if err := d.Add(evTraj); err != nil {
+		t.Fatalf("Add trajectory: %v", err)
+	}
+
+	// LocalTips should return only the normal event, not the trajectory.
+	local := d.LocalTips(aid)
+	if len(local) != 1 {
+		t.Fatalf("LocalTips() = %d; want 1", len(local))
+	}
+	if local[0] != evNormal.ID {
+		t.Errorf("LocalTips()[0] = %q; want %q", local[0], evNormal.ID)
+	}
+}
+
+func TestLocalTips_EmptyForUnknownAgent(t *testing.T) {
+	d := dag.New()
+
+	// Add an event from one agent.
+	kp := testKP(t)
+	aid := string(kp.AgentID())
+	ev, _ := event.New(event.EventTypeTransfer, nil,
+		event.TransferPayload{FromAgent: aid, ToAgent: "sink", Amount: 1, Currency: "AET"},
+		aid, nil, 0)
+	_ = crypto.SignEvent(ev, kp)
+	d.Add(ev)
+
+	// LocalTips for a different agent returns empty.
+	local := d.LocalTips("nonexistent-agent")
+	if len(local) != 0 {
+		t.Errorf("LocalTips(unknown) = %d; want 0", len(local))
+	}
+}
+
+func TestLocalTips_EmptyDAG(t *testing.T) {
+	d := dag.New()
+	local := d.LocalTips("any-agent")
+	if len(local) != 0 {
+		t.Errorf("LocalTips on empty DAG = %d; want 0", len(local))
+	}
+}
