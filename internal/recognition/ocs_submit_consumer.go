@@ -24,13 +24,24 @@ type OCSSubmitter interface {
 //
 // Readiness: an event is ready immediately if it is one of the three OCS
 // types and has SettlementState == Optimistic. No prerequisite deferral.
+//
+// After successful consumption, if an Activator is wired, this consumer
+// signals the prerequisite key for any deferred vote consumers waiting
+// on this target event.
 type OCSSubmitConsumer struct {
 	submitter OCSSubmitter
+	activator *Activator
 }
 
 // NewOCSSubmitConsumer creates a consumer wired to the given OCS engine.
 func NewOCSSubmitConsumer(submitter OCSSubmitter) *OCSSubmitConsumer {
 	return &OCSSubmitConsumer{submitter: submitter}
+}
+
+// SetActivator wires the targeted activation system so that after a target
+// event is OCS-pending, any deferred vote consumers are woken.
+func (c *OCSSubmitConsumer) SetActivator(a *Activator) {
+	c.activator = a
 }
 
 // Name returns the unique consumer identifier.
@@ -59,20 +70,25 @@ func (c *OCSSubmitConsumer) Ready(_ context.Context, ev *event.Event, _ ReadMode
 
 // Consume adds the event to the OCS pending queue via SubmitFromSync.
 // Idempotent: SubmitFromSync returns nil for already-pending or
-// already-processed events.
-func (c *OCSSubmitConsumer) Consume(_ context.Context, ev *event.Event) error {
+// already-processed events. After successful submission, signals any
+// deferred vote consumers waiting on this target.
+func (c *OCSSubmitConsumer) Consume(ctx context.Context, ev *event.Event) error {
 	if ev.SettlementState != event.SettlementOptimistic {
-		// Non-optimistic events don't need OCS pending tracking.
-		// Mark as consumed without action.
 		return nil
 	}
 	if err := c.submitter.SubmitFromSync(ev); err != nil {
 		slog.Debug("recognition: ocs_submit consume failed (non-fatal)",
 			"event_id", ev.ID, "type", ev.Type, "err", err)
-		// SubmitFromSync returns ErrQueueFull when at capacity.
-		// This is transient — the event will be retried on next activation.
 		return err
 	}
+
+	// Signal deferred vote consumers: the target event is now OCS-pending,
+	// so votes for this target can proceed.
+	if c.activator != nil {
+		prereqKey := PrerequisiteKeyOCSPending(string(ev.ID))
+		c.activator.Signal(ctx, prereqKey)
+	}
+
 	return nil
 }
 
