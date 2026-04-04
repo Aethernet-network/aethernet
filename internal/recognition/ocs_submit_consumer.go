@@ -77,10 +77,12 @@ func (c *OCSSubmitConsumer) Consume(ctx context.Context, ev *event.Event) error 
 		return nil
 	}
 	if err := c.submitter.SubmitFromSync(ev); err != nil {
-		slog.Debug("recognition: ocs_submit consume failed (non-fatal)",
+		slog.Warn("recognition: ocs_submit consume failed",
 			"event_id", ev.ID, "type", ev.Type, "err", err)
 		return err
 	}
+	slog.Info("recognition: ocs_submit consumed",
+		"event_id", ev.ID, "type", ev.Type)
 
 	// Signal deferred vote consumers: the target event is now OCS-pending,
 	// so votes for this target can proceed.

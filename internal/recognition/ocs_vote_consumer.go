@@ -118,7 +118,7 @@ func (c *OCSVoteConsumer) Consume(_ context.Context, ev *event.Event) error {
 	verdict := vp.Verdict == "accepted"
 
 	if err := c.acceptor.AcceptPeerVote(targetID, voterID, verdict); err != nil {
-		slog.Debug("recognition: ocs_vote consume failed",
+		slog.Warn("recognition: ocs_vote consume failed",
 			"event_id", ev.ID,
 			"target", vp.TargetEventID,
 			"voter", vp.VoterID,
@@ -127,6 +127,12 @@ func (c *OCSVoteConsumer) Consume(_ context.Context, ev *event.Event) error {
 		return err
 	}
 
+	slog.Info("recognition: ocs_vote consumed",
+		"event_id", ev.ID,
+		"target", vp.TargetEventID,
+		"voter", vp.VoterID,
+		"verdict", verdict,
+	)
 	return nil
 }
 

@@ -1,6 +1,7 @@
 package recognition
 
 import (
+	"log/slog"
 	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/event"
@@ -20,5 +21,11 @@ func EmitCommit(bus *Bus, ev *event.Event, source CommitSource, replay bool) {
 		Replay:     replay,
 		CommittedAt: time.Now(),
 	}
-	_ = bus.Emit(record, ev) // best-effort; queue-full logged by bus
+	if err := bus.Emit(record, ev); err != nil {
+		slog.Warn("recognition: emit failed",
+			"event_id", ev.ID, "type", ev.Type, "err", err)
+	} else {
+		slog.Info("recognition: commit emitted",
+			"event_id", ev.ID, "type", ev.Type, "source", source, "replay", replay)
+	}
 }
