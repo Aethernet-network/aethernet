@@ -62,6 +62,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/metrics"
 	"github.com/Aethernet-network/aethernet/internal/network"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
+	"github.com/Aethernet-network/aethernet/internal/recognition"
 	platformpkg "github.com/Aethernet-network/aethernet/internal/platform"
 	"github.com/Aethernet-network/aethernet/internal/protocol"
 	"github.com/Aethernet-network/aethernet/internal/ratelimit"
@@ -1661,40 +1662,70 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		_ = settlementApp.Apply(&sp)
 	})
 
+	// ── Recognition Fabric ─────────────────────────────────────────────────
+	// Wire the Causal Commit Bus (CCB) to handle OCS submission, vote
+	// recognition, task lifecycle, evidence readiness, and settlement
+	// application. The bus dispatches asynchronously after every dag.Add.
+	recIndex := recognition.NewIndex(recognition.NewMemoryIndexStore())
+	dagReadModel := recognition.NewDAGReadModel(stack.dag)
+	commitBus := recognition.NewBus(recognition.DefaultBusConfig(), recIndex, dagReadModel)
+
+	// OCS submission consumer — Transfer, Generation, TaskSettlement → pending.
+	ocsSubmitConsumer := recognition.NewOCSSubmitConsumer(stack.engine)
+	recActivator := recognition.NewActivator(recIndex, commitBus)
+	ocsSubmitConsumer.SetActivator(recActivator)
+	_ = commitBus.Register(ocsSubmitConsumer)
+
+	// OCS vote consumer — VerificationVote → AcceptPeerVote (with deferral).
+	ocsVoteConsumer := recognition.NewOCSVoteConsumer(stack.engine)
+	_ = commitBus.Register(ocsVoteConsumer)
+
+	// Task lifecycle consumer — TaskPosted/Claimed/Submitted/Approved/Disputed.
+	if stack.taskMgr != nil {
+		taskConsumer := recognition.NewTaskLifecycleConsumer(stack.taskMgr)
+		_ = commitBus.Register(taskConsumer)
+
+		// Evidence readiness consumer — marks evidence ready on TaskSubmitted.
+		// Blob availability checking is handled separately by the existing
+		// fetchEvidenceBlob + MarkEvidenceReady path in TaskManager. The
+		// consumer here handles the recognition lifecycle; nil blob checker
+		// means "assume blob is available" (consistent with legacy behavior).
+		evidenceConsumer := recognition.NewEvidenceReadinessConsumer(stack.taskMgr, nil)
+		_ = commitBus.Register(evidenceConsumer)
+	}
+
+	// Settlement consumer — Settlement → SettlementApplicator.
+	settlementConsumerAdapter := recognition.NewSettlementApplierAdapter(func(ev *event.Event) error {
+		sp, err := event.GetPayload[settlement.SettlementPayload](ev)
+		if err != nil {
+			return err
+		}
+		return settlementApp.Apply(&sp)
+	})
+	settlementConsumer := recognition.NewSettlementConsumer(settlementConsumerAdapter)
+	_ = commitBus.Register(settlementConsumer)
+
+	commitBus.Start()
+	defer commitBus.Stop()
+
+	// Wire the DAG post-commit hook to emit to the recognition bus.
+	stack.dag.SetOnCommit(func(ev *event.Event, replay bool) {
+		recognition.EmitCommit(commitBus, ev, recognition.SourceLocal, replay)
+	})
+
+	slog.Info("recognition: fabric wired",
+		"consumers", commitBus.ConsumerCount(),
+		"queue_size", recognition.DefaultQueueSize,
+		"workers", recognition.DefaultWorkers,
+	)
+
 	// ── DAG sync handler ────────────────────────────────────────────────────
-	// Route events by type. VerificationVotes feed into VotingRound (the
-	// finalization handler creates settlements). Settlements feed into the
-	// Applicator. Transfer/Generation/TaskSettlement enter the OCS pending
-	// queue. Registration updates identity.
+	// Routes event types NOT yet migrated to the recognition fabric.
+	// Migrated types: Transfer, Generation, TaskSettlement, VerificationVote,
+	// Settlement, TaskPosted/Claimed/Submitted/Approved/Disputed.
+	// Remaining: Registration, GenesisFunding, Validator lifecycle.
 	node.SetSyncHandler(func(ev *event.Event) {
 		switch ev.Type {
-		case event.EventTypeTransfer, event.EventTypeGeneration, event.EventTypeTaskSettlement:
-			_ = stack.engine.SubmitFromSync(ev)
-
-		case event.EventTypeVerificationVote:
-			// Route the vote through the OCS engine so it reaches the
-			// finalization handler. AcceptPeerVote → processVoteInternal →
-			// if finalized: onFinalized callback fires → creates Settlement
-			// event + calls Apply. This ensures settlement creation is
-			// inevitable regardless of which path (MsgVote or DAG sync)
-			// delivers the finalizing vote.
-			vp, err := event.GetPayload[settlement.VerificationVotePayload](ev)
-			if err != nil {
-				return
-			}
-			_ = stack.engine.AcceptPeerVote(
-				event.EventID(vp.TargetEventID),
-				crypto.AgentID(vp.VoterID),
-				vp.Verdict == string(settlement.VerdictAccepted),
-			)
-
-		case event.EventTypeSettlement:
-			sp, err := event.GetPayload[settlement.SettlementPayload](ev)
-			if err != nil {
-				return
-			}
-			_ = settlementApp.Apply(&sp)
-
 		case event.EventTypeRegistration:
 			rp, err := event.GetPayload[event.RegistrationPayload](ev)
 			if err != nil {
