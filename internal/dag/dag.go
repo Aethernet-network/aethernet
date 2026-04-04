@@ -112,6 +112,20 @@ type DAG struct {
 	// Add writes the event through to BadgerDB for durability. Defaults to nil
 	// (in-memory only) so existing tests require no changes.
 	store dagPersistence
+
+	// onCommit is an optional hook called after every successful durable
+	// insert (Add or addFromStore). Called OUTSIDE the DAG write lock.
+	// The replay flag is true when the event is being loaded from persistent
+	// storage (addFromStore), false for live inserts (Add).
+	//
+	// This is the universal convergence point for the Causal Commit Bus:
+	// every event path (local, remote, repair, replay) fires this hook.
+	// The hook must not block — use a non-blocking channel or bounded queue.
+	//
+	// For source tagging (local vs remote vs repair), each call site emits
+	// to the recognition bus directly with the correct CommitSource. The
+	// onCommit hook provides replay-path coverage that no call site handles.
+	onCommit func(ev *event.Event, replay bool)
 }
 
 // SetStore attaches a persistence backend to the DAG. After this call every
@@ -120,6 +134,17 @@ type DAG struct {
 // *store.Store from the store package does so.
 func (d *DAG) SetStore(s dagPersistence) {
 	d.store = s
+}
+
+// SetOnCommit registers a callback that fires after every successful durable
+// insert (Add or addFromStore). The callback runs OUTSIDE the DAG write lock
+// and must not block. Set before any Add or LoadFromStore call.
+//
+// The replay parameter is true for events loaded from persistence (addFromStore),
+// false for live inserts (Add). This enables source-aware dispatch in the
+// Causal Commit Bus without coupling the DAG to the recognition package.
+func (d *DAG) SetOnCommit(fn func(ev *event.Event, replay bool)) {
+	d.onCommit = fn
 }
 
 // New creates and returns an empty DAG ready to accept events.
@@ -149,9 +174,9 @@ func New() *DAG {
 // are not protected by the DAG's mutex — coordinate externally if needed.
 func (d *DAG) Add(e *event.Event) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 
 	if _, exists := d.events[e.ID]; exists {
+		d.mu.Unlock()
 		return fmt.Errorf("dag: %w: %s", ErrDuplicateEvent, e.ID)
 	}
 
@@ -161,6 +186,7 @@ func (d *DAG) Add(e *event.Event) error {
 	// ErrMissingSignature when both conditions hold.
 	for _, ref := range e.CausalRefs {
 		if _, ok := d.events[ref]; !ok {
+			d.mu.Unlock()
 			return fmt.Errorf("dag: %w: %s (referenced by %s)", ErrMissingCausalRef, ref, e.ID)
 		}
 	}
@@ -170,9 +196,11 @@ func (d *DAG) Add(e *event.Event) error {
 	// by a key in the validator manifest. This prevents injection of unsigned
 	// events by unauthorized nodes.
 	if len(e.Signature) == 0 {
+		d.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrMissingSignature, e.ID)
 	}
 	if !crypto.VerifyEvent(e) {
+		d.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrInvalidSignature, e.ID)
 	}
 
@@ -197,6 +225,16 @@ func (d *DAG) Add(e *event.Event) error {
 		if err := d.store.PutEvent(e); err != nil {
 			slog.Error("dag: failed to persist event", "event_id", e.ID, "err", err)
 		}
+	}
+
+	// Release lock BEFORE firing the commit hook. The hook must never run
+	// under the DAG write lock — it may enqueue work to consumers that
+	// read from the DAG, causing deadlock or blocking the hot path.
+	d.mu.Unlock()
+
+	// Fire the post-commit hook (Causal Commit Bus convergence point).
+	if d.onCommit != nil {
+		d.onCommit(e, false)
 	}
 
 	return nil
@@ -300,19 +338,21 @@ func topoSort(events []*event.Event) (sorted []*event.Event, skipped []*event.Ev
 // silently skipped.
 func (d *DAG) addFromStore(e *event.Event) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 
 	// Silently skip duplicates during replay.
 	if _, exists := d.events[e.ID]; exists {
+		d.mu.Unlock()
 		return nil
 	}
 
 	// Verify EventID integrity: recompute from content and compare.
 	recomputed, err := event.ComputeID(e)
 	if err != nil {
+		d.mu.Unlock()
 		return fmt.Errorf("dag: replay: failed to recompute EventID for %s: %w", e.ID, err)
 	}
 	if recomputed != e.ID {
+		d.mu.Unlock()
 		return fmt.Errorf("dag: replay: EventID mismatch for %s: stored=%s computed=%s — possible store corruption",
 			e.ID, e.ID, recomputed)
 	}
@@ -321,6 +361,7 @@ func (d *DAG) addFromStore(e *event.Event) error {
 	// Genesis events (empty CausalRefs) may be unsigned in legacy DAGs.
 	if len(e.Signature) > 0 {
 		if !crypto.VerifyEvent(e) {
+			d.mu.Unlock()
 			return fmt.Errorf("%w: %s (detected during store replay)", ErrInvalidSignature, e.ID)
 		}
 	}
@@ -329,6 +370,7 @@ func (d *DAG) addFromStore(e *event.Event) error {
 	// replayed first; a missing ref here indicates data corruption.
 	for _, ref := range e.CausalRefs {
 		if _, ok := d.events[ref]; !ok {
+			d.mu.Unlock()
 			slog.Warn("dag: missing causal ref during replay, skipping event",
 				"event", e.ID, "missing_ref", ref)
 			return nil
@@ -344,6 +386,13 @@ func (d *DAG) addFromStore(e *event.Event) error {
 		delete(d.tips, ref)
 	}
 	d.tips[e.ID] = struct{}{}
+
+	d.mu.Unlock()
+
+	// Fire the post-commit hook for replay events.
+	if d.onCommit != nil {
+		d.onCommit(e, true)
+	}
 
 	return nil
 }
