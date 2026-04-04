@@ -1330,18 +1330,21 @@ type cancelTaskRequest struct {
 // The event is always authored by the node's own identity (s.agentID) so it
 // can be signed with s.kp. The actorAgentID in the payload carries the
 // identity of the agent performing the action.
-func (s *Server) emitDAGEvent(evType event.EventType, payload any, _ string) event.EventID {
-	// Use LocalTips to select only this node's own tips as causal parents.
-	// This prevents referencing third-party tip events that remote nodes may
-	// not have yet, which causes materialization stalls (missing_parents).
-	tips := s.dag.LocalTips(string(s.agentID))
-	priorTS := make(map[event.EventID]uint64, len(tips))
-	for _, ref := range tips {
+//
+// semanticParents are the causally relevant parent events. Each event type
+// should reference only the event that triggered it (e.g., TaskClaimed →
+// TaskPosted event). This guarantees the parent exists on every remote node
+// because it is the event that semantically caused this one. Pass no parents
+// for root events (Registration, TaskPosted with no prior chain event).
+func (s *Server) emitDAGEvent(evType event.EventType, payload any, _ string, semanticParents ...event.EventID) event.EventID {
+	refs := semanticParents
+	priorTS := make(map[event.EventID]uint64, len(refs))
+	for _, ref := range refs {
 		if ev, err := s.dag.Get(ref); err == nil {
 			priorTS[ref] = ev.CausalTimestamp
 		}
 	}
-	ev, err := event.New(evType, tips, payload, string(s.agentID), priorTS, 0)
+	ev, err := event.New(evType, refs, payload, string(s.agentID), priorTS, 0)
 	if err != nil {
 		return ""
 	}
@@ -1606,12 +1609,18 @@ func (s *Server) handleClaimTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Semantic parent: the TaskPosted event that created this task.
+	var claimParents []event.EventID
+	if taskForClaim, tErr := s.taskMgr.Get(taskID); tErr == nil && taskForClaim.PostEventID != "" {
+		claimParents = []event.EventID{event.EventID(taskForClaim.PostEventID)}
+	}
+
 	// Emit DAG event — ApplyDAGEvent applies the state change locally.
 	s.emitDAGEvent(event.EventTypeTaskClaimed, event.TaskClaimedPayload{
 		Version:   1,
 		TaskID:    taskID,
 		ClaimerID: claimerID,
-	}, claimerID)
+	}, claimerID, claimParents...)
 
 	task, _ := s.taskMgr.Get(taskID)
 	writeJSON(w, http.StatusOK, task)
@@ -1696,6 +1705,12 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 			"evidence_nil", req.Evidence == nil, "content_empty", req.ResultContent == "")
 	}
 
+	// Semantic parent: the TaskClaimed event for this task.
+	var submitParents []event.EventID
+	if taskForSubmit, tErr := s.taskMgr.Get(taskID); tErr == nil && taskForSubmit.ClaimEventID != "" {
+		submitParents = []event.EventID{event.EventID(taskForSubmit.ClaimEventID)}
+	}
+
 	// Emit DAG event — ApplyDAGEvent applies the state change locally.
 	s.emitDAGEvent(event.EventTypeTaskSubmitted, event.TaskSubmittedPayload{
 		Version:          1,
@@ -1705,7 +1720,7 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		ResultNote:       resultNote,
 		ResultURI:        resultURI,
 		EvidenceBodyHash: evidenceBodyHash,
-	}, claimerID)
+	}, claimerID, submitParents...)
 
 	// Store evidence locally (also applied on other nodes via ApplyDAGEvent + blob fetch).
 	if req.Evidence != nil {
@@ -1793,12 +1808,18 @@ func (s *Server) handleApproveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Semantic parent: the TaskSubmitted event for this task.
+	var approveParents []event.EventID
+	if taskBefore.SubmitEventID != "" {
+		approveParents = []event.EventID{event.EventID(taskBefore.SubmitEventID)}
+	}
+
 	// Emit DAG event — ApplyDAGEvent applies the state change locally.
 	s.emitDAGEvent(event.EventTypeTaskApproved, event.TaskApprovedPayload{
 		Version:    1,
 		TaskID:     taskID,
 		ApproverID: approverID,
-	}, approverID)
+	}, approverID, approveParents...)
 
 	// Release escrow: distribute budget across worker, validator, and treasury
 	// directly from the escrow bucket (C1/C2 fix — no token minting).
@@ -1882,12 +1903,18 @@ func (s *Server) handleDisputeTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Semantic parent: the TaskSubmitted event being disputed.
+	var disputeParents []event.EventID
+	if disputeTask, tErr := s.taskMgr.Get(taskID); tErr == nil && disputeTask.SubmitEventID != "" {
+		disputeParents = []event.EventID{event.EventID(disputeTask.SubmitEventID)}
+	}
+
 	// Emit DAG event — ApplyDAGEvent applies the state change locally.
 	s.emitDAGEvent(event.EventTypeTaskDisputed, event.TaskDisputedPayload{
 		Version:  1,
 		TaskID:   taskID,
 		PosterID: posterID,
-	}, posterID)
+	}, posterID, disputeParents...)
 
 	task, _ := s.taskMgr.Get(taskID)
 	writeJSON(w, http.StatusOK, task)
@@ -2171,12 +2198,20 @@ func writeCodedError(w http.ResponseWriter, status int, code, msg, details strin
 	writeJSON(w, status, APIError{Error: msg, Code: code, Details: details})
 }
 
-// buildCausalRefs returns the causal ref list (falling back to current DAG tips
-// when none are requested) and the priorTimestamps map needed by event.New.
+// buildCausalRefs returns the causal ref list and the priorTimestamps map
+// needed by event.New. When the client provides explicit refs, those are used
+// (the client knows the semantic parent). When no refs are provided, a single
+// self-authored tip is used — this ensures each event gets a unique content
+// hash (OCS events like Transfer/Generation need unique IDs) while limiting
+// the parent set to one event that this node already broadcast.
 func (s *Server) buildCausalRefs(requested []event.EventID) ([]event.EventID, map[event.EventID]uint64) {
 	refs := requested
 	if len(refs) == 0 {
-		refs = s.dag.LocalTips(string(s.agentID))
+		// Use at most one self-authored tip for uniqueness.
+		selfTips := s.dag.LocalTips(string(s.agentID))
+		if len(selfTips) > 0 {
+			refs = selfTips[:1]
+		}
 	}
 	priorTimestamps := make(map[event.EventID]uint64, len(refs))
 	for _, ref := range refs {
@@ -2361,14 +2396,9 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		AgentID:   string(regAgentID),
 		PublicKey: hex.EncodeToString(regPubKey),
 	}
-	regTips := s.dag.LocalTips(string(s.agentID))
-	priorTS := make(map[event.EventID]uint64, len(regTips))
-	for _, ref := range regTips {
-		if ev, lookupErr := s.dag.Get(ref); lookupErr == nil {
-			priorTS[ref] = ev.CausalTimestamp
-		}
-	}
-	if regEv, err := event.New(event.EventTypeRegistration, regTips, regPayload, string(s.agentID), priorTS, 0); err == nil {
+	// Registration is a root event — no semantic parent. Empty causal refs
+	// guarantee materialization on every remote node without dependencies.
+	if regEv, err := event.New(event.EventTypeRegistration, nil, regPayload, string(s.agentID), nil, 0); err == nil {
 		if signErr := crypto.SignEvent(regEv, s.kp); signErr == nil {
 			// Publish through the authoritative local event publisher.
 			if s.publisher != nil {

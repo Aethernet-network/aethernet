@@ -794,15 +794,20 @@ func (av *AutoValidator) settleTask(task *tasks.Task, score *evidence.Score, hol
 			ScoreBP:        scoreBP,
 			HoldGeneration: holdGeneration,
 		}
-		tips := av.dag.LocalTips(string(av.validatorID))
-		priorTS := make(map[event.EventID]uint64, len(tips))
-		for _, ref := range tips {
+		// Semantic parent: the task's claim event. Every node that has
+		// processed the task lifecycle has this event, so the settlement
+		// will materialize without waiting for unrelated events.
+		var tsRefs []event.EventID
+		priorTS := map[event.EventID]uint64{}
+		if task.ClaimEventID != "" {
+			ref := event.EventID(task.ClaimEventID)
+			tsRefs = []event.EventID{ref}
 			if ev, err := av.dag.Get(ref); err == nil {
 				priorTS[ref] = ev.CausalTimestamp
 			}
 		}
 		tsEv, err := event.New(
-			event.EventTypeTaskSettlement, tips, tsPayload,
+			event.EventTypeTaskSettlement, tsRefs, tsPayload,
 			string(av.validatorID), priorTS, 0,
 		)
 		if err == nil {

@@ -1221,16 +1221,10 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			Amount:     nodeAgentFundTarget,
 			Reason:     "node-bootstrap",
 		}
-		gfTips := stack.dag.LocalTips(string(agentID))
-		priorTS := make(map[event.EventID]uint64, len(gfTips))
-		for _, ref := range gfTips {
-			if te, err := stack.dag.Get(ref); err == nil {
-				priorTS[ref] = te.CausalTimestamp
-			}
-		}
+		// GenesisFunding is a bootstrap event — no semantic parent.
 		gfEv, err := event.New(
-			event.EventTypeGenesisFunding, gfTips, gfPayload,
-			string(agentID), priorTS, 0,
+			event.EventTypeGenesisFunding, nil, gfPayload,
+			string(agentID), nil, 0,
 		)
 		if err == nil {
 			_ = crypto.SignEvent(gfEv, stack.kp)
@@ -1301,7 +1295,8 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		ReputationScore: 5000,
 		StakedAmount:    actualStake,
 	}
-	if regEv, err := event.New(event.EventTypeRegistration, stack.dag.LocalTips(string(agentID)), regPayload, string(agentID), nil, 0); err == nil {
+	// Registration is a root event — no semantic parent.
+	if regEv, err := event.New(event.EventTypeRegistration, nil, regPayload, string(agentID), nil, 0); err == nil {
 		_ = crypto.SignEvent(regEv, stack.kp)
 		if pubErr := pub.Publish(regEv); pubErr == nil {
 			slog.Info("startStack: registration event published", "agent_id", agentID)
@@ -1625,17 +1620,16 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		}
 		sp.SortAttestations()
 
-		// Create the Settlement DAG event. Use LocalTips to avoid referencing
-		// third-party tips that remote nodes may not have yet.
-		localTips := stack.dag.LocalTips(string(agentID))
-		priorTS := make(map[event.EventID]uint64, len(localTips))
-		for _, ref := range localTips {
-			if te, err := stack.dag.Get(ref); err == nil {
-				priorTS[ref] = te.CausalTimestamp
-			}
+		// Semantic parent: the target event being settled. Every node that
+		// voted on this event has it, so the settlement materializes
+		// immediately without waiting for unrelated events.
+		refs := []event.EventID{targetID}
+		priorTS := map[event.EventID]uint64{}
+		if te, err := stack.dag.Get(targetID); err == nil {
+			priorTS[targetID] = te.CausalTimestamp
 		}
 		settlementEv, err := event.New(
-			event.EventTypeSettlement, localTips, sp,
+			event.EventTypeSettlement, refs, sp,
 			string(agentID), priorTS, 0,
 		)
 		if err != nil {
@@ -2563,14 +2557,8 @@ func emitGenesisFundingEvent(d *dag.DAG, pub *localpub.Publisher, kp *crypto.Key
 		Amount:     amount,
 		Reason:     reason,
 	}
-	tips := d.Tips()
-	priorTS := make(map[event.EventID]uint64, len(tips))
-	for _, ref := range tips {
-		if ev, err := d.Get(ref); err == nil {
-			priorTS[ref] = ev.CausalTimestamp
-		}
-	}
-	ev, err := event.New(event.EventTypeGenesisFunding, tips, payload, string(agentID), priorTS, 0)
+	// GenesisFunding is a bootstrap event — no semantic parent.
+	ev, err := event.New(event.EventTypeGenesisFunding, nil, payload, string(agentID), nil, 0)
 	if err != nil {
 		slog.Warn("genesis: failed to create funding event", "to", toAgent, "err", err)
 		return

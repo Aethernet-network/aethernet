@@ -160,7 +160,9 @@ type Task struct {
 	Category          string           `json:"category"`
 	PosterID          string           `json:"poster_id"`
 	ClaimerID         string           `json:"claimer_id,omitempty"`
-	ClaimEventID      string           `json:"claim_event_id,omitempty"` // DAG event ID (TxID) for deterministic tie-break
+	PostEventID       string           `json:"post_event_id,omitempty"`   // DAG event ID for TaskPosted — semantic parent for TaskClaimed
+	ClaimEventID      string           `json:"claim_event_id,omitempty"`  // DAG event ID for TaskClaimed — semantic parent for TaskSubmitted
+	SubmitEventID     string           `json:"submit_event_id,omitempty"` // DAG event ID for TaskSubmitted — semantic parent for TaskApproved
 	Budget            uint64           `json:"budget"`
 	Status            TaskStatus       `json:"status"`
 	ResultHash        string           `json:"result_hash,omitempty"`
@@ -1069,7 +1071,7 @@ func (m *TaskManager) ApplyDAGEvent(ev *event.Event) {
 		if err != nil {
 			return
 		}
-		m.applyTaskPosted(tp)
+		m.applyTaskPosted(tp, string(ev.ID))
 
 	case event.EventTypeTaskClaimed:
 		tp, err := event.GetPayload[event.TaskClaimedPayload](ev)
@@ -1083,7 +1085,7 @@ func (m *TaskManager) ApplyDAGEvent(ev *event.Event) {
 		if err != nil {
 			return
 		}
-		m.applyTaskSubmitted(tp)
+		m.applyTaskSubmitted(tp, string(ev.ID))
 
 	case event.EventTypeTaskApproved:
 		tp, err := event.GetPayload[event.TaskApprovedPayload](ev)
@@ -1101,7 +1103,7 @@ func (m *TaskManager) ApplyDAGEvent(ev *event.Event) {
 	}
 }
 
-func (m *TaskManager) applyTaskPosted(tp event.TaskPostedPayload) {
+func (m *TaskManager) applyTaskPosted(tp event.TaskPostedPayload, eventID string) {
 	// Check existence under read lock, then call PostTask (which acquires
 	// its own write lock) only if the task doesn't exist yet.
 	m.mu.RLock()
@@ -1110,7 +1112,7 @@ func (m *TaskManager) applyTaskPosted(tp event.TaskPostedPayload) {
 	if exists {
 		return // idempotent
 	}
-	_, _ = m.PostTask(
+	task, _ := m.PostTask(
 		tp.PosterID, tp.Title, tp.Description, tp.Category, tp.Budget,
 		PostTaskOpts{
 			TaskID:              tp.TaskID,
@@ -1120,6 +1122,11 @@ func (m *TaskManager) applyTaskPosted(tp event.TaskPostedPayload) {
 			MaxDeliveryTimeSecs: tp.MaxDeliveryTime,
 		},
 	)
+	if task != nil && eventID != "" {
+		m.mu.Lock()
+		task.PostEventID = eventID
+		m.mu.Unlock()
+	}
 }
 
 func (m *TaskManager) applyTaskClaimed(tp event.TaskClaimedPayload, eventID string) {
@@ -1159,7 +1166,7 @@ func (m *TaskManager) applyTaskClaimed(tp event.TaskClaimedPayload, eventID stri
 	m.persist(task)
 }
 
-func (m *TaskManager) applyTaskSubmitted(tp event.TaskSubmittedPayload) {
+func (m *TaskManager) applyTaskSubmitted(tp event.TaskSubmittedPayload, eventID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	task, ok := m.tasks[tp.TaskID]
@@ -1173,6 +1180,7 @@ func (m *TaskManager) applyTaskSubmitted(tp event.TaskSubmittedPayload) {
 	task.ResultHash = tp.ResultHash
 	task.ResultNote = tp.ResultNote
 	task.ResultURI = tp.ResultURI
+	task.SubmitEventID = eventID
 	task.Status = TaskStatusSubmitted
 	task.SubmittedAt = time.Now().UnixNano()
 

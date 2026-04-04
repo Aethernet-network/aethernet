@@ -13,10 +13,8 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/event"
 )
 
-// dagReader provides tip selection and event lookup for constructing new events.
+// dagReader provides event lookup for constructing new events.
 type dagReader interface {
-	Tips() []event.EventID
-	LocalTips(agentID string) []event.EventID
 	Get(event.EventID) (*event.Event, error)
 }
 
@@ -103,20 +101,16 @@ func (c *Client) SubmitGrant(fromBucket string, toAgent crypto.AgentID, amount u
 }
 
 func (c *Client) submitTransferPayload(payload event.TransferPayload) (event.EventID, error) {
-	tips := c.dag.LocalTips(string(c.agentID))
-	priorTS := make(map[event.EventID]uint64, len(tips))
-	for _, ref := range tips {
-		if ev, err := c.dag.Get(ref); err == nil {
-			priorTS[ref] = ev.CausalTimestamp
-		}
-	}
-
+	// Protocol transfers (escrow locks, releases, grants, fee distributions)
+	// use empty causal refs. This guarantees materialization on every remote
+	// node without waiting for unrelated events. The transfer payload itself
+	// contains the semantic context (from/to/reason/task_id).
 	ev, err := event.New(
 		event.EventTypeTransfer,
-		tips,
+		nil,
 		payload,
 		string(c.agentID),
-		priorTS,
+		nil,
 		c.engine.MinEventStake(),
 	)
 	if err != nil {
