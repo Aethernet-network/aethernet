@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/event"
 )
@@ -23,18 +24,24 @@ type IndexStore interface {
 // per-consumer recognition state for each event. It is safe for concurrent
 // use. The in-memory map provides fast-path reads; the optional store
 // provides crash-safe persistence.
+//
+// A secondary index (prereqIndex) maps prerequisite keys to the set of
+// (consumer:eventID) composite keys waiting on that prerequisite. This
+// provides O(1) targeted activation without scanning all items.
 type Index struct {
-	mu    sync.RWMutex
-	items map[string]*RecognitionState // key: "consumer:eventID"
-	store IndexStore                   // optional; nil = in-memory only
+	mu          sync.RWMutex
+	items       map[string]*RecognitionState // key: "consumer:eventID"
+	prereqIndex map[string]map[string]struct{} // prereqKey → set of composite keys
+	store       IndexStore                     // optional; nil = in-memory only
 }
 
 // NewIndex creates a Recognition Index. If store is non-nil, state is
 // persisted on every write for crash safety.
 func NewIndex(store IndexStore) *Index {
 	return &Index{
-		items: make(map[string]*RecognitionState),
-		store: store,
+		items:       make(map[string]*RecognitionState),
+		prereqIndex: make(map[string]map[string]struct{}),
+		store:       store,
 	}
 }
 
@@ -77,12 +84,41 @@ func (idx *Index) Get(consumer string, eventID event.EventID) (*RecognitionState
 	return nil, ErrNotFound
 }
 
-// Put writes or updates the recognition state. Persists to store if available.
+// Put writes or updates the recognition state. Maintains the prerequisite
+// secondary index and persists to store if available.
 func (idx *Index) Put(state *RecognitionState) error {
 	key := stateKey(state.ConsumerName, state.EventID)
 
 	idx.mu.Lock()
+	// Remove from old prereq index if the item existed with a different key.
+	if old, exists := idx.items[key]; exists && old.PrerequisiteKey != "" {
+		if old.PrerequisiteKey != state.PrerequisiteKey {
+			if set, ok := idx.prereqIndex[old.PrerequisiteKey]; ok {
+				delete(set, key)
+				if len(set) == 0 {
+					delete(idx.prereqIndex, old.PrerequisiteKey)
+				}
+			}
+		}
+	}
 	idx.items[key] = state
+	// Add to new prereq index if deferred.
+	if state.PrerequisiteKey != "" && !state.Ready {
+		if idx.prereqIndex[state.PrerequisiteKey] == nil {
+			idx.prereqIndex[state.PrerequisiteKey] = make(map[string]struct{})
+		}
+		idx.prereqIndex[state.PrerequisiteKey][key] = struct{}{}
+	} else if state.PrerequisiteKey == "" || state.Ready {
+		// Clean up prereq index when item becomes ready or prereq cleared.
+		for pk, set := range idx.prereqIndex {
+			if _, ok := set[key]; ok {
+				delete(set, key)
+				if len(set) == 0 {
+					delete(idx.prereqIndex, pk)
+				}
+			}
+		}
+	}
 	idx.mu.Unlock()
 
 	if idx.store != nil {
@@ -166,17 +202,45 @@ func (idx *Index) SetDeferred(consumer string, eventID event.EventID, reason, pr
 	return idx.Put(&updated)
 }
 
+// IncrementAttempt atomically increments the attempt count and updates
+// the last-attempt timestamp for a (consumer, event) pair. Thread-safe.
+func (idx *Index) IncrementAttempt(consumer string, eventID event.EventID) {
+	key := stateKey(consumer, eventID)
+	idx.mu.Lock()
+	s, ok := idx.items[key]
+	if ok {
+		updated := *s
+		updated.Attempts++
+		updated.LastAttemptUnix = time.Now().Unix()
+		idx.items[key] = &updated
+		// Persist asynchronously — attempt metadata is best-effort.
+		if idx.store != nil {
+			data, err := json.Marshal(&updated)
+			if err == nil {
+				_ = idx.store.PutRecognition(key, data)
+			}
+		}
+	}
+	idx.mu.Unlock()
+}
+
 // DeferredByPrerequisite returns all deferred states that are waiting on
 // the given prerequisite key. Returns deep copies to avoid data races
-// with concurrent bus workers. Used for targeted activation when the
-// prerequisite is satisfied.
+// with concurrent bus workers. Uses the secondary prerequisite index for
+// O(1) lookup instead of scanning all items.
 func (idx *Index) DeferredByPrerequisite(prereqKey string) []*RecognitionState {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	var result []*RecognitionState
-	for _, s := range idx.items {
-		if !s.Ready && s.PrerequisiteKey == prereqKey {
+	keys, ok := idx.prereqIndex[prereqKey]
+	if !ok {
+		return nil
+	}
+
+	result := make([]*RecognitionState, 0, len(keys))
+	for key := range keys {
+		s, exists := idx.items[key]
+		if exists && !s.Ready {
 			cp := *s
 			result = append(result, &cp)
 		}
@@ -184,8 +248,9 @@ func (idx *Index) DeferredByPrerequisite(prereqKey string) []*RecognitionState {
 	return result
 }
 
-// LoadFromStore populates the in-memory index from the persistent store.
-// Called during node startup for crash recovery.
+// LoadFromStore populates the in-memory index from the persistent store,
+// rebuilding the prerequisite secondary index. Called during node startup
+// for crash recovery.
 func (idx *Index) LoadFromStore() error {
 	if idx.store == nil {
 		return nil
@@ -203,6 +268,13 @@ func (idx *Index) LoadFromStore() error {
 			continue // skip corrupt entries
 		}
 		idx.items[key] = &s
+		// Rebuild prereq secondary index.
+		if s.PrerequisiteKey != "" && !s.Ready {
+			if idx.prereqIndex[s.PrerequisiteKey] == nil {
+				idx.prereqIndex[s.PrerequisiteKey] = make(map[string]struct{})
+			}
+			idx.prereqIndex[s.PrerequisiteKey][key] = struct{}{}
+		}
 	}
 	return nil
 }
