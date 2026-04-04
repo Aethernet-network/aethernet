@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"sync"
-	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/event"
 )
@@ -180,23 +179,21 @@ func (b *Bus) processConsumer(c CommitConsumer, item commitItem) {
 	name := c.Name()
 	eventID := item.Record.EventID
 
-	// Idempotency: check if already recognized and ready.
-	existing, err := b.index.Get(name, eventID)
-	if err == nil && existing.Recognized && existing.Ready {
-		return // already fully processed
-	}
-
-	// Mark recognized.
-	state, err := b.index.MarkRecognized(name, eventID)
+	// Atomic idempotency: MarkRecognizedOnce returns false if the item was
+	// already recognized by another worker. This prevents concurrent workers
+	// from both proceeding past the recognition gate.
+	firstTime, err := b.index.MarkRecognizedOnce(name, eventID)
 	if err != nil {
 		slog.Warn("recognition: mark recognized failed",
 			"consumer", name, "event_id", eventID, "err", err)
 		return
 	}
+	if !firstTime {
+		return // another worker already handled this (consumer, event) pair
+	}
 
-	// Update attempt tracking.
-	state.Attempts++
-	state.LastAttemptUnix = time.Now().Unix()
+	// Track attempt.
+	b.index.IncrementAttempt(name, eventID)
 
 	// Check readiness.
 	ready, prereqKey, readyErr := c.Ready(b.ctx, item.Event, b.readModel)

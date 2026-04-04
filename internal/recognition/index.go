@@ -131,6 +131,37 @@ func (idx *Index) Put(state *RecognitionState) error {
 	return nil
 }
 
+// MarkRecognizedOnce atomically marks the (consumer, event) pair as recognized
+// and returns true only for the FIRST caller. Subsequent calls return false.
+// This is the concurrent-safe idempotency gate used by bus workers.
+func (idx *Index) MarkRecognizedOnce(consumer string, eventID event.EventID) (bool, error) {
+	key := stateKey(consumer, eventID)
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	if existing, ok := idx.items[key]; ok && existing.Recognized {
+		return false, nil // already recognized — another worker won
+	}
+
+	state := &RecognitionState{
+		ConsumerName: consumer,
+		EventID:      eventID,
+		Recognized:   true,
+	}
+	idx.items[key] = state
+
+	if idx.store != nil {
+		data, err := json.Marshal(state)
+		if err != nil {
+			return true, fmt.Errorf("recognition: marshal state: %w", err)
+		}
+		if err := idx.store.PutRecognition(key, data); err != nil {
+			return true, err
+		}
+	}
+	return true, nil
+}
+
 // MarkRecognized idempotently sets Recognized=true for the (consumer, event)
 // pair. Creates the state entry if it doesn't exist. Returns the updated state.
 func (idx *Index) MarkRecognized(consumer string, eventID event.EventID) (*RecognitionState, error) {
@@ -246,6 +277,34 @@ func (idx *Index) DeferredByPrerequisite(prereqKey string) []*RecognitionState {
 		}
 	}
 	return result
+}
+
+// IndexStats holds aggregate counts for observability and debugging.
+type IndexStats struct {
+	Total      int `json:"total"`
+	Recognized int `json:"recognized"`
+	Ready      int `json:"ready"`
+	Deferred   int `json:"deferred"`
+}
+
+// Stats returns aggregate counts of recognition states.
+func (idx *Index) Stats() IndexStats {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	var s IndexStats
+	s.Total = len(idx.items)
+	for _, item := range idx.items {
+		if item.Recognized {
+			s.Recognized++
+		}
+		if item.Ready {
+			s.Ready++
+		}
+		if item.Recognized && !item.Ready {
+			s.Deferred++
+		}
+	}
+	return s
 }
 
 // LoadFromStore populates the in-memory index from the persistent store,
