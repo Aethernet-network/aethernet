@@ -1167,14 +1167,19 @@ func (m *TaskManager) applyTaskClaimed(tp event.TaskClaimedPayload, eventID stri
 }
 
 func (m *TaskManager) applyTaskSubmitted(tp event.TaskSubmittedPayload, eventID string) {
+	// Determine whether to fetch the evidence blob AFTER releasing the lock.
+	var needBlobFetch bool
+	var blobTaskID, blobHash string
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	task, ok := m.tasks[tp.TaskID]
 	if !ok {
+		m.mu.Unlock()
 		slog.Debug("applyTaskSubmitted: task not found", "task_id", tp.TaskID)
 		return
 	}
 	if task.Status != TaskStatusClaimed {
+		m.mu.Unlock()
 		return // idempotent — already submitted or later
 	}
 	task.ResultHash = tp.ResultHash
@@ -1191,13 +1196,21 @@ func (m *TaskManager) applyTaskSubmitted(tp event.TaskSubmittedPayload, eventID 
 		task.EvidenceReady = true
 	}
 
-	m.persist(task)
-
-	// Fetch evidence body from blobstore if available. This is how remote
-	// nodes get the full evidence — the DAG event carries only the hash,
-	// the blob contains the actual evidence object and result content.
+	// Check whether blob fetch is needed before releasing lock.
 	if tp.EvidenceBodyHash != "" && m.evidenceBlobFetcher != nil && task.SubmittedEvidence == nil {
-		m.fetchEvidenceBlob(tp.TaskID, tp.EvidenceBodyHash)
+		needBlobFetch = true
+		blobTaskID = tp.TaskID
+		blobHash = tp.EvidenceBodyHash
+	}
+
+	m.persist(task)
+	m.mu.Unlock()
+
+	// Fetch evidence body OUTSIDE the lock. fetchEvidenceBlob calls
+	// SetSubmittedEvidence/SetResultContent/MarkEvidenceReady which each
+	// acquire m.mu — calling them under the lock would deadlock.
+	if needBlobFetch {
+		m.fetchEvidenceBlob(blobTaskID, blobHash)
 	}
 }
 

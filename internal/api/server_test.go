@@ -2311,3 +2311,72 @@ func TestGetTask_StatusAfterApproval(t *testing.T) {
 		t.Errorf("GET /v1/tasks/%s after approval: Status = %q; want %q", task.ID, polled.Status, "completed")
 	}
 }
+
+// TestSubmitTask_LatencyBounded verifies that submit completes in bounded time
+// regardless of evidence body size. This catches deadlocks in the submit path
+// like fetchEvidenceBlob running under the TaskManager mutex.
+func TestSubmitTask_LatencyBounded(t *testing.T) {
+	setup := newTestSetup(t)
+	agentID := string(setup.kp.AgentID())
+
+	// Fund agent so escrow lock succeeds.
+	setup.tl.FundAgent(crypto.AgentID(agentID), 10_000_000)
+
+	// Create a second agent to be the worker.
+	kp2, _ := crypto.GenerateKeyPair()
+	workerID := string(kp2.AgentID())
+
+	// Post task.
+	r := post(t, setup.ts, "/v1/tasks", map[string]any{
+		"poster_id":   agentID,
+		"title":       "latency test",
+		"description": "submit latency bounded",
+		"category":    "code",
+		"budget":      100000,
+	})
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("post task: want 201, got %d", r.StatusCode)
+	}
+	var task struct{ ID string `json:"id"` }
+	decodeJSON(t, r, &task)
+
+	// Claim task as worker.
+	cr := post(t, setup.ts, "/v1/tasks/"+task.ID+"/claim", map[string]any{
+		"claimer_id": workerID,
+	})
+	if cr.StatusCode != http.StatusOK {
+		t.Fatalf("claim task: want 200, got %d", cr.StatusCode)
+	}
+	cr.Body.Close()
+
+	// Submit with a 19KB evidence body — must complete within 5 seconds.
+	largeContent := make([]byte, 19000)
+	for i := range largeContent {
+		largeContent[i] = 'A'
+	}
+
+	submitBody := map[string]any{
+		"claimer_id":     workerID,
+		"result_hash":    "sha256:latency-test",
+		"result_content": string(largeContent),
+		"evidence": map[string]any{
+			"output_preview": string(largeContent[:200]),
+			"output_type":    "text",
+			"summary":        "latency test 19KB",
+			"metrics":        map[string]string{"model": "test", "tokens": "500"},
+		},
+	}
+
+	start := time.Now()
+	sr := post(t, setup.ts, "/v1/tasks/"+task.ID+"/submit", submitBody)
+	elapsed := time.Since(start)
+	defer sr.Body.Close()
+
+	if sr.StatusCode != http.StatusOK {
+		t.Fatalf("submit: want 200, got %d", sr.StatusCode)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("submit took %v; want < 5s (possible deadlock in evidence fetch path)", elapsed)
+	}
+	t.Logf("submit latency: %v (19KB evidence body)", elapsed)
+}
