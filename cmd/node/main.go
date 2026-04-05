@@ -1801,6 +1801,39 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 				stack.taskMgr.ApplyDAGEvent(ev)
 			}
 
+		// OCS economic events — submit to pending queue for verification.
+		// Idempotent: SubmitFromSync is safe to call even if the recognition
+		// fabric has already submitted the event.
+		case event.EventTypeTransfer, event.EventTypeGeneration,
+			event.EventTypeTaskSettlement:
+			if ev.SettlementState == event.SettlementOptimistic {
+				if err := stack.engine.SubmitFromSync(ev); err != nil {
+					slog.Debug("syncHandler: OCS submit failed (may already be pending)",
+						"event_id", ev.ID, "err", err)
+				}
+			}
+
+		// Verification votes — route directly to consensus round.
+		// This is the reliable synchronous path; the recognition fabric's
+		// OCSVoteConsumer provides async deferral as backup. AcceptPeerVote
+		// is idempotent — duplicate calls are safe.
+		case event.EventTypeVerificationVote:
+			vp, err := event.GetPayload[settlement.VerificationVotePayload](ev)
+			if err != nil {
+				slog.Warn("syncHandler: failed to parse vote payload",
+					"event_id", ev.ID, "err", err)
+			} else {
+				verdict := vp.Verdict == "accepted"
+				if err := stack.engine.AcceptPeerVote(
+					event.EventID(vp.TargetEventID),
+					crypto.AgentID(vp.VoterID),
+					verdict,
+				); err != nil {
+					slog.Debug("syncHandler: AcceptPeerVote failed (may be duplicate or not yet pending)",
+						"event_id", ev.ID, "target", vp.TargetEventID, "err", err)
+				}
+			}
+
 		// Validator lifecycle events — applied deterministically via the
 		// Reducer. After each successful apply, the VotingRound's snapshot
 		// is rebound so future rounds use the updated validator set.
