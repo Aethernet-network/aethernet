@@ -1628,6 +1628,7 @@ func (s *Server) handleClaimTask(w http.ResponseWriter, r *http.Request) {
 
 // handleSubmitTask handles POST /v1/tasks/{id}/submit.
 func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
+	submitStart := time.Now()
 	if s.taskMgr == nil {
 		writeError(w, http.StatusNotImplemented, "task marketplace not enabled")
 		return
@@ -1642,6 +1643,12 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	slog.Info("submit: decoded request",
+		"content_length", r.ContentLength,
+		"result_content_len", len(req.ResultContent),
+		"has_evidence", req.Evidence != nil,
+		"elapsed_ms", time.Since(submitStart).Milliseconds())
+
 	claimerID, err := s.resolveActor(r, req.ClaimerID)
 	if err != nil {
 		writeCodedError(w, http.StatusForbidden, "signer_mismatch", err.Error(), "")
@@ -1691,18 +1698,16 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 			Encrypted:     req.ResultEncrypted,
 		}
 		blobData, _ := json.Marshal(blob)
+		blobStart := time.Now()
 		if hash, _, err := s.blobStore.Put(context.Background(), blobData); err == nil {
 			evidenceBodyHash = hash
-			slog.Info("evidence: blob stored",
+			slog.Info("submit: blob stored",
 				"task_id", taskID, "hash", hash, "size", len(blobData),
-				"has_evidence", req.Evidence != nil, "has_content", req.ResultContent != "")
+				"blob_ms", time.Since(blobStart).Milliseconds(),
+				"total_ms", time.Since(submitStart).Milliseconds())
 		} else {
 			slog.Warn("submit: failed to store evidence blob", "task_id", taskID, "err", err)
 		}
-	} else {
-		slog.Debug("submit: skipping blob store",
-			"task_id", taskID, "blob_store_nil", s.blobStore == nil,
-			"evidence_nil", req.Evidence == nil, "content_empty", req.ResultContent == "")
 	}
 
 	// Semantic parent: the TaskClaimed event for this task.
@@ -1712,6 +1717,7 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Emit DAG event — ApplyDAGEvent applies the state change locally.
+	dagStart := time.Now()
 	s.emitDAGEvent(event.EventTypeTaskSubmitted, event.TaskSubmittedPayload{
 		Version:          1,
 		TaskID:           taskID,
@@ -1721,6 +1727,10 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		ResultURI:        resultURI,
 		EvidenceBodyHash: evidenceBodyHash,
 	}, claimerID, submitParents...)
+	slog.Info("submit: DAG event emitted",
+		"task_id", taskID,
+		"dag_ms", time.Since(dagStart).Milliseconds(),
+		"total_ms", time.Since(submitStart).Milliseconds())
 
 	// Store evidence locally (also applied on other nodes via ApplyDAGEvent + blob fetch).
 	if req.Evidence != nil {
@@ -1731,6 +1741,9 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	task, _ := s.taskMgr.Get(taskID)
+	slog.Info("submit: handler complete",
+		"task_id", taskID,
+		"total_ms", time.Since(submitStart).Milliseconds())
 	writeJSON(w, http.StatusOK, task)
 }
 
