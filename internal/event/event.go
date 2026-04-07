@@ -95,6 +95,17 @@ const (
 	EventTypeTaskApproved  EventType = "TaskApproved"
 	EventTypeTaskDisputed  EventType = "TaskDisputed"
 
+	// EventTypeTaskVerificationVote records a validator's scored verdict on
+	// a submitted task. Part of the multi-validator verification consensus.
+	// Semantic parent is the TaskSubmitted event being voted on.
+	EventTypeTaskVerificationVote EventType = "TaskVerificationVote"
+
+	// EventTypeTaskVerificationConsensus records the finalized consensus
+	// outcome for a task verification round (accept, reject, or disputed).
+	// Created when BFT supermajority is reached. Settlement is a
+	// deterministic consequence of this event.
+	EventTypeTaskVerificationConsensus EventType = "TaskVerificationConsensus"
+
 	// Validator lifecycle events — propagated via DAG, applied
 	// deterministically on every node via the validatorlifecycle.Reducer.
 	// These are the canonical DAG records for all validator set mutations.
@@ -709,5 +720,44 @@ type TaskDisputedPayload struct {
 
 	TaskID   string `json:"task_id"`
 	PosterID string `json:"poster_id"`
+}
+
+// TaskVerificationVotePayload carries a validator's scored verdict on a
+// submitted task as part of the multi-validator verification consensus.
+type TaskVerificationVotePayload struct {
+	Version              uint8             `json:"v"`
+	RoundID              string            `json:"round_id"`
+	TaskID               string            `json:"task_id"`
+	SubmissionEventID    string            `json:"submission_event_id"`
+	ValidatorID          string            `json:"validator_id"`
+	Verdict              string            `json:"verdict"` // "pass" | "fail" | "abstain"
+	ScoreBP              uint64            `json:"score_bp"`
+	ScoreBreakdown       map[string]uint64 `json:"score_breakdown,omitempty"`
+	AnalyzerFamily       string            `json:"analyzer_family"`
+	AnalyzerVersion      string            `json:"analyzer_version"`
+	PolicyVersion        string            `json:"policy_version"`
+	AnalysisArtifactHash string            `json:"analysis_artifact_hash,omitempty"`
+	TimestampUnix        int64             `json:"timestamp_unix"`
+}
+
+// TaskVerificationConsensusPayload records the finalized multi-validator
+// consensus outcome for a task verification round.
+type TaskVerificationConsensusPayload struct {
+	Version               uint8    `json:"v"`
+	RoundID               string   `json:"round_id"`
+	TaskID                string   `json:"task_id"`
+	SubmissionEventID     string   `json:"submission_event_id"`
+	WorkerID              string   `json:"worker_id"`
+	PosterID              string   `json:"poster_id"`
+	FinalVerdict          string   `json:"final_verdict"` // "pass" | "fail" | "disputed"
+	FinalScoreBP          uint64   `json:"final_score_bp"`
+	PassWeight            uint64   `json:"pass_weight"`
+	FailWeight            uint64   `json:"fail_weight"`
+	AbstainWeight         uint64   `json:"abstain_weight"`
+	TotalActiveWeight     uint64   `json:"total_active_weight"`
+	ParticipatingFamilies []string `json:"participating_families,omitempty"`
+	DiversityFloorMet     bool     `json:"diversity_floor_met"`
+	VoteCount             int      `json:"vote_count"`
+	FinalizationTimeUnix  int64    `json:"finalization_time_unix"`
 }
 

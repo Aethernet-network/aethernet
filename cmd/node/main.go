@@ -515,6 +515,73 @@ func applyLifecycleEventFromSync(ev *event.Event, reducer *validatorlifecycle.Re
 	}
 }
 
+// applyTaskVerificationVoteSync applies a TaskVerificationVote to its round
+// via the synchronous syncHandler path. This is the sync counterpart to the
+// async TaskVerificationVoteConsumer in the recognition fabric. Both paths
+// are idempotent via the aggregator's duplicate detection.
+func applyTaskVerificationVoteSync(
+	store *taskverification.BadgerStore,
+	reducer *validatorlifecycle.Reducer,
+	vp event.TaskVerificationVotePayload,
+) {
+	ctx := context.Background()
+	roundID := taskverification.RoundID(vp.RoundID)
+
+	round, err := store.LoadRound(ctx, roundID)
+	if err != nil {
+		return // round not yet created — the async consumer will handle it
+	}
+
+	// Look up validator weight.
+	var stake uint64
+	if reducer != nil {
+		if snap := reducer.Snapshot(); snap != nil {
+			w, eligible := snap.VoteWeightByKey(crypto.AgentID(vp.ValidatorID))
+			if !eligible {
+				return
+			}
+			stake = w
+		}
+	}
+
+	var verdict taskverification.Verdict
+	switch vp.Verdict {
+	case "pass":
+		verdict = taskverification.VerdictPass
+	case "fail":
+		verdict = taskverification.VerdictFail
+	case "abstain":
+		verdict = taskverification.VerdictAbstain
+	default:
+		return
+	}
+
+	record := taskverification.TaskVerificationVoteRecord{
+		ValidatorID:          crypto.AgentID(vp.ValidatorID),
+		Verdict:              verdict,
+		ScoreBP:              vp.ScoreBP,
+		ScoreBreakdown:       vp.ScoreBreakdown,
+		AnalyzerFamily:       vp.AnalyzerFamily,
+		AnalyzerVersion:      vp.AnalyzerVersion,
+		PolicyVersion:        vp.PolicyVersion,
+		AnalysisArtifactHash: vp.AnalysisArtifactHash,
+		Stake:                stake,
+		TimestampUnix:        vp.TimestampUnix,
+	}
+
+	if round.IsTerminal() {
+		taskverification.RecordPostFinalizationVote(round, record)
+		_ = store.SaveRound(ctx, round)
+		return
+	}
+
+	result, err := taskverification.ApplyVoteToRound(round, record)
+	if err != nil || result.DuplicateVote {
+		return
+	}
+	_ = store.SaveRound(ctx, round)
+}
+
 // replayLifecycleEventsFromDAG iterates all events in the loaded DAG and
 // applies any validator lifecycle events to the Reducer. This reconstructs
 // the full validator set state from the DAG history, not just genesis.
@@ -1671,6 +1738,10 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	ocsVoteConsumer := recognition.NewOCSVoteConsumer(stack.engine)
 	_ = commitBus.Register(ocsVoteConsumer)
 
+	// Task verification store — declared here so the syncHandler (below)
+	// can access it. Initialized inside the taskMgr guard.
+	var tvStore *taskverification.BadgerStore
+
 	// Task lifecycle consumer — TaskPosted/Claimed/Submitted/Approved/Disputed.
 	if stack.taskMgr != nil {
 		taskConsumer := recognition.NewTaskLifecycleConsumer(stack.taskMgr)
@@ -1685,12 +1756,10 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		evidenceConsumer := recognition.NewEvidenceReadinessConsumer(stack.taskMgr, nil)
 		_ = commitBus.Register(evidenceConsumer)
 
-		// Task verification round consumer — opens a TaskVerificationRound
-		// on every TaskSubmitted event for multi-validator consensus scoring.
-		// Uses deferred activation: if task metadata (PosterID, Category)
-		// isn't available yet, the consumer defers until the task lifecycle
-		// consumer signals task_metadata:<taskID>.
-		tvStore := taskverification.NewBadgerStore(stack.store.DB())
+		// Task verification store — shared by the round consumer (opens rounds),
+		// the vote consumer (aggregates votes), and the syncHandler (sync path).
+		// Initialized here so it's accessible to the syncHandler closure below.
+		tvStore = taskverification.NewBadgerStore(stack.store.DB())
 		tvRoundConsumer := recognition.NewTaskVerificationRoundConsumer(
 			tvStore,
 			recognition.TaskMetadataFunc(func(taskID string) (string, string, error) {
@@ -1712,7 +1781,24 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			},
 			func() int64 { return time.Now().Unix() },
 		)
+		tvRoundConsumer.SetActivator(recActivator)
 		_ = commitBus.Register(tvRoundConsumer)
+
+		// Task verification vote consumer — aggregates votes into rounds.
+		tvVoteConsumer := recognition.NewTaskVerificationVoteConsumer(
+			tvStore,
+			recognition.ValidatorWeightFunc(func(id crypto.AgentID) (uint64, bool) {
+				if stack.lifecycleReducer == nil {
+					return 0, false
+				}
+				snap := stack.lifecycleReducer.Snapshot()
+				if snap == nil {
+					return 0, false
+				}
+				return snap.VoteWeightByKey(id)
+			}),
+		)
+		_ = commitBus.Register(tvVoteConsumer)
 	}
 
 	// Settlement consumer — Settlement → SettlementApplicator.
@@ -1863,6 +1949,21 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 					slog.Warn("syncHandler: AcceptPeerVote failed",
 						"event_id", ev.ID, "target", vp.TargetEventID,
 						"voter", vp.VoterID, "err", err)
+				}
+			}
+
+		// Task verification votes — synchronous aggregation path.
+		// Both this syncHandler and the recognition fabric's
+		// TaskVerificationVoteConsumer apply the same vote. The aggregator's
+		// duplicate detection makes the duplication safe and free.
+		case event.EventTypeTaskVerificationVote:
+			if tvStore != nil {
+				vp, err := event.GetPayload[event.TaskVerificationVotePayload](ev)
+				if err != nil {
+					slog.Debug("syncHandler: failed to parse task verification vote",
+						"event_id", ev.ID, "err", err)
+				} else {
+					applyTaskVerificationVoteSync(tvStore, stack.lifecycleReducer, vp)
 				}
 			}
 

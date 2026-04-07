@@ -41,11 +41,21 @@ func (f TaskMetadataFunc) GetTaskPosterAndCategory(taskID string) (string, strin
 // yet in the store (concurrent dispatch — the TaskPosted event hasn't been
 // applied yet), the consumer defers with a prerequisite key. The
 // TaskLifecycleConsumer signals this key after applying TaskPosted.
+// PrerequisiteKeyTVRound returns the prerequisite key that signals a
+// TaskVerificationRound has been opened for the given round ID. Used by
+// the vote consumer to defer until the round exists.
+func PrerequisiteKeyTVRound(roundID string) string {
+	return "tv_round:" + roundID
+}
+
+// TaskVerificationRoundConsumer is a CommitConsumer that opens a
+// TaskVerificationRound whenever a TaskSubmitted event is recognized.
 type TaskVerificationRoundConsumer struct {
 	rounds       taskverification.Store
 	taskMeta     TaskMetadataReader
 	validatorVer func() uint64 // returns current validator-set version
 	clock        func() int64  // returns current Unix timestamp
+	activator    *Activator
 }
 
 // NewTaskVerificationRoundConsumer creates a consumer that opens verification
@@ -68,6 +78,12 @@ func NewTaskVerificationRoundConsumer(
 		validatorVer: validatorVer,
 		clock:        clock,
 	}
+}
+
+// SetActivator wires the targeted activation system so that after a round
+// is opened, vote consumers waiting for the round are activated.
+func (c *TaskVerificationRoundConsumer) SetActivator(a *Activator) {
+	c.activator = a
 }
 
 // Name returns the unique consumer identifier.
@@ -164,6 +180,12 @@ func (c *TaskVerificationRoundConsumer) Consume(ctx context.Context, ev *event.E
 		"deadline_unix", r.DeadlineUnix,
 		"validator_set_version", r.ValidatorSetVersion,
 	)
+
+	// Signal vote consumers that the round is now available.
+	if c.activator != nil {
+		c.activator.Signal(ctx, PrerequisiteKeyTVRound(string(r.RoundID)))
+	}
+
 	return nil
 }
 

@@ -132,6 +132,16 @@ Each lesson must be specific and actionable — a generic principle is not a les
 
 ---
 
+## Event Payload Design
+
+### Event payloads should include all metadata downstream consumers need
+- **Context**: The `TaskSubmittedPayload` contains `TaskID` and `ClaimerID` (worker), but NOT `PosterID` or `Category`. These are only in `TaskPostedPayload`. The verification round consumer needed all four fields to open a round.
+- **Wrong approach**: Assuming payload fields are available directly on the event. The round consumer initially relied on dispatch ordering (task lifecycle consumer applies TaskPosted before round consumer processes TaskSubmitted). With 4 concurrent bus workers, this ordering is not guaranteed.
+- **Right approach**: Use the deferred activation pattern — the round consumer's `Ready()` checks if task metadata is available in the TaskManager. If not, it returns deferred with prerequisite key `"task_metadata:<taskID>"`. The task lifecycle consumer signals this key after applying TaskPosted. This decouples the consumers from dispatch ordering while ensuring correctness.
+- **Why it matters**: When designing new event payloads, include all metadata that downstream consumers will need. If a consumer requires data from a different event's payload, it must either defer until that data is available or accept a coupling to dispatch ordering. Deferral is the correct pattern; ordering dependency is fragile.
+
+---
+
 ## Evidence Scoring
 
 ### All verifiers must read the same content field
