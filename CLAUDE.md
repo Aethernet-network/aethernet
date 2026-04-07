@@ -1,143 +1,289 @@
-# AetherNet — Project Guide
+# CLAUDE.md — AetherNet Protocol
 
-## Project Overview
+## What This Project Is
 
-AetherNet is a distributed incentive and settlement protocol for verified AI work. Written in Go. ~91K lines across 47 internal packages. Live on a 3-node testnet at testnet.aethernet.network. Full E2E verified: registration → consensus → settlement → cross-node balance convergence. Python SDK published to PyPI as `aethernet-sdk`.
+AetherNet is a production-grade Layer 1 blockchain protocol built on a causal DAG architecture, serving as the trust and settlement layer for the AI agent economy. Written in Go, the protocol verifies AI agent work and settles economic transactions through BFT consensus with compound verification. The northstar is creating an environment where AI and humanity improve synergistically through protocol-enforced accountability rather than model iteration.
 
-## Build & Test
+This is not a prototype. This is not a research project. This is production-grade infrastructure intended to scale to millions of events per hour and billions of users (human and agent). Every line of code must meet the standard "world's best engineers built this — impressive on first encounter and on the thousandth."
 
+## Engineering Standard
+
+**No bandaids. No shortcuts. No special cases. No fixes that only satisfy tests.**
+
+Every change must be:
+- Architecturally correct, not symptom-targeted
+- Generalizable across all event types and use cases, not narrowly scoped to the current bug
+- Verified working in the target environment (live testnet), not just in unit tests
+- Beautiful enough that experienced distributed systems engineers would study it
+
+If a fix feels hacky, stop and ask: "Knowing everything I know now, what is the elegant solution?" If a fix only addresses one event type when the same problem affects all event types, generalize it. If a fix only makes a test pass, it is not a fix.
+
+The standard is not "tests pass." The standard is "verified working on the live testnet across all 5 nodes, with autonomous end-to-end pipeline completion."
+
+## Workflow Discipline
+
+### 1. Plan Mode Required
+
+For any non-trivial change, enter plan mode before writing code. A change is non-trivial if any of the following are true:
+- Touches more than one file
+- Modifies any interface, contract, or public API
+- Changes state mutation paths or event handling
+- Could affect cross-node behavior, consensus, settlement, or networking
+- Adds or removes a callback, hook, or notification
+- Affects startup ordering or initialization sequence
+- Modifies any file under `internal/dag`, `internal/network`, `internal/ocs`, `internal/recognition`, `internal/consensus`, `internal/tasks`, `internal/autovalidator`, `internal/settlement`, `internal/identity`, `internal/ledger`, or `cmd/node/main.go`
+
+In plan mode:
+1. Write a detailed plan to `docs/plans/YYYY-MM-DD-<short-description>.md`
+2. Show the plan to the user before implementing
+3. Wait for sign-off
+4. Implement against the approved plan
+5. If implementation reveals the plan was wrong, STOP, update the plan, and re-confirm
+
+Trivial changes (typo fixes, log message wording, single-function bug fixes that don't change observable behavior) skip plan mode but are still subject to verification before completion.
+
+### 2. Subagent Boundaries
+
+When investigating or implementing changes that span multiple subsystems, spawn one subagent per affected boundary. The boundaries are:
+
+**State & Consensus** — anything that mutates protocol state or affects what nodes agree on.
+Includes: `internal/dag`, `internal/event`, `internal/ocs`, `internal/consensus`, `internal/identity`, `internal/ledger`, `internal/settlement`, `internal/validator`, validator lifecycle, staking, slashing.
+
+**Transport & Recognition** — how events move between nodes and how subsystems learn about them.
+Includes: `internal/network` (fastpath, repair, materialize, sync, ingest, completion), `internal/localpub`, `internal/recognition`, `internal/blobstore`.
+
+**Application & Interface** — how the protocol is exposed and how application logic responds to protocol events.
+Includes: `internal/api`, `internal/tasks`, `internal/autovalidator`, `internal/trajectory`, `internal/marketplace`, SDK integration points.
+
+A change to vote handling touches all three (consensus rules, transport, autovalidator) so spawn three subagents in parallel, each reading their layer fully, then synthesize. A change purely in the API layer gets one subagent.
+
+When spawning a subagent, give it: the specific question to answer, the boundary it owns, and the constraint that it must read the actual code, not assume.
+
+### 3. Self-Improvement Loop
+
+After ANY correction from the user or any time a fix reveals a deeper problem than initially diagnosed, update `docs/lessons.md` with the pattern. Lessons must be:
+- Specific (not "be careful with locks" — "TaskManager methods cannot be called while holding m.mu because Go mutexes are not reentrant")
+- Actionable (the lesson must prevent the same mistake)
+- Reviewed at the start of every session for relevance to the current work
+
+Read `docs/lessons.md` at the start of every session. If a current task touches a known lesson area, surface the lesson explicitly before implementing.
+
+### 4. Verification Before Done
+
+A task is not complete until it is verified working in the target environment.
+
+**For protocol changes**, the verification protocol is:
+1. `go test -race ./...` passes across all packages with zero failures
+2. Build on EC2 build node (44.200.60.102), push to ECR
+3. Wipe and redeploy all 5 testnet nodes
+4. Register a fresh agent, wait 30 seconds, verify balance > 0
+5. Post a task, verify it appears via ALB GET /v1/tasks
+6. If applicable to the change, verify the autonomous worker pipeline produces a settlement
+
+If step 1-6 don't all pass, the task is not done. Do not say "tests pass, deployed successfully" without running this protocol.
+
+**For application/API changes**, verify the change end-to-end through the API on the live testnet, not just in unit tests.
+
+**For SDK or worker changes**, verify the change against the live testnet with a real agent flow.
+
+Never mark a task complete by saying "the integration tests pass." Tests are necessary but not sufficient.
+
+### 5. Demand Elegance
+
+For non-trivial changes, pause before presenting and ask:
+- Is this the architecturally correct solution, or is it a symptom fix?
+- Does this generalize to all cases, or only the current bug?
+- Would a staff engineer at a top-tier protocol company approve this?
+- Is there a more elegant solution I'm avoiding because it's harder?
+- Am I adding a special case where I should be generalizing the existing pattern?
+
+If any answer is "no" or "I'm not sure," stop and reconsider. The right fix is usually one level deeper than the obvious one.
+
+### 6. Autonomous Bug Fixing
+
+When given a bug report, just fix it. Don't ask the user for clarification about logs, errors, or which files to look at unless the request is genuinely ambiguous. SSH into nodes, read logs, trace code paths, run tests, find the root cause, fix it, verify the fix, deploy if applicable, report the result.
+
+Zero context switching required from the user. The user should be able to say "the grant Transfer isn't finalizing" and walk away, and come back to either a fix that's working or a clear explanation of why the problem requires their input.
+
+## Critical Architectural Rules
+
+These rules were learned the hard way and must not be re-violated.
+
+### Event Causal References
+
+Events MUST reference only their semantically relevant parent — the event that causally triggered them. NEVER reference arbitrary DAG tips, frontier events, or recent unrelated events.
+
+Correct semantic parents:
+- `TaskClaimed` → the `TaskPosted` event being claimed
+- `TaskSubmitted` → the `TaskClaimed` event
+- `TaskApproved` → the `TaskSubmitted` event
+- `VerificationVote` → the target event being voted on
+- `Settlement` → the target event being settled
+- `TaskPosted`, `Registration`, `GenesisFunding` → root events with no parent (or genesis only)
+
+Why: events that reference parents the receiving node doesn't have yet cannot materialize via Fast Path. They go to repair, repair is too slow relative to the 30-second consensus expiry, and the event expires without consensus. The semantic parent is guaranteed to exist on every node because it is the event that semantically caused this one.
+
+### Local vs Remote Event Recognition
+
+Both the recognition fabric AND the syncHandler must handle consensus-critical events synchronously. The recognition fabric's async dispatch is correct for most cases, but votes and OCS submissions race against the 30-second consensus expiry window. Keep both paths active with idempotent handlers — duplicate registration is safe and is the design.
+
+The syncHandler must synchronously call:
+- `engine.SubmitFromSync()` for Transfer/Generation/TaskSettlement
+- `engine.AcceptPeerVote()` for VerificationVote
+
+The recognition fabric also handles these via OCSSubmitConsumer and OCSVoteConsumer. Both paths are active. Idempotency in `engine.SubmitFromSync` and `RegisterVote` makes the duplication safe.
+
+### Lock Reentrancy
+
+Go's `sync.Mutex` is NOT reentrant. A method holding `m.mu.Lock()` via `defer m.mu.Unlock()` cannot call any other method on the same struct that also acquires `m.mu`. This causes permanent deadlock.
+
+When refactoring or adding methods to TaskManager, OCS Engine, recognition Index, or any other struct with internal locking:
+- Audit every called method to verify it does not try to reacquire the same lock
+- Release the lock before calling methods that may acquire it
+- Use lock-free helper functions (named with `Locked` suffix to indicate caller must hold the lock) for shared logic
+
+Example: `applyTaskSubmitted` previously held `m.mu.Lock()` and called `fetchEvidenceBlob` which internally called `SetSubmittedEvidence`, `SetResultContent`, and `MarkEvidenceReady` — each tried to reacquire `m.mu`, causing 60-second deadlocks until ALB timeout. Fix was to release the lock before calling `fetchEvidenceBlob`.
+
+### Deploy Verification
+
+Always verify the build node's git state matches `origin/main` before building. Build artifacts deployed to nodes may not include the fix you think they include.
+
+Standard deploy sequence:
 ```bash
-go build -o bin/aethernet ./cmd/node/        # Node binary
-go build -o bin/aet ./cmd/aet/               # CLI tool
-go test -p 1 ./... -race -count=1            # All 1,500+ tests (42 packages)
-AETHERNET_E2E_TIMEOUT=60s go run ./cmd/aet-e2e  # Live testnet E2E verification
-docker buildx build --platform linux/amd64 -t aethernet .  # Docker image
+ssh ubuntu@44.200.60.102 "cd /tmp/aethernet && git fetch origin && git reset --hard origin/main && git log --oneline -3"
 ```
 
-## Architecture Layers
+The `git log --oneline -3` confirms what commits are in the build. Match against the commits you expect. If they don't match, investigate before building.
 
-Three-layer import hierarchy. Never cross boundaries.
+Always wipe `/data/aethernet/aethernet.db` and `/data/aethernet/blobs` on testnet redeploy (state may be incompatible with new schemas). NEVER wipe `/data/aethernet/node_keys/` or `/data/aethernet/validator-manifest.json` — these are persistent identity.
 
-- **Core Protocol (L1):** `event`, `dag`, `crypto`, `ledger`, `identity`, `staking`, `escrow`, `fees`, `genesis`, `wallet`, `ocs`, `consensus`, `validator`, `validatorlifecycle` — cannot import L2 or L3
-- **Coordination (L2):** `router`, `reputation`, `discovery`, `registry`, `network` — may import L1
-- **Application (L3):** `tasks`, `platform`, `autovalidator`, `evidence`, `verification`, `replay`, `canary`, `assurance`, `api` — may import L1 and L2
-- **Infrastructure:** `store`, `metrics`, `ratelimit`, `eventbus`, `config`, `cloudmap`, `auth`, `localpub`, `settlement`, `trajectory`, `blobstore` — importable by all layers
+After deploying, verify on ALL 5 nodes that the latest commit is running. A common failure mode is deploying to Node 1 only and leaving Nodes 2-5 on stale images.
 
-## Key Invariants
+### Generalization Over Special-Casing
 
-These must never be violated:
+When a bug affects one event type, ask: "Does this same problem affect other event types?" Almost always, the answer is yes. Fix the underlying pattern, not the specific instance.
 
-- **localpub.Publisher** is the ONLY path for locally-created DAG events. Zero raw `dag.Add` calls in production code. The protocol client holds a `dagReader` interface (no Add method) — compile-time enforcement. `internal/localpub/enforcement_test.go` scans the entire repo and fails CI if unauthorized `dag.Add` calls appear.
-- **SetFinalizationHandler** on the OCS engine is the authoritative settlement creation path. Settlement is triggered directly by the finalization-owning path, not a later observer.
-- **Consensus votes authenticate against validator-seat snapshots**, NOT the identity registry. The identity registry is a backward-compatibility fallback only.
-- **TrajectoryCommit checkpoint blobs** live in BlobStore (`internal/blobstore/`), NOT in Fast Path EventBody. Lean payloads flow through DAG.
-- **All write API operations** require AETHERNET-TX-V1 Ed25519 signatures.
-- **Startup ordering:** `av.Start()` must be called AFTER `SetFinalizationHandler`, `SetSyncHandler`, and `SetVoteHandler` are wired. If it starts before, the auto-validator can vote and trigger finalization while `onFinalized` is nil.
-- **Genesis manifest** must contain actual persistent node public keys (not symbolic constants). Load via `AETHERNET_VALIDATOR_MANIFEST` env var. Without it, `SingleNodeManifest(agentID)` auto-generates from the node's keypair (single-node dev mode).
-- **Persist before mutating in-memory state.** Write to BadgerDB first. If persistence fails, abort.
-- **The SettlementApplicator** is the ONLY component that mutates canonical ledger state.
-- **The protocol client** (`internal/protocol/client.go`) is the ONLY interface for application-layer token movement.
+The vote materialization stall (commit `c6defe8`) was correctly fixed for vote events. But the same bug affected TaskPosted, Transfer, and every other event type that referenced arbitrary DAG tips. Three more iterations were spent re-fixing the same bug for each event type before the generalized fix (`f234b6b` — semantic parents for all event types) was implemented. The general fix should have been the first fix.
 
-## Subsystems
+Whenever Claude Code is about to implement a per-event-type fix, stop and ask: "Should this be a per-event-type fix or a general fix?"
 
-- **Event Publication** (`internal/localpub/`): `Publisher.Publish(ev)` → dag.Add → SubmitLocalEvent (Fast Path V2) → Broadcast (V1). Enforcement test scans repo for bypass.
-- **Auth** (`internal/auth/`): AETHERNET-TX-V1 signing. JCS canonicalization (RFC 8785). TxID replay protection. Rate limiting. Self-registration: actor IS hex-encoded Ed25519 public key.
-- **Fast Path** (`internal/network/`): Three-plane networking — causality (headers), body (payloads), repair (gaps). 5-stage ingest: Announced → Completed → Validated → Materialized. 6 concurrent workers. V2 negotiation with V1 fallback. Production observability: `fastpath:` prefix logs at every stage.
-- **Trajectory** (`internal/trajectory/`, `internal/blobstore/`): TrajectoryCommit events capture exploration paths. PrimaryTips() filters trajectory commits from parent selection. Evidence anchoring via ExplorationRoot Merkle.
-- **Validator Lifecycle** (`internal/validatorlifecycle/`): ValidatorSeat with 7-state lifecycle. Deterministic Reducer with immutable snapshots. EffectiveFromVersion prevents retroactive round corruption. Committee selection via SHA-256 sortition (min=3, max=21). Key rotation, slashing, cooldown enforcement. 8 DAG event types.
-- **Settlement** (`internal/settlement/`): SettlementApplicator — sole ledger mutator. Apply → RecordFromSync → Settle. Idempotent via IsApplied.
-- **OCS** (`internal/ocs/`): Optimistic Capability Settlement engine. Submit → pending → verification → ProcessResult (metrics) + onFinalized (settlement). 30s deadline sweep.
-- **Consensus** (`internal/consensus/`): Reputation-weighted virtual voting. Snapshot-bound VotingRound. ValidatorSetVersion captured at round-open time. SupermajorityThreshold 0.667.
-- **DAG** (`internal/dag/`): Append-only causal DAG. Tip tracking. Topological sort (Kahn's algorithm) for replay. Content-addressed EventID = SHA-256.
-- **Tasks** (`internal/tasks/`): Full lifecycle: Post → Claim → Submit → Approve/Dispute/Cancel. Subtask decomposition. Escrow lock on post, release on approve.
-- **Ledger** (`internal/ledger/`): Dual ledger — TransferLedger (value transfer) + GenerationLedger (new value creation). Balance = Settled inflows - (Settled + Optimistic) outflows.
-- **Crypto** (`internal/crypto/`): Ed25519 key generation, signing, verification. Scrypt-encrypted key storage.
+## Project-Specific Knowledge
 
-## Key Files
+### Multi-AI Workflow
+
+This project uses multiple AI agents in coordination:
+- **Claude (R&D chat)**: Invention, theory, prompt generation, creative direction
+- **Claude Code**: Implementation — full codebase access, writes and tests all code
+- **ChatGPT**: Architecture design, prompt structuring for staged implementation
+- **Grok**: Adversarial red-teaming, edge case discovery, multi-agent review
+
+When given a task by Mike, Claude Code is the implementer. When investigating architectural questions, Claude Code may be asked to produce audit reports that other AIs review.
+
+### Repository Layout
 
 ```
-cmd/node/main.go                    — Node binary, all subsystem wiring
-cmd/aet-e2e/main.go                 — Live-cluster E2E verification harness
-cmd/aet/                            — CLI wallet (wallet, balance, stake, tasks)
-internal/api/server.go              — HTTP REST API (67 routes)
-internal/event/event.go             — All event types and payloads
-internal/dag/dag.go                 — Append-only causal DAG
-internal/ocs/engine.go              — OCS engine + SetFinalizationHandler
-internal/consensus/voting.go        — Snapshot-bound VotingRound
-internal/validatorlifecycle/        — Validator seat lifecycle (8 files)
-internal/network/                   — Fast Path v1 (12 files)
-internal/localpub/publisher.go      — Authoritative local event publication
-internal/auth/transaction.go        — TX-V1 signing envelope
-internal/settlement/applicator.go   — Settlement applicator
-sdk/python/                         — Python SDK (PyPI: aethernet-sdk)
-scripts/deploy-testnet.sh           — Testnet deployment
-scripts/generate-validator-manifest.sh — Collect node keys + generate manifest
+internal/
+  dag/              # Causal DAG storage and reference resolution
+  event/            # Event types and canonical serialization
+  ocs/              # Ordering/Consensus Service (BFT consensus engine)
+  consensus/        # VotingRound, supermajority calculation
+  recognition/      # Causal Recognition Fabric (commit bus + consumers)
+  network/          # Fast Path three-plane networking, repair, sync
+  localpub/         # Local event publication path
+  identity/         # Agent identity and validator-seat snapshots
+  ledger/           # Token ledger (Transfer, Generation)
+  settlement/       # Settlement applicator
+  validator/        # Validator lifecycle (seats, key rotation, slashing)
+  blobstore/        # Content-addressed evidence blob storage
+  api/              # HTTP API server
+  tasks/            # Task lifecycle manager
+  autovalidator/    # Automatic verification and scoring
+  trajectory/       # Trajectory commits and evidence anchoring
+  marketplace/      # Task marketplace logic
+  protocol/         # Protocol client (escrow, fees, settlements)
+cmd/
+  node/             # Node entrypoint and wiring
+  aet/              # CLI tool
+  marketplace/      # Marketplace standalone tool
+sdk/
+  python/           # Python SDK (PyPI: aethernet-sdk)
+docs/
+  lessons.md        # Architectural lessons learned (read at session start)
+  plans/            # Approved implementation plans
 ```
 
-## Error Handling
+### Testnet Infrastructure
 
-- **NEVER use `_ =` for store writes.** Check every PutTransfer, PutStakeMeta, PutMeta error.
-- **NEVER swallow ledger operation errors.** TransferFromBucket, FundAgent, BalanceCheck — propagate or log at ERROR.
-- **Return early on failure.** If step 1 fails, do not proceed to step 2.
+5 nodes (3x m7i.xlarge + 2x m7i.large) on AWS:
+- Node 1: 44.200.60.102 (private 172.31.12.70) — also the build node
+- Node 2: 3.87.68.158 (private 172.31.93.186)
+- Node 3: 100.27.227.231 (private 172.31.17.237)
+- Node 4: 3.232.95.111 (private 172.31.4.3)
+- Node 5: 32.195.67.127 (private 172.31.13.36)
 
-## Logging
-
-- Use `slog`, never `log.Printf`. Structured logging only.
-- ERROR: data loss, state corruption, failed persistence.
-- WARN: degraded operation, retryable failures.
-- INFO: startup, shutdown, milestone events, pipeline stage transitions.
-- DEBUG: per-request, per-event details.
-- Fast Path logs use `fastpath:` prefix with event_id, type, stage, source_peer, latency_ms.
-
-## Testing
-
-- Every change must pass: `go test -p 1 ./... -race -count=1`
-- New features require tests. No exceptions.
-- Test failure paths, not just happy paths.
-- Supply invariant test must pass after any settlement change.
-- Enforcement test prevents dag.Add bypass: `TestEnforcement_NoUnauthorizedDAGAdd`.
-- E2E settlement chain: `TestE2E_GrantSettlesWithBalance` verifies grant → vote → settlement → balance > 0.
-
-## Change Discipline
-
-- Run tests before and after every change.
-- One concern per prompt. Do not refactor adjacent code.
-- Preserve existing behavior unless explicitly told to change it.
-- New event-emitting code must use `localpub.Publisher`. Never call `dag.Add` directly.
-- New interfaces must have at least one test.
-- Check import boundaries when adding packages.
-
-## Deployment
-
-```
-Testnet: testnet.aethernet.network
+ALB: testnet.aethernet.network
 ECR: 435998721364.dkr.ecr.us-east-1.amazonaws.com/aethernet
-Nodes: 3x m7i.xlarge EC2 in us-east-1 (44.200.60.102, 3.87.68.158, 100.27.227.231)
-ALB: port 8338 (API), P2P: port 8337
-```
+SSH key: ~/.ssh/aethernet.pem
 
-- **AETHERNET_TESTNET=true** enables faucet, auto-genesis, shared API key.
-- **AETHERNET_CONSENSUS_MIN_PARTICIPANTS=2** for 3-node testnet.
-- **AETHERNET_VALIDATOR_MANIFEST=/path/to/manifest.json** loads shared genesis manifest.
-- **AETHERNET_RESET=true** wipes DB but preserves keys at `{data_dir}/node_keys/`.
-- **Persistent keys** at `/data/aethernet/node_keys/identity.json`. Do NOT wipe on redeploy.
-- **Generate manifest:** `./scripts/generate-validator-manifest.sh`
-- **Verify validator set:** `aethernet validator-set --manifest path.json --verify <digest>`
-- **E2E verify after deploy:** `AETHERNET_E2E_TIMEOUT=60s go run ./cmd/aet-e2e`
+Build on EC2 (44.200.60.102) — never build from MacBook (slow upload). Push to ECR within AWS for near-instant uploads.
 
-```bash
-# Build and push
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 435998721364.dkr.ecr.us-east-1.amazonaws.com
-docker buildx build --no-cache --platform linux/amd64 -t 435998721364.dkr.ecr.us-east-1.amazonaws.com/aethernet:latest --push .
+### Key Invariants That Must Remain True
 
-# Force deploy all 3 services
-for svc in aethernet-node aethernet-node2 aethernet-node3; do
-  aws ecs update-service --cluster aethernet-testnet --service $svc --force-new-deployment --region us-east-1 --no-cli-pager > /dev/null
-done
-```
+- The DAG is append-only and content-addressed
+- BFT supermajority is computed over total active validator stake (not received votes)
+- Validator eligibility is checked against the validator-seat snapshot at round open time, not current state
+- Vote events reference only their target as parent
+- Task lifecycle events reference their predecessor in the chain (Posted → Claimed → Submitted → Approved/Disputed)
+- Settlement events fire exactly once per finalized target
+- All consumers in the recognition fabric are idempotent
+- `localpub.Publisher.Publish` is the only sanctioned local event creation path
+- `dag.Add` is the single convergence point for all event commits
+- The Fast Path three-plane architecture (causality/body/repair) is preserved
+- No `dag.Add` calls from any new path
+- No network sends while holding `n.mu`
+- No blob fetches under TaskManager lock
+- No work performed under DAG write lock by recognition consumers
 
-## Supply Invariant
+### Agent Worker Repository
 
-- `FundAgent` creates tokens from nothing — ONLY during genesis and onboarding.
-- Fee collection uses `TransferFromBucket` or `CollectFeeFromRecipient`. Never FundAgent.
-- After every settlement, `sum(all balances) == genesis total`.
+The agent worker is a separate repo: `github.com/Aethernet-network/agent-worker`. It is a Python project using `aethernet-sdk` to claim, execute, and submit tasks. When working on the worker, `cd ~/agent-worker`, not `~/aethernet`.
+
+### Skills Library (Superpowers)
+
+This project uses the Superpowers plugin for Claude Code, which provides:
+- `brainstorming` — extracts a real spec from conversation before writing code
+- `systematic-debugging` — 4-phase root cause process
+- `verification-before-completion` — ensures fixes actually work
+- `subagent-driven-development` — fresh subagent per task with two-stage review
+- `using-git-worktrees` — isolated workspaces for parallel work
+- `test-driven-development` — RED-GREEN-REFACTOR enforcement
+- `writing-plans` — detailed implementation plans
+- `requesting-code-review` — pre-review checklist
+- `finishing-a-development-branch` — merge/PR decision workflow
+
+These are not optional. They are mandatory workflows for any non-trivial work. The skills trigger automatically. Do not bypass them.
+
+## Communication Style
+
+When reporting work to the user:
+- Lead with the result, not the process
+- State the commit hash, what changed, and what was verified
+- If verification failed, say so directly and explain why
+- Do not say "tests pass" as proof of correctness — say "verified working on testnet at X timestamp with Y outcome"
+- Do not pad responses with restating the task or summarizing the user's request
+- Do not use exclamation points or hype language
+- If you made a mistake, own it directly and fix it
+
+When the user pushes back on a decision:
+- Take it seriously
+- Don't capitulate just to appease
+- Explain your reasoning
+- If they're right, change course; if you're right, defend it with specific evidence
+
+The user values: directness, technical depth, architectural correctness, and follow-through. The user does not value: hedging, disclaimers, performative effort, or "the integration tests pass" as a closing argument.
+
+## Final Note
+
+This project is being built to scale to billions of users and become the trust layer for the AI agent economy. The work being done here is foundational infrastructure that will outlast any single feature or sprint. Treat it accordingly.
+
+When in doubt, the answer is: read the code, find the root cause, generalize the fix, verify on the live testnet, document the lesson.
