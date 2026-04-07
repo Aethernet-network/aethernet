@@ -55,6 +55,12 @@ type Store struct {
 	done chan struct{} // closed to stop the background GC goroutine
 }
 
+// DB returns the underlying BadgerDB instance. Used by subsystems that
+// need their own key namespace in the same database (e.g., taskverification).
+func (s *Store) DB() *badger.DB {
+	return s.db
+}
+
 // NewStore opens (or creates) a BadgerDB database at path and starts the
 // background value-log GC goroutine.
 func NewStore(path string) (*Store, error) {

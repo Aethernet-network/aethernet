@@ -65,6 +65,75 @@ type TaskVerificationVoteRecord struct {
 }
 
 // ---------------------------------------------------------------------------
+// Construction
+// ---------------------------------------------------------------------------
+
+// OpenRoundParams contains the inputs for opening a new verification round.
+type OpenRoundParams struct {
+	TaskID                string
+	SubmissionEventID     event.EventID
+	WorkerID              crypto.AgentID
+	PosterID              crypto.AgentID
+	Category              string
+	ValidatorSetVersion   uint64
+	Committee             []crypto.AgentID // nil for bootstrap mode (all active validators)
+	AnalyzerPolicyID      string
+	DiversityFloor        int
+	AcceptanceThresholdBP uint64
+	DeadlineSeconds       int64
+	Now                   int64 // injected for determinism in tests
+}
+
+// OpenRound creates a new TaskVerificationRound in Open state. The round ID
+// is deterministically derived from the submission event ID.
+func OpenRound(p OpenRoundParams) (*TaskVerificationRound, error) {
+	if p.TaskID == "" {
+		return nil, fmt.Errorf("%w: TaskID is required", ErrInvalidRoundID)
+	}
+	if p.SubmissionEventID == "" {
+		return nil, fmt.Errorf("%w: SubmissionEventID is required", ErrInvalidRoundID)
+	}
+	if p.WorkerID == "" {
+		return nil, fmt.Errorf("%w: WorkerID is required", ErrInvalidRoundID)
+	}
+	if p.PosterID == "" {
+		return nil, fmt.Errorf("%w: PosterID is required", ErrInvalidRoundID)
+	}
+	if p.Category == "" {
+		return nil, fmt.Errorf("%w: Category is required", ErrInvalidRoundID)
+	}
+	if p.DeadlineSeconds <= 0 {
+		return nil, fmt.Errorf("%w: DeadlineSeconds must be > 0", ErrInvalidDeadline)
+	}
+	if p.DiversityFloor < 1 {
+		return nil, fmt.Errorf("%w: DiversityFloor must be >= 1", ErrInvalidDeadline)
+	}
+	if p.AcceptanceThresholdBP > 10000 {
+		return nil, fmt.Errorf("%w: AcceptanceThresholdBP must be in [0, 10000]", ErrInvalidDeadline)
+	}
+
+	return &TaskVerificationRound{
+		RoundID:               NewRoundID(p.SubmissionEventID),
+		TaskID:                p.TaskID,
+		SubmissionEventID:     p.SubmissionEventID,
+		WorkerID:              p.WorkerID,
+		PosterID:              p.PosterID,
+		Category:              p.Category,
+		ValidatorSetVersion:   p.ValidatorSetVersion,
+		Committee:             p.Committee,
+		AnalyzerPolicyID:      p.AnalyzerPolicyID,
+		DiversityFloor:        p.DiversityFloor,
+		AcceptanceThresholdBP: p.AcceptanceThresholdBP,
+		OpenedAtUnix:          p.Now,
+		DeadlineUnix:          p.Now + p.DeadlineSeconds,
+		ExtendedUntilUnix:     0,
+		State:                 RoundStateOpen,
+		ParticipatingFamilies: make(map[string]uint64),
+		Votes:                 []TaskVerificationVoteRecord{},
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
 // State machine
 // ---------------------------------------------------------------------------
 

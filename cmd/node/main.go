@@ -70,6 +70,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/replay"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/settlement"
+	"github.com/Aethernet-network/aethernet/internal/taskverification"
 	"github.com/Aethernet-network/aethernet/internal/router"
 	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/store"
@@ -1673,6 +1674,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	// Task lifecycle consumer — TaskPosted/Claimed/Submitted/Approved/Disputed.
 	if stack.taskMgr != nil {
 		taskConsumer := recognition.NewTaskLifecycleConsumer(stack.taskMgr)
+		taskConsumer.SetActivator(recActivator)
 		_ = commitBus.Register(taskConsumer)
 
 		// Evidence readiness consumer — marks evidence ready on TaskSubmitted.
@@ -1682,6 +1684,35 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		// means "assume blob is available" (consistent with legacy behavior).
 		evidenceConsumer := recognition.NewEvidenceReadinessConsumer(stack.taskMgr, nil)
 		_ = commitBus.Register(evidenceConsumer)
+
+		// Task verification round consumer — opens a TaskVerificationRound
+		// on every TaskSubmitted event for multi-validator consensus scoring.
+		// Uses deferred activation: if task metadata (PosterID, Category)
+		// isn't available yet, the consumer defers until the task lifecycle
+		// consumer signals task_metadata:<taskID>.
+		tvStore := taskverification.NewBadgerStore(stack.store.DB())
+		tvRoundConsumer := recognition.NewTaskVerificationRoundConsumer(
+			tvStore,
+			recognition.TaskMetadataFunc(func(taskID string) (string, string, error) {
+				task, err := stack.taskMgr.Get(taskID)
+				if err != nil {
+					return "", "", err
+				}
+				return task.PosterID, task.Category, nil
+			}),
+			func() uint64 {
+				if stack.lifecycleReducer == nil {
+					return 0
+				}
+				snap := stack.lifecycleReducer.Snapshot()
+				if snap == nil {
+					return 0
+				}
+				return snap.SetVersion()
+			},
+			func() int64 { return time.Now().Unix() },
+		)
+		_ = commitBus.Register(tvRoundConsumer)
 	}
 
 	// Settlement consumer — Settlement → SettlementApplicator.

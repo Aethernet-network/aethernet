@@ -5,6 +5,91 @@ import (
 	"time"
 )
 
+func TestOpenRound_ValidParams(t *testing.T) {
+	r, err := OpenRound(OpenRoundParams{
+		TaskID:                "task-1",
+		SubmissionEventID:     "evt-sub-1",
+		WorkerID:              "worker-1",
+		PosterID:              "poster-1",
+		Category:              "research",
+		ValidatorSetVersion:   5,
+		AnalyzerPolicyID:      "bootstrap_v1",
+		DiversityFloor:        2,
+		AcceptanceThresholdBP: 6000,
+		DeadlineSeconds:       60,
+		Now:                   1000,
+	})
+	if err != nil {
+		t.Fatalf("OpenRound: %v", err)
+	}
+	if r.RoundID != NewRoundID("evt-sub-1") {
+		t.Errorf("RoundID mismatch")
+	}
+	if r.State != RoundStateOpen {
+		t.Errorf("State = %s; want open", r.State)
+	}
+	if r.OpenedAtUnix != 1000 {
+		t.Errorf("OpenedAtUnix = %d; want 1000", r.OpenedAtUnix)
+	}
+	if r.DeadlineUnix != 1060 {
+		t.Errorf("DeadlineUnix = %d; want 1060", r.DeadlineUnix)
+	}
+	if r.ExtendedUntilUnix != 0 {
+		t.Errorf("ExtendedUntilUnix = %d; want 0", r.ExtendedUntilUnix)
+	}
+	if r.ValidatorSetVersion != 5 {
+		t.Errorf("ValidatorSetVersion = %d; want 5", r.ValidatorSetVersion)
+	}
+	if r.Committee != nil {
+		t.Errorf("Committee should be nil for bootstrap mode")
+	}
+}
+
+func TestOpenRound_DeterministicID(t *testing.T) {
+	p := OpenRoundParams{
+		TaskID: "t", SubmissionEventID: "evt-1", WorkerID: "w",
+		PosterID: "p", Category: "c", DiversityFloor: 1,
+		AcceptanceThresholdBP: 5000, DeadlineSeconds: 60, Now: 1000,
+	}
+	r1, _ := OpenRound(p)
+	r2, _ := OpenRound(p)
+	if r1.RoundID != r2.RoundID {
+		t.Errorf("same params produced different round IDs")
+	}
+}
+
+func TestOpenRound_ValidationErrors(t *testing.T) {
+	base := OpenRoundParams{
+		TaskID: "t", SubmissionEventID: "e", WorkerID: "w",
+		PosterID: "p", Category: "c", DiversityFloor: 2,
+		AcceptanceThresholdBP: 6000, DeadlineSeconds: 60, Now: 1000,
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(*OpenRoundParams)
+	}{
+		{"empty TaskID", func(p *OpenRoundParams) { p.TaskID = "" }},
+		{"empty SubmissionEventID", func(p *OpenRoundParams) { p.SubmissionEventID = "" }},
+		{"empty WorkerID", func(p *OpenRoundParams) { p.WorkerID = "" }},
+		{"empty PosterID", func(p *OpenRoundParams) { p.PosterID = "" }},
+		{"empty Category", func(p *OpenRoundParams) { p.Category = "" }},
+		{"zero DeadlineSeconds", func(p *OpenRoundParams) { p.DeadlineSeconds = 0 }},
+		{"negative DeadlineSeconds", func(p *OpenRoundParams) { p.DeadlineSeconds = -1 }},
+		{"zero DiversityFloor", func(p *OpenRoundParams) { p.DiversityFloor = 0 }},
+		{"threshold > 10000", func(p *OpenRoundParams) { p.AcceptanceThresholdBP = 10001 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := base
+			tc.mutate(&p)
+			if _, err := OpenRound(p); err == nil {
+				t.Error("expected error")
+			}
+		})
+	}
+}
+
 func TestRound_StateTransitions_Valid(t *testing.T) {
 	cases := []struct {
 		name string
