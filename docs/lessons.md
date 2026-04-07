@@ -132,6 +132,16 @@ Each lesson must be specific and actionable — a generic principle is not a les
 
 ---
 
+## Evidence Scoring
+
+### All verifiers must read the same content field
+- **Context**: The `ContentVerifier` was updated to check `ev.ResultContent` (the full output) before falling back to `ev.OutputPreview` (500-char SDK cap). But `DataVerifier`, `CodeVerifier`, and `KeywordVerifier` were never updated — they continued reading `Summary + OutputPreview` directly.
+- **Wrong approach**: Fixing content resolution in one verifier and assuming the others are the same. They weren't — each had its own inline content extraction code with the same pattern but no shared function.
+- **Right approach**: Extract a shared `Evidence.ResolveContent()` method that encodes the priority order once: `ResultContent` → `Summary + OutputPreview`. All verifiers call this method instead of inlining content extraction. When the content source changes (e.g., a new field is added), one update propagates everywhere.
+- **Why it matters**: The autovalidator scored 577 bytes (preview) instead of 17,174 bytes (full output). This produced artificially low quality/completeness scores, directly affecting settlement payouts. The "research" category routes to `DataVerifier`, not `ContentVerifier`, so the fix to `ContentVerifier` was invisible for the most common task category.
+
+---
+
 ## Architecture Principles to Preserve
 
 These are not lessons from mistakes, but principles that must be maintained as new work happens.

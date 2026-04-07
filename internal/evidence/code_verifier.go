@@ -29,10 +29,7 @@ func (cv *CodeVerifier) Verify(ev *Evidence, taskTitle, taskDescription string, 
 	if ev == nil {
 		return &Score{}, false
 	}
-	content := strings.TrimSpace(ev.Summary)
-	if ev.OutputPreview != "" {
-		content = strings.TrimSpace(content + "\n" + ev.OutputPreview)
-	}
+	content := ev.ResolveContent()
 
 	syntax := cv.scoreSyntax(content)
 	completeness := cv.scoreCompleteness(content)

@@ -67,14 +67,11 @@ func (dv *DataVerifier) Verify(ev *Evidence, taskTitle, taskDescription string, 
 	if ev == nil {
 		return &Score{}, false
 	}
-	content := strings.TrimSpace(ev.Summary)
-	if ev.OutputPreview != "" {
-		content = strings.TrimSpace(content + "\n" + ev.OutputPreview)
-	}
+	content := ev.ResolveContent()
 
-	// Use the larger of: counted words in the preview+summary, or estimated
-	// from OutputSize (1 word ≈ 6 bytes). This prevents the completeness
-	// score from being penalised when the full output far exceeds the preview.
+	// Use the larger of: counted words in the content, or estimated from
+	// OutputSize (1 word ≈ 6 bytes). This prevents the completeness score
+	// from being penalised when OutputSize exceeds the resolved content.
 	wordCount := countWords(content)
 	if est := int(ev.OutputSize) / 6; est > wordCount {
 		wordCount = est

@@ -25,12 +25,7 @@ func (cv *ContentVerifier) Verify(ev *Evidence, taskTitle, taskDescription strin
 	if ev == nil {
 		return &Score{}, false
 	}
-	content := strings.TrimSpace(ev.Summary)
-	if ev.ResultContent != "" {
-		content = strings.TrimSpace(ev.ResultContent)
-	} else if ev.OutputPreview != "" {
-		content = strings.TrimSpace(content + "\n" + ev.OutputPreview)
-	}
+	content := ev.ResolveContent()
 
 	// Use the larger of: counted words in the preview+summary, or estimated
 	// from OutputSize (1 word ≈ 6 bytes). This prevents the completeness

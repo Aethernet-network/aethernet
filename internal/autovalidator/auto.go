@@ -462,7 +462,7 @@ func (av *AutoValidator) processSubmittedTasks() {
 			"relevance", score.Relevance,
 			"passed", passed,
 			"category", task.Category,
-			"content_len", len(ev.Summary)+len(ev.OutputPreview),
+			"content_len", len(ev.ResolveContent()),
 		)
 
 		// Canary evaluation: check whether this task is a protocol-internal

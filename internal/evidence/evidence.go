@@ -48,6 +48,21 @@ type Evidence struct {
 	ValidatorPublicKey string `json:"validator_public_key,omitempty"`
 }
 
+// ResolveContent returns the best available textual content from an Evidence
+// object. Priority: ResultContent (full output) → Summary + OutputPreview
+// (truncated fallback). All verifiers should use this instead of reading
+// OutputPreview directly.
+func (e *Evidence) ResolveContent() string {
+	if e.ResultContent != "" {
+		return strings.TrimSpace(e.ResultContent)
+	}
+	content := strings.TrimSpace(e.Summary)
+	if e.OutputPreview != "" {
+		content = strings.TrimSpace(content + "\n" + e.OutputPreview)
+	}
+	return content
+}
+
 // Validate checks that required fields are present.
 func (e *Evidence) Validate() error {
 	if e.Hash == "" {
