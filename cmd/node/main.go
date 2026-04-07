@@ -1829,8 +1829,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 					crypto.AgentID(vp.VoterID),
 					verdict,
 				); err != nil {
-					slog.Debug("syncHandler: AcceptPeerVote failed (may be duplicate or not yet pending)",
-						"event_id", ev.ID, "target", vp.TargetEventID, "err", err)
+					slog.Warn("syncHandler: AcceptPeerVote failed",
+						"event_id", ev.ID, "target", vp.TargetEventID,
+						"voter", vp.VoterID, "err", err)
 				}
 			}
 

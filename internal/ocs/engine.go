@@ -350,8 +350,12 @@ func (e *Engine) processVoteInternal(result VerificationResult, broadcast bool) 
 	// Register the vote in the consensus round.
 	err := e.voting.RegisterVote(result.EventID, result.VerifierID, result.Verdict, result.VerifiedValue)
 	if err != nil {
-		// Acceptable non-fatal conditions: duplicate vote, already finalized,
-		// round exhausted. The event will be settled by the deadline sweep.
+		slog.Warn("ocs: RegisterVote rejected",
+			"event_id", result.EventID,
+			"voter", result.VerifierID,
+			"broadcast", broadcast,
+			"err", err,
+		)
 		return nil
 	}
 
