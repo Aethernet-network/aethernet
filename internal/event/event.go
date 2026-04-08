@@ -106,6 +106,11 @@ const (
 	// deterministic consequence of this event.
 	EventTypeTaskVerificationConsensus EventType = "TaskVerificationConsensus"
 
+	// EventTypeSlashingChallenge records a slashing action raised against
+	// a validator for provable bad faith (equivocation, systematic divergence).
+	// Semantic parent is the TaskVerificationConsensus event that triggered it.
+	EventTypeSlashingChallenge EventType = "SlashingChallenge"
+
 	// Validator lifecycle events — propagated via DAG, applied
 	// deterministically on every node via the validatorlifecycle.Reducer.
 	// These are the canonical DAG records for all validator set mutations.
@@ -761,3 +766,20 @@ type TaskVerificationConsensusPayload struct {
 	FinalizationTimeUnix  int64    `json:"finalization_time_unix"`
 }
 
+
+// SlashingChallengePayload carries a slashing action raised against a
+// validator for provable bad faith.
+type SlashingChallengePayload struct {
+	Version               uint8  `json:"v"`
+	ChallengeID           string `json:"challenge_id"`
+	SubjectValidatorID    string `json:"subject_validator_id"`
+	SlashingType          string `json:"slashing_type"` // "soft" | "hard"
+	Reason                string `json:"reason"`
+	StakePenaltyBP        uint64 `json:"stake_penalty_bp,omitempty"`
+	ReputationPenalty     int    `json:"reputation_penalty,omitempty"`
+	EvidenceHash          string `json:"evidence_hash,omitempty"`
+	RoundID               string `json:"round_id"`
+	ChallengeWindowEndsAt int64  `json:"challenge_window_ends_at,omitempty"`
+	RaisedBy              string `json:"raised_by"`
+	TimestampUnix         int64  `json:"timestamp_unix"`
+}

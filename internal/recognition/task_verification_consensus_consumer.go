@@ -16,17 +16,19 @@ import (
 // events from the DAG: applies round state for replay safety AND invokes
 // the v4.1 economic settlement (escrow release/refund/split).
 type TaskVerificationConsensusConsumer struct {
-	rounds  taskverification.Store
-	settler *settlement.VerificationConsensusSettler // nil if settlement not wired
+	rounds    taskverification.Store
+	settler   *settlement.VerificationConsensusSettler  // nil if settlement not wired
+	slashing  *taskverification.SlashingEvaluator       // nil if slashing not wired
 }
 
 // NewTaskVerificationConsensusConsumer creates a consensus consumer.
-// settler may be nil (round state is applied but no settlement occurs).
+// settler and slashing may be nil (graceful degradation).
 func NewTaskVerificationConsensusConsumer(
 	rounds taskverification.Store,
 	settler *settlement.VerificationConsensusSettler,
+	slashing *taskverification.SlashingEvaluator,
 ) *TaskVerificationConsensusConsumer {
-	return &TaskVerificationConsensusConsumer{rounds: rounds, settler: settler}
+	return &TaskVerificationConsensusConsumer{rounds: rounds, settler: settler, slashing: slashing}
 }
 
 // Name returns the unique consumer identifier.
@@ -105,6 +107,22 @@ func (c *TaskVerificationConsensusConsumer) Consume(_ context.Context, ev *event
 				"poster_refund", settleResult.PosterRefund,
 				"treasury", settleResult.TreasuryAmount,
 				"total_distributed", settleResult.TotalDistributed,
+			)
+		}
+	}
+
+	// Evaluate slashing after settlement. Best-effort — failures log but
+	// do not block the pipeline.
+	if c.slashing != nil {
+		actions := c.slashing.EvaluateRound(context.Background(), round)
+		for _, action := range actions {
+			slog.Info("task_verification_consensus: slashing action",
+				"round_id", payload.RoundID,
+				"validator_id", action.ValidatorID,
+				"type", action.Type,
+				"reason", action.Reason,
+				"stake_penalty_bp", action.StakePenaltyBP,
+				"reputation_penalty", action.ReputationPenalty,
 			)
 		}
 	}

@@ -1875,10 +1875,14 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			genLedgerCalc, crypto.AgentID(genesis.BucketTreasury),
 			validatorQFn,
 		)
-		_ = tvCalibrationStore // used by consensus consumer below
-		_ = tvReputationStore  // used by consensus consumer below
+		// tvCalibrationStore and tvReputationStore are used by the slashing evaluator above.
 
-		tvConsensusConsumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, tvSettler)
+		tvSlashingEvaluator := taskverification.NewSlashingEvaluator(
+			taskverification.DefaultSlashingPolicy(),
+			tvReputationStore,
+			tvCalibrationStore,
+		)
+		tvConsensusConsumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, tvSettler, tvSlashingEvaluator)
 		_ = commitBus.Register(tvConsensusConsumer)
 
 		// Deadline checker — scans open rounds for expiry, extends or
