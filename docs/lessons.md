@@ -183,6 +183,12 @@ Each lesson must be specific and actionable — a generic principle is not a les
 - **Right approach**: `defer Stop()` must be in the function that blocks (the signal wait loop in `cmdStart`), not in `startStack` which returns immediately. Background goroutines' lifetimes must match the process lifetime, not the setup function's lifetime.
 - **Why it matters**: This is the root cause of the multi-validator pipeline stalling on the testnet. 40 events entered the bus queue and zero were processed because the workers were killed before the first event arrived. Discovered at Gate 9 of the testnet verification.
 
+### Idempotency checks must not skip side effects
+- **Context**: The consensus consumer checked `round.IsTerminal()` and returned nil (idempotent no-op) if the round was already finalized. But settlement invocation came AFTER this check. The vote consumer finalized the round (which emits the consensus event) but does NOT invoke settlement — that's the consensus consumer's job. So the consensus consumer saw the round as already finalized and skipped settlement entirely.
+- **Wrong approach**: Using an early-return idempotency check before all side effects. The round being finalized is idempotent for round STATE but not for SETTLEMENT.
+- **Right approach**: Separate the idempotency concerns. The round state update is idempotent (skip if terminal). Settlement is independently idempotent (settler checks task terminal state). Both must run regardless of the other's state. The consensus consumer now applies round state if needed AND always invokes settlement.
+- **Why it matters**: Settlement never applied — tasks stayed in "submitted" state with no escrow release. Discovered during Gate 11 of testnet verification.
+
 ### Slashing is best-effort from the consumer's perspective
 - **Context**: The slashing evaluator runs after settlement in the consensus consumer. If it fails, the settlement is already applied and the consensus event is already on the DAG.
 - **Right approach**: Log slashing failures but do not fail the consumer. Settlement and consensus are the critical path; slashing is a guardrail that can be retried.
