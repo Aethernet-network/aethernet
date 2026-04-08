@@ -171,6 +171,12 @@ Each lesson must be specific and actionable — a generic principle is not a les
 - **Context**: When a round finalizes and emits a TaskVerificationConsensus event, the round state must be persisted BEFORE the event is published. If the node crashes between persist and publish, the round is in the correct state and the consensus event can be re-emitted on restart. If publish happens before persist, a crash leaves the DAG ahead of local state.
 - **Right approach**: Every code path that finalizes a round (vote consumer, deadline checker) persists the round, then publishes the consensus event.
 
+### Deferred activation signals are not retroactive
+- **Context**: The round consumer's `Ready()` deferred on task metadata, waiting for a `task_metadata:<taskID>` signal from the task lifecycle consumer. But the signal was sent when TaskPosted was applied — minutes before TaskSubmitted arrived. The deferred activation mechanism only activates items waiting at signal time, not items that defer after the signal has already fired.
+- **Wrong approach**: Deferring on prerequisite signals when the prerequisite was satisfied in a prior event (TaskPosted) that's already been processed. The signal fires once and items that defer later miss it.
+- **Right approach**: For consumers processing events whose prerequisites are guaranteed by causal ordering (TaskSubmitted is causally after TaskPosted), use always-ready `Ready()` and check prerequisites in `Consume()`. Deferred activation is for events that might arrive out of order (like votes before their round), not for events with guaranteed causal ancestors.
+- **Why it matters**: This caused the entire multi-validator verification pipeline to silently stall — rounds were never opened because the deferred consumer never woke up. Discovered only during live testnet verification (Gate 9), not in unit tests where events are processed synchronously.
+
 ### Slashing is best-effort from the consumer's perspective
 - **Context**: The slashing evaluator runs after settlement in the consensus consumer. If it fails, the settlement is already applied and the consensus event is already on the DAG.
 - **Right approach**: Log slashing failures but do not fail the consumer. Settlement and consensus are the critical path; slashing is a guardrail that can be retried.

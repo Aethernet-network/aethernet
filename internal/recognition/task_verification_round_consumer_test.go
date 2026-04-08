@@ -209,7 +209,7 @@ func TestRoundConsumer_IgnoresNonTaskSubmitted(t *testing.T) {
 	}
 }
 
-func TestRoundConsumer_DefersIfTaskMissing(t *testing.T) {
+func TestRoundConsumer_ErrorsIfTaskMissing(t *testing.T) {
 	store := newTestVerificationStore(t)
 	// Task metadata not available (returns error).
 	consumer := recognition.NewTaskVerificationRoundConsumer(
@@ -222,17 +222,19 @@ func TestRoundConsumer_DefersIfTaskMissing(t *testing.T) {
 	ev := makeSubmittedEventForRound("task-missing", "worker-1")
 	ctx := context.Background()
 
-	// Ready should return false with prerequisite key.
-	ready, prereq, err := consumer.Ready(ctx, ev, nil)
+	// Ready always returns true (deferred activation removed — see lessons.md).
+	ready, _, err := consumer.Ready(ctx, ev, nil)
 	if err != nil {
 		t.Fatalf("Ready: %v", err)
 	}
-	if ready {
-		t.Error("should NOT be ready when task metadata is missing")
+	if !ready {
+		t.Error("Ready should always be true")
 	}
-	expectedPrereq := recognition.PrerequisiteKeyTaskMetadata("task-missing")
-	if prereq != expectedPrereq {
-		t.Errorf("prereq = %s; want %s", prereq, expectedPrereq)
+
+	// Consume should return an error when task metadata is missing.
+	err = consumer.Consume(ctx, ev)
+	if err == nil {
+		t.Error("Consume should error when task metadata is missing")
 	}
 }
 

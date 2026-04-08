@@ -94,27 +94,18 @@ func (c *TaskVerificationRoundConsumer) Interested(ev *event.Event) bool {
 	return ev.Type == event.EventTypeTaskSubmitted
 }
 
-// Ready checks that the task metadata (PosterID, Category) is available.
-// The TaskSubmitted payload contains TaskID and ClaimerID, but PosterID
-// and Category are only available after the TaskPosted event has been
-// applied to the TaskManager. If the task is not yet available, the
-// consumer defers with a prerequisite key that the TaskLifecycleConsumer
-// signals after applying TaskPosted.
-func (c *TaskVerificationRoundConsumer) Ready(_ context.Context, ev *event.Event, _ ReadModel) (bool, string, error) {
-	var payload struct {
-		TaskID string `json:"task_id"`
-	}
-	if err := json.Unmarshal(ev.Payload, &payload); err != nil || payload.TaskID == "" {
-		// Malformed payload — mark ready so Consume handles the error.
-		return true, "", nil
-	}
-
-	_, _, err := c.taskMeta.GetTaskPosterAndCategory(payload.TaskID)
-	if err != nil {
-		// Task not yet in store — defer until task_metadata is signaled.
-		prereq := PrerequisiteKeyTaskMetadata(payload.TaskID)
-		return false, prereq, nil
-	}
+// Ready always returns true. The TaskSubmitted event's causal parent is the
+// TaskPosted event, which means the task is guaranteed to be in the
+// TaskManager by the time TaskSubmitted is committed to the DAG. If the
+// task metadata lookup fails in Consume (e.g., during a startup race), the
+// error is logged and the round creation retries via the recognition fabric.
+//
+// Note: the original deferred activation design (Ready checks metadata,
+// defers if missing) had a race condition: the task_metadata signal fires
+// when TaskPosted is applied, but if TaskSubmitted is processed AFTER the
+// signal has already fired, the deferred consumer never wakes up. Always-ready
+// with error-on-consume avoids this.
+func (c *TaskVerificationRoundConsumer) Ready(_ context.Context, _ *event.Event, _ ReadModel) (bool, string, error) {
 	return true, "", nil
 }
 
