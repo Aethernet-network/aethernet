@@ -177,6 +177,12 @@ Each lesson must be specific and actionable — a generic principle is not a les
 - **Right approach**: For consumers processing events whose prerequisites are guaranteed by causal ordering (TaskSubmitted is causally after TaskPosted), use always-ready `Ready()` and check prerequisites in `Consume()`. Deferred activation is for events that might arrive out of order (like votes before their round), not for events with guaranteed causal ancestors.
 - **Why it matters**: This caused the entire multi-validator verification pipeline to silently stall — rounds were never opened because the deferred consumer never woke up. Discovered only during live testnet verification (Gate 9), not in unit tests where events are processed synchronously.
 
+### defer in a function that returns immediately kills background goroutines
+- **Context**: `commitBus.Start()` launches worker goroutines. `defer commitBus.Stop()` was placed in `startStack()`, which returns immediately after setup. The defer fired on return, calling `Stop()` which cancels the context and waits for workers — killing the commit bus before any traffic arrives. The bus had been dead since the recognition fabric was first wired.
+- **Why it wasn't caught**: The syncHandler provides a synchronous path for consensus-critical events (votes, OCS submissions). The bus was supposed to provide the async path, but since the sync path handled everything, the dead bus was invisible. Only multi-validator verification (which relies exclusively on the bus for round opening, vote aggregation, and finalization) revealed the bug.
+- **Right approach**: `defer Stop()` must be in the function that blocks (the signal wait loop in `cmdStart`), not in `startStack` which returns immediately. Background goroutines' lifetimes must match the process lifetime, not the setup function's lifetime.
+- **Why it matters**: This is the root cause of the multi-validator pipeline stalling on the testnet. 40 events entered the bus queue and zero were processed because the workers were killed before the first event arrived. Discovered at Gate 9 of the testnet verification.
+
 ### Slashing is best-effort from the consumer's perspective
 - **Context**: The slashing evaluator runs after settlement in the consensus consumer. If it fails, the settlement is already applied and the consensus event is already on the DAG.
 - **Right approach**: Log slashing failures but do not fail the consumer. Settlement and consensus are the critical path; slashing is a guardrail that can be retried.

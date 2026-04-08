@@ -326,6 +326,7 @@ type nodeStack struct {
 	votingRound     *consensus.VotingRound
 	protoClient     *protocol.Client
 	lifecycleReducer *validatorlifecycle.Reducer
+	commitBus        *recognition.Bus
 }
 
 // taskManagerSource adapts *tasks.TaskManager to the router.TaskSource interface,
@@ -1651,7 +1652,8 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		settlementApp.SetMetrics(stack.nodeMetrics)
 	}
 	settlementApp.Start()
-	defer settlementApp.Stop()
+	// NOTE: settlementApp.Stop() handled by container shutdown, not defer
+	// here (startStack returns immediately; defers fire before traffic).
 
 	// ── Consensus finalization handler ───────────────────────────────────────
 	// When processVoteInternal detects supermajority, this handler fires to
@@ -1895,7 +1897,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			func() int64 { return time.Now().Unix() },
 		)
 		tvDeadlineChecker.Start()
-		defer tvDeadlineChecker.Stop()
+		// NOTE: deadline checker stop handled by container shutdown (SIGTERM)
 	}
 
 	// Settlement consumer — Settlement → SettlementApplicator.
@@ -1909,8 +1911,11 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	settlementConsumer := recognition.NewSettlementConsumer(settlementConsumerAdapter)
 	_ = commitBus.Register(settlementConsumer)
 
+	stack.commitBus = commitBus
 	commitBus.Start()
-	defer commitBus.Stop()
+	// NOTE: commitBus.Stop() is NOT deferred here because startStack returns
+	// immediately and its defers fire before the node starts serving traffic.
+	// The caller (cmdStart) is responsible for stopping the bus on shutdown.
 
 	// Wire the DAG post-commit hook to emit to the recognition bus.
 	stack.dag.SetOnCommit(func(ev *event.Event, replay bool) {
@@ -2545,6 +2550,14 @@ func cmdStart() {
 	}
 
 	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, *enableMarketplace, cfg, *noAuth)
+
+	// Stop the commit bus on shutdown (cannot defer inside startStack because
+	// startStack returns immediately and defers fire before traffic arrives).
+	defer func() {
+		if stack.commitBus != nil {
+			stack.commitBus.Stop()
+		}
+	}()
 
 	// AWS Cloud Map registration — auto-registers this node's private IP so other
 	// ECS tasks can discover peers via DNS. No-op when
