@@ -543,6 +543,18 @@ func (av *AutoValidator) processSubmittedTaskMultiVoter(task *tasks.Task) {
 		content = task.ResultContent
 	}
 
+	// Content gate: if content is empty, the evidence blob hasn't propagated
+	// to this node yet. Skip and retry next tick. EvidenceReady can be true
+	// (set by MarkEvidenceReady) without content being populated (which only
+	// happens via fetchEvidenceBlob during applyTaskSubmitted).
+	if content == "" {
+		slog.Debug("auto-validator: multi-voter content empty, will retry",
+			"task_id", task.ID, "evidence_ready", task.EvidenceReady,
+			"has_evidence", task.SubmittedEvidence != nil)
+		delete(av.multiVoterVoted, task.ID)
+		return
+	}
+
 	input := verification.AnalysisInput{
 		TaskID:            task.ID,
 		Category:          task.Category,

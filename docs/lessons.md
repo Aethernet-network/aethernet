@@ -189,6 +189,12 @@ Each lesson must be specific and actionable — a generic principle is not a les
 - **Right approach**: Separate the idempotency concerns. The round state update is idempotent (skip if terminal). Settlement is independently idempotent (settler checks task terminal state). Both must run regardless of the other's state. The consensus consumer now applies round state if needed AND always invokes settlement.
 - **Why it matters**: Settlement never applied — tasks stayed in "submitted" state with no escrow release. Discovered during Gate 11 of testnet verification.
 
+### EvidenceReady does not guarantee content is populated
+- **Context**: Remote nodes set `EvidenceReady=true` via `MarkEvidenceReady` when the blob arrives, but the content fields (`ResultContent`, `SubmittedEvidence`) are only populated by `fetchEvidenceBlob` during `applyTaskSubmitted`. If the blob arrives late (after the initial fetch retries), `MarkEvidenceReady` sets the flag without populating content. The autovalidator's `EvidenceReady` gate passes, but the multi-voter scores empty content (score=0, verdict=fail).
+- **Wrong approach**: Trusting `EvidenceReady` as proof that content is available. It only indicates the blob hash is known, not that the content has been extracted and stored on the task.
+- **Right approach**: Add a content gate in `processSubmittedTaskMultiVoter`: if `content == ""`, skip and retry next tick. This ensures analyzers always score actual content, not empty strings.
+- **Why it matters**: Remote nodes produced score=0 with empty artifact hashes, overwhelming the pass votes from nodes that had the content. A 2200-word technical explainer scored 0 on 3 of 5 nodes because those nodes scored before the blob propagated.
+
 ### Slashing is best-effort from the consumer's perspective
 - **Context**: The slashing evaluator runs after settlement in the consensus consumer. If it fails, the settlement is already applied and the consensus event is already on the DAG.
 - **Right approach**: Log slashing failures but do not fail the consumer. Settlement and consensus are the critical path; slashing is a guardrail that can be retried.
