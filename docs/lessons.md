@@ -152,6 +152,31 @@ Each lesson must be specific and actionable — a generic principle is not a les
 
 ---
 
+## Multi-Validator Consensus (Prompts 01-09)
+
+### Single-validator scoring is tautological with identical analyzers
+- **Context**: All 5 validators ran the same deterministic heuristic scoring code. The audit at `docs/multi-validator-scoring-audit.md` revealed that BFT consensus on task quality was theatrical — every node produced the same score, so "multi-validator consensus" was actually "one computation repeated 5 times."
+- **Right approach**: Structural independence requires genuinely different analysis methodologies (LLM semantic, deterministic heuristic, embedding similarity, statistical structural). The diversity floor (≥2 distinct families for acceptance) makes monoculture coalitions insufficient.
+- **Why it matters**: Compound verification only creates trust when the verifications are structurally independent. Correlated verifications add redundancy, not trust.
+
+### Equivocation detection must be keyed on (validator, analyzer family)
+- **Context**: A validator running 2 families correctly emits 2 votes per round. The original aggregator keyed duplicate/equivocation detection on ValidatorID alone, which would have flagged the second vote as equivocation.
+- **Right approach**: Key on `(ValidatorID, AnalyzerFamily)`. Same validator + different family = allowed. Same validator + same family + different verdict = equivocation.
+
+### Calibration votes must count normally, not zero-weight
+- **Context**: During calibration (first N tasks per category × family), the design considered zero-weighting calibration votes. But zero-weight votes cannot form supermajority, which would stall consensus during the calibration period.
+- **Right approach**: Calibration votes count normally toward consensus. Only slashing is deferred until calibration completes.
+
+### Persist-before-publish is the invariant for externally-consumed events
+- **Context**: When a round finalizes and emits a TaskVerificationConsensus event, the round state must be persisted BEFORE the event is published. If the node crashes between persist and publish, the round is in the correct state and the consensus event can be re-emitted on restart. If publish happens before persist, a crash leaves the DAG ahead of local state.
+- **Right approach**: Every code path that finalizes a round (vote consumer, deadline checker) persists the round, then publishes the consensus event.
+
+### Slashing is best-effort from the consumer's perspective
+- **Context**: The slashing evaluator runs after settlement in the consensus consumer. If it fails, the settlement is already applied and the consensus event is already on the DAG.
+- **Right approach**: Log slashing failures but do not fail the consumer. Settlement and consensus are the critical path; slashing is a guardrail that can be retried.
+
+---
+
 ## Architecture Principles to Preserve
 
 These are not lessons from mistakes, but principles that must be maintained as new work happens.

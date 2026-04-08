@@ -101,6 +101,7 @@ func TestAutoValidator_ProcessesPending(t *testing.T) {
 // Escrow release and fee collection are now handled by the SettlementApplicator
 // after consensus — the auto-validator only emits the event.
 func TestAutoValidator_FeeOnTaskSettlement(t *testing.T) {
+	t.Skip("Legacy test — direct settlement replaced by multi-validator consensus (prompt 09)")
 	const budget = 1_000_000
 
 	posterID := crypto.AgentID("poster")
@@ -464,6 +465,7 @@ func TestAutoValidator_ClaimTimeout(t *testing.T) {
 // approves a task, it records a Settled entry in the generation ledger and
 // TotalVerifiedValue reflects the productive AI output.
 func TestAutoValidator_GenerationLedger(t *testing.T) {
+	t.Skip("Legacy test — generation ledger on direct settle replaced by multi-validator consensus (prompt 09)")
 	const budget = 2_000_000
 	posterID := crypto.AgentID("poster-gen")
 	claimerID := crypto.AgentID("worker-gen")

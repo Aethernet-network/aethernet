@@ -441,208 +441,18 @@ func (av *AutoValidator) processSubmittedTasks() {
 			continue
 		}
 
-		// Multi-validator path: when MultiVoter is wired, emit per-family
-		// TaskVerificationVote events instead of unilaterally settling.
-		// The legacy single-validator path below is only reached when
-		// multiVoter is nil (safety fallback or test mode).
-		if av.multiVoter != nil {
-			if _, done := av.multiVoterVoted[task.ID]; done {
-				continue // already processed this task via multi-voter
-			}
-			av.processSubmittedTaskMultiVoter(task)
-			av.multiVoterVoted[task.ID] = struct{}{}
+		// Multi-validator path: emit per-family TaskVerificationVote events.
+		// The single-validator path was removed in prompt 09.
+		if av.multiVoter == nil {
+			slog.Warn("auto-validator: multiVoter not wired — cannot process submitted tasks",
+				"task_id", task.ID)
 			continue
 		}
-
-		// LEGACY PATH (single-validator) — deprecated in prompt 05.
-		// Will be removed in prompt 09 after end-to-end verification.
-
-		// Structural pre-check: log garbage submissions but let the existing
-		// evidence scoring pipeline make the final decision. The structural
-		// check provides early warning logging, not a separate dispute path.
-		_, structuralPass, rejectReason := av.verifyTaskSubmission(task)
-		if !structuralPass {
-			slog.Warn("auto-validator: task failed structural verification",
-				"task_id", task.ID, "claimer", task.ClaimerID, "reason", rejectReason)
-		}
-		// Use the structured evidence stored at submission time when available —
-		// it carries OutputPreview, Metrics, and the correct OutputType/OutputSize
-		// that the auto-validator's verifiers rely on for quality scoring.
-		// Fall back to the individual stored fields for tasks submitted before
-		// this feature was added (SubmittedEvidence == nil).
-		ev := task.SubmittedEvidence
-		if ev == nil {
-			ev = &evidence.Evidence{
-				Hash:       task.ResultHash,
-				Summary:    task.ResultNote,
-				OutputType: "text",
-				OutputSize: uint64(len(task.ResultNote)),
-				OutputURL:  task.ResultURI,
-			}
-		}
-		// Inject the full result content so the verifier scores the actual
-		// work, not just the 500-char OutputPreview cap from the SDK.
-		if task.ResultContent != "" && ev.ResultContent == "" {
-			ev.ResultContent = task.ResultContent
-		}
-		score, passed, observedGates := av.verifyEvidence(ev, task.Title, task.Description, task.Budget, task.Category)
-		_ = av.taskMgr.SetVerificationScore(task.ID, score)
-
-		slog.Info("auto-settlement: score breakdown",
-			"task_id", task.ID,
-			"overall", score.Overall,
-			"quality", score.Quality,
-			"completeness", score.Completeness,
-			"relevance", score.Relevance,
-			"passed", passed,
-			"category", task.Category,
-			"content_len", len(ev.ResolveContent()),
-		)
-
-		// Canary evaluation: check whether this task is a protocol-internal
-		// measurement canary. When a canary record is found, emit a
-		// CalibrationSignal comparing the worker's result to ground truth.
-		// Evaluation is observational — settlement proceeds normally regardless.
-		if av.canaryEvalStore != nil && av.canaryEval != nil {
-			if c, err := av.canaryEvalStore.GetCanaryByTaskID(task.ID); err == nil {
-				// Use the ResultNote as observed output for truth model evaluation.
-				// If structured evidence is available, prefer its Summary (it may
-				// be richer than the raw note).
-				observedOutput := task.ResultNote
-				if ev != nil && ev.Summary != "" {
-					observedOutput = ev.Summary
-				}
-				// observedGates carries named structural gate results from the
-				// VerificationService (e.g. "has_output", "min_length", "hash_valid").
-				// Nil when the legacy verifierRegistry / keyword-verifier path was used.
-				sig := av.canaryEval.Evaluate(c, task.ClaimerID, canary.RoleWorker, passed, observedGates, observedOutput)
-				slog.Info("canary: calibration signal emitted",
-					"signal_id", sig.ID,
-					"task_id", task.ID,
-					"canary_id", c.ID,
-					"actor_id", task.ClaimerID,
-					"correctness", sig.Correctness,
-					"severity", sig.Severity,
-					"computed_by", sig.ComputedBy,
-					"truth_model_score", sig.TruthModelScore,
-				)
-			}
-		}
-
-		if !passed {
-			// Reject: score below threshold. Reopen the task for another agent.
-			formerClaimer, closed, err := av.taskMgr.RejectSubmission(task.ID)
-			if err != nil {
-				slog.Warn("auto-validator: could not reject submission", "task_id", task.ID, "err", err)
-				continue
-			}
-			if closed {
-				slog.Info("auto-settlement: task failed permanently — max rejections reached",
-					"task_id", task.ID, "score", score.Overall, "threshold", evidence.PassThreshold,
-					"rejections", tasks.MaxRejections)
-				// Return escrowed budget to poster.
-				if av.escrowMgr != nil {
-					_ = av.escrowMgr.Refund(task.ID)
-				}
-			} else {
-				slog.Info("auto-settlement: task rejected — below threshold, reopened",
-					"task_id", task.ID, "score", score.Overall, "threshold", evidence.PassThreshold,
-					"former_claimer", formerClaimer, "rejection_count", task.RejectionCount+1)
-			}
-			// Penalize the worker's reputation for low-quality submission.
-			if av.reputationMgr != nil && formerClaimer != "" {
-				av.reputationMgr.RecordFailure(crypto.AgentID(formerClaimer), task.Category)
-			}
+		if _, done := av.multiVoterVoted[task.ID]; done {
 			continue
 		}
-
-		// Determine whether the replay coordinator wants to verify this task
-		// and, if so, whether to hold the generation ledger entry.
-		holdGeneration := false
-		var replayReason string
-		if av.replayCoordinator != nil {
-			// Fetch the real task count for the claimer so the probationary
-			// sampling rate is applied correctly to new agents.
-			agentTaskCount := 0
-			if av.identityRegistry != nil && task.ClaimerID != "" {
-				if fp, err := av.identityRegistry.Get(crypto.AgentID(task.ClaimerID)); err == nil {
-					agentTaskCount = int(fp.TasksCompleted)
-				}
-			}
-
-			shouldReplay, reason := av.replayCoordinator.ShouldReplay(
-				task.ID, task.ClaimerID, task.Category,
-				score.Overall,
-				task.Contract.GenerationEligible,
-				false,           // challenged — not supported at settle time
-				nil,             // anomalyFlags — populated by executor, not yet available
-				agentTaskCount,  // real count from identity registry
-			)
-			if shouldReplay {
-				replayReason = reason
-				if task.Contract.GenerationEligible {
-					holdGeneration = true
-				} else {
-					slog.Info("auto-validator: replay scheduled (non-generation task)",
-						"task_id", task.ID, "reason", reason)
-				}
-			}
-		}
-
-		slog.Info("auto-settlement: settling task via verification",
-			"task_id", task.ID,
-			"claimer", task.ClaimerID,
-			"score", score.Overall,
-			"budget", task.Budget,
-			"passed_threshold", passed,
-		)
-		av.settleTask(task, score, holdGeneration)
-
-		// Schedule the replay job after settlement so the task is in Completed
-		// state before the replay executor can query it.
-		if replayReason != "" && av.replayCoordinator != nil {
-			// Build minimal ReplayRequirements from the task's AcceptanceContract.
-			// These fields give the replay executor the contract commitment hash and
-			// the required gate list so it knows what to re-run.
-			var reqs *verification.ReplayRequirements
-			if task.Contract.SpecHash != "" || len(task.Contract.RequiredChecks) > 0 {
-				reqs = &verification.ReplayRequirements{
-					AcceptanceContractHash: task.Contract.SpecHash,
-					RequiredChecks:         task.Contract.RequiredChecks,
-				}
-			}
-
-			// Assess the replayability of the submitted material so operators
-			// can monitor how many replay jobs have full execution packs vs.
-			// structural-only material. This is informational; it does not
-			// block scheduling.
-			assessment := verification.AssessReplayability(reqs, task.Category, task.Contract.PolicyVersion)
-			slog.Debug("auto-validator: replay material assessment",
-				"task_id", task.ID,
-				"category", task.Category,
-				"replayable", assessment.Replayable,
-				"replay_level", assessment.ReplayLevel,
-				"missing_fields_count", len(assessment.MissingFields),
-			)
-
-			job, err := av.replayCoordinator.ScheduleReplay(
-				task.ID, task.ResultHash, task.Category,
-				task.Contract.PolicyVersion,
-				reqs, replayReason, task.ClaimerID,
-			)
-			if err != nil {
-				slog.Error("auto-validator: failed to schedule replay",
-					"task_id", task.ID, "reason", replayReason, "err", err)
-			} else {
-				if err := av.taskMgr.SetReplayStatus(task.ID, "replay_pending", job.ID); err != nil {
-					slog.Error("auto-validator: failed to set replay status",
-						"task_id", task.ID, "job_id", job.ID, "err", err)
-				}
-				slog.Info("auto-validator: replay scheduled",
-					"task_id", task.ID, "job_id", job.ID, "reason", replayReason,
-					"hold_generation", holdGeneration)
-			}
-		}
+		av.processSubmittedTaskMultiVoter(task)
+		av.multiVoterVoted[task.ID] = struct{}{}
 	}
 }
 
@@ -1086,7 +896,8 @@ func (av *AutoValidator) verifyPendingEvent(item *ocs.PendingItem) (bool, uint64
 	case event.EventTypeGeneration:
 		return av.verifyGeneration(item)
 	case event.EventTypeTaskSettlement:
-		return av.verifyTaskSettlement(item)
+		// TaskSettlement events go through BFT consensus. Auto-approve.
+		return true, item.Amount, ""
 	default:
 		// Default approve for event types we don't specifically verify.
 		return true, item.Amount, ""
@@ -1117,12 +928,6 @@ func (av *AutoValidator) verifyGeneration(item *ocs.PendingItem) (bool, uint64, 
 			}
 		}
 	}
-	return true, item.Amount, ""
-}
-
-func (av *AutoValidator) verifyTaskSettlement(item *ocs.PendingItem) (bool, uint64, string) {
-	// TaskSettlement events are created by the autovalidator itself after
-	// evidence scoring. They carry the already-computed score. Approve them.
 	return true, item.Amount, ""
 }
 
