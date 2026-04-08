@@ -1262,6 +1262,20 @@ func (m *TaskManager) applyTaskSubmitted(tp event.TaskSubmittedPayload, eventID 
 // fetchEvidenceBlob retrieves an evidence blob from the blobstore and stores
 // it locally. Called synchronously from applyTaskSubmitted — the blob is
 // typically already in the local BlobStore (piggybacked in the sync batch),
+// RetryEvidenceBlobFetch is the public entry point for re-attempting
+// evidence blob fetch. Called by the autovalidator when content is empty
+// despite EvidenceReady being true (blob propagated after the initial
+// fetch failed during applyTaskSubmitted).
+func (m *TaskManager) RetryEvidenceBlobFetch(taskID, blobHash string) {
+	if m.evidenceBlobFetcher == nil || blobHash == "" {
+		return
+	}
+	m.fetchEvidenceBlob(taskID, blobHash)
+}
+
+// fetchEvidenceBlob retrieves an evidence blob from the blobstore and stores
+// it locally. Called synchronously from applyTaskSubmitted — the blob is
+// typically already in the local BlobStore (piggybacked in the sync batch),
 // so this is a fast local read. Retries up to 3 times with 500ms delay for
 // the rare case where the blob hasn't arrived yet.
 func (m *TaskManager) fetchEvidenceBlob(taskID, blobHash string) {

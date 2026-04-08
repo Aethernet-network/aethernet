@@ -545,14 +545,27 @@ func (av *AutoValidator) processSubmittedTaskMultiVoter(task *tasks.Task) bool {
 		content = task.ResultContent
 	}
 
-	// Content gate: if content is empty, the evidence blob hasn't propagated
-	// to this node yet. Skip and retry next tick. EvidenceReady can be true
-	// (set by MarkEvidenceReady) without content being populated (which only
-	// happens via fetchEvidenceBlob during applyTaskSubmitted).
+	// Content gate: if content is empty, the evidence blob hasn't been applied
+	// to the task yet. The blob might be in the local BlobStore (propagated
+	// after the initial fetchEvidenceBlob failed). Try to fetch and apply it.
+	if content == "" && task.EvidenceBodyHash != "" && av.taskMgr != nil {
+		// Re-trigger blob fetch via the TaskManager's evidence path.
+		av.taskMgr.RetryEvidenceBlobFetch(task.ID, task.EvidenceBodyHash)
+		// Re-read the task to see if content is now available.
+		if refreshed, err := av.taskMgr.Get(task.ID); err == nil {
+			if refreshed.SubmittedEvidence != nil {
+				content = refreshed.SubmittedEvidence.ResolveContent()
+			}
+			if content == "" && refreshed.ResultContent != "" {
+				content = refreshed.ResultContent
+			}
+		}
+	}
+
 	if content == "" {
-		slog.Debug("auto-validator: multi-voter content empty, will retry",
+		slog.Debug("auto-validator: multi-voter content empty after retry",
 			"task_id", task.ID, "evidence_ready", task.EvidenceReady,
-			"has_evidence", task.SubmittedEvidence != nil)
+			"has_blob_hash", task.EvidenceBodyHash != "")
 		return false // retry next tick
 	}
 
