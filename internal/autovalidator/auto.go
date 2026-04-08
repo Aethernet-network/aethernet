@@ -451,8 +451,9 @@ func (av *AutoValidator) processSubmittedTasks() {
 		if _, done := av.multiVoterVoted[task.ID]; done {
 			continue
 		}
-		av.processSubmittedTaskMultiVoter(task)
-		av.multiVoterVoted[task.ID] = struct{}{}
+		if av.processSubmittedTaskMultiVoter(task) {
+			av.multiVoterVoted[task.ID] = struct{}{}
+		}
 	}
 }
 
@@ -503,9 +504,12 @@ func (av *AutoValidator) processExpiredClaims() {
 // processSubmittedTaskMultiVoter handles a single submitted task via the
 // multi-validator path: looks up the verification round, builds the analysis
 // input, and calls MultiVoter.ScoreAndVote to emit per-family votes.
-func (av *AutoValidator) processSubmittedTaskMultiVoter(task *tasks.Task) {
+// processSubmittedTaskMultiVoter returns true if the task was successfully
+// processed (votes emitted or round already finalized). Returns false if
+// the task should be retried on the next tick (e.g., content not yet available).
+func (av *AutoValidator) processSubmittedTaskMultiVoter(task *tasks.Task) bool {
 	if av.multiVoter == nil || av.multiVoter.rounds == nil {
-		return
+		return false
 	}
 
 	// Look up the verification round for this submission.
@@ -513,7 +517,7 @@ func (av *AutoValidator) processSubmittedTaskMultiVoter(task *tasks.Task) {
 	if submitEventID == "" {
 		slog.Debug("auto-validator: multi-voter skipping task — no SubmitEventID",
 			"task_id", task.ID)
-		return
+		return true // no event ID means no round will ever exist; don't retry
 	}
 
 	round, err := av.multiVoter.rounds.LoadRoundBySubmissionEvent(
@@ -522,15 +526,13 @@ func (av *AutoValidator) processSubmittedTaskMultiVoter(task *tasks.Task) {
 		// Round not yet created by the round consumer — will retry next tick.
 		slog.Debug("auto-validator: multi-voter round not found, will retry",
 			"task_id", task.ID, "submit_event_id", submitEventID, "err", err)
-		// Don't add to multiVoterVoted — allow retry next tick.
-		delete(av.multiVoterVoted, task.ID)
-		return
+		return false // retry
 	}
 
 	if round.State != taskverification.RoundStateOpen {
 		slog.Debug("auto-validator: multi-voter round not open, skipping",
 			"task_id", task.ID, "round_id", round.RoundID, "state", round.State)
-		return
+		return true // terminal — don't retry
 	}
 
 	// Build the analysis input from the task.
@@ -551,8 +553,7 @@ func (av *AutoValidator) processSubmittedTaskMultiVoter(task *tasks.Task) {
 		slog.Debug("auto-validator: multi-voter content empty, will retry",
 			"task_id", task.ID, "evidence_ready", task.EvidenceReady,
 			"has_evidence", task.SubmittedEvidence != nil)
-		delete(av.multiVoterVoted, task.ID)
-		return
+		return false // retry next tick
 	}
 
 	input := verification.AnalysisInput{
@@ -569,8 +570,7 @@ func (av *AutoValidator) processSubmittedTaskMultiVoter(task *tasks.Task) {
 	if err != nil {
 		slog.Warn("auto-validator: multi-voter ScoreAndVote failed",
 			"task_id", task.ID, "err", err)
-		delete(av.multiVoterVoted, task.ID)
-		return
+		return false // retry
 	}
 
 	slog.Info("auto-validator: multi-voter completed",
@@ -581,6 +581,7 @@ func (av *AutoValidator) processSubmittedTaskMultiVoter(task *tasks.Task) {
 		"votes_skipped", result.VotesSkipped,
 		"analyzers_failed", result.AnalyzersFailed,
 	)
+	return true // successfully processed
 }
 
 func (av *AutoValidator) processDisputedTasks() {
