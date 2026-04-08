@@ -1785,7 +1785,23 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		tvRoundConsumer.SetActivator(recActivator)
 		_ = commitBus.Register(tvRoundConsumer)
 
-		// Task verification vote consumer — aggregates votes into rounds.
+		// Finalizer for verification rounds — shared by vote consumer and
+		// deadline checker.
+		tvFinalizer := taskverification.NewFinalizer(taskverification.DefaultFinalizerConfig())
+
+		activeWeightFn := func() uint64 {
+			if stack.lifecycleReducer == nil {
+				return 0
+			}
+			snap := stack.lifecycleReducer.Snapshot()
+			if snap == nil {
+				return 0
+			}
+			return snap.ActiveWeight()
+		}
+
+		// Task verification vote consumer — aggregates votes into rounds
+		// and invokes the finalizer after each vote.
 		tvVoteConsumer := recognition.NewTaskVerificationVoteConsumer(
 			tvStore,
 			recognition.ValidatorWeightFunc(func(id crypto.AgentID) (uint64, bool) {
@@ -1798,8 +1814,31 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 				}
 				return snap.VoteWeightByKey(id)
 			}),
+			tvFinalizer,
+			pub,
+			stack.kp,
+			agentID,
+			activeWeightFn,
+			func() int64 { return time.Now().Unix() },
 		)
 		_ = commitBus.Register(tvVoteConsumer)
+
+		// Consensus consumer — applies TaskVerificationConsensus events to
+		// local rounds for replay safety.
+		tvConsensusConsumer := recognition.NewTaskVerificationConsensusConsumer(tvStore)
+		_ = commitBus.Register(tvConsensusConsumer)
+
+		// Deadline checker — scans open rounds for expiry, extends or
+		// finalizes as appropriate.
+		tvDeadlineChecker := taskverification.NewDeadlineChecker(
+			tvStore, tvFinalizer, pub, stack.kp, agentID,
+			activeWeightFn,
+			5*time.Second,
+			taskverification.DefaultRoundExtensionSeconds,
+			func() int64 { return time.Now().Unix() },
+		)
+		tvDeadlineChecker.Start()
+		defer tvDeadlineChecker.Stop()
 	}
 
 	// Settlement consumer — Settlement → SettlementApplicator.

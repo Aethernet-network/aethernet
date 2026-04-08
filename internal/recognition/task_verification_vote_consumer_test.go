@@ -74,11 +74,19 @@ func allEligible(stake uint64) recognition.ValidatorWeightFunc {
 	return func(id crypto.AgentID) (uint64, bool) { return stake, true }
 }
 
+// newVoteConsumer creates a vote consumer without finalizer for basic tests.
+func newVoteConsumer(store *taskverification.BadgerStore, weight uint64) *recognition.TaskVerificationVoteConsumer {
+	return recognition.NewTaskVerificationVoteConsumer(
+		store, allEligible(weight),
+		nil, nil, nil, "", nil, nil, // no finalizer, no publisher
+	)
+}
+
 func TestVoteConsumer_AppliesValidVote(t *testing.T) {
 	store := newVoteTestStore(t)
 	r := saveOpenRound(t, store, "task-1", "evt-sub-1")
 
-	consumer := recognition.NewTaskVerificationVoteConsumer(store, allEligible(300))
+	consumer := newVoteConsumer(store, 300)
 	ev := makeTVVoteEvent(string(r.RoundID), "task-1", "evt-sub-1", "validator-a", "pass", "llm_semantic", 7500)
 	ctx := context.Background()
 
@@ -110,7 +118,7 @@ func TestVoteConsumer_IdempotentDuplicate(t *testing.T) {
 	store := newVoteTestStore(t)
 	r := saveOpenRound(t, store, "task-idem", "evt-sub-idem")
 
-	consumer := recognition.NewTaskVerificationVoteConsumer(store, allEligible(300))
+	consumer := newVoteConsumer(store, 300)
 	ev := makeTVVoteEvent(string(r.RoundID), "task-idem", "evt-sub-idem", "validator-a", "pass", "llm_semantic", 7500)
 	ctx := context.Background()
 
@@ -130,7 +138,7 @@ func TestVoteConsumer_DetectsEquivocation(t *testing.T) {
 	store := newVoteTestStore(t)
 	r := saveOpenRound(t, store, "task-equi", "evt-sub-equi")
 
-	consumer := recognition.NewTaskVerificationVoteConsumer(store, allEligible(300))
+	consumer := newVoteConsumer(store, 300)
 	ctx := context.Background()
 
 	ev1 := makeTVVoteEvent(string(r.RoundID), "task-equi", "evt-sub-equi", "validator-a", "pass", "llm_semantic", 7500)
@@ -155,7 +163,9 @@ func TestVoteConsumer_IneligibleValidator(t *testing.T) {
 
 	// Weight function returns ineligible.
 	noOne := recognition.ValidatorWeightFunc(func(id crypto.AgentID) (uint64, bool) { return 0, false })
-	consumer := recognition.NewTaskVerificationVoteConsumer(store, noOne)
+	consumer := recognition.NewTaskVerificationVoteConsumer(
+		store, noOne, nil, nil, nil, "", nil, nil,
+	)
 
 	ev := makeTVVoteEvent(string(r.RoundID), "task-inelig", "evt-sub-inelig", "bad-validator", "pass", "llm_semantic", 7500)
 	ctx := context.Background()
@@ -174,7 +184,7 @@ func TestVoteConsumer_IneligibleValidator(t *testing.T) {
 func TestVoteConsumer_RoundNotYetOpen(t *testing.T) {
 	store := newVoteTestStore(t)
 	// Do NOT save a round — simulate vote arriving before round is opened.
-	consumer := recognition.NewTaskVerificationVoteConsumer(store, allEligible(300))
+	consumer := newVoteConsumer(store, 300)
 
 	roundID := string(taskverification.NewRoundID("evt-sub-notyet"))
 	ev := makeTVVoteEvent(roundID, "task-notyet", "evt-sub-notyet", "validator-a", "pass", "llm_semantic", 7500)
@@ -200,7 +210,7 @@ func TestVoteConsumer_PostFinalizationVote(t *testing.T) {
 	_ = r.Transition(taskverification.RoundStateFinalizedAccept, time.Now().Unix())
 	_ = store.SaveRound(context.Background(), r)
 
-	consumer := recognition.NewTaskVerificationVoteConsumer(store, allEligible(300))
+	consumer := newVoteConsumer(store, 300)
 	ev := makeTVVoteEvent(string(r.RoundID), "task-finalized", "evt-sub-fin", "late-validator", "pass", "llm_semantic", 7000)
 	ctx := context.Background()
 
@@ -222,7 +232,7 @@ func TestVoteConsumer_MultipleFamilies(t *testing.T) {
 	store := newVoteTestStore(t)
 	r := saveOpenRound(t, store, "task-families", "evt-sub-fam")
 
-	consumer := recognition.NewTaskVerificationVoteConsumer(store, allEligible(200))
+	consumer := newVoteConsumer(store, 200)
 	ctx := context.Background()
 
 	_ = consumer.Consume(ctx, makeTVVoteEvent(string(r.RoundID), "task-families", "evt-sub-fam", "v1", "pass", "llm_semantic", 7500))

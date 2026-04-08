@@ -34,19 +34,37 @@ func (f ValidatorWeightFunc) VoteWeight(id crypto.AgentID) (uint64, bool) { retu
 // deferred with a prerequisite key. The round consumer signals this key
 // after creating the round.
 type TaskVerificationVoteConsumer struct {
-	rounds    taskverification.Store
-	weightFn  ValidatorWeightLookup
+	rounds           taskverification.Store
+	weightFn         ValidatorWeightLookup
+	finalizer        *taskverification.Finalizer
+	publisher        taskverification.ConsensusPublisher
+	kp               *crypto.KeyPair
+	validatorID      crypto.AgentID
+	activeWeightFn   func() uint64
+	clock            func() int64
 }
 
 // NewTaskVerificationVoteConsumer creates a consumer that applies votes to
-// verification rounds.
+// verification rounds and invokes the finalizer after each vote.
 func NewTaskVerificationVoteConsumer(
 	rounds taskverification.Store,
 	weightFn ValidatorWeightLookup,
+	finalizer *taskverification.Finalizer,
+	publisher taskverification.ConsensusPublisher,
+	kp *crypto.KeyPair,
+	validatorID crypto.AgentID,
+	activeWeightFn func() uint64,
+	clock func() int64,
 ) *TaskVerificationVoteConsumer {
 	return &TaskVerificationVoteConsumer{
-		rounds:   rounds,
-		weightFn: weightFn,
+		rounds:         rounds,
+		weightFn:       weightFn,
+		finalizer:      finalizer,
+		publisher:      publisher,
+		kp:             kp,
+		validatorID:    validatorID,
+		activeWeightFn: activeWeightFn,
+		clock:          clock,
 	}
 }
 
@@ -172,6 +190,37 @@ func (c *TaskVerificationVoteConsumer) Consume(ctx context.Context, ev *event.Ev
 		"distinct_families", round.DistinctPassFamilies(),
 		"event_id", ev.ID,
 	)
+
+	// Invoke the finalizer: check if this vote tips the round to supermajority.
+	if c.finalizer != nil && c.activeWeightFn != nil {
+		totalWeight := c.activeWeightFn()
+		now := c.clock()
+		decision := c.finalizer.Evaluate(round, totalWeight, now)
+		if decision.ShouldFinalize {
+			targetState := taskverification.VerdictToState(decision.Verdict)
+			if err := round.Transition(targetState, now); err == nil {
+				round.FinalVerdict = decision.Verdict
+				round.FinalScoreBP = decision.FinalScoreBP
+
+				// Persist BEFORE publish (ordering invariant).
+				if err := c.rounds.SaveRound(ctx, round); err != nil {
+					slog.Warn("task_verification_vote: save finalized round failed",
+						"round_id", round.RoundID, "err", err)
+				} else {
+					taskverification.EmitConsensusEvent(
+						round, c.publisher, c.kp, c.validatorID, decision.Reason)
+					slog.Info("task_verification_vote: round finalized by vote",
+						"round_id", round.RoundID,
+						"task_id", round.TaskID,
+						"verdict", decision.Verdict,
+						"reason", decision.Reason,
+						"score_bp", decision.FinalScoreBP,
+					)
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
