@@ -33,12 +33,14 @@ import (
 type TaskStatus string
 
 const (
-	TaskStatusOpen      TaskStatus = "open"
-	TaskStatusClaimed   TaskStatus = "claimed"
-	TaskStatusSubmitted TaskStatus = "submitted"
-	TaskStatusCompleted TaskStatus = "completed"
-	TaskStatusDisputed  TaskStatus = "disputed"
-	TaskStatusCancelled TaskStatus = "cancelled"
+	TaskStatusOpen             TaskStatus = "open"
+	TaskStatusClaimed          TaskStatus = "claimed"
+	TaskStatusSubmitted        TaskStatus = "submitted"
+	TaskStatusCompleted        TaskStatus = "completed"
+	TaskStatusDisputed         TaskStatus = "disputed"
+	TaskStatusCancelled        TaskStatus = "cancelled"
+	TaskStatusRejected         TaskStatus = "rejected"          // multi-validator consensus: fail verdict
+	TaskStatusDisputedResolved TaskStatus = "disputed_resolved" // multi-validator consensus: abstain (50/50 split)
 )
 
 // DefaultClaimDeadline is the testnet claim timeout. When a task is claimed,
@@ -455,7 +457,8 @@ func (m *TaskManager) archiveCompleted() {
 		if task.CompletedAt == 0 {
 			continue // not yet completed/cancelled
 		}
-		if task.Status != TaskStatusCompleted && task.Status != TaskStatusCancelled {
+		if task.Status != TaskStatusCompleted && task.Status != TaskStatusCancelled &&
+			task.Status != TaskStatusRejected && task.Status != TaskStatusDisputedResolved {
 			continue
 		}
 		if time.Unix(0, task.CompletedAt).Before(cutoff) {
@@ -958,6 +961,48 @@ func (m *TaskManager) ResolveDispute(taskID string, resolverID crypto.AgentID, a
 		task.CompletedAt = time.Now().UnixNano()
 	} else {
 		task.Status = TaskStatusCancelled // rejected by dispute resolution
+	}
+	m.persist(task)
+	return nil
+}
+
+// ApplyVerificationConsensusResolution applies the multi-validator verification
+// consensus verdict to a task. Transitions the task to its terminal state:
+//   - "pass"    → Completed
+//   - "fail"    → Rejected
+//   - "abstain" → DisputedResolved
+//
+// Idempotent: calling on an already-terminal task is a no-op.
+func (m *TaskManager) ApplyVerificationConsensusResolution(
+	taskID string,
+	verdict string,
+	finalScoreBP uint64,
+	roundID string,
+) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrTaskNotFound, taskID)
+	}
+
+	// Idempotent: already in a terminal state.
+	switch task.Status {
+	case TaskStatusCompleted, TaskStatusRejected, TaskStatusDisputedResolved, TaskStatusCancelled:
+		return nil
+	}
+
+	switch verdict {
+	case "pass":
+		task.Status = TaskStatusCompleted
+		task.CompletedAt = time.Now().UnixNano()
+	case "fail":
+		task.Status = TaskStatusRejected
+	case "abstain":
+		task.Status = TaskStatusDisputedResolved
+	default:
+		return fmt.Errorf("tasks: unknown verification consensus verdict: %q", verdict)
 	}
 	m.persist(task)
 	return nil

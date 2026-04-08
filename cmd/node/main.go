@@ -1587,6 +1587,20 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		if payload.ClaimerID == "" {
 			return nil // no claimer — nothing to release
 		}
+		// Guard: if the task is already settled via the new verification
+		// consensus path, skip. Prevents double-settlement during the
+		// transition period before prompt 09 removes the old path.
+		if stack.taskMgr != nil {
+			if t, tErr := stack.taskMgr.Get(payload.TaskID); tErr == nil {
+				if t.Status == tasks.TaskStatusCompleted ||
+					t.Status == tasks.TaskStatusRejected ||
+					t.Status == tasks.TaskStatusDisputedResolved {
+					slog.Debug("task-settler: task already settled via verification consensus, skipping old path",
+						"task_id", payload.TaskID, "status", t.Status)
+					return nil
+				}
+			}
+		}
 		posterID := crypto.AgentID(payload.PosterID)
 		claimerID := crypto.AgentID(payload.ClaimerID)
 		treasuryID := crypto.AgentID(genesis.BucketTreasury)
@@ -1825,7 +1839,17 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 
 		// Consensus consumer — applies TaskVerificationConsensus events to
 		// local rounds for replay safety.
-		tvConsensusConsumer := recognition.NewTaskVerificationConsensusConsumer(tvStore)
+		// Verification consensus settler — applies v4.1 economic distribution.
+		genLedgerCalc := settlement.NewGenerationLedgerCalculator(
+			stack.dag,
+			func(_ event.EventID) float64 { return 1.0 }, // TODO prompt 08: real Q
+		)
+		tvSettler := settlement.NewVerificationConsensusSettler(
+			stack.taskMgr, stack.transfer, stack.escrowMgr,
+			genLedgerCalc, crypto.AgentID(genesis.BucketTreasury),
+		)
+
+		tvConsensusConsumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, tvSettler)
 		_ = commitBus.Register(tvConsensusConsumer)
 
 		// Deadline checker — scans open rounds for expiry, extends or

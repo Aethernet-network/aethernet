@@ -8,22 +8,25 @@ import (
 	"log/slog"
 
 	"github.com/Aethernet-network/aethernet/internal/event"
+	"github.com/Aethernet-network/aethernet/internal/settlement"
 	"github.com/Aethernet-network/aethernet/internal/taskverification"
 )
 
 // TaskVerificationConsensusConsumer processes TaskVerificationConsensus
-// events from the DAG and applies them to local round state. Critical for
-// replay safety: when a node restarts and replays the DAG, consensus events
-// bring all rounds back to their finalized state.
+// events from the DAG: applies round state for replay safety AND invokes
+// the v4.1 economic settlement (escrow release/refund/split).
 type TaskVerificationConsensusConsumer struct {
-	rounds taskverification.Store
+	rounds  taskverification.Store
+	settler *settlement.VerificationConsensusSettler // nil if settlement not wired
 }
 
 // NewTaskVerificationConsensusConsumer creates a consensus consumer.
+// settler may be nil (round state is applied but no settlement occurs).
 func NewTaskVerificationConsensusConsumer(
 	rounds taskverification.Store,
+	settler *settlement.VerificationConsensusSettler,
 ) *TaskVerificationConsensusConsumer {
-	return &TaskVerificationConsensusConsumer{rounds: rounds}
+	return &TaskVerificationConsensusConsumer{rounds: rounds, settler: settler}
 }
 
 // Name returns the unique consumer identifier.
@@ -85,6 +88,27 @@ func (c *TaskVerificationConsensusConsumer) Consume(_ context.Context, ev *event
 		"score_bp", payload.FinalScoreBP,
 		"event_id", ev.ID,
 	)
+
+	// Apply v4.1 economic settlement: escrow release/refund/split.
+	if c.settler != nil {
+		settleResult, err := c.settler.Settle(context.Background(), &payload, round)
+		if err != nil {
+			slog.Warn("task_verification_consensus: settlement failed",
+				"task_id", payload.TaskID, "err", err)
+			// Don't fail the consumer — the round state is persisted,
+			// settlement can be retried on the next consensus event replay.
+		} else if settleResult.Applied {
+			slog.Info("task_verification_consensus: settlement applied",
+				"task_id", payload.TaskID,
+				"verdict", payload.FinalVerdict,
+				"worker_payout", settleResult.WorkerPayout,
+				"poster_refund", settleResult.PosterRefund,
+				"treasury", settleResult.TreasuryAmount,
+				"total_distributed", settleResult.TotalDistributed,
+			)
+		}
+	}
+
 	return nil
 }
 
