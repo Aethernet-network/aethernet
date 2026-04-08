@@ -105,8 +105,9 @@ func TestRoundConsumer_OpensRoundOnTaskSubmitted(t *testing.T) {
 	if r.State != taskverification.RoundStateOpen {
 		t.Errorf("State = %s; want open", r.State)
 	}
-	if r.DeadlineUnix != 1060 {
-		t.Errorf("DeadlineUnix = %d; want 1060", r.DeadlineUnix)
+	expectedDeadline := int64(1000 + taskverification.DefaultRoundDeadlineSeconds)
+	if r.DeadlineUnix != expectedDeadline {
+		t.Errorf("DeadlineUnix = %d; want %d", r.DeadlineUnix, expectedDeadline)
 	}
 }
 

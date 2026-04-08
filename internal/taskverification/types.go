@@ -19,8 +19,10 @@ const (
 	DefaultAcceptanceThresholdBP = 6000
 
 	// DefaultRoundDeadlineSeconds is the initial deadline for a verification
-	// round before extension.
-	DefaultRoundDeadlineSeconds = 60
+	// round before extension. Set to 180s to account for evidence blob
+	// propagation latency across the 5-node testnet (blobs can take 30-60s
+	// to propagate via Fast Path body plane and fallback fetch).
+	DefaultRoundDeadlineSeconds = 180
 
 	// DefaultRoundExtensionSeconds is the additional time granted when a
 	// round qualifies for deadline extension.
