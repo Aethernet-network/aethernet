@@ -40,7 +40,7 @@ func setupSettlerTest(t *testing.T, budget uint64) (
 	_ = em.Hold(taskID, "poster-1", budget)
 
 	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) float64 { return 1.0 })
-	settler := NewVerificationConsensusSettler(tm, tl, em, calc, "genesis:treasury")
+	settler := NewVerificationConsensusSettler(tm, tl, em, calc, "genesis:treasury", nil)
 
 	return settler, tm, tl, em
 }
@@ -308,5 +308,111 @@ func TestSettle_TotalDistributionEqualsBudget(t *testing.T) {
 					budget, verdict, result.TotalDistributed, budget)
 			}
 		}
+	}
+}
+
+// --- Q-weighted distribution tests ---
+
+func setupQWeightedSettler(t *testing.T, budget uint64, qFn ValidatorQScoreFn) (
+	*VerificationConsensusSettler, *tasks.TaskManager,
+) {
+	t.Helper()
+	tl := ledger.NewTransferLedger()
+	tm := tasks.NewTaskManager()
+	em := escrow.New(tl)
+	_ = tl.FundAgent("poster-1", budget*10)
+	_, _ = tm.PostTask("poster-1", "q-test", "desc", "research", budget)
+	allTasks := tm.Search(tasks.TaskStatusOpen, "", 0)
+	taskID := allTasks[0].ID
+	_ = tm.ClaimTask(taskID, "worker-1")
+	_ = tm.SubmitResult(taskID, "worker-1", "sha256:q", "note", "")
+	_ = em.Hold(taskID, "poster-1", budget)
+	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) float64 { return 1.0 })
+	settler := NewVerificationConsensusSettler(tm, tl, em, calc, "genesis:treasury", qFn)
+	return settler, tm
+}
+
+func TestSettle_QWeighted_AllNeutral_EqualsEvenSplit(t *testing.T) {
+	budget := uint64(10000)
+	qFn := ValidatorQScoreFn(func(_ crypto.AgentID, _, _ string) float64 { return 1.0 })
+	settler, tm := setupQWeightedSettler(t, budget, qFn)
+	allTasks := tm.Search(tasks.TaskStatusSubmitted, "", 0)
+	taskID := allTasks[0].ID
+
+	round := makeRoundWithVotes(taskID, map[string]taskverification.Verdict{
+		"v1": taskverification.VerdictPass,
+		"v2": taskverification.VerdictPass,
+	})
+	payload := &event.TaskVerificationConsensusPayload{
+		RoundID: "round-q", TaskID: taskID, FinalVerdict: "pass",
+		WorkerID: "worker-1", PosterID: "poster-1",
+	}
+
+	result, err := settler.Settle(context.Background(), payload, round)
+	if err != nil {
+		t.Fatalf("Settle: %v", err)
+	}
+	validatorPool := budget * 2300 / 10000
+	perValidator := validatorPool / 2
+	for vid, amt := range result.ValidatorPayouts {
+		if amt < perValidator-1 || amt > perValidator+1 {
+			t.Errorf("validator %s got %d; want ~%d (equal split)", vid, amt, perValidator)
+		}
+	}
+}
+
+func TestSettle_QWeighted_HighAndLow(t *testing.T) {
+	budget := uint64(10000)
+	qFn := ValidatorQScoreFn(func(id crypto.AgentID, _, _ string) float64 {
+		if id == "v1" {
+			return 0.9
+		}
+		return 0.1
+	})
+	settler, tm := setupQWeightedSettler(t, budget, qFn)
+	allTasks := tm.Search(tasks.TaskStatusSubmitted, "", 0)
+	taskID := allTasks[0].ID
+
+	round := makeRoundWithVotes(taskID, map[string]taskverification.Verdict{
+		"v1": taskverification.VerdictPass,
+		"v2": taskverification.VerdictPass,
+	})
+	payload := &event.TaskVerificationConsensusPayload{
+		RoundID: "round-q2", TaskID: taskID, FinalVerdict: "pass",
+		WorkerID: "worker-1", PosterID: "poster-1",
+	}
+
+	result, _ := settler.Settle(context.Background(), payload, round)
+	if result.ValidatorPayouts["v1"] <= result.ValidatorPayouts["v2"] {
+		t.Errorf("high-Q v1 (%d) should get more than low-Q v2 (%d)",
+			result.ValidatorPayouts["v1"], result.ValidatorPayouts["v2"])
+	}
+	if result.TotalDistributed != budget {
+		t.Errorf("total = %d; want %d", result.TotalDistributed, budget)
+	}
+}
+
+func TestSettle_QWeighted_AllZero_FallsBackToEvenSplit(t *testing.T) {
+	budget := uint64(10000)
+	qFn := ValidatorQScoreFn(func(_ crypto.AgentID, _, _ string) float64 { return 0 })
+	settler, tm := setupQWeightedSettler(t, budget, qFn)
+	allTasks := tm.Search(tasks.TaskStatusSubmitted, "", 0)
+	taskID := allTasks[0].ID
+
+	round := makeRoundWithVotes(taskID, map[string]taskverification.Verdict{
+		"v1": taskverification.VerdictPass,
+		"v2": taskverification.VerdictPass,
+	})
+	payload := &event.TaskVerificationConsensusPayload{
+		RoundID: "round-q3", TaskID: taskID, FinalVerdict: "pass",
+		WorkerID: "worker-1", PosterID: "poster-1",
+	}
+
+	result, _ := settler.Settle(context.Background(), payload, round)
+	if len(result.ValidatorPayouts) != 2 {
+		t.Fatalf("expected 2 payouts; got %d", len(result.ValidatorPayouts))
+	}
+	if result.TotalDistributed != budget {
+		t.Errorf("total = %d; want %d", result.TotalDistributed, budget)
 	}
 }

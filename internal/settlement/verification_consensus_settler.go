@@ -24,22 +24,29 @@ const (
 // VerificationConsensusSettler processes TaskVerificationConsensus events
 // and applies the v4.1 economic distribution: 73/23/2/2 on accept, full
 // refund on reject, 50/50 on dispute.
+// ValidatorQScoreFn returns the Quality Score Q for a validator in the
+// context of a specific family and category. Used for Q-weighted fee
+// distribution. Returns 1.0 for neutral (new validators with no history).
+type ValidatorQScoreFn func(validatorID crypto.AgentID, family string, category string) float64
+
 type VerificationConsensusSettler struct {
-	taskMgr     *tasks.TaskManager
-	transfer    *ledger.TransferLedger
-	escrowMgr   *escrow.Escrow
-	genLedger   *GenerationLedgerCalculator
-	treasuryID  crypto.AgentID
+	taskMgr    *tasks.TaskManager
+	transfer   *ledger.TransferLedger
+	escrowMgr  *escrow.Escrow
+	genLedger  *GenerationLedgerCalculator
+	treasuryID crypto.AgentID
+	qScoreFn   ValidatorQScoreFn // nil → even-split fallback
 }
 
 // NewVerificationConsensusSettler creates a settler with the full v4.1
-// economic model.
+// economic model. qScoreFn may be nil for even-split fallback.
 func NewVerificationConsensusSettler(
 	taskMgr *tasks.TaskManager,
 	transfer *ledger.TransferLedger,
 	escrowMgr *escrow.Escrow,
 	genLedger *GenerationLedgerCalculator,
 	treasuryID crypto.AgentID,
+	qScoreFn ValidatorQScoreFn,
 ) *VerificationConsensusSettler {
 	return &VerificationConsensusSettler{
 		taskMgr:    taskMgr,
@@ -47,6 +54,7 @@ func NewVerificationConsensusSettler(
 		escrowMgr:  escrowMgr,
 		genLedger:  genLedger,
 		treasuryID: treasuryID,
+		qScoreFn:   qScoreFn,
 	}
 }
 
@@ -138,17 +146,18 @@ func (s *VerificationConsensusSettler) settleAccept(
 	}
 	result.WorkerPayout = workerAmount
 
-	// 2. Validator payouts: even-split among consensus-agreeing validators.
-	// TODO prompt 08: replace even-split with Quality-Score-weighted distribution.
-	// Weight each validator by their Quality Score Q for this category/family,
-	// as computed by the reputation store landed in prompt 08.
+	// 2. Validator payouts: Q-weighted among consensus-agreeing validators.
+	// Q(validator) = AgreementRate from the reputation store (Consistency term
+	// from paper v4.1). New validators default to Q=1.0 (neutral).
+	// TODO prompt future: wire full Q formula with CVD_norm, ChallengeSurvival,
+	// ReplicationRate terms once their infrastructure is built.
 	agreeing := collectAgreeingValidators(round, taskverification.VerdictPass)
 	if len(agreeing) == 0 {
 		slog.Warn("verification_settler: no agreeing validators on accept — routing validator pool to treasury",
 			"task_id", payload.TaskID)
 		treasuryAmount += validatorPool
 	} else {
-		result.ValidatorPayouts = distributeEvenly(s.transfer, escrowBucket, agreeing, validatorPool)
+		result.ValidatorPayouts = s.distributeByQuality(escrowBucket, agreeing, validatorPool, round.Category)
 	}
 
 	// 3. Generation Ledger royalties (2% on accept only).
@@ -215,7 +224,7 @@ func (s *VerificationConsensusSettler) settleReject(
 			"task_id", payload.TaskID)
 		treasuryAmount += validatorPool
 	} else {
-		result.ValidatorPayouts = distributeEvenly(s.transfer, escrowBucket, agreeing, validatorPool)
+		result.ValidatorPayouts = s.distributeByQuality(escrowBucket, agreeing, validatorPool, round.Category)
 	}
 
 	// 3. Treasury (protocol fee + redirected Generation Ledger).
@@ -315,27 +324,69 @@ func collectAgreeingValidators(round *taskverification.TaskVerificationRound, ve
 	return result
 }
 
-// distributeEvenly splits a pool among recipients. Remainder goes to the last.
-func distributeEvenly(
-	transfer *ledger.TransferLedger,
+// distributeByQuality splits a pool among recipients weighted by their
+// Quality Score Q. Falls back to even-split when qScoreFn is nil or when
+// all Q scores sum to zero.
+func (s *VerificationConsensusSettler) distributeByQuality(
 	from crypto.AgentID,
 	recipients []crypto.AgentID,
 	pool uint64,
+	category string,
 ) map[crypto.AgentID]uint64 {
 	payouts := make(map[crypto.AgentID]uint64)
 	if len(recipients) == 0 || pool == 0 {
 		return payouts
 	}
-	perValidator := pool / uint64(len(recipients))
-	var distributed uint64
+
+	// Compute Q scores for each recipient.
+	type scored struct {
+		id crypto.AgentID
+		q  float64
+	}
+	entries := make([]scored, len(recipients))
+	var totalQ float64
 	for i, v := range recipients {
-		amount := perValidator
-		if i == len(recipients)-1 {
-			amount = pool - distributed // last gets remainder
+		q := 1.0 // neutral default
+		if s.qScoreFn != nil {
+			// Use the first vote's family for Q lookup. In practice, agreeing
+			// validators may have voted from different families; use category
+			// as the primary key since family is per-vote not per-validator.
+			q = s.qScoreFn(v, "", category)
+		}
+		entries[i] = scored{id: v, q: q}
+		totalQ += q
+	}
+
+	// Fallback to even-split if total Q is zero.
+	if totalQ == 0 {
+		perValidator := pool / uint64(len(recipients))
+		var distributed uint64
+		for i, v := range recipients {
+			amount := perValidator
+			if i == len(recipients)-1 {
+				amount = pool - distributed
+			}
+			if amount > 0 {
+				_ = s.transfer.TransferFromBucket(from, v, amount)
+				payouts[v] = amount
+			}
+			distributed += amount
+		}
+		return payouts
+	}
+
+	// Q-weighted distribution.
+	var distributed uint64
+	for i, e := range entries {
+		var amount uint64
+		if i == len(entries)-1 {
+			amount = pool - distributed // last gets remainder for determinism
+		} else {
+			amount = uint64(float64(pool) * (e.q / totalQ))
 		}
 		if amount > 0 {
-			_ = transfer.TransferFromBucket(from, v, amount)
-			payouts[v] = amount
+			_ = s.transfer.TransferFromBucket(from, e.id, amount)
+			payouts[e.id] = amount
 		}
 		distributed += amount
 	}

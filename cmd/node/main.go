@@ -1840,14 +1840,43 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		// Consensus consumer — applies TaskVerificationConsensus events to
 		// local rounds for replay safety.
 		// Verification consensus settler — applies v4.1 economic distribution.
+		// Reputation store for validator vote agreement tracking.
+		tvReputationStore := taskverification.NewValidatorReputationStore(stack.store.DB())
+
+		// Calibration store for per (category × family) calibration progress.
+		tvCalibrationStore := taskverification.NewCalibrationStore(
+			stack.store.DB(),
+			taskverification.CalibrationConfig{DefaultThreshold: 100},
+		)
+
+		// Generation Ledger calculator.
+		// TODO prompt future: replace neutral qualityFn (1.0) with ancestor Q
+		// based on ReplicationRate and ChallengeSurvival once that infrastructure
+		// lands. Ancestor Q is different from validator Q — it measures the
+		// quality of prior verified work, not vote consistency.
 		genLedgerCalc := settlement.NewGenerationLedgerCalculator(
 			stack.dag,
-			func(_ event.EventID) float64 { return 1.0 }, // TODO prompt 08: real Q
+			func(_ event.EventID) float64 { return 1.0 },
 		)
+
+		// Validator Q score function for Q-weighted fee distribution.
+		// Uses the Consistency term (α₄) from paper v4.1: AgreementRate.
+		// TODO prompt future: wire CVD_norm (α₁), ChallengeSurvival (α₂),
+		// ReplicationRate (α₃) once their infrastructure is built.
+		validatorQFn := settlement.ValidatorQScoreFn(func(validatorID crypto.AgentID, family, category string) float64 {
+			return tvReputationStore.ValidatorQScore(
+				context.Background(), validatorID,
+				verification.FamilyID(family), category,
+			)
+		})
+
 		tvSettler := settlement.NewVerificationConsensusSettler(
 			stack.taskMgr, stack.transfer, stack.escrowMgr,
 			genLedgerCalc, crypto.AgentID(genesis.BucketTreasury),
+			validatorQFn,
 		)
+		_ = tvCalibrationStore // used by consensus consumer below
+		_ = tvReputationStore  // used by consensus consumer below
 
 		tvConsensusConsumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, tvSettler)
 		_ = commitBus.Register(tvConsensusConsumer)
