@@ -1,0 +1,1 @@
+{"families":[{"family":"deterministic_heuristic","analyzer":"deterministic_heuristic/heuristic:v1"},{"family":"statistical_structural","analyzer":"statistical_structural/statistical:v1"}]}

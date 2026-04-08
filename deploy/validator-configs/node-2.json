@@ -1,0 +1,1 @@
+{"families":[{"family":"deterministic_heuristic","analyzer":"deterministic_heuristic/heuristic:v1"},{"family":"embedding_similarity","analyzer":"embedding_similarity/embedding:v1"}]}

@@ -71,6 +71,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/settlement"
 	"github.com/Aethernet-network/aethernet/internal/taskverification"
+	verfamilies "github.com/Aethernet-network/aethernet/internal/verification/families"
 	"github.com/Aethernet-network/aethernet/internal/router"
 	"github.com/Aethernet-network/aethernet/internal/staking"
 	"github.com/Aethernet-network/aethernet/internal/store"
@@ -1995,6 +1996,34 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	node.SetVoteHandler(func(voterID crypto.AgentID, eventID event.EventID, verdict bool) {
 		_ = stack.engine.AcceptPeerVote(eventID, voterID, verdict)
 	})
+
+	// ── Verification Analyzer Registry ────────────────────────────────────
+	// Register the four bootstrap analyzer families and their default
+	// analyzers. The registry is constructed but not yet consumed by the
+	// autovalidator (that's prompt 05). Validators select which families
+	// to run via per-node config or the default bootstrap config.
+	analyzerRegistry := verfamilies.RegisterBootstrapAnalyzers()
+	analyzerCfg := verification.DefaultBootstrapConfig()
+	if cfgPath := os.Getenv("AETHERNET_ANALYZER_CONFIG"); cfgPath != "" {
+		if loaded, err := verification.LoadValidatorAnalyzerConfig(cfgPath); err != nil {
+			slog.Warn("verification: failed to load analyzer config, using default",
+				"path", cfgPath, "err", err)
+		} else {
+			analyzerCfg = loaded
+		}
+	}
+	validatorAnalyzers, err := analyzerRegistry.ValidatorAnalyzers(analyzerCfg)
+	if err != nil {
+		slog.Warn("verification: failed to resolve validator analyzers, using default",
+			"err", err)
+		analyzerCfg = verification.DefaultBootstrapConfig()
+		validatorAnalyzers, _ = analyzerRegistry.ValidatorAnalyzers(analyzerCfg)
+	}
+	_ = validatorAnalyzers // consumed by autovalidator in prompt 05
+	slog.Info("verification: analyzer registry ready",
+		"families", len(analyzerRegistry.ListFamilies()),
+		"configured_analyzers", len(analyzerCfg.Families),
+	)
 
 	// Start the auto-validator AFTER the finalization handler, sync handler,
 	// and vote handler are all wired. If the auto-validator starts before the

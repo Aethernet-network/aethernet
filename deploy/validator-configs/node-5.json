@@ -1,0 +1,1 @@
+{"families":[{"family":"statistical_structural","analyzer":"statistical_structural/statistical:v1"},{"family":"embedding_similarity","analyzer":"embedding_similarity/embedding:v1"}]}
