@@ -2019,11 +2019,30 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		analyzerCfg = verification.DefaultBootstrapConfig()
 		validatorAnalyzers, _ = analyzerRegistry.ValidatorAnalyzers(analyzerCfg)
 	}
-	_ = validatorAnalyzers // consumed by autovalidator in prompt 05
 	slog.Info("verification: analyzer registry ready",
 		"families", len(analyzerRegistry.ListFamilies()),
 		"configured_analyzers", len(analyzerCfg.Families),
 	)
+
+	// Wire the MultiVoter into the autovalidator. The MultiVoter needs:
+	// - the resolved analyzers (from the registry)
+	// - the task verification store (for round lookup)
+	// - the publisher (for emitting vote events)
+	// - the signing keypair and validator ID
+	if stack.autoVal != nil && tvStore != nil && len(validatorAnalyzers) > 0 {
+		mv := autovalidator.NewMultiVoter(
+			validatorAnalyzers,
+			tvStore,
+			pub,
+			stack.kp,
+			agentID,
+			func() int64 { return time.Now().Unix() },
+		)
+		stack.autoVal.SetMultiVoter(mv)
+		slog.Info("verification: multi-voter wired into autovalidator",
+			"analyzer_count", len(validatorAnalyzers),
+		)
+	}
 
 	// Start the auto-validator AFTER the finalization handler, sync handler,
 	// and vote handler are all wired. If the auto-validator starts before the

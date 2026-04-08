@@ -44,16 +44,19 @@ func ApplyVoteToRound(
 		return AggregationResult{}, ErrRoundNotOpen
 	}
 
-	// Check for duplicate or equivocation.
+	// Check for duplicate or equivocation. Keyed on (ValidatorID, AnalyzerFamily)
+	// because a validator running multiple families correctly emits one vote per
+	// family. Equivocation is same validator + same family with different verdict
+	// or score.
 	for _, existing := range round.Votes {
-		if existing.ValidatorID == vote.ValidatorID {
+		if existing.ValidatorID == vote.ValidatorID && existing.AnalyzerFamily == vote.AnalyzerFamily {
 			if existing.Verdict == vote.Verdict && existing.ScoreBP == vote.ScoreBP {
 				return AggregationResult{DuplicateVote: true}, nil
 			}
 			return AggregationResult{EquivocationDetected: true},
-				fmt.Errorf("%w: validator %s voted %s/%d then %s/%d for round %s",
+				fmt.Errorf("%w: validator %s family %s voted %s/%d then %s/%d for round %s",
 					ErrEquivocation,
-					vote.ValidatorID,
+					vote.ValidatorID, vote.AnalyzerFamily,
 					existing.Verdict, existing.ScoreBP,
 					vote.Verdict, vote.ScoreBP,
 					round.RoundID,

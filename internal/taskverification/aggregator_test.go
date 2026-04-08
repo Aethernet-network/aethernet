@@ -179,6 +179,56 @@ func TestApplyVote_StakeWeighting(t *testing.T) {
 	}
 }
 
+func TestApplyVote_SameValidatorDifferentFamilies(t *testing.T) {
+	r := makeOpenRound()
+	vote1 := makeVote("v1", VerdictPass, 7500, 300, "llm_semantic")
+	vote2 := makeVote("v1", VerdictPass, 6500, 300, "heuristic")
+	res1, err := ApplyVoteToRound(r, vote1)
+	if err != nil || !res1.Applied {
+		t.Fatalf("first vote should be applied: %v", err)
+	}
+	res2, err := ApplyVoteToRound(r, vote2)
+	if err != nil {
+		t.Fatalf("same validator, different family should NOT be equivocation: %v", err)
+	}
+	if !res2.Applied {
+		t.Error("second vote (different family) should be applied")
+	}
+	if len(r.Votes) != 2 {
+		t.Errorf("Votes len = %d; want 2", len(r.Votes))
+	}
+	if r.PassWeight != 600 {
+		t.Errorf("PassWeight = %d; want 600 (both votes count)", r.PassWeight)
+	}
+	if r.DistinctPassFamilies() != 2 {
+		t.Errorf("DistinctPassFamilies = %d; want 2", r.DistinctPassFamilies())
+	}
+}
+
+func TestApplyVote_SameValidatorSameFamilyDifferentVerdict(t *testing.T) {
+	r := makeOpenRound()
+	vote1 := makeVote("v1", VerdictPass, 7500, 300, "llm_semantic")
+	vote2 := makeVote("v1", VerdictFail, 3000, 300, "llm_semantic")
+	_, _ = ApplyVoteToRound(r, vote1)
+	_, err := ApplyVoteToRound(r, vote2)
+	if !errors.Is(err, ErrEquivocation) {
+		t.Fatalf("same validator+family, different verdict should be equivocation: %v", err)
+	}
+}
+
+func TestApplyVote_SameValidatorSameFamilySameVerdict(t *testing.T) {
+	r := makeOpenRound()
+	vote := makeVote("v1", VerdictPass, 7500, 300, "llm_semantic")
+	_, _ = ApplyVoteToRound(r, vote)
+	res, err := ApplyVoteToRound(r, vote)
+	if err != nil {
+		t.Fatalf("duplicate should not error: %v", err)
+	}
+	if !res.DuplicateVote {
+		t.Error("should be marked as duplicate")
+	}
+}
+
 func TestRecordPostFinalizationVote(t *testing.T) {
 	r := makeOpenRound()
 	r.State = RoundStateFinalizedAccept

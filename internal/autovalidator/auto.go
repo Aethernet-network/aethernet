@@ -44,6 +44,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/settlement"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
+	"github.com/Aethernet-network/aethernet/internal/taskverification"
 	"github.com/Aethernet-network/aethernet/internal/verification"
 )
 
@@ -170,6 +171,15 @@ type AutoValidator struct {
 	// VerificationVote for. Prevents duplicate vote emission on every tick.
 	voted map[event.EventID]struct{}
 
+	// multiVoter is the multi-validator voting path (prompt 05). When set,
+	// processSubmittedTasks runs configured analyzers and emits per-family
+	// TaskVerificationVote events instead of unilaterally settling.
+	// When nil, falls back to the legacy single-validator path.
+	multiVoter *MultiVoter
+
+	// multiVoterVoted tracks (taskID) that this validator has already
+	// processed via the multi-voter path. Prevents re-scoring on each tick.
+	multiVoterVoted map[string]struct{}
 }
 
 // NewAutoValidator creates an AutoValidator that polls engine every interval
@@ -183,6 +193,7 @@ func NewAutoValidator(engine *ocs.Engine, validatorID crypto.AgentID, interval t
 		taskStaleness:        10 * time.Second,
 		disputeReviewTimeout: 10 * time.Minute,
 		voted:                make(map[event.EventID]struct{}),
+		multiVoterVoted:      make(map[string]struct{}),
 	}
 }
 
@@ -319,6 +330,13 @@ func (av *AutoValidator) SetKeyPair(kp *crypto.KeyPair) {
 	av.kp = kp
 }
 
+// SetMultiVoter wires the multi-validator voting path. When set,
+// processSubmittedTasks emits per-family TaskVerificationVote events
+// instead of unilaterally settling via the legacy single-validator path.
+func (av *AutoValidator) SetMultiVoter(mv *MultiVoter) {
+	av.multiVoter = mv
+}
+
 // verifyEvidence dispatches to the VerificationService when wired, falls back
 // to the VerifierRegistry, and finally falls back to the default keyword
 // verifier. This is the single call-site for all evidence assessment in the
@@ -422,6 +440,22 @@ func (av *AutoValidator) processSubmittedTasks() {
 			)
 			continue
 		}
+
+		// Multi-validator path: when MultiVoter is wired, emit per-family
+		// TaskVerificationVote events instead of unilaterally settling.
+		// The legacy single-validator path below is only reached when
+		// multiVoter is nil (safety fallback or test mode).
+		if av.multiVoter != nil {
+			if _, done := av.multiVoterVoted[task.ID]; done {
+				continue // already processed this task via multi-voter
+			}
+			av.processSubmittedTaskMultiVoter(task)
+			av.multiVoterVoted[task.ID] = struct{}{}
+			continue
+		}
+
+		// LEGACY PATH (single-validator) — deprecated in prompt 05.
+		// Will be removed in prompt 09 after end-to-end verification.
 
 		// Structural pre-check: log garbage submissions but let the existing
 		// evidence scoring pipeline make the final decision. The structural
@@ -656,6 +690,77 @@ func (av *AutoValidator) processExpiredClaims() {
 //
 // If no score is stored (e.g. dispute raised before auto-validation ran), the
 // verifier is called again with the task's evidence fields.
+// processSubmittedTaskMultiVoter handles a single submitted task via the
+// multi-validator path: looks up the verification round, builds the analysis
+// input, and calls MultiVoter.ScoreAndVote to emit per-family votes.
+func (av *AutoValidator) processSubmittedTaskMultiVoter(task *tasks.Task) {
+	if av.multiVoter == nil || av.multiVoter.rounds == nil {
+		return
+	}
+
+	// Look up the verification round for this submission.
+	submitEventID := event.EventID(task.SubmitEventID)
+	if submitEventID == "" {
+		slog.Debug("auto-validator: multi-voter skipping task — no SubmitEventID",
+			"task_id", task.ID)
+		return
+	}
+
+	round, err := av.multiVoter.rounds.LoadRoundBySubmissionEvent(
+		context.Background(), submitEventID)
+	if err != nil {
+		// Round not yet created by the round consumer — will retry next tick.
+		slog.Debug("auto-validator: multi-voter round not found, will retry",
+			"task_id", task.ID, "submit_event_id", submitEventID, "err", err)
+		// Don't add to multiVoterVoted — allow retry next tick.
+		delete(av.multiVoterVoted, task.ID)
+		return
+	}
+
+	if round.State != taskverification.RoundStateOpen {
+		slog.Debug("auto-validator: multi-voter round not open, skipping",
+			"task_id", task.ID, "round_id", round.RoundID, "state", round.State)
+		return
+	}
+
+	// Build the analysis input from the task.
+	ev := task.SubmittedEvidence
+	content := ""
+	if ev != nil {
+		content = ev.ResolveContent()
+	}
+	if content == "" && task.ResultContent != "" {
+		content = task.ResultContent
+	}
+
+	input := verification.AnalysisInput{
+		TaskID:            task.ID,
+		Category:          task.Category,
+		TaskTitle:         task.Title,
+		TaskDescription:   task.Description,
+		SubmissionContent: content,
+		EvidenceHash:      task.ResultHash,
+		SubmittedAt:       task.SubmittedAt,
+	}
+
+	result, err := av.multiVoter.ScoreAndVote(context.Background(), round, input)
+	if err != nil {
+		slog.Warn("auto-validator: multi-voter ScoreAndVote failed",
+			"task_id", task.ID, "err", err)
+		delete(av.multiVoterVoted, task.ID)
+		return
+	}
+
+	slog.Info("auto-validator: multi-voter completed",
+		"task_id", task.ID,
+		"round_id", round.RoundID,
+		"analyzers_run", result.AnalyzersRun,
+		"votes_emitted", result.VotesEmitted,
+		"votes_skipped", result.VotesSkipped,
+		"analyzers_failed", result.AnalyzersFailed,
+	)
+}
+
 func (av *AutoValidator) processDisputedTasks() {
 	disputed := av.taskMgr.Search(tasks.TaskStatusDisputed, "", 0)
 	now := time.Now().UnixNano()
