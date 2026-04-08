@@ -112,9 +112,6 @@ func (c *TaskVerificationRoundConsumer) Ready(_ context.Context, _ *event.Event,
 // Consume opens a TaskVerificationRound for the submitted task. Idempotent:
 // if a round already exists for this submission event ID, returns nil.
 func (c *TaskVerificationRoundConsumer) Consume(ctx context.Context, ev *event.Event) error {
-	slog.Info("task_verification_round: Consume entered",
-		"event_id", ev.ID, "event_type", ev.Type)
-
 	var payload struct {
 		TaskID    string `json:"task_id"`
 		ClaimerID string `json:"claimer_id"`

@@ -166,15 +166,7 @@ func (b *Bus) dispatch(item commitItem) {
 	b.mu.RUnlock()
 
 	for _, c := range consumers {
-		interested := c.Interested(item.Event)
-		if item.Event.Type == "TaskSubmitted" {
-			slog.Info("recognition: dispatch trace",
-				"consumer", c.Name(),
-				"event_type", item.Event.Type,
-				"interested", interested,
-				"event_id", item.Record.EventID)
-		}
-		if !interested {
+		if !c.Interested(item.Event) {
 			continue
 		}
 		b.processConsumer(c, item)
