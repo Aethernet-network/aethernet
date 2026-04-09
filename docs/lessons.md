@@ -195,6 +195,12 @@ Each lesson must be specific and actionable — a generic principle is not a les
 - **Right approach**: Add a content gate in `processSubmittedTaskMultiVoter`: if `content == ""`, skip and retry next tick. This ensures analyzers always score actual content, not empty strings.
 - **Why it matters**: Remote nodes produced score=0 with empty artifact hashes, overwhelming the pass votes from nodes that had the content. A 2200-word technical explainer scored 0 on 3 of 5 nodes because those nodes scored before the blob propagated.
 
+### Evidence blobs do not propagate to remote nodes
+- **Context**: Evidence blobs are stored in the FSStore BlobStore on the originating node. The BlobStore is a local filesystem store — there is no cross-node blob replication in the current codebase. Remote nodes' `/data/blobs/` directories are empty.
+- **Consequence**: Remote validators cannot score task submissions because the evidence content (ResultContent, SubmittedEvidence) is only available on the node that received the HTTP submission. The multi-voter's blob retry mechanism correctly re-attempts the fetch, but the fetch always fails because the blob was never replicated.
+- **Impact on multi-validator consensus**: Only the originating node can score. With a 5-node testnet, pass weight from 1 node (20%) never reaches the 66.67% supermajority threshold. All rounds expire as disputes.
+- **Required fix**: Implement cross-node blob replication. Options: (a) piggyback blobs in the Fast Path body plane alongside DAG events, (b) implement a separate blob sync protocol, or (c) include the full content in the DAG event payload (increases event size but guarantees propagation). This is prerequisite infrastructure for multi-validator scoring.
+
 ### Slashing is best-effort from the consumer's perspective
 - **Context**: The slashing evaluator runs after settlement in the consensus consumer. If it fails, the settlement is already applied and the consensus event is already on the DAG.
 - **Right approach**: Log slashing failures but do not fail the consumer. Settlement and consensus are the critical path; slashing is a guardrail that can be retried.
