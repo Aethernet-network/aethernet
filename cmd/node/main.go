@@ -2231,6 +2231,19 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			stack.blobSyncEngine = blobEngine
 			slog.Info("blobsync: engine wired and started", "workers", 4)
 
+			// BlobDemandConsumer — bridges recognition fabric to BlobSync.
+			// Extracts BlobRefs from committed events, checks local store,
+			// and enqueues fetches for missing blobs. Always-ready, idempotent,
+			// non-blocking (per lessons 0e6d8cc, 1cfb8ed).
+			blobRegistry := blobsync.NewBlobRefRegistry()
+			blobsync.RegisterBootstrapExtractors(blobRegistry)
+			demandConsumer := blobsync.NewBlobDemandConsumer(blobRegistry, subStore, blobEngine)
+			if err := commitBus.Register(demandConsumer); err != nil {
+				slog.Error("blobsync: failed to register demand consumer", "err", err)
+			} else {
+				slog.Info("blobsync: demand consumer registered on commit bus")
+			}
+
 			slog.Info("trajectory + evidence blob service wired", "blob_dir", blobDir)
 		}
 		if stack.discoveryEngine != nil {
