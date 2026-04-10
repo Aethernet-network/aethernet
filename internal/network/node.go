@@ -243,6 +243,14 @@ type Node struct {
 	// TaskSubmitted events, and receivers verify + store them before completion.
 	blobStore nodeBlobStore
 
+	// blobQueryHandler routes incoming MsgBlobQuery messages to BlobTransport.
+	blobQueryHandler func(peerID string, payload []byte)
+	// blobQueryResponseHandler routes incoming MsgBlobQueryResponse messages.
+	blobQueryResponseHandler func(peerID string, payload []byte)
+	// blobFetchResponseHandler routes incoming MsgBlobResponse to BlobTransport
+	// for pending fetch requests (separate from the existing body-completion path).
+	blobFetchResponseHandler func(peerID string, payload []byte)
+
 	// overload tracks the node's current load level for backpressure signaling.
 	overload OverloadState
 
@@ -666,6 +674,67 @@ func (n *Node) SetBlobStore(bs nodeBlobStore) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.blobStore = bs
+}
+
+// SetBlobQueryHandler registers a handler for incoming MsgBlobQuery messages.
+// Called by BlobTransport to handle discovery queries.
+func (n *Node) SetBlobQueryHandler(fn func(peerID string, payload []byte)) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.blobQueryHandler = fn
+}
+
+// SetBlobQueryResponseHandler registers a handler for incoming MsgBlobQueryResponse.
+func (n *Node) SetBlobQueryResponseHandler(fn func(peerID string, payload []byte)) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.blobQueryResponseHandler = fn
+}
+
+// SetBlobFetchResponseHandler registers a handler for incoming MsgBlobResponse
+// messages routed to BlobTransport (separate from body-completion path).
+func (n *Node) SetBlobFetchResponseHandler(fn func(peerID string, payload []byte)) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.blobFetchResponseHandler = fn
+}
+
+// SendToPeerByID sends a typed message to a specific peer identified by their
+// agent ID string. Used by BlobTransport for directed blob requests.
+func (n *Node) SendToPeerByID(peerID string, msgType MessageType, payload []byte) error {
+	n.mu.RLock()
+	peer, ok := n.peers[crypto.AgentID(peerID)]
+	n.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("network: peer %s not connected", peerID)
+	}
+	return peer.Send(Message{Type: msgType, Payload: payload})
+}
+
+// BroadcastToN sends a typed message to up to fanout random peers.
+// Returns the agent IDs of peers the message was sent to.
+func (n *Node) BroadcastToN(msgType MessageType, payload []byte, fanout int) ([]string, error) {
+	n.mu.RLock()
+	peers := make([]*Peer, 0, len(n.peers))
+	for _, p := range n.peers {
+		peers = append(peers, p)
+	}
+	n.mu.RUnlock()
+
+	if fanout > len(peers) {
+		fanout = len(peers)
+	}
+
+	var sent []string
+	for i := 0; i < fanout && i < len(peers); i++ {
+		p := peers[i]
+		if err := p.Send(Message{Type: msgType, Payload: payload}); err == nil {
+			p.mu.RLock()
+			sent = append(sent, string(p.AgentID))
+			p.mu.RUnlock()
+		}
+	}
+	return sent, nil
 }
 
 // BroadcastVote sends a signed MsgVote to all currently connected peers.
@@ -1351,6 +1420,31 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 	case MsgBlobResponse:
 		// Fallback blob response: verify and store.
 		n.handleBlobResponse(peer, msg.Payload)
+		// Also route to BlobTransport for pending fetch requests.
+		n.mu.RLock()
+		bfh := n.blobFetchResponseHandler
+		n.mu.RUnlock()
+		if bfh != nil {
+			bfh(string(peer.AgentID), msg.Payload)
+		}
+
+	case MsgBlobQuery:
+		// BlobSync discovery: peer asking "do you have this blob?"
+		n.mu.RLock()
+		bqh := n.blobQueryHandler
+		n.mu.RUnlock()
+		if bqh != nil {
+			bqh(string(peer.AgentID), msg.Payload)
+		}
+
+	case MsgBlobQueryResponse:
+		// BlobSync discovery response: peer saying "yes/no I have it."
+		n.mu.RLock()
+		bqrh := n.blobQueryResponseHandler
+		n.mu.RUnlock()
+		if bqrh != nil {
+			bqrh(string(peer.AgentID), msg.Payload)
+		}
 
 	case MsgRepairRequest:
 		// Targeted repair: peer needs specific missing events.

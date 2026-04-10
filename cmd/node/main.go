@@ -42,6 +42,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/assurance"
 	"github.com/Aethernet-network/aethernet/internal/autovalidator"
 	"github.com/Aethernet-network/aethernet/internal/blobstore"
+	"github.com/Aethernet-network/aethernet/internal/blobsync"
 	"github.com/Aethernet-network/aethernet/internal/canary"
 	"github.com/Aethernet-network/aethernet/internal/cloudmap"
 	"github.com/Aethernet-network/aethernet/internal/config"
@@ -327,6 +328,7 @@ type nodeStack struct {
 	protoClient     *protocol.Client
 	lifecycleReducer *validatorlifecycle.Reducer
 	commitBus        *recognition.Bus
+	blobSyncEngine   *blobsync.BlobSyncEngine
 }
 
 // taskManagerSource adapts *tasks.TaskManager to the router.TaskSource interface,
@@ -2195,6 +2197,40 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			stack.taskMgr.SetEvidenceBlobFetcher(func(hash string) ([]byte, error) {
 				return blobStore.Get(context.Background(), hash)
 			})
+
+			// BlobSync — cross-node blob replication engine.
+			subStore := blobstore.NewSubscribableStore(blobStore)
+			reputation := blobsync.NewBlobServingReputation()
+			hintCache := blobsync.NewHolderHintCache(1024)
+
+			// PeerSender adapter: bridges blobsync → network.Node without circular imports.
+			peerSender := blobsync.NewNodePeerSender(
+				string(stack.kp.AgentID()),
+				func(peerID string, msgType string, payload []byte) error {
+					return node.SendToPeerByID(peerID, network.MessageType(msgType), payload)
+				},
+				func(msgType string, payload []byte, fanout int) ([]string, error) {
+					return node.BroadcastToN(network.MessageType(msgType), payload, fanout)
+				},
+			)
+
+			transport := blobsync.NewBlobTransport(peerSender, reputation)
+			blobEngine := blobsync.NewBlobSyncEngine(subStore, transport, hintCache, 4)
+
+			// Route incoming blob messages to transport handlers.
+			node.SetBlobFetchResponseHandler(transport.HandleBlobResponse)
+			node.SetBlobQueryResponseHandler(transport.HandleBlobQueryResponse)
+			node.SetBlobQueryHandler(func(peerID string, payload []byte) {
+				transport.HandleBlobQuery(peerID, payload, func(hash string) bool {
+					has, _ := blobStore.Has(context.Background(), hash)
+					return has
+				})
+			})
+
+			blobEngine.Start()
+			stack.blobSyncEngine = blobEngine
+			slog.Info("blobsync: engine wired and started", "workers", 4)
+
 			slog.Info("trajectory + evidence blob service wired", "blob_dir", blobDir)
 		}
 		if stack.discoveryEngine != nil {
@@ -2382,6 +2418,9 @@ func stopStack(node *network.Node, stack *nodeStack) {
 	}
 	if stack.replayRunner != nil {
 		stack.replayRunner.Stop()
+	}
+	if stack.blobSyncEngine != nil {
+		stack.blobSyncEngine.Stop()
 	}
 	if stack.autoVal != nil {
 		stack.autoVal.Stop()

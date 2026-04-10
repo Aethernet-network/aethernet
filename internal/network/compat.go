@@ -168,6 +168,7 @@ func IsV2Message(msgType MessageType) bool {
 	switch msgType {
 	case MsgEventHeader, MsgFrontier, MsgWindowDigest, MsgCheckpoint,
 		MsgEventBody, MsgBodyRequest, MsgBlobRequest, MsgBlobResponse,
+		MsgBlobQuery, MsgBlobQueryResponse,
 		MsgRepairRequest, MsgRepairResponse,
 		MsgHelloV2, MsgPeerStatus, MsgAckHint, MsgNackMissing, MsgOverloaded:
 		return true

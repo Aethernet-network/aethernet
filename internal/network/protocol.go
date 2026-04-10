@@ -37,6 +37,10 @@ const (
 	MsgBlobRequest     MessageType = "v2_blob_request"
 	MsgBlobResponse    MessageType = "v2_blob_response"
 
+	// BlobSync plane (discovery).
+	MsgBlobQuery         MessageType = "v2_blob_query"
+	MsgBlobQueryResponse MessageType = "v2_blob_query_response"
+
 	// Repair/proof plane.
 	MsgRepairRequest   MessageType = "v2_repair_request"
 	MsgRepairResponse  MessageType = "v2_repair_response"
@@ -137,6 +141,19 @@ type BlobResponse struct {
 // MaxBlobRequestsPerPeer caps concurrent outstanding blob requests to a
 // single peer to prevent unbounded request storms.
 const MaxBlobRequestsPerPeer = 5
+
+// BlobQuery is a discovery message: "do you have this blob?"
+// Sent to multiple peers (bounded fanout) to locate blob holders.
+type BlobQuery struct {
+	Hash [32]byte `json:"hash"`
+}
+
+// BlobQueryResponse is the affirmative reply to a BlobQuery.
+// Only sent if the responder actually has the blob locally.
+type BlobQueryResponse struct {
+	Hash    [32]byte `json:"hash"`
+	HasBlob bool     `json:"has_blob"`
+}
 
 // ── Repair/Proof Plane ───────────────────────────────────────────────────────
 
