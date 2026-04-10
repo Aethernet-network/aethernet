@@ -1,5 +1,7 @@
 # CLAUDE.md — AetherNet Protocol
 
+**Required reading at session start:** this file, `docs/design-principles.md`, `docs/lessons.md`.
+
 ## What This Project Is
 
 AetherNet is a production-grade Layer 1 blockchain protocol built on a causal DAG architecture, serving as the trust and settlement layer for the AI agent economy. Written in Go, the protocol verifies AI agent work and settles economic transactions through BFT consensus with compound verification. The northstar is creating an environment where AI and humanity improve synergistically through protocol-enforced accountability rather than model iteration.
