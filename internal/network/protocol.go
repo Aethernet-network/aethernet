@@ -45,6 +45,9 @@ const (
 	MsgRepairRequest   MessageType = "v2_repair_request"
 	MsgRepairResponse  MessageType = "v2_repair_response"
 
+	// RoundProgress control plane.
+	MsgProgressUpdate  MessageType = "v2_progress_update"
+
 	// Control plane.
 	MsgHelloV2         MessageType = "v2_hello"
 	MsgPeerStatus      MessageType = "v2_peer_status"

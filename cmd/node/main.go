@@ -25,6 +25,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -64,6 +65,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/network"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/recognition"
+	"github.com/Aethernet-network/aethernet/internal/roundprogress"
 	platformpkg "github.com/Aethernet-network/aethernet/internal/platform"
 	"github.com/Aethernet-network/aethernet/internal/protocol"
 	"github.com/Aethernet-network/aethernet/internal/ratelimit"
@@ -329,6 +331,7 @@ type nodeStack struct {
 	lifecycleReducer *validatorlifecycle.Reducer
 	commitBus        *recognition.Bus
 	blobSyncEngine   *blobsync.BlobSyncEngine
+	leaseEnforcer    *roundprogress.LeaseEnforcer
 }
 
 // taskManagerSource adapts *tasks.TaskManager to the router.TaskSource interface,
@@ -2245,6 +2248,49 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			}
 
 			slog.Info("trajectory + evidence blob service wired", "blob_dir", blobDir)
+
+			// RoundProgress — signed validator progress control plane.
+			// Persistent snapshot store backed by the same BadgerDB instance.
+			rpStore := roundprogress.NewBadgerSnapshotStore(stack.store.DB())
+			rpRateLimiter := roundprogress.NewRateLimiter(10)
+			rpAggregator := roundprogress.NewProgressAggregator(rpStore, rpRateLimiter)
+
+			// Wire incoming MsgProgressUpdate to the aggregator with signature verification.
+			node.SetProgressUpdateHandler(func(peerID string, payload []byte) {
+				var update roundprogress.ProgressUpdate
+				if err := json.Unmarshal(payload, &update); err != nil {
+					slog.Debug("roundprogress: invalid update", "peer", peerID, "err", err)
+					return
+				}
+				// Verify signature against claimed validator's public key.
+				if stack.validatorReg != nil {
+					val, valErr := stack.validatorReg.GetByAgentID(update.ValidatorID)
+					if valErr != nil {
+						slog.Debug("roundprogress: unknown validator", "validator", update.ValidatorID)
+						return
+					}
+					pubKey, _ := hex.DecodeString(val.AgentID)
+					if !roundprogress.VerifySignature(&update, pubKey) {
+						slog.Debug("roundprogress: signature verification failed",
+							"validator", update.ValidatorID, "round", update.RoundID)
+						return
+					}
+				}
+				nowUnix := time.Now().Unix()
+				if err := rpAggregator.Apply(&update, nowUnix); err != nil {
+					slog.Debug("roundprogress: update rejected",
+						"validator", update.ValidatorID,
+						"round", update.RoundID,
+						"err", err)
+				}
+			})
+
+			// LeaseEnforcer — background goroutine scanning for expired leases.
+			// Lifecycle managed by caller's signal wait loop (per lesson 1cfb8ed).
+			leaseEnforcer := roundprogress.NewLeaseEnforcer(rpStore, 5*time.Second, nil)
+			leaseEnforcer.Start()
+			stack.leaseEnforcer = leaseEnforcer
+			slog.Info("roundprogress: control plane wired")
 		}
 		if stack.discoveryEngine != nil {
 			apiSrv.SetDiscoveryEngine(stack.discoveryEngine)
@@ -2431,6 +2477,9 @@ func stopStack(node *network.Node, stack *nodeStack) {
 	}
 	if stack.replayRunner != nil {
 		stack.replayRunner.Stop()
+	}
+	if stack.leaseEnforcer != nil {
+		stack.leaseEnforcer.Stop()
 	}
 	if stack.blobSyncEngine != nil {
 		stack.blobSyncEngine.Stop()

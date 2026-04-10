@@ -251,6 +251,10 @@ type Node struct {
 	// for pending fetch requests (separate from the existing body-completion path).
 	blobFetchResponseHandler func(peerID string, payload []byte)
 
+	// progressUpdateHandler routes incoming MsgProgressUpdate messages to
+	// the RoundProgress aggregator for validation and snapshot update.
+	progressUpdateHandler func(peerID string, payload []byte)
+
 	// overload tracks the node's current load level for backpressure signaling.
 	overload OverloadState
 
@@ -697,6 +701,14 @@ func (n *Node) SetBlobFetchResponseHandler(fn func(peerID string, payload []byte
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.blobFetchResponseHandler = fn
+}
+
+// SetProgressUpdateHandler registers a handler for incoming MsgProgressUpdate
+// messages. Called by the RoundProgress aggregator for validation and storage.
+func (n *Node) SetProgressUpdateHandler(fn func(peerID string, payload []byte)) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.progressUpdateHandler = fn
 }
 
 // SendToPeerByID sends a typed message to a specific peer identified by their
@@ -1444,6 +1456,15 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		n.mu.RUnlock()
 		if bqrh != nil {
 			bqrh(string(peer.AgentID), msg.Payload)
+		}
+
+	case MsgProgressUpdate:
+		// RoundProgress control plane: validator progress update.
+		n.mu.RLock()
+		puh := n.progressUpdateHandler
+		n.mu.RUnlock()
+		if puh != nil {
+			puh(string(peer.AgentID), msg.Payload)
 		}
 
 	case MsgRepairRequest:

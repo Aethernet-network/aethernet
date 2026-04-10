@@ -170,6 +170,7 @@ func IsV2Message(msgType MessageType) bool {
 		MsgEventBody, MsgBodyRequest, MsgBlobRequest, MsgBlobResponse,
 		MsgBlobQuery, MsgBlobQueryResponse,
 		MsgRepairRequest, MsgRepairResponse,
+		MsgProgressUpdate,
 		MsgHelloV2, MsgPeerStatus, MsgAckHint, MsgNackMissing, MsgOverloaded:
 		return true
 	default:
