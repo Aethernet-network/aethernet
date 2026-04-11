@@ -208,8 +208,18 @@ func (r *TaskVerificationRound) DistinctPassFamilies() int {
 // DistinctParticipatingFamilies returns the number of distinct analyzer
 // families that have contributed any vote (pass, fail, or abstain) to this
 // round. Used for the participation floor check.
+//
+// Computes from the Votes slice as the authoritative source, since the
+// AllParticipatingFamilies map may lose entries under concurrent vote
+// processing (read-then-write race on the round store).
 func (r *TaskVerificationRound) DistinctParticipatingFamilies() int {
-	return len(r.AllParticipatingFamilies)
+	families := make(map[string]bool)
+	for _, v := range r.Votes {
+		if v.AnalyzerFamily != "" {
+			families[v.AnalyzerFamily] = true
+		}
+	}
+	return len(families)
 }
 
 // ---------------------------------------------------------------------------
