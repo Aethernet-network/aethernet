@@ -334,6 +334,15 @@ type nodeStack struct {
 	leaseEnforcer    *roundprogress.LeaseEnforcer
 }
 
+// nodeProgressTransport adapts node.BroadcastToN for roundprogress.ProgressTransport.
+type nodeProgressTransport struct {
+	broadcastFn func(payload []byte) error
+}
+
+func (t *nodeProgressTransport) BroadcastProgressUpdate(payload []byte) error {
+	return t.broadcastFn(payload)
+}
+
 // taskManagerSource adapts *tasks.TaskManager to the router.TaskSource interface,
 // converting []*tasks.Task slices into []router.RoutableTask without importing
 // the tasks package from the router (which would create an import cycle).
@@ -2291,6 +2300,23 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			leaseEnforcer.Start()
 			stack.leaseEnforcer = leaseEnforcer
 			slog.Info("roundprogress: control plane wired")
+
+			// Wire ProgressEmitter and BlobSubscriber to AutoValidator.
+			if stack.autoVal != nil {
+				// ProgressTransport adapter: broadcasts via MsgProgressUpdate.
+				progressTransport := &nodeProgressTransport{
+					broadcastFn: func(payload []byte) error {
+						_, err := node.BroadcastToN(network.MsgProgressUpdate, payload, 50)
+						return err
+					},
+				}
+				progressEmitter := roundprogress.NewProgressEmitter(
+					string(agentID), stack.kp, progressTransport, rpAggregator,
+				)
+				stack.autoVal.SetProgressEmitter(progressEmitter)
+				stack.autoVal.SetBlobSubscriber(subStore)
+				slog.Info("autovalidator: progress emitter and blob subscriber wired")
+			}
 		}
 		if stack.discoveryEngine != nil {
 			apiSrv.SetDiscoveryEngine(stack.discoveryEngine)

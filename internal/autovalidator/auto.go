@@ -26,6 +26,8 @@ package autovalidator
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"log/slog"
 	"sync"
 	"time"
@@ -41,6 +43,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/replay"
+	"github.com/Aethernet-network/aethernet/internal/roundprogress"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
 	"github.com/Aethernet-network/aethernet/internal/settlement"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
@@ -76,6 +79,12 @@ type canaryEvalSource interface {
 // accepted when not available (falls back to verifier-only scoring).
 type canaryEvalRecorder interface {
 	Evaluate(c *canary.CanaryTask, actorID, role string, observedPass bool, observedChecks map[string]bool, observedOutput string) *canary.CalibrationSignal
+}
+
+// blobSubscriber abstracts the event-driven blob arrival notification.
+// *blobstore.SubscribableStore satisfies this interface.
+type blobSubscriber interface {
+	Subscribe(hash [32]byte) <-chan struct{}
 }
 
 // AutoValidator periodically checks for pending OCS items and auto-approves
@@ -180,6 +189,15 @@ type AutoValidator struct {
 	// multiVoterVoted tracks (taskID) that this validator has already
 	// processed via the multi-voter path. Prevents re-scoring on each tick.
 	multiVoterVoted map[string]struct{}
+
+	// progressEmitter is optional. When set, emits signed RoundProgress updates
+	// at each phase of verification work: Acknowledged → FetchingBlob → Analyzing
+	// → ScorePending → VoteEmitted. Nil on non-validator nodes.
+	progressEmitter *roundprogress.ProgressEmitter
+
+	// blobSub is optional. When set, enables event-driven blob arrival
+	// notification via Subscribe instead of polling. Used by processWithBlobWait.
+	blobSub blobSubscriber
 }
 
 // NewAutoValidator creates an AutoValidator that polls engine every interval
@@ -335,6 +353,19 @@ func (av *AutoValidator) SetKeyPair(kp *crypto.KeyPair) {
 // instead of unilaterally settling via the legacy single-validator path.
 func (av *AutoValidator) SetMultiVoter(mv *MultiVoter) {
 	av.multiVoter = mv
+}
+
+// SetProgressEmitter wires the RoundProgress emitter for signed progress
+// updates during verification work. Nil-safe — if not set, progress emission
+// is silently skipped.
+func (av *AutoValidator) SetProgressEmitter(e *roundprogress.ProgressEmitter) {
+	av.progressEmitter = e
+}
+
+// SetBlobSubscriber wires the event-driven blob arrival notification.
+// When set, processSubmittedTaskMultiVoter uses Subscribe instead of polling.
+func (av *AutoValidator) SetBlobSubscriber(bs blobSubscriber) {
+	av.blobSub = bs
 }
 
 // verifyEvidence dispatches to the VerificationService when wired, falls back
@@ -501,12 +532,32 @@ func (av *AutoValidator) processExpiredClaims() {
 //
 // If no score is stored (e.g. dispute raised before auto-validation ran), the
 // verifier is called again with the task's evidence fields.
+// emitProgress is a nil-safe helper for emitting round progress updates.
+// Does nothing if the emitter is not wired (non-validator node).
+func (av *AutoValidator) emitProgress(
+	roundID, family string,
+	phase roundprogress.ProgressPhase,
+	generation uint64,
+	evidence [32]byte,
+	reasonCode uint16,
+	diagnostic string,
+) {
+	if av.progressEmitter == nil {
+		return
+	}
+	_ = av.progressEmitter.Emit(roundID, family, phase, generation, evidence, 0, reasonCode, diagnostic)
+}
+
 // processSubmittedTaskMultiVoter handles a single submitted task via the
 // multi-validator path: looks up the verification round, builds the analysis
 // input, and calls MultiVoter.ScoreAndVote to emit per-family votes.
-// processSubmittedTaskMultiVoter returns true if the task was successfully
-// processed (votes emitted or round already finalized). Returns false if
-// the task should be retried on the next tick (e.g., content not yet available).
+//
+// Emits RoundProgress updates at each phase: Acknowledged → FetchingBlob
+// (if blob missing) → Analyzing → ScorePending → VoteEmitted.
+//
+// Returns true if the task was dispatched (votes emitted, goroutine launched
+// for blob wait, or round not open). Returns false only if the task should
+// be retried on the next tick.
 func (av *AutoValidator) processSubmittedTaskMultiVoter(task *tasks.Task) bool {
 	if av.multiVoter == nil || av.multiVoter.rounds == nil {
 		return false
@@ -535,6 +586,18 @@ func (av *AutoValidator) processSubmittedTaskMultiVoter(task *tasks.Task) bool {
 		return true // terminal — don't retry
 	}
 
+	roundID := string(round.RoundID)
+	// TODO: per-family progress tracking. For v1, use "all" as the family
+	// since progress is emitted before we know which families will run.
+	progressFamily := "all"
+	var gen uint64 = 1
+
+	// Emit Acknowledged — we've found the round and are starting work.
+	// Evidence: hash of round ID for v1.
+	evidenceHash := sha256.Sum256([]byte(roundID + ":ack:" + itoa(gen)))
+	av.emitProgress(roundID, progressFamily, roundprogress.ProgressPhaseAcknowledged,
+		gen, evidenceHash, roundprogress.ReasonCodeStartingRound, "round found")
+
 	// Build the analysis input from the task.
 	ev := task.SubmittedEvidence
 	content := ""
@@ -549,9 +612,7 @@ func (av *AutoValidator) processSubmittedTaskMultiVoter(task *tasks.Task) bool {
 	// to the task yet. The blob might be in the local BlobStore (propagated
 	// after the initial fetchEvidenceBlob failed). Try to fetch and apply it.
 	if content == "" && task.EvidenceBodyHash != "" && av.taskMgr != nil {
-		// Re-trigger blob fetch via the TaskManager's evidence path.
 		av.taskMgr.RetryEvidenceBlobFetch(task.ID, task.EvidenceBodyHash)
-		// Re-read the task to see if content is now available.
 		if refreshed, err := av.taskMgr.Get(task.ID); err == nil {
 			if refreshed.SubmittedEvidence != nil {
 				content = refreshed.SubmittedEvidence.ResolveContent()
@@ -562,12 +623,141 @@ func (av *AutoValidator) processSubmittedTaskMultiVoter(task *tasks.Task) bool {
 		}
 	}
 
+	// If content is still missing and we have a blob hash + subscriber,
+	// dispatch to a goroutine that waits for the blob via Subscribe.
+	// This avoids blocking the sequential ticker loop.
+	if content == "" && task.EvidenceBodyHash != "" && av.blobSub != nil {
+		gen++
+		evidenceHash = sha256.Sum256([]byte(roundID + ":fetch:" + itoa(gen)))
+		av.emitProgress(roundID, progressFamily, roundprogress.ProgressPhaseFetchingBlob,
+			gen, evidenceHash, roundprogress.ReasonCodeFetchingEvidenceBlob,
+			"waiting for evidence blob")
+
+		// Spawn goroutine for subscribe-based wait. Return true to mark as
+		// dispatched — the goroutine handles the rest.
+		go av.processWithBlobWait(task, round, roundID, progressFamily, gen)
+		return true
+	}
+
 	if content == "" {
 		slog.Debug("auto-validator: multi-voter content empty after retry",
 			"task_id", task.ID, "evidence_ready", task.EvidenceReady,
 			"has_blob_hash", task.EvidenceBodyHash != "")
-		return false // retry next tick
+		return false // retry next tick (no blob hash or no subscriber)
 	}
+
+	// Content available — proceed with analysis and voting.
+	av.analyzeAndVote(task, round, content, roundID, progressFamily, gen)
+	return true
+}
+
+// processWithBlobWait waits for the evidence blob to arrive via Subscribe,
+// then proceeds with analysis and voting. Runs in its own goroutine so the
+// ticker loop is not blocked. No locks are held during the wait.
+func (av *AutoValidator) processWithBlobWait(
+	task *tasks.Task,
+	round *taskverification.TaskVerificationRound,
+	roundID, progressFamily string,
+	gen uint64,
+) {
+	// Parse the evidence blob hash.
+	var blobHash [32]byte
+	decoded, err := hex.DecodeString(task.EvidenceBodyHash)
+	if err != nil || len(decoded) != 32 {
+		gen++
+		evidenceHash := sha256.Sum256([]byte(roundID + ":fail:" + itoa(gen)))
+		av.emitProgress(roundID, progressFamily, roundprogress.ProgressPhaseFailed,
+			gen, evidenceHash, roundprogress.ReasonCodeBlobUnavailable,
+			"invalid evidence hash format")
+		return
+	}
+	copy(blobHash[:], decoded)
+
+	// Subscribe for event-driven blob arrival notification.
+	ch := av.blobSub.Subscribe(blobHash)
+
+	// Wait with bounded timeout (30s for consensus-blocking blobs).
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	select {
+	case <-ch:
+		// Blob arrived.
+		slog.Info("auto-validator: blob arrived via subscribe",
+			"task_id", task.ID, "hash", task.EvidenceBodyHash)
+	case <-ctx.Done():
+		// Timeout — abstain from this round.
+		gen++
+		evidenceHash := sha256.Sum256([]byte(roundID + ":abstain:" + itoa(gen)))
+		av.emitProgress(roundID, progressFamily, roundprogress.ProgressPhaseAbstained,
+			gen, evidenceHash, roundprogress.ReasonCodeBlobUnavailable,
+			"evidence blob fetch timeout")
+		slog.Warn("auto-validator: blob fetch timeout — abstaining",
+			"task_id", task.ID, "hash", task.EvidenceBodyHash,
+			"round_id", roundID)
+		return
+	case <-av.stop:
+		return // shutting down
+	}
+
+	// Blob arrived — re-trigger content application and re-read the task.
+	if av.taskMgr == nil {
+		gen++
+		evidenceHash := sha256.Sum256([]byte(roundID + ":fail:" + itoa(gen)))
+		av.emitProgress(roundID, progressFamily, roundprogress.ProgressPhaseFailed,
+			gen, evidenceHash, roundprogress.ReasonCodeAnalyzerFailure,
+			"no task manager to re-read task")
+		return
+	}
+	av.taskMgr.RetryEvidenceBlobFetch(task.ID, task.EvidenceBodyHash)
+	refreshed, err := av.taskMgr.Get(task.ID)
+	if err != nil {
+		gen++
+		evidenceHash := sha256.Sum256([]byte(roundID + ":fail:" + itoa(gen)))
+		av.emitProgress(roundID, progressFamily, roundprogress.ProgressPhaseFailed,
+			gen, evidenceHash, roundprogress.ReasonCodeAnalyzerFailure,
+			"task re-read failed after blob arrival")
+		return
+	}
+
+	content := ""
+	if refreshed.SubmittedEvidence != nil {
+		content = refreshed.SubmittedEvidence.ResolveContent()
+	}
+	if content == "" && refreshed.ResultContent != "" {
+		content = refreshed.ResultContent
+	}
+
+	// Content gate: even after blob arrival, verify content is non-empty.
+	if content == "" {
+		gen++
+		evidenceHash := sha256.Sum256([]byte(roundID + ":fail:" + itoa(gen)))
+		av.emitProgress(roundID, progressFamily, roundprogress.ProgressPhaseFailed,
+			gen, evidenceHash, roundprogress.ReasonCodeBlobUnavailable,
+			"content still empty after blob arrival")
+		slog.Warn("auto-validator: content empty after blob arrived",
+			"task_id", task.ID, "hash", task.EvidenceBodyHash)
+		return
+	}
+
+	// Proceed with analysis and voting.
+	av.analyzeAndVote(refreshed, round, content, roundID, progressFamily, gen)
+}
+
+// analyzeAndVote runs the analysis pipeline and emits votes, with progress
+// updates at each phase. Extracted from processSubmittedTaskMultiVoter so
+// both the synchronous and goroutine paths share the same logic.
+func (av *AutoValidator) analyzeAndVote(
+	task *tasks.Task,
+	round *taskverification.TaskVerificationRound,
+	content, roundID, progressFamily string,
+	gen uint64,
+) {
+	// Emit Analyzing.
+	gen++
+	evidenceHash := sha256.Sum256([]byte(roundID + ":analyze:" + itoa(gen)))
+	av.emitProgress(roundID, progressFamily, roundprogress.ProgressPhaseAnalyzing,
+		gen, evidenceHash, roundprogress.ReasonCodeAnalyzerRunning, "running analyzers")
 
 	input := verification.AnalysisInput{
 		TaskID:            task.ID,
@@ -579,22 +769,54 @@ func (av *AutoValidator) processSubmittedTaskMultiVoter(task *tasks.Task) bool {
 		SubmittedAt:       task.SubmittedAt,
 	}
 
+	// Emit ScorePending before vote emission.
+	gen++
+	evidenceHash = sha256.Sum256([]byte(roundID + ":score:" + itoa(gen)))
+	av.emitProgress(roundID, progressFamily, roundprogress.ProgressPhaseScorePending,
+		gen, evidenceHash, roundprogress.ReasonCodeScoring, "scoring complete, emitting votes")
+
 	result, err := av.multiVoter.ScoreAndVote(context.Background(), round, input)
 	if err != nil {
+		gen++
+		evidenceHash = sha256.Sum256([]byte(roundID + ":fail:" + itoa(gen)))
+		av.emitProgress(roundID, progressFamily, roundprogress.ProgressPhaseFailed,
+			gen, evidenceHash, roundprogress.ReasonCodeAnalyzerFailure,
+			"ScoreAndVote failed: "+err.Error())
 		slog.Warn("auto-validator: multi-voter ScoreAndVote failed",
 			"task_id", task.ID, "err", err)
-		return false // retry
+		return
 	}
+
+	// Emit VoteEmitted — terminal.
+	gen++
+	evidenceHash = sha256.Sum256([]byte(roundID + ":vote:" + itoa(gen)))
+	av.emitProgress(roundID, progressFamily, roundprogress.ProgressPhaseVoteEmitted,
+		gen, evidenceHash, roundprogress.ReasonCodeVoteEmitted,
+		"votes emitted")
 
 	slog.Info("auto-validator: multi-voter completed",
 		"task_id", task.ID,
-		"round_id", round.RoundID,
+		"round_id", roundID,
 		"analyzers_run", result.AnalyzersRun,
 		"votes_emitted", result.VotesEmitted,
 		"votes_skipped", result.VotesSkipped,
 		"analyzers_failed", result.AnalyzersFailed,
 	)
-	return true // successfully processed
+}
+
+// itoa converts uint64 to string without importing strconv.
+func itoa(n uint64) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
 }
 
 func (av *AutoValidator) processDisputedTasks() {

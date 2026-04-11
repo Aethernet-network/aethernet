@@ -1,5 +1,7 @@
 package roundprogress
 
+import "sync"
+
 // SnapshotStore persists the latest RoundProgressSnapshot per
 // (roundID, validatorID, analyzerFamily). The snapshot IS the authoritative
 // state — no replay needed on restart.
@@ -18,7 +20,9 @@ type SnapshotStore interface {
 }
 
 // MemorySnapshotStore is an in-memory SnapshotStore for testing.
+// Thread-safe via sync.Mutex.
 type MemorySnapshotStore struct {
+	mu    sync.Mutex
 	snaps map[string]*RoundProgressSnapshot // key: "roundID:validatorID:family"
 }
 
@@ -34,6 +38,8 @@ func snapKey(roundID, validatorID, family string) string {
 }
 
 func (s *MemorySnapshotStore) Get(roundID, validatorID, family string) (*RoundProgressSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	snap, ok := s.snaps[snapKey(roundID, validatorID, family)]
 	if !ok {
 		return nil, nil
@@ -43,6 +49,8 @@ func (s *MemorySnapshotStore) Get(roundID, validatorID, family string) (*RoundPr
 }
 
 func (s *MemorySnapshotStore) GetAllForRound(roundID string) ([]*RoundProgressSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	prefix := roundID + ":"
 	var result []*RoundProgressSnapshot
 	for k, v := range s.snaps {
@@ -55,12 +63,16 @@ func (s *MemorySnapshotStore) GetAllForRound(roundID string) ([]*RoundProgressSn
 }
 
 func (s *MemorySnapshotStore) Put(snap *RoundProgressSnapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	cp := *snap
 	s.snaps[snapKey(snap.RoundID, snap.ValidatorID, snap.AnalyzerFamily)] = &cp
 	return nil
 }
 
 func (s *MemorySnapshotStore) DeleteRound(roundID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	prefix := roundID + ":"
 	for k := range s.snaps {
 		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {

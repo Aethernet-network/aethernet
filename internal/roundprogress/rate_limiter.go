@@ -13,8 +13,9 @@ type RateLimiter struct {
 }
 
 // NewRateLimiter creates a rate limiter with the given minimum interval.
+// Pass 0 for the default (10s). Pass -1 to disable rate limiting (always allow).
 func NewRateLimiter(intervalSec int64) *RateLimiter {
-	if intervalSec <= 0 {
+	if intervalSec == 0 {
 		intervalSec = defaultRateLimitIntervalSec
 	}
 	return &RateLimiter{
@@ -35,6 +36,9 @@ func (rl *RateLimiter) Allow(roundID, validatorID, family string, nowUnix int64)
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
+	if rl.intervalSec < 0 {
+		return true // rate limiting disabled
+	}
 	lastUpdate, ok := rl.last[key]
 	if ok && (nowUnix-lastUpdate) < rl.intervalSec {
 		return false
