@@ -39,7 +39,8 @@ type TaskVerificationRound struct {
 	PassWeight            uint64            `json:"pass_weight"`
 	FailWeight            uint64            `json:"fail_weight"`
 	AbstainWeight         uint64            `json:"abstain_weight"`
-	ParticipatingFamilies map[string]uint64 `json:"participating_families,omitempty"` // family_id → accumulated pass-weight
+	ParticipatingFamilies    map[string]uint64 `json:"participating_families,omitempty"`     // family_id → accumulated pass-weight
+	AllParticipatingFamilies map[string]bool   `json:"all_participating_families,omitempty"` // family_id → true if any vote (pass/fail/abstain) received
 
 	// Vote records (for audit and finalization)
 	Votes []TaskVerificationVoteRecord `json:"votes,omitempty"`
@@ -128,8 +129,9 @@ func OpenRound(p OpenRoundParams) (*TaskVerificationRound, error) {
 		DeadlineUnix:          p.Now + p.DeadlineSeconds,
 		ExtendedUntilUnix:     0,
 		State:                 RoundStateOpen,
-		ParticipatingFamilies: make(map[string]uint64),
-		Votes:                 []TaskVerificationVoteRecord{},
+		ParticipatingFamilies:    make(map[string]uint64),
+		AllParticipatingFamilies: make(map[string]bool),
+		Votes:                   []TaskVerificationVoteRecord{},
 	}, nil
 }
 
@@ -201,6 +203,13 @@ func (r *TaskVerificationRound) DistinctPassFamilies() int {
 		}
 	}
 	return count
+}
+
+// DistinctParticipatingFamilies returns the number of distinct analyzer
+// families that have contributed any vote (pass, fail, or abstain) to this
+// round. Used for the participation floor check.
+func (r *TaskVerificationRound) DistinctParticipatingFamilies() int {
+	return len(r.AllParticipatingFamilies)
 }
 
 // ---------------------------------------------------------------------------

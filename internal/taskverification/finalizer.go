@@ -25,13 +25,19 @@ type FinalizerConfig struct {
 	// Default 6667 = 66.67%.
 	BFTThresholdBP uint64
 
-	// AcceptanceScoreThreshold is the minimum median score (in basis points)
-	// for acceptance. Default 6000 = 0.60.
+	// AcceptanceScoreThreshold is preserved for observability but is
+	// NO LONGER USED as an acceptance gate. Cross-family median scores
+	// are a category error — see docs/lessons.md.
 	AcceptanceScoreThreshold uint64
 
 	// DiversityFloor is the minimum number of distinct analyzer families
 	// that must contribute pass-weight for acceptance.
 	DiversityFloor int
+
+	// ParticipationFloor is the minimum number of distinct analyzer families
+	// that must contribute any vote (pass/fail/abstain) for acceptance.
+	// Per Grok adversarial review (April 2026).
+	ParticipationFloor int
 
 	// EnforceFailDiversity when true requires fail-side diversity for
 	// rejection. Default false.
@@ -42,8 +48,9 @@ type FinalizerConfig struct {
 func DefaultFinalizerConfig() FinalizerConfig {
 	return FinalizerConfig{
 		BFTThresholdBP:           6667,
-		AcceptanceScoreThreshold: 6000,
+		AcceptanceScoreThreshold: 6000, // observability only, not an acceptance gate
 		DiversityFloor:           2,
+		ParticipationFloor:       DefaultParticipationFloor,
 		EnforceFailDiversity:     false,
 	}
 }
@@ -75,11 +82,17 @@ func (f *Finalizer) Evaluate(
 	// BFT threshold: ceil(totalActiveWeight * BFTThresholdBP / 10000)
 	threshold := ceilMulDiv(totalActiveWeight, f.config.BFTThresholdBP, 10000)
 
-	// 1. Check accept: supermajority pass + diversity + score threshold.
+	// 1. Check accept: supermajority pass + diversity floor + participation floor.
+	// Median score is NOT an acceptance gate (category error — see docs/lessons.md).
+	// Score values are preserved in the consensus payload as observability metadata.
 	if round.PassWeight >= threshold {
-		median := MedianScore(round.Votes, VerdictPass)
+		participationFloor := f.config.ParticipationFloor
+		if participationFloor == 0 {
+			participationFloor = DefaultParticipationFloor
+		}
 		if round.DistinctPassFamilies() >= f.config.DiversityFloor &&
-			median >= f.config.AcceptanceScoreThreshold {
+			round.DistinctParticipatingFamilies() >= participationFloor {
+			median := MedianScore(round.Votes, VerdictPass) // observability only
 			return FinalizationDecision{
 				ShouldFinalize: true,
 				Verdict:        VerdictPass,
@@ -87,8 +100,8 @@ func (f *Finalizer) Evaluate(
 				Reason:         ReasonAcceptSupermajority,
 			}
 		}
-		// Supermajority pass but diversity or score insufficient — don't
-		// finalize yet, wait for more diverse votes or deadline.
+		// Supermajority pass but diversity or participation insufficient —
+		// don't finalize yet, wait for more votes or deadline.
 	}
 
 	// 2. Check reject: supermajority fail.

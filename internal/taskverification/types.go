@@ -14,9 +14,17 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	// DefaultAcceptanceThresholdBP is the minimum score (in basis points)
-	// for a round to finalize as accepted. 6000 = 0.60.
+	// DefaultAcceptanceThresholdBP is preserved for backward compatibility
+	// in round construction but is NO LONGER USED as an acceptance gate.
+	// Cross-family median scores are a category error — see docs/lessons.md.
+	// Score values remain in the consensus payload as observability metadata.
 	DefaultAcceptanceThresholdBP = 6000
+
+	// DefaultParticipationFloor is the minimum number of distinct analyzer
+	// families that must contribute any vote (pass/fail/abstain) for a round
+	// to finalize as accept. Adjusted for small validator sets via
+	// EffectiveParticipationFloor. Per Grok adversarial review (April 2026).
+	DefaultParticipationFloor = 3
 
 	// DefaultRoundDeadlineSeconds is the initial deadline for a verification
 	// round before extension. Set to 180s to account for evidence blob
@@ -32,6 +40,20 @@ const (
 	// families that must contribute pass-weight for acceptance.
 	DefaultDiversityFloor = 2
 )
+
+// EffectiveParticipationFloor returns the participation floor for a given
+// network, accounting for the total number of configured analyzer families.
+// On small networks where fewer than 3 families are configured, the floor
+// is reduced to (totalConfigured - 1) with a hard minimum of 2.
+func EffectiveParticipationFloor(totalConfiguredFamilies int) int {
+	if totalConfiguredFamilies >= DefaultParticipationFloor {
+		return DefaultParticipationFloor
+	}
+	if totalConfiguredFamilies-1 >= 2 {
+		return totalConfiguredFamilies - 1
+	}
+	return 2
+}
 
 // ---------------------------------------------------------------------------
 // RoundID

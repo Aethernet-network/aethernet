@@ -315,10 +315,11 @@ func (d *DeadlineChecker) buildRoundState(
 		staleCount = 0
 	}
 
-	// OutcomeSecured: check if current durable votes satisfy BFT threshold
-	// + diversity floor + median score, such that remaining votes cannot
-	// change the outcome. Computed from durable votes only (authority boundary).
-	outcomeSecured := d.isOutcomeSecured(round, totalWeight)
+	// OutcomeSecured: the outcome would still hold even if every validator
+	// with an active (non-stale, non-terminal) progress lease voted the
+	// worst case for the currently-leading verdict. Computed from durable
+	// votes only (authority boundary). Per Grok hardening 4.
+	outcomeSecured := d.isOutcomeSecured(round, totalWeight, activeLeaseCount)
 
 	backstopUnix := round.OpenedAtUnix + d.backstopSeconds
 
@@ -335,15 +336,64 @@ func (d *DeadlineChecker) buildRoundState(
 }
 
 // isOutcomeSecured checks if the current durable votes make the outcome
-// mathematically certain regardless of remaining votes. Uses the existing
-// finalizer's BFT threshold, diversity floor, and median score checks.
+// mathematically certain even in the worst case: every validator with an
+// active progress lease votes the opposite direction.
 //
-// This is conservative: it only returns true when the existing votes ALREADY
-// satisfy all finalization criteria. It does not speculate about future votes.
-func (d *DeadlineChecker) isOutcomeSecured(round *TaskVerificationRound, totalWeight uint64) bool {
-	// Check if the finalizer would finalize right now.
+// For pass: assume every active-lease validator votes fail with max weight.
+// Does pass still meet BFT threshold + diversity + participation?
+//
+// For fail: assume every active-lease validator votes pass with max weight.
+// Does fail still meet BFT threshold?
+//
+// Per Grok adversarial review hardening 4 (April 2026).
+func (d *DeadlineChecker) isOutcomeSecured(round *TaskVerificationRound, totalWeight uint64, activeLeaseCount int) bool {
+	// First check: does the finalizer say we can finalize right now?
 	decision := d.finalizer.Evaluate(round, totalWeight, d.clock())
-	return decision.ShouldFinalize && decision.Reason != ReasonDeadlineExpiredDispute
+	if !decision.ShouldFinalize || decision.Reason == ReasonDeadlineExpiredDispute {
+		return false
+	}
+
+	// If there are no active leases, the simple check suffices.
+	if activeLeaseCount == 0 {
+		return true
+	}
+
+	// Strengthened check: would the verdict survive worst-case active-lease votes?
+	// Each active-lease validator has weight (totalWeight / totalValidators approx).
+	// In the worst case for pass: they all vote fail.
+	// Worst-case additional fail weight:
+	worstCaseWeight := uint64(0)
+	if d.activeCountFn != nil {
+		totalValidators := d.activeCountFn()
+		if totalValidators > 0 {
+			perValidator := totalWeight / uint64(totalValidators)
+			worstCaseWeight = perValidator * uint64(activeLeaseCount)
+		}
+	}
+
+	threshold := ceilMulDiv(totalWeight, d.finalizer.config.BFTThresholdBP, 10000)
+
+	if decision.Verdict == VerdictPass {
+		// Worst case for pass: active-lease validators all vote fail.
+		worstCaseFailWeight := round.FailWeight + worstCaseWeight
+		// If fail weight could reach BFT threshold, pass is not secured.
+		if worstCaseFailWeight >= threshold {
+			return false
+		}
+		// Pass is secured: even worst-case fail can't overturn it.
+		return true
+	}
+
+	if decision.Verdict == VerdictFail {
+		// Worst case for fail: active-lease validators all vote pass.
+		worstCasePassWeight := round.PassWeight + worstCaseWeight
+		if worstCasePassWeight >= threshold {
+			return false
+		}
+		return true
+	}
+
+	return false
 }
 
 func (d *DeadlineChecker) applyFinalization(ctx context.Context, round *TaskVerificationRound, decision FinalizationDecision, now int64) {

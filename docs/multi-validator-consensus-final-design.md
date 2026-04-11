@@ -89,10 +89,10 @@ Four bootstrap families with structurally independent failure modes:
 **Default**: 2 distinct analyzer families must contribute pass-weight for acceptance.
 
 **Enforced at finalization** by the Finalizer's `Evaluate()`:
-- Accept requires: PassWeight ≥ BFT threshold AND `DistinctPassFamilies() ≥ DiversityFloor` AND `MedianScore(pass votes) ≥ AcceptanceScoreThreshold`
+- Accept requires: PassWeight ≥ BFT threshold (over full active validator set) AND `DistinctPassFamilies() ≥ DiversityFloor` (default 2) AND `DistinctParticipatingFamilies() ≥ ParticipationFloor` (default 3, adjusted for small networks) AND `OutcomeStillSecuredAgainstActiveLeases()` for early finalization. Score values are non-consensus metadata — see `docs/lessons.md` on cross-family score thresholds.
 - Reject does NOT require diversity (configurable via `EnforceFailDiversity`, default false)
 
-**Family tracking**: `ParticipatingFamilies` map accumulates pass-weight per family. `DistinctPassFamilies()` counts families with weight > 0.
+**Family tracking**: `ParticipatingFamilies` map accumulates pass-weight per family. `AllParticipatingFamilies` map tracks all families with any vote. `DistinctPassFamilies()` counts pass-only families; `DistinctParticipatingFamilies()` counts all participating families.
 
 ## 5. v4.1 Economic Model
 

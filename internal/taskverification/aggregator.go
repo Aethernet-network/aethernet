@@ -67,6 +67,14 @@ func ApplyVoteToRound(
 	// Record the vote.
 	round.Votes = append(round.Votes, vote)
 
+	// Track all participating families regardless of verdict (for participation floor).
+	if vote.AnalyzerFamily != "" {
+		if round.AllParticipatingFamilies == nil {
+			round.AllParticipatingFamilies = make(map[string]bool)
+		}
+		round.AllParticipatingFamilies[vote.AnalyzerFamily] = true
+	}
+
 	// Update weight counters.
 	switch vote.Verdict {
 	case VerdictPass:
