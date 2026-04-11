@@ -1,6 +1,6 @@
 # CLAUDE.md — AetherNet Protocol
 
-**Required reading at session start:** this file, `docs/design-principles.md`, `docs/lessons.md`.
+**Required reading at session start:** this file, `docs/design-principles.md`, `docs/lessons.md`, `docs/handoff-2026-04-11-blobsync-accept-path.md`.
 
 ## What This Project Is
 
