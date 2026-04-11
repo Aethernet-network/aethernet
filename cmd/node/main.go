@@ -65,6 +65,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/network"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/recognition"
+	"github.com/Aethernet-network/aethernet/internal/roundpolicy"
 	"github.com/Aethernet-network/aethernet/internal/roundprogress"
 	platformpkg "github.com/Aethernet-network/aethernet/internal/platform"
 	"github.com/Aethernet-network/aethernet/internal/protocol"
@@ -1773,6 +1774,10 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	// can access it. Initialized inside the taskMgr guard.
 	var tvStore *taskverification.BadgerStore
 
+	// tvDeadlineChecker is declared outside the taskMgr block so the progress
+	// store can be wired later (BlobSync prompt 06).
+	var tvDeadlineChecker *taskverification.DeadlineChecker
+
 	// Task lifecycle consumer — TaskPosted/Claimed/Submitted/Approved/Disputed.
 	if stack.taskMgr != nil {
 		taskConsumer := recognition.NewTaskLifecycleConsumer(stack.taskMgr)
@@ -1903,7 +1908,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 
 		// Deadline checker — scans open rounds for expiry, extends or
 		// finalizes as appropriate.
-		tvDeadlineChecker := taskverification.NewDeadlineChecker(
+		tvDeadlineChecker = taskverification.NewDeadlineChecker(
 			tvStore, tvFinalizer, pub, stack.kp, agentID,
 			activeWeightFn,
 			5*time.Second,
@@ -2300,6 +2305,23 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			leaseEnforcer.Start()
 			stack.leaseEnforcer = leaseEnforcer
 			slog.Info("roundprogress: control plane wired")
+
+			// Wire progress-aware finalization to the deadline checker.
+			if tvDeadlineChecker != nil {
+				policyEvaluator := roundpolicy.NewRoundPolicyEvaluator()
+				activeCountFn := func() int {
+					if stack.lifecycleReducer == nil {
+						return 5 // testnet fallback
+					}
+					snap := stack.lifecycleReducer.Snapshot()
+					if snap == nil {
+						return 5
+					}
+					return snap.ActiveSeatCount
+				}
+				tvDeadlineChecker.SetProgressAware(policyEvaluator, rpStore, activeCountFn, 300)
+				slog.Info("deadline_checker: progress-aware finalization wired")
+			}
 
 			// Wire ProgressEmitter and BlobSubscriber to AutoValidator.
 			if stack.autoVal != nil {
