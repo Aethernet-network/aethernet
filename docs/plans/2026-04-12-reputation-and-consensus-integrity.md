@@ -701,7 +701,7 @@ All of the following must be true before the workstream is marked complete:
 11. Unit test verifies compaction preserves aggregate consistency across the retention boundary (resolves ChatGPT round 2 success criteria addition).
 12. Unit test verifies the observability tier-3 endpoint does not expose per-validator data (resolves ChatGPT round 2 success criteria addition).
 13. Integration test drives a real `TaskVerificationConsensus` event through the full pipeline and asserts `EvidenceStore` mutates correctly, including the canonical write boundary.
-14. Integration test verifies projection registry startup health check correctly fails a node that has a Canonical projection with empty state after 3 epochs of eligibility.
+14. Integration test verifies projection registry startup health check correctly fails a node that has a Canonical projection with empty state more than 3 epochs after registration (consistent with PR-5 invariant language).
 15. Live testnet: deploy to all 5 nodes via the 6-step protocol in CLAUDE.md.
 16. Live testnet: produce a first accept verdict and verify `EvidenceStore` contains non-empty state on every node.
 17. Live testnet: produce a second accept verdict and verify two validators with different agreement histories receive different W tier assignments.
