@@ -53,6 +53,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
 	"github.com/Aethernet-network/aethernet/internal/discovery"
+	"github.com/Aethernet-network/aethernet/internal/epoch"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/eventbus"
@@ -64,6 +65,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/metrics"
 	"github.com/Aethernet-network/aethernet/internal/network"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
+	"github.com/Aethernet-network/aethernet/internal/projections"
 	"github.com/Aethernet-network/aethernet/internal/recognition"
 	"github.com/Aethernet-network/aethernet/internal/roundpolicy"
 	"github.com/Aethernet-network/aethernet/internal/roundprogress"
@@ -333,6 +335,8 @@ type nodeStack struct {
 	commitBus        *recognition.Bus
 	blobSyncEngine   *blobsync.BlobSyncEngine
 	leaseEnforcer    *roundprogress.LeaseEnforcer
+	roundCounter     *epoch.RoundCounter
+	projReg          *projections.ProjectionRegistry
 }
 
 // nodeProgressTransport adapts node.BroadcastToN for roundprogress.ProgressTransport.
@@ -1906,6 +1910,41 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		tvConsensusConsumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, tvSettler, tvSlashingEvaluator, tvCalibrationStore)
 		_ = commitBus.Register(tvConsensusConsumer)
 
+		// --- Projection registry (step 2) ---
+		// The round counter is the protocol's epoch clock: it increments on
+		// every finalized TaskVerificationConsensus event and derives the
+		// current epoch as total/EpochLength. The registry's epochFn is a
+		// lazy closure so the counter can be registered as a projection in
+		// the same pass. Per step-2 plan §D1.
+		roundCounter, rcErr := epoch.NewRoundCounter(stack.store.DB())
+		if rcErr != nil {
+			slog.Error("epoch: round counter init failed", "err", rcErr)
+			os.Exit(1)
+		}
+		stack.roundCounter = roundCounter
+		_ = commitBus.Register(epoch.NewRoundCountConsumer(roundCounter))
+
+		projReg := projections.NewProjectionRegistry(func() uint64 {
+			return roundCounter.CurrentEpoch()
+		})
+		stack.projReg = projReg
+
+		// Register every known projection. MustRegister panics on any
+		// PR-1..PR-4 validation failure, which is the correct response at
+		// startup — a malformed entry is a programming error, not a runtime
+		// condition.
+		projReg.MustRegister(epoch.RoundCounterProjection(roundCounter))
+		projReg.MustRegister(taskverification.CalibrationProjection(tvCalibrationStore))
+		projReg.MustRegister(taskverification.RoundStoreProjection(tvStore))
+		projReg.MustRegister(escrow.Projection(stack.escrowMgr))
+		projReg.MustRegister(ledger.TransferLedgerProjection(stack.transfer))
+		projReg.MustRegister(ocs.PendingProjection(stack.engine))
+		if stack.reputationMgr != nil {
+			projReg.MustRegister(reputation.Projection(stack.reputationMgr))
+		}
+		// BlobServingReputation and RoundProgress registered at their
+		// construction sites below (they don't exist at this point).
+
 		// Deadline checker — scans open rounds for expiry, extends or
 		// finalizes as appropriate.
 		tvDeadlineChecker = taskverification.NewDeadlineChecker(
@@ -2218,6 +2257,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			// BlobSync — cross-node blob replication engine.
 			subStore := blobstore.NewSubscribableStore(blobStore)
 			reputation := blobsync.NewBlobServingReputation()
+			if stack.projReg != nil {
+				stack.projReg.MustRegister(blobsync.ServingReputationProjection(reputation))
+			}
 			hintCache := blobsync.NewHolderHintCache(1024)
 
 			// PeerSender adapter: bridges blobsync → network.Node without circular imports.
@@ -2266,6 +2308,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			// RoundProgress — signed validator progress control plane.
 			// Persistent snapshot store backed by the same BadgerDB instance.
 			rpStore := roundprogress.NewBadgerSnapshotStore(stack.store.DB())
+			if stack.projReg != nil {
+				stack.projReg.MustRegister(roundprogress.Projection(rpStore))
+			}
 			rpRateLimiter := roundprogress.NewRateLimiter(10)
 			rpAggregator := roundprogress.NewProgressAggregator(rpStore, rpRateLimiter)
 
@@ -2792,9 +2837,39 @@ func cmdStart() {
 	// the Fast Path pipeline. Broadcast them now so peers receive them.
 	broadcastLocalEvents(stack.dag, node, agentID)
 
+	// Startup projection-registry health check. Per step-2 plan §D6 the
+	// periodic check fires on epoch boundaries, not on a wall clock; the
+	// startup check establishes the initial cached status for /v1/status.
+	runProjectionHealthCheck(stack)
+
 	runLoop(agentID, stack.dag, node, stack.engine, stack.supply, stack.bus)
 	stopStack(node, stack)
 	slog.Info("node stopped cleanly")
+}
+
+// runProjectionHealthCheck evaluates the projection registry and logs any
+// non-OK Canonical entries at Warn. Called at startup and from the
+// epoch-boundary hook (commit 5). Nil-safe so tests that do not wire the
+// registry remain clean.
+func runProjectionHealthCheck(stack *nodeStack) {
+	if stack == nil || stack.projReg == nil {
+		return
+	}
+	status := stack.projReg.HealthCheck(context.Background())
+	slog.Info("projections: health check",
+		"overall", status.Overall.String(),
+		"entry_count", len(status.Checks),
+	)
+	for _, c := range status.Checks {
+		switch c.Health {
+		case projections.HealthEmpty, projections.HealthProbeFailed:
+			slog.Warn("projections: entry health degraded",
+				"name", c.Name, "status", c.Health.String(), "reason", c.Reason)
+		default:
+			slog.Info("projections: entry registered",
+				"name", c.Name, "status", c.Health.String())
+		}
+	}
 }
 
 // broadcastLocalEvents sends all DAG events authored by this node to
@@ -2868,6 +2943,8 @@ func cmdConnect() {
 		os.Exit(1)
 	}
 	fmt.Printf("Connected  : %s  (%s)\n\n", peer.AgentID, *peerAddr)
+
+	runProjectionHealthCheck(stack)
 
 	runLoop(agentID, stack.dag, node, stack.engine, stack.supply, stack.bus)
 	stopStack(node, stack)
