@@ -293,3 +293,19 @@ Application state derives from the DAG, not the other way around. TaskManager, O
 - **Why it matters**: Heuristic design is a trade-off between false positives and false negatives. Erring on false positives makes the lint hostile; erring on false negatives creates gaps. The right balance is: tight heuristic + explicit acknowledgment of what it does and doesn't catch + trusted human complement for the residual. The principle (plan §9.3) is broader than the heuristic by design. The lint is an approximation, and it must advertise itself as one — both in code and in the diagnostic output a contributor sees when it fires. Step-3 negative tests verify the heuristic catches what it claims to catch; code review catches what the heuristic explicitly defers.
 
 ---
+
+## Cross-Node Convergence Verification
+
+### 2026-04-11 first-observed accept verdict — verification status
+
+**Context**: On 2026-04-11T17:52:30Z (commit `dcc7c17`), AetherNet produced its first observed accept verdict on task `52c5b97a555f8d83dbcee9751ea73d62`. The verdict was correct (`pass / accept_supermajority`). The worker was paid 73,000 µAET as designed. The math on each node was internally consistent. The result was celebrated as empirical validation of the compound-verification thesis at machine speed.
+
+**Wrong**: Verifying a settlement only on the originating node and confirming "worker received the right amount" is not sufficient evidence that the protocol maintained consensus integrity for that task. Different nodes can apply the same canonical event differently and still produce internally-consistent single-node ledger state.
+
+**Right**: Cross-node ledger convergence on the 2026-04-11 task was incomplete. We did not detect this until the cross-node consistency audit on 2026-04-XX (commit `7077d18`). The audit found that this task is one of three historical tasks (along with `a2b588c8…` and `b2f96181…`) where different nodes ended up with different ledger state for the same canonical settlement. The verdict was correct; the cross-node application of that verdict diverged.
+
+**Why**: Principle 13 says "tests are necessary, live testnet is sufficient." That principle now reads with an asterisk: live testnet is sufficient *only if the verification looks at all nodes, not just the originating node*. The 2026-04-11 verification looked at the originating node and saw correct behavior; it did not check that all 5 nodes converged on the same ledger state. That is a lesson about the depth of testnet verification, not about the verdict's correctness or about the protocol's underlying soundness.
+
+The forward correction is: every settlement-affecting verification from this point forward must explicitly verify cross-node convergence as part of its pass criteria. The settlement-consensus-integrity-fix workstream (F3-B fix, locked v3-final at the time of this entry) closes the underlying mechanism that caused the divergence and adds cross-node convergence to its success criteria.
+
+---
