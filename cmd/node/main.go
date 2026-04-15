@@ -1903,7 +1903,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			tvReputationStore,
 			tvCalibrationStore,
 		)
-		tvConsensusConsumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, tvSettler, tvSlashingEvaluator)
+		tvConsensusConsumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, tvSettler, tvSlashingEvaluator, tvCalibrationStore)
 		_ = commitBus.Register(tvConsensusConsumer)
 
 		// Deadline checker — scans open rounds for expiry, extends or

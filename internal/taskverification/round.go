@@ -49,6 +49,15 @@ type TaskVerificationRound struct {
 	FinalVerdict      Verdict `json:"final_verdict"`
 	FinalScoreBP      uint64  `json:"final_score_bp"`
 	FinalizationTime  int64   `json:"finalization_time,omitempty"`
+
+	// CalibrationApplied is set to true after the recognition-fabric
+	// consensus consumer applies per-family calibration increments for
+	// this round. Guards against double-apply on consensus-event replay.
+	// Per step-2 plan §D2: name the semantic state (CalibrationApplied),
+	// not the writer mechanism (Increment). Field is JSON-optional so
+	// rounds persisted before step 2 deserialize with zero-value false,
+	// which is correct — the first replay catches up and sets the flag.
+	CalibrationApplied bool `json:"calibration_applied,omitempty"`
 }
 
 // TaskVerificationVoteRecord captures a single validator's vote within a round.
@@ -292,6 +301,7 @@ func (r *TaskVerificationRound) Canonical() ([]byte, error) {
 		FinalVerdict:          r.FinalVerdict,
 		FinalScoreBP:          r.FinalScoreBP,
 		FinalizationTime:      r.FinalizationTime,
+		CalibrationApplied:    r.CalibrationApplied,
 	}
 
 	data, err := json.Marshal(proj)

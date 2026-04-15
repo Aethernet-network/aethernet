@@ -10,25 +10,34 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/settlement"
 	"github.com/Aethernet-network/aethernet/internal/taskverification"
+	"github.com/Aethernet-network/aethernet/internal/verification"
 )
 
 // TaskVerificationConsensusConsumer processes TaskVerificationConsensus
 // events from the DAG: applies round state for replay safety AND invokes
-// the v4.1 economic settlement (escrow release/refund/split).
+// the v4.1 economic settlement (escrow release/refund/split) AND advances
+// per-(category, family) calibration counters.
 type TaskVerificationConsensusConsumer struct {
-	rounds    taskverification.Store
-	settler   *settlement.VerificationConsensusSettler  // nil if settlement not wired
-	slashing  *taskverification.SlashingEvaluator       // nil if slashing not wired
+	rounds      taskverification.Store
+	settler     *settlement.VerificationConsensusSettler // nil if settlement not wired
+	slashing    *taskverification.SlashingEvaluator      // nil if slashing not wired
+	calibration *taskverification.CalibrationStore       // nil if calibration not wired
 }
 
 // NewTaskVerificationConsensusConsumer creates a consensus consumer.
-// settler and slashing may be nil (graceful degradation).
+// settler, slashing, and calibration may be nil (graceful degradation).
 func NewTaskVerificationConsensusConsumer(
 	rounds taskverification.Store,
 	settler *settlement.VerificationConsensusSettler,
 	slashing *taskverification.SlashingEvaluator,
+	calibration *taskverification.CalibrationStore,
 ) *TaskVerificationConsensusConsumer {
-	return &TaskVerificationConsensusConsumer{rounds: rounds, settler: settler, slashing: slashing}
+	return &TaskVerificationConsensusConsumer{
+		rounds:      rounds,
+		settler:     settler,
+		slashing:    slashing,
+		calibration: calibration,
+	}
 }
 
 // Name returns the unique consumer identifier.
@@ -107,8 +116,51 @@ func (c *TaskVerificationConsensusConsumer) Consume(_ context.Context, ev *event
 		}
 	}
 
-	// Evaluate slashing after settlement. Best-effort — failures log but
-	// do not block the pipeline.
+	// Apply calibration counters once per round per distinct analyzer family
+	// that contributed any vote. Idempotency-guarded by round.CalibrationApplied
+	// so a replay does not double-count. Must run BEFORE slashing so that
+	// SlashingEvaluator.EvaluateRound reads the post-increment calibration
+	// state when deciding whether a (category, family) tuple is calibrated.
+	// Per step-2 plan §D2.
+	if c.calibration != nil && !round.CalibrationApplied {
+		allSucceeded := true
+		seen := make(map[string]struct{}, len(round.Votes))
+		for _, vote := range round.Votes {
+			fam := vote.AnalyzerFamily
+			if fam == "" {
+				continue
+			}
+			if _, already := seen[fam]; already {
+				continue
+			}
+			seen[fam] = struct{}{}
+			if _, err := c.calibration.Increment(context.Background(), round.Category, verification.FamilyID(fam)); err != nil {
+				slog.Warn("task_verification_consensus: calibration increment failed",
+					"round_id", payload.RoundID,
+					"category", round.Category,
+					"family", fam,
+					"err", err,
+				)
+				// Don't set CalibrationApplied; next replay retries.
+				// Note: partially-applied increments before the failure will
+				// double-count on retry, since Increment is non-idempotent.
+				// This is within §8's conservative margin; noted for future
+				// hardening.
+				allSucceeded = false
+				break
+			}
+		}
+		if allSucceeded {
+			round.CalibrationApplied = true
+			if err := c.rounds.SaveRound(context.Background(), round); err != nil {
+				slog.Warn("task_verification_consensus: save round after calibration failed",
+					"round_id", payload.RoundID, "err", err)
+			}
+		}
+	}
+
+	// Evaluate slashing after settlement and calibration. Best-effort —
+	// failures log but do not block the pipeline.
 	if c.slashing != nil {
 		actions := c.slashing.EvaluateRound(context.Background(), round)
 		for _, action := range actions {
