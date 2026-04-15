@@ -18,6 +18,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
+	"github.com/Aethernet-network/aethernet/internal/projections"
 	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 	"github.com/Aethernet-network/aethernet/internal/registry"
 	"github.com/Aethernet-network/aethernet/internal/reputation"
@@ -164,6 +165,82 @@ func TestHandleStatus(t *testing.T) {
 	}
 	if status.SupplyRatio < 1.0 {
 		t.Errorf("supply_ratio should be >= 1.0, got %f", status.SupplyRatio)
+	}
+}
+
+// TestHandleStatus_ProjectionsField exercises the step-2 §D5 wiring:
+// /v1/status includes a "projections" summary when SetProjectionHealth
+// has been called, and ?verbose=true adds the per-entry Checks list.
+func TestHandleStatus_ProjectionsField(t *testing.T) {
+	setup := newTestSetup(t)
+
+	// Without SetProjectionHealth, the field is omitted.
+	resp := get(t, setup.ts, "/v1/status")
+	var bare struct {
+		Projections *map[string]interface{} `json:"projections"`
+	}
+	decodeJSON(t, resp, &bare)
+	if bare.Projections != nil {
+		t.Fatalf("projections must be omitted when not set: got %v", *bare.Projections)
+	}
+
+	// Simulate a SetProjectionHealth call.
+	setup.srv.SetProjectionHealth(projections.HealthStatus{
+		Overall: projections.HealthOK,
+		Checks: []projections.ProjectionStatus{
+			{Name: "A", Health: projections.HealthOK},
+			{Name: "B", Health: projections.HealthNotYetEligible, Reason: "within window"},
+			{Name: "C", Health: projections.HealthAdvisory, Reason: "advisory"},
+		},
+	})
+
+	// Default: summary only.
+	resp = get(t, setup.ts, "/v1/status")
+	var summary struct {
+		Projections struct {
+			Overall string         `json:"overall"`
+			Counts  map[string]int `json:"counts"`
+			Checks  []interface{}  `json:"checks,omitempty"`
+		} `json:"projections"`
+	}
+	decodeJSON(t, resp, &summary)
+	if summary.Projections.Overall != "OK" {
+		t.Fatalf("overall: want OK, got %q", summary.Projections.Overall)
+	}
+	if summary.Projections.Counts["OK"] != 1 {
+		t.Fatalf("counts[OK]: want 1, got %d", summary.Projections.Counts["OK"])
+	}
+	if summary.Projections.Counts["NotYetEligible"] != 1 {
+		t.Fatalf("counts[NotYetEligible]: want 1, got %d", summary.Projections.Counts["NotYetEligible"])
+	}
+	if summary.Projections.Counts["Advisory"] != 1 {
+		t.Fatalf("counts[Advisory]: want 1, got %d", summary.Projections.Counts["Advisory"])
+	}
+	if len(summary.Projections.Checks) != 0 {
+		t.Fatalf("summary must omit Checks: got %d entries", len(summary.Projections.Checks))
+	}
+
+	// Verbose: Checks populated.
+	resp = get(t, setup.ts, "/v1/status?verbose=true")
+	var verbose struct {
+		Projections struct {
+			Overall string `json:"overall"`
+			Checks  []struct {
+				Name   string `json:"name"`
+				Health string `json:"health"`
+				Reason string `json:"reason,omitempty"`
+			} `json:"checks"`
+		} `json:"projections"`
+	}
+	decodeJSON(t, resp, &verbose)
+	if len(verbose.Projections.Checks) != 3 {
+		t.Fatalf("verbose Checks: want 3, got %d", len(verbose.Projections.Checks))
+	}
+	// Assertion on one entry to verify the round-trip.
+	for _, c := range verbose.Projections.Checks {
+		if c.Name == "B" && c.Health != "NotYetEligible" {
+			t.Fatalf("entry B: health want NotYetEligible, got %s", c.Health)
+		}
 	}
 }
 

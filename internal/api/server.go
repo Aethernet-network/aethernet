@@ -72,6 +72,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/network"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/platform"
+	"github.com/Aethernet-network/aethernet/internal/projections"
 	"github.com/Aethernet-network/aethernet/internal/ratelimit"
 	svcregistry "github.com/Aethernet-network/aethernet/internal/registry"
 	"github.com/Aethernet-network/aethernet/internal/replay"
@@ -210,6 +211,13 @@ type Server struct {
 	// Reputation tracking — optional; set via SetReputationManager after construction.
 	// When nil, reputation endpoints return 501 and completion recording is skipped.
 	reputationMgr *reputation.ReputationManager
+
+	// Projection registry health — optional; set via SetProjectionHealth.
+	// Populated by runProjectionHealthCheck in cmd/node/main.go at startup
+	// and on each epoch advance. Read by handleStatus for /v1/status.
+	// Guarded by projHealthMu for concurrent read/write. Per step-2 plan §D5.
+	projHealthMu sync.RWMutex
+	projHealth   *projections.HealthStatus
 
 	// Discovery engine — optional; set via SetDiscoveryEngine after construction.
 	// When nil, GET /v1/discover returns 501.
@@ -717,6 +725,29 @@ func (s *Server) SetTaskManager(tm *tasks.TaskManager, e *escrow.Escrow) {
 // SetReputationManager wires reputation tracking into the server. Call before
 // Start. When nil, GET /v1/agents/{id}/reputation and /v1/reputation/rankings
 // return 501, and task approval/dispute does not record reputation events.
+// SetProjectionHealth caches the latest projection-registry HealthCheck
+// result so handleStatus can serve it without invoking probes in the HTTP
+// hot path. Called at startup and on each epoch advance by
+// cmd/node/main.go. Safe for concurrent use with handleStatus reads.
+// Per step-2 plan §D5.
+func (s *Server) SetProjectionHealth(status projections.HealthStatus) {
+	s.projHealthMu.Lock()
+	defer s.projHealthMu.Unlock()
+	s.projHealth = &status
+}
+
+// projectionHealthSnapshot returns a copy of the cached HealthStatus, or
+// nil if none has been set. Safe for concurrent use.
+func (s *Server) projectionHealthSnapshot() *projections.HealthStatus {
+	s.projHealthMu.RLock()
+	defer s.projHealthMu.RUnlock()
+	if s.projHealth == nil {
+		return nil
+	}
+	copy := *s.projHealth
+	return &copy
+}
+
 func (s *Server) SetReputationManager(rm *reputation.ReputationManager) {
 	s.reputationMgr = rm
 }
@@ -1107,12 +1138,28 @@ type balanceResponse struct {
 }
 
 type statusResponse struct {
-	AgentID     string  `json:"agent_id"`
-	Version     string  `json:"version"`
-	Peers       int     `json:"peers"`
-	DAGSize     int     `json:"dag_size"`
-	OCSPending  int     `json:"ocs_pending"`
-	SupplyRatio float64 `json:"supply_ratio"`
+	AgentID     string                     `json:"agent_id"`
+	Version     string                     `json:"version"`
+	Peers       int                        `json:"peers"`
+	DAGSize     int                        `json:"dag_size"`
+	OCSPending  int                        `json:"ocs_pending"`
+	SupplyRatio float64                    `json:"supply_ratio"`
+	Projections *projectionStatusResponse  `json:"projections,omitempty"`
+}
+
+// projectionStatusResponse carries the projection-registry HealthCheck
+// summary (default) or the full per-entry Checks list (when ?verbose=true).
+// Per step-2 plan §D5.
+type projectionStatusResponse struct {
+	Overall string                  `json:"overall"`
+	Counts  map[string]int          `json:"counts"`
+	Checks  []projectionCheckEntry  `json:"checks,omitempty"` // populated only when verbose
+}
+
+type projectionCheckEntry struct {
+	Name   string `json:"name"`
+	Health string `json:"health"`
+	Reason string `json:"reason,omitempty"`
 }
 
 type tipsResponse struct {
@@ -2721,6 +2768,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		peers = s.node.PeerCount()
 	}
 	ratio, _ := s.supply.SupplyRatio()
+
+	var projResp *projectionStatusResponse
+	if hs := s.projectionHealthSnapshot(); hs != nil {
+		projResp = buildProjectionStatusResponse(hs, r.URL.Query().Get("verbose") == "true")
+	}
+
 	writeJSON(w, http.StatusOK, statusResponse{
 		AgentID:     string(s.agentID),
 		Version:     "0.1.0-testnet",
@@ -2728,7 +2781,33 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		DAGSize:     s.dag.Size(),
 		OCSPending:  s.engine.PendingCount(),
 		SupplyRatio: ratio,
+		Projections: projResp,
 	})
+}
+
+// buildProjectionStatusResponse assembles the /v1/status projections field.
+// Default form returns overall health and per-status counts. ?verbose=true
+// returns the full per-entry Checks list in addition. Per step-2 plan §D5.
+func buildProjectionStatusResponse(hs *projections.HealthStatus, verbose bool) *projectionStatusResponse {
+	counts := make(map[string]int, 6)
+	for _, c := range hs.Checks {
+		counts[c.Health.String()]++
+	}
+	resp := &projectionStatusResponse{
+		Overall: hs.Overall.String(),
+		Counts:  counts,
+	}
+	if verbose {
+		resp.Checks = make([]projectionCheckEntry, 0, len(hs.Checks))
+		for _, c := range hs.Checks {
+			resp.Checks = append(resp.Checks, projectionCheckEntry{
+				Name:   c.Name,
+				Health: c.Health.String(),
+				Reason: c.Reason,
+			})
+		}
+	}
+	return resp
 }
 
 // handleVerify submits a VerificationResult to the OCS engine.

@@ -2868,10 +2868,10 @@ func installProjectionEpochHook(stack *nodeStack) {
 	})
 }
 
-// runProjectionHealthCheck evaluates the projection registry and logs any
-// non-OK Canonical entries at Warn. Called at startup and from the
-// epoch-boundary hook (commit 5). Nil-safe so tests that do not wire the
-// registry remain clean.
+// runProjectionHealthCheck evaluates the projection registry, logs any
+// non-OK Canonical entries at Warn, and caches the result on the api
+// server for /v1/status. Called at startup and from the epoch-boundary
+// hook. Nil-safe so tests that do not wire the registry remain clean.
 func runProjectionHealthCheck(stack *nodeStack) {
 	if stack == nil || stack.projReg == nil {
 		return
@@ -2890,6 +2890,9 @@ func runProjectionHealthCheck(stack *nodeStack) {
 			slog.Info("projections: entry registered",
 				"name", c.Name, "status", c.Health.String())
 		}
+	}
+	if stack.apiSrv != nil {
+		stack.apiSrv.SetProjectionHealth(status)
 	}
 }
 
