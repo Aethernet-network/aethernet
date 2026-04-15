@@ -217,26 +217,33 @@ func hasBadgerPersistence(named *types.Named, lookup *typeLookup, depth int) (bo
 			continue
 		}
 
-		// Embedded / named field — recurse.
+		// Embedding-only recursion (plan §D3 founder refinement): recurse
+		// through anonymous/embedded fields, NOT through named fields.
+		// A type that holds a named pointer to a store (e.g. a consumer
+		// wiring `store *BadgerStore`) is a reader/consumer, not a wrapper
+		// — it does not own that persistence dependency. Only true
+		// embedding (anonymous field on the struct) promotes the inner
+		// type's persistence to the outer.
+		if !f.Embedded() {
+			continue
+		}
+		// Embedded value of named struct type.
 		if nt, ok := ft.(*types.Named); ok {
-			// Skip stdlib types and BadgerDB itself (already handled above).
 			if nt.Obj() != nil && nt.Obj().Pkg() != nil &&
 				nt.Obj().Pkg().Path() == badgerDBTypePath {
 				continue
 			}
-			// Only recurse if we can look up the type's full definition in
-			// the module (i.e., it's a named type in our packages set).
 			if lookup != nil && lookup.Has(nt) {
 				ok, warn, ev := hasBadgerPersistence(nt, lookup, depth+1)
 				if ok {
-					return true, warn, fmt.Sprintf("via embedded/composed field %q: %s", f.Name(), ev)
+					return true, warn, fmt.Sprintf("via embedded field %q: %s", f.Name(), ev)
 				}
 				if warn != "" && ifaceWarn == "" {
 					ifaceWarn = warn
 				}
 			}
 		}
-		// Pointer to named struct — also recurse.
+		// Embedded pointer to named struct type (e.g. *inner).
 		if ptr, ok := ft.(*types.Pointer); ok {
 			if nt, ok := ptr.Elem().(*types.Named); ok {
 				if nt.Obj() != nil && nt.Obj().Pkg() != nil &&
@@ -246,7 +253,7 @@ func hasBadgerPersistence(named *types.Named, lookup *typeLookup, depth int) (bo
 				if lookup != nil && lookup.Has(nt) {
 					ok, warn, ev := hasBadgerPersistence(nt, lookup, depth+1)
 					if ok {
-						return true, warn, fmt.Sprintf("via pointer field %q: %s", f.Name(), ev)
+						return true, warn, fmt.Sprintf("via embedded pointer %q: %s", f.Name(), ev)
 					}
 					if warn != "" && ifaceWarn == "" {
 						ifaceWarn = warn

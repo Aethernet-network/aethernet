@@ -49,6 +49,8 @@ const (
 // Store is the durable persistence layer for a single AetherNet node.
 // It wraps a BadgerDB instance and exposes typed put/get/scan operations
 // for every major data type. It is safe for concurrent use by multiple goroutines.
+//
+// projections:lint ignore "this is the BadgerDB wrapper used as persistence substrate by every other store; it is infrastructure not a consensus-adjacent projection"
 type Store struct {
 	db   *badger.DB
 	path string

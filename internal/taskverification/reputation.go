@@ -39,6 +39,8 @@ func (r *ValidatorReputation) AgreementRate() float64 {
 }
 
 // ValidatorReputationStore persists validator vote agreement metrics.
+//
+// projections:lint ignore "scheduled for deletion in step-4 of the reputation workstream which replaces it with EvidenceStore; intentionally unregistered to avoid churn — see docs/plans/2026-04-12-reputation-and-consensus-integrity.md §17 step 3"
 type ValidatorReputationStore struct {
 	db *badger.DB
 	mu sync.Mutex
