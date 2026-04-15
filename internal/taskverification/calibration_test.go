@@ -20,6 +20,28 @@ func newTestCalibrationStore(t *testing.T, threshold int) *CalibrationStore {
 	return NewCalibrationStore(db, CalibrationConfig{DefaultThreshold: threshold})
 }
 
+func TestCalibrationStore_Empty(t *testing.T) {
+	s := newTestCalibrationStore(t, 100)
+	ctx := context.Background()
+	empty, err := s.Empty(ctx)
+	if err != nil {
+		t.Fatalf("Empty: %v", err)
+	}
+	if !empty {
+		t.Fatalf("fresh calibration store must be empty")
+	}
+	if _, err := s.Increment(ctx, "research", verification.FamilyDeterministicHeuristic); err != nil {
+		t.Fatalf("Increment: %v", err)
+	}
+	empty, err = s.Empty(ctx)
+	if err != nil {
+		t.Fatalf("Empty after increment: %v", err)
+	}
+	if empty {
+		t.Fatalf("calibration store must not be empty after increment")
+	}
+}
+
 func TestCalibrationStore_IncrementPersists(t *testing.T) {
 	s := newTestCalibrationStore(t, 100)
 	ctx := context.Background()

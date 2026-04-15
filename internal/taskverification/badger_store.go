@@ -39,6 +39,27 @@ func NewBadgerStore(db *badger.DB) *BadgerStore {
 	return &BadgerStore{db: db}
 }
 
+// Empty reports whether the round store holds any persisted rounds.
+// Used by the projection registry StateProbe — see
+// docs/plans/2026-04-12-reputation-step-2-retrofit-projections.md §D7.
+// Scans the primary "tv:round:" prefix and returns on first hit.
+func (s *BadgerStore) Empty(_ context.Context) (bool, error) {
+	empty := true
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(prefixRound)
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		it.Rewind()
+		if it.Valid() {
+			empty = false
+		}
+		return nil
+	})
+	return empty, err
+}
+
 // SaveRound persists a round with all secondary indexes updated atomically
 // in a single Badger transaction.
 func (s *BadgerStore) SaveRound(_ context.Context, r *TaskVerificationRound) error {

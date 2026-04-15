@@ -1,6 +1,7 @@
 package escrow_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -14,6 +15,28 @@ func newFundedLedger(agentID string, amount uint64) *ledger.TransferLedger {
 	tl := ledger.NewTransferLedger()
 	_ = tl.FundAgent(crypto.AgentID(agentID), amount)
 	return tl
+}
+
+func TestEscrow_Empty(t *testing.T) {
+	tl := newFundedLedger("alice", 10_000)
+	e := escrow.New(tl)
+	empty, err := e.Empty(context.Background())
+	if err != nil {
+		t.Fatalf("Empty: %v", err)
+	}
+	if !empty {
+		t.Fatalf("fresh escrow must be empty")
+	}
+	if err := e.Hold("task-empty", "alice", 1_000); err != nil {
+		t.Fatalf("Hold: %v", err)
+	}
+	empty, err = e.Empty(context.Background())
+	if err != nil {
+		t.Fatalf("Empty after Hold: %v", err)
+	}
+	if empty {
+		t.Fatalf("escrow must not be empty after Hold")
+	}
 }
 
 func TestHold(t *testing.T) {

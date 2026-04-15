@@ -1,6 +1,7 @@
 package ledger_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -11,6 +12,29 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 )
+
+// Empty probe contract for the projection registry.
+// See docs/plans/2026-04-12-reputation-step-2-retrofit-projections.md §D7.
+func TestTransferLedger_Empty(t *testing.T) {
+	l := ledger.NewTransferLedger()
+	empty, err := l.Empty(context.Background())
+	if err != nil {
+		t.Fatalf("Empty: %v", err)
+	}
+	if !empty {
+		t.Fatalf("fresh ledger must be empty")
+	}
+	if err := l.FundAgent("alice", 1_000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+	empty, err = l.Empty(context.Background())
+	if err != nil {
+		t.Fatalf("Empty after FundAgent: %v", err)
+	}
+	if empty {
+		t.Fatalf("ledger with genesis funding must not be empty")
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Helpers

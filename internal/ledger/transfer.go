@@ -10,6 +10,7 @@
 package ledger
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -162,6 +163,18 @@ func (l *TransferLedger) TotalMinted() uint64 {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.totalMinted
+}
+
+// Empty reports whether the transfer ledger holds any entries (live or
+// archived). Used by the projection registry StateProbe — see
+// docs/plans/2026-04-12-reputation-step-2-retrofit-projections.md §D7.
+// "Empty" means no transfer has ever been recorded on this node; the
+// archivedNetSettled map is non-empty iff entries were evicted, so its
+// presence also implies non-empty.
+func (l *TransferLedger) Empty(_ context.Context) (bool, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return len(l.entries) == 0 && len(l.archivedNetSettled) == 0, nil
 }
 
 // NewTransferLedger returns an empty, ready-to-use TransferLedger.

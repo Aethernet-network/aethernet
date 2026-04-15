@@ -1,6 +1,7 @@
 package ocs_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -13,6 +14,19 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 )
+
+// Empty probe contract for the projection registry.
+// See docs/plans/2026-04-12-reputation-step-2-retrofit-projections.md §D7.
+func TestEngine_PendingEmpty(t *testing.T) {
+	h := newHarness(t, nil)
+	empty, err := h.eng.PendingEmpty(context.Background())
+	if err != nil {
+		t.Fatalf("PendingEmpty on fresh engine: %v", err)
+	}
+	if !empty {
+		t.Fatalf("fresh engine must have empty pending")
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Helpers

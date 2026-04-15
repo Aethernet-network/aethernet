@@ -99,6 +99,27 @@ func (s *CalibrationStore) IsCalibrated(_ context.Context, category string, fami
 	return count >= s.GetThreshold(category, family), nil
 }
 
+// Empty reports whether the calibration store holds any (category, family)
+// counters. Used by the projection registry StateProbe — see
+// docs/plans/2026-04-12-reputation-step-2-retrofit-projections.md §D7.
+// Iterates the "cal:" prefix and returns on the first matching key.
+func (s *CalibrationStore) Empty(_ context.Context) (bool, error) {
+	empty := true
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(prefixCalibration)
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		it.Rewind()
+		if it.Valid() {
+			empty = false
+		}
+		return nil
+	})
+	return empty, err
+}
+
 // GetThreshold returns the calibration threshold, checking per-category
 // and per-family overrides before falling back to the default.
 func (s *CalibrationStore) GetThreshold(category string, family verification.FamilyID) int {

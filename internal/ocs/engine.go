@@ -256,6 +256,17 @@ func (e *Engine) SetStore(s ocsPersistence) {
 	e.store = s
 }
 
+// PendingEmpty reports whether the engine currently holds any pending items.
+// Used by the projection registry StateProbe — see
+// docs/plans/2026-04-12-reputation-step-2-retrofit-projections.md §D7.
+// Named PendingEmpty (not Empty) because the Engine has multiple distinct
+// state spaces and naming the probe after its subject prevents ambiguity.
+func (e *Engine) PendingEmpty(_ context.Context) (bool, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return len(e.pending) == 0, nil
+}
+
 // SetEventBus wires an event bus into the Engine. Call before Start.
 // When non-nil, ProcessResult publishes settlement, verification, and slash
 // events for real-time streaming. Nil-safe: all existing tests are unaffected.

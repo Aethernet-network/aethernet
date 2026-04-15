@@ -11,6 +11,7 @@
 package escrow
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -106,6 +107,15 @@ func (e *Escrow) IsLocked(taskID string) bool {
 	defer e.mu.RUnlock()
 	_, exists := e.entries[taskID]
 	return exists
+}
+
+// Empty reports whether the escrow holds any in-flight entries. Used by
+// the projection registry StateProbe — see
+// docs/plans/2026-04-12-reputation-step-2-retrofit-projections.md §D7.
+func (e *Escrow) Empty(_ context.Context) (bool, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return len(e.entries) == 0, nil
 }
 
 // Hold moves amount from posterID's balance into the escrow bucket for taskID.
