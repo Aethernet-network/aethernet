@@ -93,12 +93,25 @@ func extractRegisteredSet(pkgs []*packages.Package) (*RegisteredSet, []string) {
 	set := NewRegisteredSet()
 	var warnings []string
 
+	// Dedup across the `pkg` and `pkg [pkg.test]` variants packages.Load
+	// returns when Tests: true is set. The test-enriched variant shares
+	// pkg.PkgPath with the base but its Syntax set is a superset. We walk
+	// every variant but index entries by (pkgPath, storeType) so a match
+	// in both variants only counts once.
 	for _, pkg := range pkgs {
 		if pkg.Types == nil || pkg.TypesInfo == nil || pkg.Syntax == nil {
 			continue
 		}
-		for i, file := range pkg.Syntax {
-			_ = i
+		for _, file := range pkg.Syntax {
+			// Skip *_test.go files — Projection constructors used as
+			// test fixtures (in test helpers, synthetic test data) are
+			// not production registrations and must not enter the
+			// registered-set. Per step-3 plan §D2, the static source of
+			// truth is production *Projection() constructors only.
+			filename := pkg.Fset.Position(file.Pos()).Filename
+			if strings.HasSuffix(filename, "_test.go") {
+				continue
+			}
 			for _, decl := range file.Decls {
 				fn, ok := decl.(*ast.FuncDecl)
 				if !ok || fn.Type == nil || fn.Type.Results == nil {
@@ -114,7 +127,11 @@ func extractRegisteredSet(pkgs []*packages.Package) (*RegisteredSet, []string) {
 					}
 					continue
 				}
-				set.ByStoreType[registeredKey{pkgPath: pkg.PkgPath, storeType: entry.StoreType}] = entry
+				key := registeredKey{pkgPath: pkg.PkgPath, storeType: entry.StoreType}
+				if _, already := set.ByStoreType[key]; already {
+					continue // deduped across pkg/pkg.test variants
+				}
+				set.ByStoreType[key] = entry
 				set.All = append(set.All, entry)
 				if warn != "" {
 					warnings = append(warnings, warn)

@@ -1,7 +1,10 @@
 package lint
 
 import (
+	"bufio"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
@@ -40,9 +43,42 @@ func Check(modulePath string) (*Report, error) {
 				fmt.Sprintf("package %s: load error: %v", pkg.PkgPath, e))
 		}
 	}
-	// Step-2 commits will hang this together in follow-up commits;
-	// skeleton returns an empty Report so the test harness compiles.
+	// Stage 1: extract registered set from *Projection() constructors.
+	set, extractWarnings := extractRegisteredSet(pkgs)
+	report.Warnings = append(report.Warnings, extractWarnings...)
+
+	// Stage 2: match suspect types against the heuristic.
+	suspects, insufficient, matcherWarnings := findSuspectTypes(pkgs, set)
+	report.UnregisteredTypes = suspects
+	report.InsufficientSuppressions = insufficient
+	report.Warnings = append(report.Warnings, matcherWarnings...)
+
+	// Stage 3: verify IntegrationTestRef existence. Needs module root
+	// and import path so the filesystem-walk fallback can map
+	// directories to import paths.
+	modImport := readModuleImportPath(modulePath)
+	report.MissingRefs = verifyTestRefs(pkgs, set, modulePath, modImport)
 	return report, nil
+}
+
+// readModuleImportPath reads the module declaration from go.mod at root
+// and returns the module import path. Returns "" if go.mod is missing or
+// unparseable; the lint degrades gracefully (filesystem fallback is
+// skipped).
+func readModuleImportPath(root string) string {
+	f, err := os.Open(filepath.Join(root, "go.mod"))
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "module ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "module "))
+		}
+	}
+	return ""
 }
 
 // Report is the composed output of a lint run.
