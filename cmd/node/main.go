@@ -2841,10 +2841,31 @@ func cmdStart() {
 	// periodic check fires on epoch boundaries, not on a wall clock; the
 	// startup check establishes the initial cached status for /v1/status.
 	runProjectionHealthCheck(stack)
+	installProjectionEpochHook(stack)
 
 	runLoop(agentID, stack.dag, node, stack.engine, stack.supply, stack.bus)
 	stopStack(node, stack)
 	slog.Info("node stopped cleanly")
+}
+
+// installProjectionEpochHook registers an OnEpochChange callback with the
+// round counter so that every epoch advance re-runs the projection
+// registry health check. Fire-and-forget on a fresh goroutine per
+// RoundCounter contract; HealthCheck itself is concurrency-safe. Nil-safe
+// for tests that do not wire the counter.
+//
+// Per step-2 plan §D6: the health check is PR-5-semantic and must fire
+// only when PR-5 state can actually change, which is at epoch boundaries.
+// No wall clock, no polling.
+func installProjectionEpochHook(stack *nodeStack) {
+	if stack == nil || stack.projReg == nil || stack.roundCounter == nil {
+		return
+	}
+	stack.roundCounter.OnEpochChange(func(epoch uint64) {
+		slog.Info("projections: epoch advanced, re-running health check",
+			"new_epoch", epoch)
+		runProjectionHealthCheck(stack)
+	})
 }
 
 // runProjectionHealthCheck evaluates the projection registry and logs any
@@ -2945,6 +2966,7 @@ func cmdConnect() {
 	fmt.Printf("Connected  : %s  (%s)\n\n", peer.AgentID, *peerAddr)
 
 	runProjectionHealthCheck(stack)
+	installProjectionEpochHook(stack)
 
 	runLoop(agentID, stack.dag, node, stack.engine, stack.supply, stack.bus)
 	stopStack(node, stack)
