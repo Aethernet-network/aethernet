@@ -64,6 +64,11 @@ type ReputationEvidence struct {
     StakeBP           uint64        // basis points of total-network stake this validator held at round open
     EscrowBudget      uint64        // µAET escrow of the task
     DerivationVersion uint32        // protocol version that produced this record
+    TrajectoryRoot    string        // content-addressed reference to the task's
+                                    // exploration root commit per the trajectory
+                                    // subsystem; populated-empty until trajectory
+                                    // integration ships (see workstream sequencing
+                                    // in section 14)
 }
 ```
 
@@ -82,6 +87,8 @@ Every field is integer, enum, ID, or bool. No `float64`. No `time.Time`. No open
 **Invariant (CR-3)**: A `ReputationEvidence` record is immutable once written. Challenge outcomes, version upgrades, and retroactive policy changes do not modify existing records. See §2.3.
 
 **Invariant (CR-4)**: Every field of `ReputationEvidence` is derivable from the `TaskVerificationConsensus` event plus the round's vote set plus the validator-set snapshot at round open. No field depends on operator input, wall clock, or non-DAG side channels.
+
+**Invariant (CR-10 — TrajectoryRoot population)**: The `TrajectoryRoot` field is populated with the content-addressed root of the task's trajectory commit tree if the trajectory-integration workstream has shipped at the time this record is written. Until then, the field is the empty string. The empty value is semantically meaningful: it means "trajectory integration was not yet wired when this record was produced," not "this task had no trajectory." Future workstreams that read TrajectoryRoot must distinguish empty (no integration) from populated (integration active).
 
 ### 2.3 Challenge outcomes are not part of the evidence record (resolves ChatGPT round 2 required correction 2)
 
@@ -681,6 +688,7 @@ Per ChatGPT round 2 required correction 7 and Grok round 2 residual analysis, th
 - **Agent/worker reputation** (`internal/reputation/ReputationManager`). Classified in the projection registry retrofit (audit required in this workstream's commit). Not redesigned.
 - **Data ingestion workstream's independence-weighting query interface**. This workstream produces the primitives (pair aggregate, context-bounded trust transfer, multi-axis evidence). The query interface itself is the next workstream after challenge path.
 - **Per-operator identity binding**. Not a concept in the protocol today. Every validator identity is independent. This workstream does not assume per-operator binding exists. Attack resistance is stated conditional on the current identity model.
+- **Trajectory integration**. The TrajectoryRoot field is added to the evidence record per the trajectory audit's Option 4-wide recommendation, but populated-empty until a dedicated trajectory-integration workstream ships. That workstream is sequenced after this one (reputation Step 4) and before the challenge-path workstream. See `docs/audits/2026-04-XX-trajectory-subsystem-audit.md` for the gap analysis.
 
 ---
 
@@ -712,6 +720,7 @@ All of the following must be true before the workstream is marked complete:
 22. `docs/design-principles.md` has principle 16 added.
 23. `docs/multi-validator-consensus-final-design.md` is updated to reference the new projection and new slashing path.
 24. `docs/projection-registry.md` exists with the registry specification, the structural definition, and the retrofit list.
+25. The `TrajectoryRoot` field exists on `ReputationEvidence` and is included in canonical serialization. Tests verify the field is present, integer-zero-equivalent (empty string) by default, and that records with empty TrajectoryRoot serialize and deserialize byte-identically.
 
 ---
 
