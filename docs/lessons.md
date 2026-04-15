@@ -257,3 +257,13 @@ Application state derives from the DAG, not the other way around. TaskManager, O
 - **Why it matters**: This was the second bug blocking the first accept verdict. It was masked during unit tests (single-threaded) and only appeared under the live 5-node testnet's concurrent bus workers. Fix: commit `dcc7c17`.
 
 ---
+
+## Workstream Discipline
+
+### Multi-subsystem retrofits — bound the scope, defer discoveries explicitly
+- **Context**: During Step 2 of the reputation/consensus-integrity workstream (projection-registry retrofit pass), the parallel-subagent investigation surfaced additional durable stores beyond the plan §9.6 list: `StakeManager` (`internal/staking`) and the Identity Registry (`internal/identity`). Both are consensus-adjacent — stake amounts weight BFT votes; identity validation gates participation in rounds.
+- **Wrong approach**: Register them in Step 2 alongside calibration, escrow, and ledger. Scope expands; each store's canonical read/write semantics (what is a "live consumer" for stake mutations? for identity-registration churn?) requires its own investigation; review surface of the step grows from ~10 files to ~20 and single-sitting review becomes impractical.
+- **Right approach**: Name the discovered stores in the step's plan, defer their registration to a dedicated follow-up retrofit pass, and document the deferral explicitly so a later session knows they are pending. `StakeManager` and Identity Registry registration is pending as of 2026-04-14 — they should be revisited either in an explicit "Step 2.5 validator-state retrofit" or rolled into the validator-onramp workstream. Do not let them slip silently.
+- **Why it matters**: Step boundaries are a design tool, not an obstacle. Expanding a step's scope mid-flight to catch every tangentially-related concern produces long commits, delayed sign-off, and harder-to-review history. Bounded steps with explicit deferrals keep the workstream moving and preserve an auditable trail of what is known-pending.
+
+---
