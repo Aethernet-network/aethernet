@@ -108,6 +108,7 @@ const (
 // prefix. Non-canonical node-local machinery per C-15.
 type AdmissionRecord struct {
 	SchemaVersion             uint32                       `json:"schema_version"`
+	Key                       string                       `json:"key"`
 	State                     AdmissionState               `json:"state"`
 	DAGAnchor                 event.EventID                `json:"dag_anchor"`
 	PrerequisiteSchemaVersion uint32                       `json:"prerequisite_schema_version"`
