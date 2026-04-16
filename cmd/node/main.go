@@ -935,6 +935,10 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 	if s != nil {
 		escrowMgr.SetStore(s)
 	}
+	// Wire the DAG reader for RegisterEscrow's funding-transfer validation.
+	// Must be attached before any recognition-fabric listener is started so
+	// consumers that invoke RegisterEscrow have a configured reader.
+	escrowMgr.SetDAGReader(d)
 
 	// Category-specific reputation tracking.
 	reputationMgr := reputation.NewReputationManager()
@@ -1625,15 +1629,22 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		claimerID := crypto.AgentID(payload.ClaimerID)
 		treasuryID := crypto.AgentID(genesis.BucketTreasury)
 
-		// Ensure escrow exists on this node. On the posting node, escrow was
-		// locked via canonical Transfer (prompt 2). On peer nodes, the
-		// SettlementApplicator's applyTransfer registered the escrow entry
-		// when the escrow-lock transfer settled. If for any reason the escrow
-		// doesn't exist yet (e.g. deferred settlement), create it now.
+		// Ensure escrow metadata is registered on this node. The canonical
+		// escrow-lock Transfer has already moved funds; if the metadata is
+		// missing (e.g. deferred settlement or peer-node restart), look up
+		// the funding Transfer's EventID and register metadata only —
+		// RegisterEscrow does NOT call TransferFromBucket a second time.
 		if !stack.escrowMgr.IsLocked(payload.TaskID) {
-			if err := stack.escrowMgr.Hold(payload.TaskID, posterID, payload.Budget); err != nil {
-				slog.Warn("task-settler: escrow catch-up hold failed",
-					"task_id", payload.TaskID, "err", err)
+			fundingRef, lookupErr := settlement.LookupEscrowLockTransfer(
+				stack.dag, payload.TaskID, posterID, payload.Budget)
+			if lookupErr != nil {
+				slog.Warn("task-settler: escrow catch-up funding-transfer lookup failed",
+					"task_id", payload.TaskID, "err", lookupErr)
+				return lookupErr
+			}
+			if err := stack.escrowMgr.RegisterEscrow(payload.TaskID, posterID, payload.Budget, fundingRef); err != nil {
+				slog.Warn("task-settler: escrow catch-up register failed",
+					"task_id", payload.TaskID, "funding_ref", fundingRef, "err", err)
 				return err
 			}
 		}
