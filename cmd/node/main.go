@@ -931,9 +931,20 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 	} else {
 		taskMgr = tasks.NewTaskManager()
 	}
-	escrowMgr := escrow.New(tl)
+	// Part B (B-1): load persisted escrow entries before any listener starts.
+	// LoadFromStore reconstructs in-flight entries from BadgerDB so that
+	// escrow operations after restart can find entries created before the
+	// restart. When no store is present (in-memory mode), start fresh.
+	var escrowMgr *escrow.Escrow
 	if s != nil {
-		escrowMgr.SetStore(s)
+		var loadErr error
+		escrowMgr, loadErr = escrow.LoadFromStore(tl, s)
+		if loadErr != nil {
+			slog.Error("startup: escrow.LoadFromStore failed", "err", loadErr)
+			os.Exit(1)
+		}
+	} else {
+		escrowMgr = escrow.New(tl)
 	}
 	// Wire the DAG reader for RegisterEscrow's funding-transfer validation.
 	// Must be attached before any recognition-fabric listener is started so
@@ -1603,6 +1614,13 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	}
 	if stack.store != nil {
 		settlementApp.SetStore(stack.store)
+		// Part A (A-1): load persisted applied-set before any listener starts.
+		// Previously-applied settlements are restored so they are not re-applied
+		// on restart, closing the Layer 3 restart-and-replay state loss.
+		if err := settlementApp.LoadApplied(stack.store.AllMeta); err != nil {
+			slog.Error("startup: applicator.LoadApplied failed", "err", err)
+			os.Exit(1)
+		}
 	}
 	settlementApp.SetFeeCollector(stack.feeCollector, crypto.AgentID(genesis.BucketTreasury))
 	settlementApp.SetStakeManager(stack.stakeManager)
