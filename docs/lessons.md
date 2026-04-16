@@ -309,3 +309,19 @@ Application state derives from the DAG, not the other way around. TaskManager, O
 The forward correction is: every settlement-affecting verification from this point forward must explicitly verify cross-node convergence as part of its pass criteria. The settlement-consensus-integrity-fix workstream (F3-B fix, locked v3-final at the time of this entry) closes the underlying mechanism that caused the divergence and adds cross-node convergence to its success criteria.
 
 ---
+
+## Lint Exemptions
+
+### 2026-04-15 — Marketplace escrow lint exemption (no-bypass CI lint from F3-B fix)
+
+**Context**: During the F3-B settlement-consensus-integrity fix workstream, the no-bypass CI lint (§4.11 of the locked design) was added to enforce that no canonical-event consumer is wired directly to the recognition fabric — all consumers must register through the `CanonicalEventDispatcher`. The `escrow.Hold` caller audit (commit `b424775`) surfaced that the standalone marketplace binary (`internal/marketplace/server.go`) operates its own application-layer escrow not backed by any DAG Transfer event, and therefore cannot use `RegisterEscrow` (which requires a `fundingTransferRef` that the marketplace does not have).
+
+**Wrong**: Forcing the marketplace into the protocol-escrow API immediately would require designing how marketplace-originated escrow flows through the protocol's canonical Transfer mechanism, which is a substantial design problem in its own right and was not in scope for the F3-B fix workstream.
+
+**Right**: Grant the marketplace an explicit lint exemption with a structured justification string, document the exemption in this lessons file, and queue a follow-up workstream — **marketplace escrow integration** — between the challenge path workstream and data ingestion. The exemption is structural (comment-based, machine-checkable, requires ≥20 chars and ≥3 words of justification) and the follow-up is tracked.
+
+**Why**: The no-tech-debt directive says we don't ship workarounds without recording them honestly. A lint exemption without documentation is exactly the kind of "trust me" that creates future tech debt; a lint exemption with a justification string and a queued follow-up workstream is a known scope boundary that a future contributor can find. The marketplace gets to keep working without forcing a rushed redesign; the long-term path to clean integration is queued, not silently dropped.
+
+**Workstream queue update**: The named workstream sequence is now F3-B fix → reputation Step 4 → trajectory integration → challenge path → marketplace escrow integration → data ingestion → mainnet planning.
+
+---
