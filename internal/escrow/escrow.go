@@ -40,6 +40,12 @@ type EscrowEntry struct {
 	WorkerPaid    bool `json:"worker_paid"`    // true once the worker's net share has been transferred
 	ValidatorPaid bool `json:"validator_paid"` // true once the validator's share has been transferred
 	TreasuryPaid  bool `json:"treasury_paid"`  // true once the treasury's share has been transferred
+
+	// Extended per-recipient paid tracking for ReleaseSettlement (commit 9).
+	// Per-validator and per-gen-ledger-recipient idempotency guards.
+	ValidatorsPaid   map[string]bool `json:"validators_paid,omitempty"`
+	GenLedgerPaid    map[string]bool `json:"gen_ledger_paid,omitempty"`
+	PosterRefundPaid bool            `json:"poster_refund_paid,omitempty"`
 }
 
 // escrowPersistence is the subset of store.Store used by Escrow for durable writes.
@@ -406,6 +412,128 @@ func (e *Escrow) ReleaseNet(
 	if e.store != nil {
 		if err := e.store.DeleteEscrow(taskID); err != nil {
 			slog.Error("escrow: failed to delete completed entry", "task_id", taskID, "err", err)
+		}
+	}
+	return nil
+}
+
+// ReleaseSettlement distributes the escrowed budget across the full v4.1
+// economic model's recipient set: worker, N validators (Q-weighted),
+// gen-ledger recipients, poster refund (dispute path), and treasury.
+//
+// Each individual transfer is guarded by a per-recipient paid flag persisted
+// to BadgerDB after each successful transfer. On retry after a crash,
+// already-paid recipients are skipped. This provides per-transfer idempotency
+// equivalent to a single BadgerDB transaction, satisfying C-11.
+//
+// Integer arithmetic remainders from the share calculations are routed to
+// treasury so the sum across all recipients equals the budget exactly.
+// Cross-node conservation is verified by §10 success criterion 6.
+//
+// Returns ErrEscrowNotFound if no escrow exists for taskID.
+func (e *Escrow) ReleaseSettlement(
+	taskID string,
+	worker crypto.AgentID, workerAmount uint64,
+	posterRefund crypto.AgentID, posterRefundAmount uint64,
+	validators map[crypto.AgentID]uint64,
+	genRecipients map[crypto.AgentID]uint64,
+	treasury crypto.AgentID, treasuryAmount uint64,
+) error {
+	e.mu.Lock()
+	entry, ok := e.entries[taskID]
+	e.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("%w: task %s", ErrEscrowNotFound, taskID)
+	}
+
+	bucket := bucketID(taskID)
+
+	// 1. Worker payout.
+	if workerAmount > 0 && !entry.WorkerPaid {
+		if err := e.ledger.TransferFromBucket(bucket, worker, workerAmount); err != nil {
+			return fmt.Errorf("escrow: settlement worker for task %s: %w", taskID, err)
+		}
+		e.mu.Lock()
+		entry.WorkerPaid = true
+		e.mu.Unlock()
+		e.persist(entry)
+	}
+
+	// 2. Poster refund (dispute path; zero on accept/reject).
+	if posterRefundAmount > 0 && !entry.PosterRefundPaid {
+		if err := e.ledger.TransferFromBucket(bucket, posterRefund, posterRefundAmount); err != nil {
+			return fmt.Errorf("escrow: settlement poster refund for task %s: %w", taskID, err)
+		}
+		e.mu.Lock()
+		entry.PosterRefundPaid = true
+		e.mu.Unlock()
+		e.persist(entry)
+	}
+
+	// 3. Per-validator payouts (Q-weighted).
+	for vid, amount := range validators {
+		if amount == 0 {
+			continue
+		}
+		e.mu.Lock()
+		if entry.ValidatorsPaid == nil {
+			entry.ValidatorsPaid = make(map[string]bool)
+		}
+		alreadyPaid := entry.ValidatorsPaid[string(vid)]
+		e.mu.Unlock()
+		if alreadyPaid {
+			continue
+		}
+		if err := e.ledger.TransferFromBucket(bucket, vid, amount); err != nil {
+			return fmt.Errorf("escrow: settlement validator %s for task %s: %w", vid, taskID, err)
+		}
+		e.mu.Lock()
+		entry.ValidatorsPaid[string(vid)] = true
+		e.mu.Unlock()
+		e.persist(entry)
+	}
+
+	// 4. Gen-ledger royalty payouts.
+	for rid, amount := range genRecipients {
+		if amount == 0 {
+			continue
+		}
+		e.mu.Lock()
+		if entry.GenLedgerPaid == nil {
+			entry.GenLedgerPaid = make(map[string]bool)
+		}
+		alreadyPaid := entry.GenLedgerPaid[string(rid)]
+		e.mu.Unlock()
+		if alreadyPaid {
+			continue
+		}
+		if err := e.ledger.TransferFromBucket(bucket, rid, amount); err != nil {
+			return fmt.Errorf("escrow: settlement gen-ledger %s for task %s: %w", rid, taskID, err)
+		}
+		e.mu.Lock()
+		entry.GenLedgerPaid[string(rid)] = true
+		e.mu.Unlock()
+		e.persist(entry)
+	}
+
+	// 5. Treasury.
+	if treasuryAmount > 0 && !entry.TreasuryPaid {
+		if err := e.ledger.TransferFromBucket(bucket, treasury, treasuryAmount); err != nil {
+			return fmt.Errorf("escrow: settlement treasury for task %s: %w", taskID, err)
+		}
+		e.mu.Lock()
+		entry.TreasuryPaid = true
+		e.mu.Unlock()
+		e.persist(entry)
+	}
+
+	// All disbursements complete — remove the entry.
+	e.mu.Lock()
+	delete(e.entries, taskID)
+	e.mu.Unlock()
+	if e.store != nil {
+		if err := e.store.DeleteEscrow(taskID); err != nil {
+			slog.Error("escrow: failed to delete settled entry", "task_id", taskID, "err", err)
 		}
 	}
 	return nil
