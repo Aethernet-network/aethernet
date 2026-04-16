@@ -415,20 +415,30 @@ func (a *Applicator) reconcile() {
 }
 
 // LoadApplied restores the applied set from the store on node restart.
-func (a *Applicator) LoadApplied(allMeta func(prefix string) (map[string][]byte, error)) {
+// Per A-1: must complete before any code path that can deliver canonical
+// events to consumers begins execution. Per A-2: returns an error on
+// failure (startup must abort).
+func (a *Applicator) LoadApplied(allMeta func(prefix string) (map[string][]byte, error)) error {
 	entries, err := allMeta("settlement:applied:")
 	if err != nil {
-		slog.Warn("settlement: failed to load applied set", "err", err)
-		return
+		return fmt.Errorf("settlement: load applied set: %w", err)
 	}
 	a.mu.Lock()
 	for key := range entries {
-		// key is "settlement:applied:<targetEventID>"
 		targetID := event.EventID(key[len("settlement:applied:"):])
 		a.applied[targetID] = struct{}{}
 	}
 	a.mu.Unlock()
 	slog.Info("settlement: loaded applied set", "count", len(entries))
+	return nil
+}
+
+// AppliedCount returns the number of events in the applied set.
+// Safe for concurrent use.
+func (a *Applicator) AppliedCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.applied)
 }
 
 // Metrics returns the current settlement counters.

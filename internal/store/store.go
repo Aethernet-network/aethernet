@@ -520,6 +520,47 @@ func (s *Store) GetMeta(key string) ([]byte, error) {
 	return data, err
 }
 
+// AllMeta returns all key-value pairs stored under "meta:<prefix>".
+// Keys in the returned map include the full "meta:" namespace prefix.
+// Used by the settlement applicator's LoadApplied to scan
+// "meta:settlement:applied:" entries.
+func (s *Store) AllMeta(prefix string) (map[string][]byte, error) {
+	result := make(map[string][]byte)
+	fullPrefix := prefixMeta + prefix
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(fullPrefix)
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Seek(opts.Prefix); it.ValidForPrefix(opts.Prefix); it.Next() {
+			item := it.Item()
+			key := string(item.Key())
+			// Strip the "meta:" prefix to return the logical key.
+			logicalKey := key[len(prefixMeta):]
+			if err := item.Value(func(val []byte) error {
+				cp := make([]byte, len(val))
+				copy(cp, val)
+				result[logicalKey] = cp
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: all meta prefix %q: %w", prefix, err)
+	}
+	return result, nil
+}
+
+// Sync forces a durable fsync of the BadgerDB value log and WAL.
+// Called after safety-critical writes (settlement applied-set, escrow
+// registry) to satisfy invariants A-3 and B-3.
+func (s *Store) Sync() error {
+	return s.db.Sync()
+}
+
 // ---------------------------------------------------------------------------
 // Platform developer API keys (raw JSON blobs)
 // ---------------------------------------------------------------------------
