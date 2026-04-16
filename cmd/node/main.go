@@ -1896,7 +1896,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		})
 
 		tvSettler := settlement.NewVerificationConsensusSettler(
-			stack.taskMgr, stack.transfer, stack.escrowMgr,
+			stack.taskMgr, stack.transfer, stack.escrowMgr, stack.dag,
 			genLedgerCalc, crypto.AgentID(genesis.BucketTreasury),
 			validatorQFn,
 		)

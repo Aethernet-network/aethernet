@@ -36,11 +36,12 @@ func setupSettlerTest(t *testing.T, budget uint64) (
 	_ = tm.ClaimTask(taskID, "worker-1")
 	_ = tm.SubmitResult(taskID, "worker-1", "sha256:test", "note", "")
 
-	// Hold escrow.
+	// Hold escrow via legacy test path; the settler test path pre-populates the
+	// escrow so the catch-up branch (which needs a DAG scanner) is not exercised.
 	_ = em.Hold(taskID, "poster-1", budget)
 
 	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) float64 { return 1.0 })
-	settler := NewVerificationConsensusSettler(tm, tl, em, calc, "genesis:treasury", nil)
+	settler := NewVerificationConsensusSettler(tm, tl, em, nil, calc, "genesis:treasury", nil)
 
 	return settler, tm, tl, em
 }
@@ -328,7 +329,7 @@ func setupQWeightedSettler(t *testing.T, budget uint64, qFn ValidatorQScoreFn) (
 	_ = tm.SubmitResult(taskID, "worker-1", "sha256:q", "note", "")
 	_ = em.Hold(taskID, "poster-1", budget)
 	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) float64 { return 1.0 })
-	settler := NewVerificationConsensusSettler(tm, tl, em, calc, "genesis:treasury", qFn)
+	settler := NewVerificationConsensusSettler(tm, tl, em, nil, calc, "genesis:treasury", qFn)
 	return settler, tm
 }
 
@@ -415,4 +416,104 @@ func TestSettle_QWeighted_AllZero_FallsBackToEvenSplit(t *testing.T) {
 	if result.TotalDistributed != budget {
 		t.Errorf("total = %d; want %d", result.TotalDistributed, budget)
 	}
+}
+
+// stubSettlerScanner satisfies DAGScanner for catch-up tests.
+type stubSettlerScanner struct{ events []*event.Event }
+
+func (s *stubSettlerScanner) All() []*event.Event { return s.events }
+
+// TestVerificationConsensusSettler_EscrowCatchUp_UsesRegisterEscrow exercises
+// the C1-2 migration: when the settler runs on a peer node where the escrow
+// is not yet locked, it uses LookupEscrowLockTransfer + RegisterEscrow rather
+// than calling the legacy Hold path. The canonical Transfer has already moved
+// funds; the catch-up path records metadata only.
+func TestVerificationConsensusSettler_EscrowCatchUp_UsesRegisterEscrow(t *testing.T) {
+	budget := uint64(10000)
+	tl := ledger.NewTransferLedger()
+	tm := tasks.NewTaskManager()
+	em := escrow.New(tl)
+
+	// Seed poster with budget and DIRECTLY move into the escrow bucket,
+	// simulating what the canonical Transfer has already done on the producer.
+	_ = tl.FundAgent("poster-1", budget*10)
+
+	_, _ = tm.PostTask("poster-1", "catch-up", "desc", "research", budget)
+	taskID := tm.Search(tasks.TaskStatusOpen, "", 0)[0].ID
+	_ = tm.ClaimTask(taskID, "worker-1")
+	_ = tm.SubmitResult(taskID, "worker-1", "sha256:test", "note", "")
+
+	// Move funds into bucket (simulates canonical Transfer's side effect on
+	// this node, but the escrow manager hasn't registered metadata yet).
+	_ = tl.TransferFromBucket("poster-1", crypto.AgentID("escrow:"+taskID), budget)
+
+	// Build the canonical escrow-lock Transfer event and seed the DAG scanner.
+	evt, err := event.New(event.EventTypeTransfer, nil,
+		event.TransferPayload{
+			Version:   1,
+			FromAgent: "poster-1",
+			ToAgent:   "escrow:" + taskID,
+			Amount:    budget,
+			Currency:  "AET",
+			Reason:    "escrow-lock",
+			TaskID:    taskID,
+		},
+		"poster-1", nil, 0)
+	if err != nil {
+		t.Fatalf("construct transfer: %v", err)
+	}
+	scanner := &stubSettlerScanner{events: []*event.Event{evt}}
+
+	// The escrow manager needs the DAGReader so RegisterEscrow can validate.
+	em.SetDAGReader(&applicatorStub{events: map[event.EventID]*event.Event{evt.ID: evt}})
+
+	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) float64 { return 1.0 })
+	settler := NewVerificationConsensusSettler(tm, tl, em, scanner, calc, "genesis:treasury", nil)
+
+	posterBalBefore, _ := tl.Balance(crypto.AgentID("poster-1"))
+
+	round := makeRoundWithVotes(taskID, map[string]taskverification.Verdict{
+		"validator-1": taskverification.VerdictPass,
+		"validator-2": taskverification.VerdictPass,
+	})
+	payload := &event.TaskVerificationConsensusPayload{
+		RoundID:      "round-catchup",
+		TaskID:       taskID,
+		FinalVerdict: "pass",
+		FinalScoreBP: 9000,
+		WorkerID:     "worker-1",
+		PosterID:     "poster-1",
+	}
+	result, err := settler.Settle(context.Background(), payload, round)
+	if err != nil {
+		t.Fatalf("Settle: %v", err)
+	}
+	if !result.Applied {
+		t.Fatal("should be applied")
+	}
+
+	// The catch-up must NOT have debited poster a second time.
+	posterBalAfter, _ := tl.Balance(crypto.AgentID("poster-1"))
+	if posterBalAfter != posterBalBefore {
+		t.Errorf("poster balance changed during catch-up: before=%d after=%d", posterBalBefore, posterBalAfter)
+	}
+
+	// The entry was registered with the correct funding ref.
+	got, err := em.Get(taskID)
+	if err != nil {
+		t.Fatalf("Get after catch-up: %v", err)
+	}
+	if got.FundingTransferRef != evt.ID {
+		t.Errorf("FundingTransferRef: got %s want %s", got.FundingTransferRef, evt.ID)
+	}
+}
+
+// applicatorStub satisfies escrow.DAGReader for the catch-up test.
+type applicatorStub struct{ events map[event.EventID]*event.Event }
+
+func (s *applicatorStub) Get(id event.EventID) (*event.Event, error) {
+	if e, ok := s.events[id]; ok {
+		return e, nil
+	}
+	return nil, context.Canceled // non-nil error; sentinel unused
 }

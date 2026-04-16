@@ -33,6 +33,7 @@ type VerificationConsensusSettler struct {
 	taskMgr    *tasks.TaskManager
 	transfer   *ledger.TransferLedger
 	escrowMgr  *escrow.Escrow
+	dagScanner DAGScanner // for LookupEscrowLockTransfer on catch-up
 	genLedger  *GenerationLedgerCalculator
 	treasuryID crypto.AgentID
 	qScoreFn   ValidatorQScoreFn // nil → even-split fallback
@@ -40,10 +41,15 @@ type VerificationConsensusSettler struct {
 
 // NewVerificationConsensusSettler creates a settler with the full v4.1
 // economic model. qScoreFn may be nil for even-split fallback.
+//
+// dagScanner is used on the escrow catch-up path (peer node scenario) to
+// locate the canonical escrow-lock Transfer event that funds the escrow.
+// May be nil only in tests that do not exercise the catch-up path.
 func NewVerificationConsensusSettler(
 	taskMgr *tasks.TaskManager,
 	transfer *ledger.TransferLedger,
 	escrowMgr *escrow.Escrow,
+	dagScanner DAGScanner,
 	genLedger *GenerationLedgerCalculator,
 	treasuryID crypto.AgentID,
 	qScoreFn ValidatorQScoreFn,
@@ -52,6 +58,7 @@ func NewVerificationConsensusSettler(
 		taskMgr:    taskMgr,
 		transfer:   transfer,
 		escrowMgr:  escrowMgr,
+		dagScanner: dagScanner,
 		genLedger:  genLedger,
 		treasuryID: treasuryID,
 		qScoreFn:   qScoreFn,
@@ -98,9 +105,19 @@ func (s *VerificationConsensusSettler) Settle(
 	entry, err := s.escrowMgr.Get(payload.TaskID)
 	if err != nil {
 		// If escrow is not locked, try to catch up (peer node scenario).
+		// The canonical escrow-lock Transfer has already moved funds; we only
+		// need to register metadata linking the escrow entry to that Transfer.
 		if !s.escrowMgr.IsLocked(payload.TaskID) {
-			if holdErr := s.escrowMgr.Hold(payload.TaskID, crypto.AgentID(task.PosterID), task.Budget); holdErr != nil {
-				return result, fmt.Errorf("verification_settler: escrow catch-up failed: %w", holdErr)
+			if s.dagScanner == nil {
+				return result, fmt.Errorf("verification_settler: escrow catch-up required but dagScanner not configured for task %s", payload.TaskID)
+			}
+			fundingRef, lookupErr := LookupEscrowLockTransfer(
+				s.dagScanner, payload.TaskID, crypto.AgentID(task.PosterID), task.Budget)
+			if lookupErr != nil {
+				return result, fmt.Errorf("verification_settler: escrow catch-up funding-transfer lookup failed: %w", lookupErr)
+			}
+			if regErr := s.escrowMgr.RegisterEscrow(payload.TaskID, crypto.AgentID(task.PosterID), task.Budget, fundingRef); regErr != nil {
+				return result, fmt.Errorf("verification_settler: escrow catch-up register failed: %w", regErr)
 			}
 			entry, err = s.escrowMgr.Get(payload.TaskID)
 			if err != nil {
