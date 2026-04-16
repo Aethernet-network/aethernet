@@ -15,6 +15,7 @@ type AdmissionStore interface {
 	GetAdmission(key string) (*AdmissionRecord, error)
 	PutAdmission(key string, record *AdmissionRecord) error
 	AllAdmissions() ([]*AdmissionRecord, error)
+	DeleteAdmission(key string) error
 }
 
 // EvidenceEmitter publishes a canonical event to the DAG. Injected to
@@ -122,6 +123,37 @@ func (d *Dispatcher) Admit(ctx context.Context, ev *event.Event) error {
 		return nil
 	}
 
+	// Check prerequisites outside the transaction (D-8).
+	prereqResult, prereqErr := d.checkPrerequisites(ev, consumers)
+	if prereqErr != nil {
+		// Forgery: clean up the reservation record — the prerequisite
+		// can never be satisfied since it's not a real ancestor.
+		_ = d.store.DeleteAdmission(key)
+		return prereqErr // forgery → fail admission (D-4)
+	}
+
+	if !prereqResult.allProjected {
+		// Valid but missing prerequisites → defer (D-1, D-2).
+		rec.State = StateReservedPendingPrereqs
+		rec.MissingPrerequisites = prereqResult.missing
+		if err := d.store.PutAdmission(key, rec); err != nil {
+			return fmt.Errorf("dispatch: persist deferral for %s: %w", key, err)
+		}
+		d.mu.Lock()
+		d.addToDeferralIndex(prereqResult.missing, key)
+		d.mu.Unlock()
+		return nil
+	}
+
+	// All prerequisites satisfied → proceed to processing.
+	if rec.State == StateReservedPendingPrereqs {
+		rec.State = StateProcessing
+		rec.MissingPrerequisites = nil
+		if err := d.store.PutAdmission(key, rec); err != nil {
+			return fmt.Errorf("dispatch: prereq-to-processing for %s: %w", key, err)
+		}
+	}
+
 	return d.invokeConsumers(ctx, ev, key, rec)
 }
 
@@ -169,12 +201,8 @@ func (d *Dispatcher) reserveOrLoad(key string, ev *event.Event, consumers []Cons
 		return existing, nil
 
 	case StateReservedPendingPrereqs:
-		// Part D handles prerequisite re-check. In Part C, transition
-		// to processing immediately.
-		existing.State = StateProcessing
-		if err := d.store.PutAdmission(key, existing); err != nil {
-			return nil, fmt.Errorf("dispatch: prereq transition for %s: %w", key, err)
-		}
+		// Return as-is; the prerequisite check in Admit will determine
+		// whether to transition to processing or stay deferred.
 		return existing, nil
 
 	case StateProcessing:
@@ -190,12 +218,20 @@ func (d *Dispatcher) createReservation(key string, ev *event.Event, consumers []
 		consumerMap[c.Name()] = ConsumerPending
 	}
 
+	// Capture the max PrerequisiteSchemaVersion across interested consumers.
+	var maxSchemaVer uint32
+	for _, c := range consumers {
+		if v := c.PrerequisiteSchemaVersion(); v > maxSchemaVer {
+			maxSchemaVer = v
+		}
+	}
+
 	rec := &AdmissionRecord{
 		SchemaVersion:             1,
 		Key:                       key,
-		State:                     StateProcessing, // Part C skips reserved-pending-prereqs
+		State:                     StateReservedPendingPrereqs,
 		DAGAnchor:                 d.currentAnchor(),
-		PrerequisiteSchemaVersion: 0,
+		PrerequisiteSchemaVersion: maxSchemaVer,
 		Consumers:                 consumerMap,
 		EventID:                   ev.ID,
 		EventType:                 string(ev.Type),
@@ -272,6 +308,11 @@ func (d *Dispatcher) Recover(ctx context.Context) error {
 	consumers := d.consumers
 	d.mu.RUnlock()
 
+	// Rebuild the in-memory deferral index from persisted records.
+	d.mu.Lock()
+	d.rebuildDeferralIndex(records)
+	d.mu.Unlock()
+
 	for _, rec := range records {
 		switch rec.State {
 		case StateApplied:
@@ -281,8 +322,37 @@ func (d *Dispatcher) Recover(ctx context.Context) error {
 			continue
 
 		case StateReservedPendingPrereqs:
-			// Part C: prerequisites are always satisfied; transition to processing.
+			// Re-check prerequisites. If still missing, leave deferred.
+			// If now satisfied, transition to processing and fall through
+			// to recovery probe.
+			var stillMissing []event.EventID
+			for _, pid := range rec.MissingPrerequisites {
+				if _, dagErr := d.dag.Get(pid); dagErr != nil {
+					stillMissing = append(stillMissing, pid)
+				}
+			}
+			if len(stillMissing) > 0 {
+				rec.MissingPrerequisites = stillMissing
+				// Check failover threshold during recovery.
+				currentEpoch := d.epochFn()
+				if rec.CreatedAtEpoch <= currentEpoch {
+					age := currentEpoch - rec.CreatedAtEpoch
+					if age >= DeferralFailoverThreshold {
+						return fmt.Errorf("dispatch: admission %s deferred for %d epochs "+
+							"(threshold %d); manual intervention required",
+							rec.Key, age, DeferralFailoverThreshold)
+					}
+				}
+				if err := d.store.PutAdmission(rec.Key, rec); err != nil {
+					return fmt.Errorf("dispatch: recovery persist deferred %s: %w", rec.EventID, err)
+				}
+				continue
+			}
 			rec.State = StateProcessing
+			rec.MissingPrerequisites = nil
+			d.mu.Lock()
+			d.removeFromDeferralIndex(rec.Key)
+			d.mu.Unlock()
 			fallthrough
 
 		case StateProcessing:

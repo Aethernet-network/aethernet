@@ -48,6 +48,13 @@ func (m *memAdmissionStore) PutAdmission(key string, rec *AdmissionRecord) error
 	return nil
 }
 
+func (m *memAdmissionStore) DeleteAdmission(key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.records, key)
+	return nil
+}
+
 func (m *memAdmissionStore) AllAdmissions() ([]*AdmissionRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

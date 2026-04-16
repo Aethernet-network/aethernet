@@ -1,0 +1,272 @@
+package dispatch
+
+import (
+	"context"
+	"errors"
+	"sync/atomic"
+	"testing"
+
+	"github.com/Aethernet-network/aethernet/internal/event"
+)
+
+// --- Deferral index unit tests ----------------------------------------------
+
+func TestDeferralIndex_AddAndLookup(t *testing.T) {
+	d, _ := newTestDispatcher(t)
+	d.mu.Lock()
+	d.addToDeferralIndex([]event.EventID{"prereq-1", "prereq-2"}, "admission-key-1")
+	d.mu.Unlock()
+
+	d.mu.Lock()
+	keys1 := d.deferralIndex["prereq-1"]
+	keys2 := d.deferralIndex["prereq-2"]
+	d.mu.Unlock()
+
+	if len(keys1) != 1 || keys1[0] != "admission-key-1" {
+		t.Errorf("prereq-1: got %v want [admission-key-1]", keys1)
+	}
+	if len(keys2) != 1 || keys2[0] != "admission-key-1" {
+		t.Errorf("prereq-2: got %v want [admission-key-1]", keys2)
+	}
+}
+
+func TestDeferralIndex_CleanOnTransition(t *testing.T) {
+	d, _ := newTestDispatcher(t)
+	d.mu.Lock()
+	d.addToDeferralIndex([]event.EventID{"prereq-1"}, "key-A")
+	d.addToDeferralIndex([]event.EventID{"prereq-1"}, "key-B")
+	d.removeFromDeferralIndex("key-A")
+	remaining := d.deferralIndex["prereq-1"]
+	d.mu.Unlock()
+
+	if len(remaining) != 1 || remaining[0] != "key-B" {
+		t.Errorf("after remove key-A: got %v want [key-B]", remaining)
+	}
+}
+
+func TestDeferralIndex_RebuildFromStore(t *testing.T) {
+	ev := makeTestEvent(t, "alice", "p1")
+	dag := &stubDAG{
+		tips:   []event.EventID{"tip-1"},
+		events: map[event.EventID]*event.Event{ev.ID: ev},
+	}
+	d, store := newTestDispatcherWithDAG(t, dag)
+
+	key, _ := AdmissionKey(ev)
+	_ = store.PutAdmission(key, &AdmissionRecord{
+		SchemaVersion:        1,
+		Key:                  key,
+		State:                StateReservedPendingPrereqs,
+		EventID:              ev.ID,
+		EventType:            string(ev.Type),
+		MissingPrerequisites: []event.EventID{"missing-prereq"},
+		Consumers:            map[string]PerConsumerStatus{"c": ConsumerPending},
+	})
+
+	records, _ := store.AllAdmissions()
+	d.mu.Lock()
+	d.rebuildDeferralIndex(records)
+	keys := d.deferralIndex["missing-prereq"]
+	d.mu.Unlock()
+
+	if len(keys) != 1 || keys[0] != key {
+		t.Errorf("rebuild: got %v want [%s]", keys, key)
+	}
+}
+
+// --- Integration: full deferral flow ----------------------------------------
+
+func TestDispatcher_DeferralFlow_EndToEnd(t *testing.T) {
+	parent := makeTestEvent(t, "alice", "parent")
+	child := makeTestEvent(t, "alice", "child")
+
+	// DAG knows parent is ancestor of child, but parent not yet retrievable
+	// via Get (simulating the "valid but not yet projected" edge case).
+	dag := &stubDAGWithGetOverride{
+		stubDAG: stubDAG{
+			tips: []event.EventID{"tip-1"},
+			ancestors: map[[2]event.EventID]bool{
+				{parent.ID, child.ID}: true,
+			},
+			events: map[event.EventID]*event.Event{
+				child.ID: child,
+			},
+		},
+		getMissing: map[event.EventID]bool{parent.ID: true},
+	}
+
+	store := newMemStore()
+	d := NewDispatcher(store, dag, func() uint64 { return 1 })
+
+	var applyCount atomic.Int64
+	c := &prereqConsumer{
+		syntheticConsumer: newSyntheticConsumer("test-consumer"),
+		prereqs:          []event.EventID{parent.ID},
+	}
+	c.syntheticConsumer.applyCount = applyCount
+	_ = d.Register(c)
+
+	// First Admit: defers because parent is not projected.
+	if err := d.Admit(context.Background(), child); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+
+	key, _ := AdmissionKey(child)
+	rec, _ := store.GetAdmission(key)
+	if rec.State != StateReservedPendingPrereqs {
+		t.Fatalf("state after first Admit: got %v want reserved-pending-prerequisites", rec.State)
+	}
+	if c.syntheticConsumer.applyCount.Load() != 0 {
+		t.Fatalf("Apply should not have been called during deferral")
+	}
+
+	// Now "project" the parent by making it available via Get.
+	dag.getMissing[parent.ID] = false
+	dag.events[parent.ID] = parent
+
+	// NotifyProjection triggers re-check.
+	d.NotifyProjection(context.Background(), parent.ID)
+
+	rec, _ = store.GetAdmission(key)
+	if rec.State != StateApplied {
+		t.Errorf("state after NotifyProjection: got %v want applied", rec.State)
+	}
+	if c.syntheticConsumer.applyCount.Load() != 1 {
+		t.Errorf("Apply should have been called once; got %d", c.syntheticConsumer.applyCount.Load())
+	}
+}
+
+// --- Integration: forgery rejection -----------------------------------------
+
+func TestDispatcher_ForgeryRejection(t *testing.T) {
+	unrelated := makeTestEvent(t, "bob", "unrelated")
+	child := makeTestEvent(t, "alice", "child")
+
+	dag := &stubDAG{
+		tips:      []event.EventID{"tip-1"},
+		ancestors: map[[2]event.EventID]bool{}, // unrelated is NOT an ancestor
+		events: map[event.EventID]*event.Event{
+			child.ID:     child,
+			unrelated.ID: unrelated,
+		},
+	}
+	store := newMemStore()
+	d := NewDispatcher(store, dag, func() uint64 { return 1 })
+
+	c := &prereqConsumer{
+		syntheticConsumer: newSyntheticConsumer("test-consumer"),
+		prereqs:          []event.EventID{unrelated.ID},
+	}
+	_ = d.Register(c)
+
+	err := d.Admit(context.Background(), child)
+	if !errors.Is(err, ErrPrerequisiteForgery) {
+		t.Fatalf("want ErrPrerequisiteForgery, got %v", err)
+	}
+
+	// No admission record should exist for a forged prerequisite.
+	key, _ := AdmissionKey(child)
+	_, getErr := store.GetAdmission(key)
+	if getErr == nil {
+		t.Error("admission record should not exist after forgery rejection")
+	}
+}
+
+// --- Integration: no-prerequisite consumer proceeds directly ----------------
+
+func TestDispatcher_NoPrerequisites_ProceedsDirectly(t *testing.T) {
+	d, _ := newTestDispatcher(t)
+	c := newSyntheticConsumer("test-consumer")
+	_ = d.Register(c)
+
+	ev := makeTestEvent(t, "alice", "p1")
+	if err := d.Admit(context.Background(), ev); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if c.applyCount.Load() != 1 {
+		t.Errorf("consumer without prerequisites: Apply count %d want 1", c.applyCount.Load())
+	}
+}
+
+// --- Failover threshold test ------------------------------------------------
+
+func TestFailoverThreshold_AtThresholdFailsRecovery(t *testing.T) {
+	ev := makeTestEvent(t, "alice", "p1")
+	dag := &stubDAGWithGetOverride{
+		stubDAG: stubDAG{
+			tips: []event.EventID{"tip-1"},
+			ancestors: map[[2]event.EventID]bool{
+				{"missing-prereq", ev.ID}: true,
+			},
+			events: map[event.EventID]*event.Event{ev.ID: ev},
+		},
+		getMissing: map[event.EventID]bool{"missing-prereq": true},
+	}
+
+	store := newMemStore()
+	currentEpoch := uint64(100)
+	d := NewDispatcher(store, dag, func() uint64 { return currentEpoch })
+
+	key, _ := AdmissionKey(ev)
+	_ = store.PutAdmission(key, &AdmissionRecord{
+		SchemaVersion:        1,
+		Key:                  key,
+		State:                StateReservedPendingPrereqs,
+		EventID:              ev.ID,
+		EventType:            string(ev.Type),
+		MissingPrerequisites: []event.EventID{"missing-prereq"},
+		CreatedAtEpoch:       0, // deferred since epoch 0; age = 100 >= threshold
+		Consumers:            map[string]PerConsumerStatus{"c": ConsumerPending},
+	})
+
+	err := d.Recover(context.Background())
+	if err == nil {
+		t.Fatal("expected Recover to fail at failover threshold")
+	}
+	if !containsStr(err.Error(), "manual intervention required") {
+		t.Errorf("error should mention manual intervention: %v", err)
+	}
+}
+
+func TestFailoverThreshold_BelowThresholdContinues(t *testing.T) {
+	ev := makeTestEvent(t, "alice", "p1")
+	dag := &stubDAGWithGetOverride{
+		stubDAG: stubDAG{
+			tips: []event.EventID{"tip-1"},
+			ancestors: map[[2]event.EventID]bool{
+				{"missing-prereq", ev.ID}: true,
+			},
+			events: map[event.EventID]*event.Event{ev.ID: ev},
+		},
+		getMissing: map[event.EventID]bool{"missing-prereq": true},
+	}
+
+	store := newMemStore()
+	currentEpoch := uint64(99)
+	d := NewDispatcher(store, dag, func() uint64 { return currentEpoch })
+
+	key, _ := AdmissionKey(ev)
+	_ = store.PutAdmission(key, &AdmissionRecord{
+		SchemaVersion:        1,
+		Key:                  key,
+		State:                StateReservedPendingPrereqs,
+		EventID:              ev.ID,
+		EventType:            string(ev.Type),
+		MissingPrerequisites: []event.EventID{"missing-prereq"},
+		CreatedAtEpoch:       0,
+		Consumers:            map[string]PerConsumerStatus{"c": ConsumerPending},
+	})
+
+	if err := d.Recover(context.Background()); err != nil {
+		t.Fatalf("Recover should succeed below threshold: %v", err)
+	}
+}
+
+func containsStr(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
