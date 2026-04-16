@@ -113,11 +113,24 @@ func RunTypeAConformance(t *testing.T, factory ConsumerFactory) {
 		defer cleanup()
 		ev := makeEvent(t, "alice", 700)
 		prereqs := c.Prerequisites(ev)
-		// Part C consumers return nil prerequisites; Part D consumers
-		// will return non-empty. Either way, this test documents the
-		// contract.
-		_ = prereqs
-		// The dispatcher handles deferral; the consumer just declares
-		// prerequisites. No assertion beyond "doesn't panic."
+		// Part D: consumers may return non-empty Prerequisites.
+		// The dispatcher handles deferral; the consumer declares which
+		// events it depends on. This test documents that Prerequisites
+		// is callable and returns a valid (possibly nil) slice.
+		if prereqs != nil {
+			for _, p := range prereqs {
+				if p == "" {
+					t.Error("Prerequisites returned empty EventID")
+				}
+			}
+		}
+	})
+
+	t.Run("PrerequisiteSchemaVersion", func(t *testing.T) {
+		c, cleanup := factory()
+		defer cleanup()
+		// PrerequisiteSchemaVersion must return a valid uint32 without
+		// panicking. The actual value is consumer-specific.
+		_ = c.PrerequisiteSchemaVersion()
 	})
 }
