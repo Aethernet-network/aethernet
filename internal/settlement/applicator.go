@@ -31,8 +31,11 @@ type eventLookup func(event.EventID) (*event.Event, error)
 // register escrow locks on settlement. Injected to avoid a Core→Application
 // import.
 type escrowHolder interface {
-	Hold(taskID string, posterID crypto.AgentID, amount uint64) error
 	IsLocked(taskID string) bool
+	// RegisterEscrow records escrow metadata without moving funds.
+	// Used by the applicator's escrow-lock settlement path — the canonical
+	// Transfer has already moved funds; RegisterEscrow only records the entry.
+	RegisterEscrow(taskID string, posterID crypto.AgentID, amount uint64, fundingTransferRef event.EventID) error
 }
 
 // taskSettler executes task-specific settlement side effects. Injected by
@@ -304,12 +307,16 @@ func (a *Applicator) applyTransfer(targetID event.EventID, verdict SettlementVer
 		if tp, err := event.GetPayload[event.TransferPayload](target); err == nil {
 			switch tp.Reason {
 			case "escrow-lock":
-				// Register escrow entry so release/refund can find it.
+				// Register escrow metadata. The canonical Transfer (target) has
+				// already moved funds via RecordFromSync above; RegisterEscrow
+				// records the entry and links it to the funding Transfer's ID
+				// WITHOUT invoking TransferFromBucket a second time — closing
+				// the F1 double-debit on this path.
 				if a.escrow != nil && tp.TaskID != "" {
 					if !a.escrow.IsLocked(tp.TaskID) {
-						if err := a.escrow.Hold(tp.TaskID, crypto.AgentID(tp.FromAgent), tp.Amount); err != nil {
-							slog.Warn("settlement: escrow hold failed",
-								"task_id", tp.TaskID, "err", err)
+						if err := a.escrow.RegisterEscrow(tp.TaskID, crypto.AgentID(tp.FromAgent), tp.Amount, targetID); err != nil {
+							slog.Warn("settlement: escrow register failed",
+								"task_id", tp.TaskID, "funding_ref", targetID, "err", err)
 						}
 					}
 				}
