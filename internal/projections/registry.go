@@ -245,6 +245,9 @@ func checkIdempotentOrMismatch(existing, incoming CanonicalProjection) error {
 	if existing.IdleJustification != incoming.IdleJustification {
 		return mismatch("IdleJustification", existing.IdleJustification, incoming.IdleJustification)
 	}
+	if existing.Subcategory != incoming.Subcategory {
+		return mismatch("Subcategory", existing.Subcategory, incoming.Subcategory)
+	}
 	// StateProbe intentionally excluded: Go does not support function equality.
 	// First-registered probe is retained.
 	return nil
