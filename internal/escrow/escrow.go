@@ -262,6 +262,43 @@ func (e *Escrow) RegisterEscrow(
 	return nil
 }
 
+// RegisterEscrowForTest records an EscrowEntry without DAG validation.
+//
+// SCOPE: This method exists for the test-helpers module and same-package tests.
+// Production code must not call this method. The no-bypass CI lint (built in
+// Part C of the F3-B workstream) will fail the build if any production package
+// imports or invokes this method. Until that lint lands, the constraint is
+// enforced by code review.
+//
+// See docs/plans/2026-04-15-f3b-part-e-escrow-hardening.md §3.1 and
+// docs/plans/2026-04-15-settlement-consensus-integrity-fix.md §6.1.
+//
+// Idempotent under duplicate call: second invocation with an existing taskID
+// is a no-op returning nil.
+func (e *Escrow) RegisterEscrowForTest(
+	taskID string,
+	poster crypto.AgentID,
+	amount uint64,
+	fundingTransferRef event.EventID,
+) error {
+	e.mu.Lock()
+	if _, exists := e.entries[taskID]; exists {
+		e.mu.Unlock()
+		return nil
+	}
+	entry := &EscrowEntry{
+		TaskID:             taskID,
+		PosterID:           poster,
+		Amount:             amount,
+		FundingTransferRef: fundingTransferRef,
+	}
+	e.entries[taskID] = entry
+	e.mu.Unlock()
+
+	e.persist(entry)
+	return nil
+}
+
 // Release moves the escrowed amount from the task bucket to claimerID.
 // Returns ErrEscrowNotFound if no escrow exists for taskID.
 func (e *Escrow) Release(taskID string, claimerID crypto.AgentID) error {
