@@ -18,6 +18,7 @@ import (
 	"sync"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 )
 
@@ -26,12 +27,19 @@ import (
 // disbursements have succeeded, enabling idempotent retry: if ReleaseNet
 // fails mid-way, a second call skips already-completed transfers (CRITICAL-3).
 type EscrowEntry struct {
-	TaskID        string         `json:"task_id"`
-	PosterID      crypto.AgentID `json:"poster_id"`
-	Amount        uint64         `json:"amount"`
-	WorkerPaid    bool           `json:"worker_paid"`    // true once the worker's net share has been transferred
-	ValidatorPaid bool           `json:"validator_paid"` // true once the validator's share has been transferred
-	TreasuryPaid  bool           `json:"treasury_paid"`  // true once the treasury's share has been transferred
+	TaskID   string         `json:"task_id"`
+	PosterID crypto.AgentID `json:"poster_id"`
+	Amount   uint64         `json:"amount"`
+
+	// FundingTransferRef is the EventID of the canonical Transfer (Reason=escrow-lock)
+	// that funded this escrow. Recorded by RegisterEscrow after DAG validation.
+	// Empty for pre-Part-E legacy entries loaded from persistent storage; LoadFromStore
+	// tolerates the zero value.
+	FundingTransferRef event.EventID `json:"funding_transfer_ref,omitempty"`
+
+	WorkerPaid    bool `json:"worker_paid"`    // true once the worker's net share has been transferred
+	ValidatorPaid bool `json:"validator_paid"` // true once the validator's share has been transferred
+	TreasuryPaid  bool `json:"treasury_paid"`  // true once the treasury's share has been transferred
 }
 
 // escrowPersistence is the subset of store.Store used by Escrow for durable writes.
@@ -49,10 +57,11 @@ var ErrEscrowNotFound = errors.New("escrow: entry not found")
 // Escrow manages task budget escrow using virtual transfer ledger buckets.
 // It is safe for concurrent use by multiple goroutines.
 type Escrow struct {
-	mu      sync.RWMutex
-	entries map[string]*EscrowEntry // keyed by taskID
-	ledger  *ledger.TransferLedger
-	store   escrowPersistence // optional; nil = in-memory only
+	mu        sync.RWMutex
+	entries   map[string]*EscrowEntry // keyed by taskID
+	ledger    *ledger.TransferLedger
+	store     escrowPersistence // optional; nil = in-memory only
+	dagReader DAGReader         // optional until RegisterEscrow is called; then required
 }
 
 // New creates a new Escrow backed by tl.
@@ -68,6 +77,18 @@ func New(tl *ledger.TransferLedger) *Escrow {
 // s must satisfy escrowPersistence; *store.Store from the store package does so.
 func (e *Escrow) SetStore(s escrowPersistence) {
 	e.store = s
+}
+
+// SetDAGReader attaches the DAG reader used by RegisterEscrow for funding-transfer
+// validation. Must be called before RegisterEscrow is invoked; RegisterEscrow
+// returns ErrDAGReaderNotConfigured if called with no reader attached.
+//
+// Idempotent: calling twice replaces the reader. Safe to call at startup before
+// any event-processing goroutine is started.
+func (e *Escrow) SetDAGReader(r DAGReader) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.dagReader = r
 }
 
 // persist writes entry to the store (best-effort; errors are logged not propagated).
