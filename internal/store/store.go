@@ -21,6 +21,7 @@ import (
 
 	"github.com/Aethernet-network/aethernet/internal/consensus"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/dispatch"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/identity"
@@ -44,6 +45,7 @@ const (
 	prefixValidator      = "val:"  // validator registry records
 	prefixReplayReserve  = "rsvr:" // per-category replay reserve balances
 	prefixChallenge      = "chal:" // challenge bond records (JSON blobs)
+	prefixDispatch       = "dispatch:" // dispatcher admission records
 )
 
 // Store is the durable persistence layer for a single AetherNet node.
@@ -1455,4 +1457,72 @@ func (s *Store) AllChallenges() (map[string][]byte, error) {
 		return nil, fmt.Errorf("store: all challenges: %w", err)
 	}
 	return result, nil
+}
+
+// ---------------------------------------------------------------------------
+// Dispatcher Admission Records
+// ---------------------------------------------------------------------------
+
+// PutAdmission serialises record to JSON and stores it under "dispatch:<key>".
+func (s *Store) PutAdmission(key string, record *dispatch.AdmissionRecord) error {
+	data, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("store: marshal admission %s: %w", key, err)
+	}
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(key), data)
+	})
+}
+
+// GetAdmission retrieves the admission record stored at key.
+// Returns badger.ErrKeyNotFound if no record exists.
+func (s *Store) GetAdmission(key string) (*dispatch.AdmissionRecord, error) {
+	var rec dispatch.AdmissionRecord
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(key))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			return json.Unmarshal(val, &rec)
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// AllAdmissions returns every admission record stored under the "dispatch:" prefix.
+// Used by the dispatcher's crash-recovery scan at startup.
+func (s *Store) AllAdmissions() ([]*dispatch.AdmissionRecord, error) {
+	var records []*dispatch.AdmissionRecord
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte(prefixDispatch)
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Seek(opts.Prefix); it.ValidForPrefix(opts.Prefix); it.Next() {
+			item := it.Item()
+			var rec dispatch.AdmissionRecord
+			if err := item.Value(func(val []byte) error {
+				return json.Unmarshal(val, &rec)
+			}); err != nil {
+				return err
+			}
+			records = append(records, &rec)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: all admissions: %w", err)
+	}
+	return records, nil
+}
+
+// DeleteAdmission removes the admission record at key.
+func (s *Store) DeleteAdmission(key string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete([]byte(key))
+	})
 }
