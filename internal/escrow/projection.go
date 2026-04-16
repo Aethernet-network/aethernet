@@ -27,6 +27,7 @@ func Projection(e *Escrow) projections.CanonicalProjection {
 		IntegrationTestRef: "github.com/Aethernet-network/aethernet/internal/integration.TestEscrow_HoldsOnTransferOptimistic",
 		Owner:              "state-and-consensus",
 		CreatedAt:          "2026-04-14",
+		Subcategory:        projections.SubcategoryEscrowRegistry,
 		StateProbe: func(ctx context.Context) (bool, error) {
 			return e.Empty(ctx)
 		},
