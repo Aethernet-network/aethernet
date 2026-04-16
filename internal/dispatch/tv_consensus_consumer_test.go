@@ -2,6 +2,7 @@ package dispatch_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	badger "github.com/dgraph-io/badger/v4"
@@ -261,6 +262,120 @@ func TestTVConsensusConsumer_Apply_EscrowAlreadyReleased_NoOp(t *testing.T) {
 	if workerBal1 != workerBal2 || treasuryBal1 != treasuryBal2 {
 		t.Errorf("balances mutated on Apply with deleted escrow: worker %d→%d treasury %d→%d",
 			workerBal1, workerBal2, treasuryBal1, treasuryBal2)
+	}
+}
+
+// TestTVConsensusConsumer_Apply_ConcurrentSameTask_Serialized exercises the
+// per-task mutex added after the v2 §10 rerun found that the commit-10
+// task-level pre-check closed sequential re-entrance but not concurrent
+// re-entrance. Two goroutines call Apply simultaneously with distinct
+// TaskVerificationConsensus events targeting the same task. Without the
+// per-task mutex, both would pass the task-terminal / HasSettlementStarted
+// pre-checks (no paid flags set, task not terminal) and race into
+// ReleaseSettlement with different recipient sets, producing interleaved
+// partial drains and divergent escrow end-state. With the mutex, the
+// second goroutine blocks until the first finishes settlement and terminal-
+// status transition, then observes AlreadyApplied and exits.
+func TestTVConsensusConsumer_Apply_ConcurrentSameTask_Serialized(t *testing.T) {
+	c, tm, tl, em, store := newTestTVConsumer(t)
+	budget := uint64(10000)
+	taskID, round := setupTask(t, tm, tl, em, budget)
+	_ = store.SaveRound(context.Background(), round)
+
+	ev1 := makeConsensusEvent(t, taskID, "round-1", "pass")
+	ev2 := makeConsensusEvent(t, taskID, "round-alt", "pass")
+
+	var wg sync.WaitGroup
+	var errs [2]error
+	wg.Add(2)
+	go func() { defer wg.Done(); errs[0] = c.Apply(context.Background(), ev1) }()
+	go func() { defer wg.Done(); errs[1] = c.Apply(context.Background(), ev2) }()
+	wg.Wait()
+
+	for i, e := range errs {
+		if e != nil {
+			t.Errorf("concurrent Apply[%d]: %v", i, e)
+		}
+	}
+
+	// Exactly one settlement should have landed: worker paid budget*7300/10000,
+	// treasury paid the remainder after worker + validator pool. Any divergence
+	// would manifest as excess or missing balance on worker, treasury, or a
+	// non-empty escrow bucket.
+	workerBal, _ := tl.Balance(crypto.AgentID("worker"))
+	if workerBal != budget*7300/10000 {
+		t.Errorf("worker balance: got %d want %d", workerBal, budget*7300/10000)
+	}
+	treasuryBal, _ := tl.Balance(crypto.AgentID("genesis:treasury"))
+	v1Bal, _ := tl.Balance(crypto.AgentID("validator-1"))
+	if total := workerBal + v1Bal + treasuryBal; total != budget {
+		t.Errorf("total distributed %d != budget %d (worker=%d v1=%d treasury=%d)",
+			total, budget, workerBal, v1Bal, treasuryBal)
+	}
+	bucketBal, _ := tl.Balance(crypto.AgentID("escrow:" + taskID))
+	if bucketBal != 0 {
+		t.Errorf("escrow bucket should be empty after settlement; got %d stuck", bucketBal)
+	}
+	if em.IsLocked(taskID) {
+		t.Errorf("escrow entry should be deleted after successful settlement")
+	}
+	task, _ := tm.Get(taskID)
+	if task.Status != tasks.TaskStatusCompleted {
+		t.Errorf("task status: got %s want completed", task.Status)
+	}
+}
+
+// TestTVConsensusConsumer_Apply_ConcurrentDifferentTasks_Parallel verifies
+// that the per-task mutex does not serialize across different tasks. Two
+// goroutines applying events for two distinct tasks must both complete
+// settlement — the locks are independent.
+func TestTVConsensusConsumer_Apply_ConcurrentDifferentTasks_Parallel(t *testing.T) {
+	c, tm, tl, em, store := newTestTVConsumer(t)
+	budgetA, budgetB := uint64(10000), uint64(20000)
+
+	// Fund a second poster so both tasks can be escrowed independently.
+	_ = tl.FundAgent("poster", 100_000)
+
+	taskA, roundA := setupTask(t, tm, tl, em, budgetA)
+	_ = store.SaveRound(context.Background(), roundA)
+
+	// Second task uses a different task id (PostTask generates unique ids)
+	// but we need to reuse helpers that call PostTask on the same manager.
+	taskB, rawRoundB := setupTask(t, tm, tl, em, budgetB)
+	// setupTask uses RoundID "round-1" for every task — rewrite to avoid
+	// cross-task round collision in the store.
+	roundB := *rawRoundB
+	roundB.RoundID = "round-B"
+	_ = store.SaveRound(context.Background(), &roundB)
+
+	evA := makeConsensusEvent(t, taskA, "round-1", "pass")
+	evB := makeConsensusEvent(t, taskB, "round-B", "pass")
+
+	var wg sync.WaitGroup
+	var errs [2]error
+	wg.Add(2)
+	go func() { defer wg.Done(); errs[0] = c.Apply(context.Background(), evA) }()
+	go func() { defer wg.Done(); errs[1] = c.Apply(context.Background(), evB) }()
+	wg.Wait()
+
+	for i, e := range errs {
+		if e != nil {
+			t.Errorf("Apply[%d]: %v", i, e)
+		}
+	}
+
+	// Both tasks should be completed; both escrow buckets empty.
+	for _, tid := range []string{taskA, taskB} {
+		if em.IsLocked(tid) {
+			t.Errorf("escrow for task %s should be released", tid)
+		}
+		if bal, _ := tl.Balance(crypto.AgentID("escrow:" + tid)); bal != 0 {
+			t.Errorf("escrow bucket %s not empty: %d stuck", tid, bal)
+		}
+		task, _ := tm.Get(tid)
+		if task.Status != tasks.TaskStatusCompleted {
+			t.Errorf("task %s status: got %s", tid, task.Status)
+		}
 	}
 }
 

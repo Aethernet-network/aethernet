@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/event"
@@ -27,6 +28,18 @@ type TVConsensusConsumer struct {
 	rounds    taskverification.Store
 	taskMgr   *tasks.TaskManager
 	escrowMgr *escrow.Escrow
+
+	// taskLocks holds one *sync.Mutex per task_id seen by Apply. Serializes
+	// Apply calls against the same task so concurrent events targeting the
+	// same task_id do not each pass the task-level idempotency pre-check
+	// (commit-10) and enter ReleaseSettlement in parallel.
+	//
+	// Entries are kept for the node's lifetime; at testnet scale this is
+	// bounded by the number of settled tasks. TODO for mainnet: garbage-
+	// collect entries whose task has been in terminal status for some grace
+	// period — once terminal, the pre-checks catch any late Apply anyway,
+	// so the lock is decorative.
+	taskLocks sync.Map
 }
 
 // NewTVConsensusConsumer constructs a consumer. All parameters required.
@@ -42,6 +55,14 @@ func NewTVConsensusConsumer(
 		taskMgr:   taskMgr,
 		escrowMgr: escrowMgr,
 	}
+}
+
+// taskMu returns the mutex associated with taskID, creating it on first use.
+// LoadOrStore ensures exactly one *sync.Mutex exists per taskID across
+// concurrent callers.
+func (c *TVConsensusConsumer) taskMu(taskID string) *sync.Mutex {
+	v, _ := c.taskLocks.LoadOrStore(taskID, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 func (c *TVConsensusConsumer) Name() string { return "tv_consensus_settlement" }
@@ -76,24 +97,45 @@ func (c *TVConsensusConsumer) PrerequisiteSchemaVersion() uint32 { return 1 }
 // event. Delegates to the existing settler logic, which routes all payouts
 // through escrow.ReleaseSettlement with per-recipient paid-flag idempotency.
 //
-// Task-level idempotency pre-check (added after the §10 treasury-spread
-// investigation): the dispatcher dedupes by canonical event hash, but each
-// finalizing validator emits its own TaskVerificationConsensus event with
-// a distinct hash, and all pass admission. Without a task-level guard, the
-// second and subsequent events each drive a settler.Settle → ReleaseSettlement
-// against the same escrow bucket; the per-recipient paid flags dedupe within
-// a single event's recipient set but do not dedupe across different events
-// with different recipient sets, so the interleaved partial drains diverge
-// across nodes (most visibly: treasury may not receive its share because
-// another event's validator-payout step drained the bucket first).
+// Task-level idempotency: the dispatcher dedupes by canonical event hash,
+// but each finalizing validator emits its own TaskVerificationConsensus
+// event with a distinct hash, and all pass admission. Without a task-level
+// guard, the second and subsequent events each drive a settler.Settle →
+// ReleaseSettlement against the same escrow bucket; the per-recipient paid
+// flags dedupe within a single event's recipient set but do not dedupe
+// across different events with different recipient sets, so the interleaved
+// partial drains diverge across nodes (most visibly: treasury may not
+// receive its share because another event's validator-payout step drained
+// the bucket first).
 //
-// The pre-check enforces: at most one TaskVerificationConsensus event for a
-// given task drives a settlement; all subsequent events are no-ops.
+// The guard is two-part:
+//   - A per-task mutex (taskMu) serializes Apply calls targeting the same
+//     task_id. This closes the concurrent re-entrance race where two events
+//     for the same task would each pass the pre-checks and enter settlement
+//     in parallel.
+//   - The task-terminal / HasSettlementStarted pre-checks — now evaluated
+//     while holding the lock — cause the second and subsequent callers for
+//     the same task to observe AlreadyApplied and return without invoking
+//     the settler.
+//
+// The lock MUST be acquired before the pre-checks. If the lock were acquired
+// after, two goroutines could both pass the pre-checks concurrently (the
+// original bug), then serialize, and the second would still attempt
+// settlement. Acquiring the lock first means the second goroutine blocks
+// until the first has completed settlement (including setting paid flags
+// and terminal status); when the second enters the pre-checks it correctly
+// observes the terminal state and returns a no-op.
+//
+// Different tasks still settle in parallel — the lock is per-task_id.
 func (c *TVConsensusConsumer) Apply(ctx context.Context, ev *event.Event) error {
 	payload, err := event.GetPayload[event.TaskVerificationConsensusPayload](ev)
 	if err != nil {
 		return fmt.Errorf("tv_consensus_settlement: unmarshal: %w", err)
 	}
+
+	mu := c.taskMu(payload.TaskID)
+	mu.Lock()
+	defer mu.Unlock()
 
 	// Pre-check 1: task already in a terminal status. Covers both the
 	// "producer-node after successful settle" case (entry deleted, task
