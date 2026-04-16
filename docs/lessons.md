@@ -325,3 +325,14 @@ The forward correction is: every settlement-affecting verification from this poi
 **Workstream queue update**: The named workstream sequence is now F3-B fix → reputation Step 4 → trajectory integration → challenge path → marketplace escrow integration → data ingestion → mainnet planning.
 
 ---
+
+## RecoveryProbe Assumptions
+
+### Only `ApplyVerificationConsensusResolution` sets terminal status on multi-validator-pipeline tasks
+
+- **Context**: The `TVConsensusConsumer` dispatcher consumer's `RecoveryProbe` checks the task's terminal status (`Completed`, `Rejected`, `DisputedResolved`) as positive evidence that settlement completed. This is correct only if the multi-validator settlement flow is the only code path that sets terminal status on tasks processed through the verification-consensus pipeline.
+- **Wrong approach**: Assuming terminal status is only set by one code path without auditing all assignment sites. If a legacy path (e.g., `ApproveTask`, `ResolveDispute`, or `applyTaskApproved` from a legacy `TaskApproved` DAG event) also sets terminal status, `RecoveryProbe` would return `RecoveryCompleted` for a task whose settlement the dispatcher never actually invoked — skipping settlement silently.
+- **Right approach**: Audit all terminal-status assignment sites (six in `tasks.go` as of 2026-04-16). Three are in `ApplyVerificationConsensusResolution` (the settlement path); the other three require different event types or explicit HTTP API calls. On the live multi-validator protocol, only `ApplyVerificationConsensusResolution` fires for verification-consensus-pipeline tasks. The assumption is valid today but must be re-verified if any new code path is added that sets `TaskStatusCompleted`, `TaskStatusRejected`, or `TaskStatusDisputedResolved`.
+- **Why it matters**: A false `RecoveryCompleted` from `RecoveryProbe` causes the dispatcher to mark the consumer as `applied` when it hasn't actually run settlement. The task appears terminal but the worker was never paid, validators never received their share, and the treasury is short. This is a silent fund-loss bug. Any contributor adding a new terminal-status-setting path must check whether `TVConsensusConsumer.RecoveryProbe` is still correct.
+
+---
