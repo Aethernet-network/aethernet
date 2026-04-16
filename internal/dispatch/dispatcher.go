@@ -314,6 +314,16 @@ func (d *Dispatcher) Recover(ctx context.Context) error {
 	d.mu.Unlock()
 
 	for _, rec := range records {
+		// Schema version mismatch check (D-6): refuse to advance records
+		// whose stored PrerequisiteSchemaVersion differs from any current
+		// consumer's version. Abort startup with an operator-action
+		// diagnostic.
+		if rec.State != StateApplied {
+			if err := d.checkSchemaVersions(rec, consumers); err != nil {
+				return err
+			}
+		}
+
 		switch rec.State {
 		case StateApplied:
 			continue
@@ -387,6 +397,33 @@ func (d *Dispatcher) Recover(ctx context.Context) error {
 		rec.State = computeTopLevelState(rec.Consumers)
 		if err := d.store.PutAdmission(rec.Key, rec); err != nil {
 			return fmt.Errorf("dispatch: recovery persist for %s: %w", rec.EventID, err)
+		}
+	}
+	return nil
+}
+
+// checkSchemaVersions verifies that non-applied admission records have a
+// PrerequisiteSchemaVersion that matches every current consumer with
+// pending status. Per D-6: mismatch aborts startup with an operator-action
+// diagnostic. No canonical ledger rollback implied.
+func (d *Dispatcher) checkSchemaVersions(rec *AdmissionRecord, consumers map[string]Consumer) error {
+	for name, status := range rec.Consumers {
+		if status == ConsumerApplied {
+			continue
+		}
+		c, ok := consumers[name]
+		if !ok {
+			continue // orphaned consumer
+		}
+		if rec.PrerequisiteSchemaVersion != c.PrerequisiteSchemaVersion() {
+			return fmt.Errorf(
+				"dispatch: schema version mismatch for consumer %q on admission %s: "+
+					"record has version %d, consumer declares version %d. "+
+					"Operator action: complete in-flight records under the old binary, "+
+					"or clear non-applied local admission state (dispatch: BadgerDB prefix) "+
+					"after verifying no canonical effects were committed. "+
+					"No canonical ledger rollback is implied.",
+				name, rec.Key, rec.PrerequisiteSchemaVersion, c.PrerequisiteSchemaVersion())
 		}
 	}
 	return nil

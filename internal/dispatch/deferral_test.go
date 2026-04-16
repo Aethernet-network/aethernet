@@ -413,6 +413,70 @@ func TestEvidenceEmission_PayloadFields(t *testing.T) {
 	}
 }
 
+// --- Schema version mismatch tests ------------------------------------------
+
+func TestSchemaVersion_MatchPasses(t *testing.T) {
+	ev := makeTestEvent(t, "alice", "p1")
+	dag := &stubDAG{
+		tips:   []event.EventID{"tip-1"},
+		events: map[event.EventID]*event.Event{ev.ID: ev},
+	}
+	d, store := newTestDispatcherWithDAG(t, dag)
+
+	c := newSyntheticConsumer("test-consumer")
+	c.probeResult = RecoveryCompleted
+	_ = d.Register(c)
+
+	key, _ := AdmissionKey(ev)
+	_ = store.PutAdmission(key, &AdmissionRecord{
+		SchemaVersion:             1,
+		Key:                       key,
+		State:                     StateProcessing,
+		PrerequisiteSchemaVersion: 0, // matches consumer's version (0)
+		EventID:                   ev.ID,
+		EventType:                 string(ev.Type),
+		Consumers:                 map[string]PerConsumerStatus{"test-consumer": ConsumerPending},
+	})
+
+	if err := d.Recover(context.Background()); err != nil {
+		t.Fatalf("Recover should succeed on version match: %v", err)
+	}
+}
+
+func TestSchemaVersion_MismatchFailsStartup(t *testing.T) {
+	ev := makeTestEvent(t, "alice", "p1")
+	dag := &stubDAG{
+		tips:   []event.EventID{"tip-1"},
+		events: map[event.EventID]*event.Event{ev.ID: ev},
+	}
+	d, store := newTestDispatcherWithDAG(t, dag)
+
+	c := newSyntheticConsumer("test-consumer")
+	_ = d.Register(c) // consumer declares PrerequisiteSchemaVersion = 0
+
+	key, _ := AdmissionKey(ev)
+	_ = store.PutAdmission(key, &AdmissionRecord{
+		SchemaVersion:             1,
+		Key:                       key,
+		State:                     StateProcessing,
+		PrerequisiteSchemaVersion: 1, // MISMATCH with consumer's 0
+		EventID:                   ev.ID,
+		EventType:                 string(ev.Type),
+		Consumers:                 map[string]PerConsumerStatus{"test-consumer": ConsumerPending},
+	})
+
+	err := d.Recover(context.Background())
+	if err == nil {
+		t.Fatal("expected Recover to fail on schema version mismatch")
+	}
+	if !containsStr(err.Error(), "schema version mismatch") {
+		t.Errorf("error should mention schema version mismatch: %v", err)
+	}
+	if !containsStr(err.Error(), "No canonical ledger rollback is implied") {
+		t.Errorf("error should include no-rollback language: %v", err)
+	}
+}
+
 func containsStr(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {
