@@ -262,6 +262,157 @@ func TestFailoverThreshold_BelowThresholdContinues(t *testing.T) {
 	}
 }
 
+// --- Evidence emission tests -------------------------------------------------
+
+func TestEvidenceEmission_AtComplaintThreshold(t *testing.T) {
+	ev := makeTestEvent(t, "alice", "p1")
+	dag := &stubDAGWithGetOverride{
+		stubDAG: stubDAG{
+			tips: []event.EventID{"tip-1"},
+			ancestors: map[[2]event.EventID]bool{
+				{"missing-prereq", ev.ID}: true,
+			},
+			events: map[event.EventID]*event.Event{ev.ID: ev},
+		},
+		getMissing: map[event.EventID]bool{"missing-prereq": true},
+	}
+
+	store := newMemStore()
+	currentEpoch := uint64(30) // exactly at complaint threshold
+	d := NewDispatcher(store, dag, func() uint64 { return currentEpoch })
+
+	var emitted []*event.Event
+	d.SetEvidenceEmitter(func(ev *event.Event) error {
+		emitted = append(emitted, ev)
+		return nil
+	})
+
+	key, _ := AdmissionKey(ev)
+	rec := &AdmissionRecord{
+		SchemaVersion:        1,
+		Key:                  key,
+		State:                StateReservedPendingPrereqs,
+		EventID:              ev.ID,
+		EventType:            string(ev.Type),
+		MissingPrerequisites: []event.EventID{"missing-prereq"},
+		CreatedAtEpoch:       0,
+		Consumers:            map[string]PerConsumerStatus{"c": ConsumerPending},
+	}
+
+	d.checkDeferralThresholds(context.Background(), rec)
+
+	if len(emitted) != 1 {
+		t.Fatalf("expected 1 evidence event, got %d", len(emitted))
+	}
+	if emitted[0].Type != event.EventTypePrerequisiteWithholding {
+		t.Errorf("event type: got %s want PrerequisiteWithholding", emitted[0].Type)
+	}
+	if !rec.EvidenceEmitted {
+		t.Error("EvidenceEmitted should be true after emission")
+	}
+}
+
+func TestEvidenceEmission_BelowThreshold(t *testing.T) {
+	ev := makeTestEvent(t, "alice", "p1")
+	store := newMemStore()
+	d := NewDispatcher(store, &stubDAG{tips: []event.EventID{"tip-1"}}, func() uint64 { return 29 })
+
+	var emitted []*event.Event
+	d.SetEvidenceEmitter(func(ev *event.Event) error {
+		emitted = append(emitted, ev)
+		return nil
+	})
+
+	key, _ := AdmissionKey(ev)
+	rec := &AdmissionRecord{
+		Key:                  key,
+		State:                StateReservedPendingPrereqs,
+		EventID:              ev.ID,
+		MissingPrerequisites: []event.EventID{"missing"},
+		CreatedAtEpoch:       0,
+	}
+
+	d.checkDeferralThresholds(context.Background(), rec)
+
+	if len(emitted) != 0 {
+		t.Errorf("should not emit below threshold; got %d events", len(emitted))
+	}
+}
+
+func TestEvidenceEmission_OnlyOnce(t *testing.T) {
+	ev := makeTestEvent(t, "alice", "p1")
+	store := newMemStore()
+	d := NewDispatcher(store, &stubDAG{tips: []event.EventID{"tip-1"}}, func() uint64 { return 50 })
+
+	var emitCount int
+	d.SetEvidenceEmitter(func(_ *event.Event) error {
+		emitCount++
+		return nil
+	})
+
+	key, _ := AdmissionKey(ev)
+	rec := &AdmissionRecord{
+		Key:                  key,
+		State:                StateReservedPendingPrereqs,
+		EventID:              ev.ID,
+		MissingPrerequisites: []event.EventID{"missing"},
+		CreatedAtEpoch:       0,
+	}
+	_ = store.PutAdmission(key, rec)
+
+	d.checkDeferralThresholds(context.Background(), rec)
+	d.checkDeferralThresholds(context.Background(), rec) // second call
+
+	if emitCount != 1 {
+		t.Errorf("evidence emitted %d times; want exactly 1", emitCount)
+	}
+}
+
+func TestEvidenceEmission_PayloadFields(t *testing.T) {
+	ev := makeTestEvent(t, "alice", "p1")
+	store := newMemStore()
+	d := NewDispatcher(store, &stubDAG{tips: []event.EventID{"tip-1"}}, func() uint64 { return 35 })
+
+	var emitted *event.Event
+	d.SetEvidenceEmitter(func(e *event.Event) error {
+		emitted = e
+		return nil
+	})
+
+	key, _ := AdmissionKey(ev)
+	rec := &AdmissionRecord{
+		Key:                  key,
+		State:                StateReservedPendingPrereqs,
+		EventID:              ev.ID,
+		EventType:            "Transfer",
+		MissingPrerequisites: []event.EventID{"prereq-1"},
+		CreatedAtEpoch:       0,
+	}
+	_ = store.PutAdmission(key, rec)
+
+	d.checkDeferralThresholds(context.Background(), rec)
+
+	if emitted == nil {
+		t.Fatal("no event emitted")
+	}
+	payload, err := event.GetPayload[event.PrerequisiteWithholdingPayload](emitted)
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if payload.StuckEventID != ev.ID {
+		t.Errorf("StuckEventID: got %s want %s", payload.StuckEventID, ev.ID)
+	}
+	if payload.DeferredSinceEpoch != 0 {
+		t.Errorf("DeferredSinceEpoch: got %d want 0", payload.DeferredSinceEpoch)
+	}
+	if payload.CurrentEpoch != 35 {
+		t.Errorf("CurrentEpoch: got %d want 35", payload.CurrentEpoch)
+	}
+	if len(payload.MissingPrerequisites) != 1 || payload.MissingPrerequisites[0] != "prereq-1" {
+		t.Errorf("MissingPrerequisites: got %v want [prereq-1]", payload.MissingPrerequisites)
+	}
+}
+
 func containsStr(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {
