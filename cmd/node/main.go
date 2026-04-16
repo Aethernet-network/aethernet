@@ -52,6 +52,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/verification"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
+	"github.com/Aethernet-network/aethernet/internal/dispatch"
 	"github.com/Aethernet-network/aethernet/internal/discovery"
 	"github.com/Aethernet-network/aethernet/internal/epoch"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
@@ -337,6 +338,7 @@ type nodeStack struct {
 	leaseEnforcer    *roundprogress.LeaseEnforcer
 	roundCounter     *epoch.RoundCounter
 	projReg          *projections.ProjectionRegistry
+	dispatcher       *dispatch.Dispatcher
 }
 
 // nodeProgressTransport adapts node.BroadcastToN for roundprogress.ProgressTransport.
@@ -1937,6 +1939,28 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			tvCalibrationStore,
 		)
 		tvConsensusConsumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, tvSettler, tvSlashingEvaluator, tvCalibrationStore)
+
+		// Commit 9 of §9: wire the CanonicalEventDispatcher for exactly-once
+		// settlement mediation. The dispatcher owns the admission state machine
+		// (C-1 through C-16) and the causal prerequisite gating (D-1 through D-8).
+		eventDispatcher := dispatch.NewDispatcher(stack.store, stack.dag, func() uint64 {
+			if stack.roundCounter != nil {
+				return stack.roundCounter.CurrentEpoch()
+			}
+			return 0
+		})
+		tvDispatchConsumer := dispatch.NewTVConsensusConsumer(tvSettler, tvStore, stack.taskMgr)
+		if err := eventDispatcher.Register(tvDispatchConsumer); err != nil {
+			slog.Error("dispatch: register TVConsensusConsumer failed", "err", err)
+			os.Exit(1)
+		}
+		if err := eventDispatcher.Recover(context.Background()); err != nil {
+			slog.Error("dispatch: recovery failed", "err", err)
+			os.Exit(1)
+		}
+		tvConsensusConsumer.SetDispatcher(eventDispatcher)
+		stack.dispatcher = eventDispatcher
+
 		_ = commitBus.Register(tvConsensusConsumer)
 
 		// --- Projection registry (step 2) ---
