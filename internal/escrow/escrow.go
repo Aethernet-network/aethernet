@@ -151,6 +151,39 @@ func (e *Escrow) IsLocked(taskID string) bool {
 	return exists
 }
 
+// HasSettlementStarted reports whether settlement has made partial progress
+// against the escrow for taskID — i.e. the entry exists and has any
+// per-recipient paid flag set.
+//
+// Returns false when the entry is absent (either never registered or already
+// fully released and deleted) or exists with no paid flags (fresh escrow,
+// settlement has not yet begun). Callers that need to distinguish "never
+// registered" from "already released" must consult task status.
+//
+// Intended use: the TVConsensusConsumer task-level idempotency pre-check. The
+// dispatcher dedupes by canonical event hash, but when multiple validators
+// each emit their own TaskVerificationConsensus for the same (task, round),
+// each is canonically unique and all pass admission. Without a task-level
+// guard, the second and subsequent events call settler.Settle against the
+// same escrow bucket; ReleaseSettlement's per-recipient paid flags are
+// defense against in-event retries, not against different events with
+// different recipient sets, so the interleaved partial drain diverges across
+// nodes. See the §10 treasury-spread investigation for the mechanism.
+func (e *Escrow) HasSettlementStarted(taskID string) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	entry, ok := e.entries[taskID]
+	if !ok {
+		return false
+	}
+	return entry.WorkerPaid ||
+		entry.ValidatorPaid ||
+		entry.TreasuryPaid ||
+		entry.PosterRefundPaid ||
+		len(entry.ValidatorsPaid) > 0 ||
+		len(entry.GenLedgerPaid) > 0
+}
+
 // Empty reports whether the escrow holds any in-flight entries. Used by
 // the projection registry StateProbe — see
 // docs/plans/2026-04-12-reputation-step-2-retrofit-projections.md §D7.

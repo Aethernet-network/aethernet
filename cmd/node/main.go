@@ -1949,7 +1949,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			}
 			return 0
 		})
-		tvDispatchConsumer := dispatch.NewTVConsensusConsumer(tvSettler, tvStore, stack.taskMgr)
+		tvDispatchConsumer := dispatch.NewTVConsensusConsumer(tvSettler, tvStore, stack.taskMgr, stack.escrowMgr)
 		if err := eventDispatcher.Register(tvDispatchConsumer); err != nil {
 			slog.Error("dispatch: register TVConsensusConsumer failed", "err", err)
 			os.Exit(1)
