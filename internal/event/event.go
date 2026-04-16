@@ -162,6 +162,13 @@ const (
 	// EventTypeValidatorRecoveryRotateCancel cancels a pending recovery-
 	// authorized key rotation. Signed by the recovery key.
 	EventTypeValidatorRecoveryRotateCancel EventType = "ValidatorRecoveryRotateCancel"
+
+	// EventTypePrerequisiteWithholding is canonical evidence emitted when a
+	// node's dispatcher holds an event in reserved-pending-prerequisites for
+	// more than DeferralComplaintThreshold epochs (locked at 30). The
+	// slashing/challenge-path consumer that acts on this evidence is a
+	// follow-up workstream; Part D only emits it. See locked design §5.4.
+	EventTypePrerequisiteWithholding EventType = "PrerequisiteWithholding"
 )
 
 // SettlementState tracks an event's position in the Optimistic Capability Settlement
@@ -792,4 +799,18 @@ type SlashingChallengePayload struct {
 	ChallengeWindowEndsAt int64  `json:"challenge_window_ends_at,omitempty"`
 	RaisedBy              string `json:"raised_by"`
 	TimestampUnix         int64  `json:"timestamp_unix"`
+}
+
+// PrerequisiteWithholdingPayload is the canonical evidence emitted by the
+// dispatcher when a node holds an event in reserved-pending-prerequisites
+// for more than DeferralComplaintThreshold epochs. The slashing consumer
+// that acts on this evidence is a follow-up workstream; Part D emits only.
+type PrerequisiteWithholdingPayload struct {
+	Version              uint8     `json:"v"`
+	StuckEventID         EventID   `json:"stuck_event_id"`
+	StuckEventType       string    `json:"stuck_event_type"`
+	MissingPrerequisites []EventID `json:"missing_prerequisites"`
+	DeferredSinceEpoch   uint64    `json:"deferred_since_epoch"`
+	CurrentEpoch         uint64    `json:"current_epoch"`
+	EmittingNodeAgent    string    `json:"emitting_node_agent"`
 }
