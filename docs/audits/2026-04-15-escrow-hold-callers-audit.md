@@ -205,15 +205,35 @@ Spot-check confirms every `.Hold(` match in the repo is against an escrow manage
 
 ---
 
-## Founder Sign-Off
+## Founder sign-off
 
-*(blank; awaiting founder review of the checklist before Part E implementation begins)*
+**Reviewed**: 2026-04-15.
 
-**Sign-off checklist** for the founder:
-- [ ] C3-1 (`internal/api/server.go:1507` test-fallback) resolution: ___________________
-- [ ] C3-2 (`internal/marketplace/server.go:355` marketplace binary) resolution: ___________________
-- [ ] Category 1 identified `fundingTransferRef` sources accepted (trivial for C1-1; DAG-lookup-required for C1-2 and C1-3; Part D deferral invoked when Transfer not locally projected).
-- [ ] Category 2 same-package-test module-boundary option selected for `internal/escrow/*_test.go` (Option A / B / C per §Category 2).
-- [ ] Category 2 projection-lint-reference preservation for C2-8 (keep `TestEscrow_HoldsOnTransferOptimistic` at its current symbol path to avoid breaking the step-3 lint's PR-3 check).
+**Status**: Approved with Category 3 resolutions captured below. Audit converts from "incomplete" to "approved." Part E implementation may proceed.
 
-Once all items checked, the audit status flips from "incomplete" to "approved"; Part E implementation can begin per the v3-final §9 sequencing.
+### Category 3 resolutions
+
+**C3-1 (`internal/api/server.go:1507` — test-fallback in production code): REMOVE.**
+
+The fallback is removed entirely during Part E implementation. Tests that constructed `api.Server` without a `protoClient` and relied on the fallback must either wire `protoClient` properly (real or test double) or restructure so the path being tested does not reach this code. The fallback's existence is the same anti-pattern as the `escrow.Hold` conflation — convenience code that conflates production and test paths in ways that hide design problems. Removal closes the surface.
+
+If any test breakage during Part E implementation cannot be cleanly fixed by wiring `protoClient`, surface it as a separate item for founder decision rather than reintroducing a fallback under a different name.
+
+**C3-2 (`internal/marketplace/server.go:355` — standalone marketplace binary): OUT-OF-SCOPE WITH EXPLICIT LINT EXEMPTION.**
+
+The marketplace binary operates its own application-layer escrow not backed by any DAG Transfer event. `RegisterEscrow` requires a `fundingTransferRef` that the marketplace cannot provide. The marketplace continues to use the combined fund-and-register behavior via an explicit lint-exempt path during Part E implementation.
+
+The exemption is structural and documented:
+- The call site receives a comment exemption that the no-bypass CI lint from §4.11 of the locked F3-B design accepts.
+- The justification string is ≥20 chars and ≥3 words, citing the follow-up workstream.
+- Suggested exemption: `// dispatch:lint marketplace-exempt "marketplace binary operates own application-layer escrow; protocol-escrow integration tracked as follow-up workstream"`.
+
+A new workstream — **marketplace escrow integration** — is added to the named workstream queue, sequenced between the challenge path workstream and the data ingestion workstream. The follow-up workstream's scope: design how the marketplace's application-layer escrow flows through (or is replaced by) the protocol's canonical escrow, so the marketplace can use `RegisterEscrow` like all other production paths.
+
+### Coupling note for Part E implementation
+
+The Category 2 entry C2-8 (`internal/escrow/projection_escrow_test.go:33`) is the step-2 projection-lint `IntegrationTestRef` target. If Part E moves this test to a different module as part of the test-helpers quarantine, the corresponding projection registry entry's `IntegrationTestRef` field must be updated to match the new symbol path. The projection-lint will fail the build otherwise.
+
+### Audit now approved.
+
+Part E implementation may begin per the §9 sequencing in the locked F3-B design.
