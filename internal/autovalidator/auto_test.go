@@ -8,6 +8,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
+	"github.com/Aethernet-network/aethernet/internal/escrow_testhelpers"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/fees"
 	"github.com/Aethernet-network/aethernet/internal/identity"
@@ -122,8 +123,8 @@ func TestAutoValidator_FeeOnTaskSettlement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PostTask: %v", err)
 	}
-	if err := esc.Hold(task.ID, posterID, budget); err != nil {
-		t.Fatalf("Hold: %v", err)
+	if err := escrow_testhelpers.FundAndRegisterEscrowForTest(tl, esc, task.ID, posterID, budget); err != nil {
+		t.Fatalf("FundAndRegisterEscrowForTest: %v", err)
 	}
 	if err := tm.ClaimTask(task.ID, claimerID); err != nil {
 		t.Fatalf("ClaimTask: %v", err)
@@ -254,8 +255,8 @@ func TestAutoValidator_DisputeResolutionApprove(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PostTask: %v", err)
 	}
-	if err := esc.Hold(task.ID, posterID, budget); err != nil {
-		t.Fatalf("Hold: %v", err)
+	if err := escrow_testhelpers.FundAndRegisterEscrowForTest(tl, esc, task.ID, posterID, budget); err != nil {
+		t.Fatalf("FundAndRegisterEscrowForTest: %v", err)
 	}
 	if err := tm.ClaimTask(task.ID, claimerID); err != nil {
 		t.Fatalf("ClaimTask: %v", err)
@@ -326,8 +327,8 @@ func TestAutoValidator_DisputeResolutionReject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PostTask: %v", err)
 	}
-	if err := esc.Hold(task.ID, posterID, budget); err != nil {
-		t.Fatalf("Hold: %v", err)
+	if err := escrow_testhelpers.FundAndRegisterEscrowForTest(tl, esc, task.ID, posterID, budget); err != nil {
+		t.Fatalf("FundAndRegisterEscrowForTest: %v", err)
 	}
 	if err := tm.ClaimTask(task.ID, claimerID); err != nil {
 		t.Fatalf("ClaimTask: %v", err)
@@ -398,8 +399,8 @@ func TestAutoValidator_ClaimTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PostTask: %v", err)
 	}
-	if err := esc.Hold(task.ID, posterID, budget); err != nil {
-		t.Fatalf("Hold: %v", err)
+	if err := escrow_testhelpers.FundAndRegisterEscrowForTest(tl, esc, task.ID, posterID, budget); err != nil {
+		t.Fatalf("FundAndRegisterEscrowForTest: %v", err)
 	}
 	// Claim the task — do NOT submit a result.
 	if err := tm.ClaimTask(task.ID, claimerID); err != nil {
@@ -483,8 +484,8 @@ func TestAutoValidator_GenerationLedger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PostTask: %v", err)
 	}
-	if err := esc.Hold(task.ID, posterID, budget); err != nil {
-		t.Fatalf("Hold: %v", err)
+	if err := escrow_testhelpers.FundAndRegisterEscrowForTest(tl, esc, task.ID, posterID, budget); err != nil {
+		t.Fatalf("FundAndRegisterEscrowForTest: %v", err)
 	}
 	if err := tm.ClaimTask(task.ID, claimerID); err != nil {
 		t.Fatalf("ClaimTask: %v", err)

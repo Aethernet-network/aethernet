@@ -26,6 +26,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
 	escrowpkg "github.com/Aethernet-network/aethernet/internal/escrow"
+	"github.com/Aethernet-network/aethernet/internal/escrow_testhelpers"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/evidence"
 	"github.com/Aethernet-network/aethernet/internal/fees"
@@ -183,7 +184,7 @@ func waitGenLedger(gl *ledger.GenerationLedger, window time.Duration, timeout ti
 // the escrow release + fee tracking that the SettlementApplicator would
 // normally perform after consensus. Used in integration tests that don't
 // wire the full consensus pipeline.
-func applyTaskSettlements(t *testing.T, d *dag.DAG, esc *escrowpkg.Escrow, fc *fees.Collector, treasuryID crypto.AgentID) {
+func applyTaskSettlements(t *testing.T, d *dag.DAG, tl *ledger.TransferLedger, esc *escrowpkg.Escrow, fc *fees.Collector, treasuryID crypto.AgentID) {
 	t.Helper()
 	for _, ev := range d.All() {
 		if ev.Type != event.EventTypeTaskSettlement {
@@ -202,8 +203,8 @@ func applyTaskSettlements(t *testing.T, d *dag.DAG, esc *escrowpkg.Escrow, fc *f
 		claimerID := crypto.AgentID(payload.ClaimerID)
 
 		if !esc.IsLocked(payload.TaskID) {
-			if err := esc.Hold(payload.TaskID, posterID, payload.Budget); err != nil {
-				t.Logf("applyTaskSettlements: catch-up hold failed: %v", err)
+			if err := escrow_testhelpers.FundAndRegisterEscrowForTest(tl, esc, payload.TaskID, posterID, payload.Budget); err != nil {
+				t.Logf("applyTaskSettlements: catch-up register failed: %v", err)
 				continue
 			}
 		}
@@ -323,8 +324,8 @@ func TestE2E_FullSettlementLifecycle(t *testing.T) {
 	taskID := task.ID
 	st.track(crypto.AgentID("escrow:" + taskID))
 
-	if err := esc.Hold(taskID, posterID, budget); err != nil {
-		t.Fatalf("Hold: %v", err)
+	if err := escrow_testhelpers.FundAndRegisterEscrowForTest(tl, esc, taskID, posterID, budget); err != nil {
+		t.Fatalf("FundAndRegisterEscrowForTest: %v", err)
 	}
 
 	st.check(t, "after escrow hold")
@@ -434,7 +435,7 @@ func min(a, b float64) float64 {
 
 	// Apply TaskSettlement events: simulate the SettlementApplicator doing
 	// escrow release + fee distribution after consensus finalization.
-	applyTaskSettlements(t, d, esc, fc, treasuryID)
+	applyTaskSettlements(t, d, tl, esc, fc, treasuryID)
 
 	// ── Economic assertions ───────────────────────────────────────────────────
 	fee := fees.CalculateFee(budget)
@@ -766,8 +767,8 @@ func TestE2E_EscrowIdempotency(t *testing.T) {
 	taskID := task.ID
 	st.track(crypto.AgentID("escrow:" + taskID))
 
-	if err := esc.Hold(taskID, posterID, budget); err != nil {
-		t.Fatalf("Hold: %v", err)
+	if err := escrow_testhelpers.FundAndRegisterEscrowForTest(tl, esc, taskID, posterID, budget); err != nil {
+		t.Fatalf("FundAndRegisterEscrowForTest: %v", err)
 	}
 
 	st.check(t, "after hold")
@@ -1170,8 +1171,8 @@ func TestE2E_MultiAgentEconomics(t *testing.T) {
 		taskIDs[i] = task.ID
 		st.track(crypto.AgentID("escrow:" + task.ID))
 
-		if err := sharedEsc.Hold(task.ID, posterID, taskBudget); err != nil {
-			t.Fatalf("Hold[%d]: %v", i, err)
+		if err := escrow_testhelpers.FundAndRegisterEscrowForTest(tl, sharedEsc, task.ID, posterID, taskBudget); err != nil {
+			t.Fatalf("FundAndRegisterEscrowForTest[%d]: %v", i, err)
 		}
 	}
 
@@ -1260,7 +1261,7 @@ func Solve(input string) (string, error) {
 	// Apply TaskSettlement events: simulate the SettlementApplicator doing
 	// escrow release + fee distribution after consensus finalization.
 	st.track(crypto.AgentID("")) // synthetic validator-fee holding bucket
-	applyTaskSettlements(t, d, sharedEsc, fc, treasuryID)
+	applyTaskSettlements(t, d, tl, sharedEsc, fc, treasuryID)
 
 	// Verify total fees collected ≈ 0.1% of total settled value.
 	totalSettledValue := uint64(numTasks) * taskBudget
@@ -1395,8 +1396,8 @@ func TestE2E_FraudulentApprovalReplaySlash(t *testing.T) {
 	taskID := task.ID
 	st.track(crypto.AgentID("escrow:" + taskID))
 
-	if err := esc.Hold(taskID, posterID, budget); err != nil {
-		t.Fatalf("Hold: %v", err)
+	if err := escrow_testhelpers.FundAndRegisterEscrowForTest(tl, esc, taskID, posterID, budget); err != nil {
+		t.Fatalf("FundAndRegisterEscrowForTest: %v", err)
 	}
 	if err := tm.ClaimTask(taskID, workerID); err != nil {
 		t.Fatalf("Claim: %v", err)

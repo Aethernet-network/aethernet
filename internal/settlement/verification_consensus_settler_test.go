@@ -6,6 +6,7 @@ import (
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
+	"github.com/Aethernet-network/aethernet/internal/escrow_testhelpers"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
@@ -36,9 +37,10 @@ func setupSettlerTest(t *testing.T, budget uint64) (
 	_ = tm.ClaimTask(taskID, "worker-1")
 	_ = tm.SubmitResult(taskID, "worker-1", "sha256:test", "note", "")
 
-	// Hold escrow via legacy test path; the settler test path pre-populates the
-	// escrow so the catch-up branch (which needs a DAG scanner) is not exercised.
-	_ = em.Hold(taskID, "poster-1", budget)
+	// Fund+register via the quarantined test helper; the settler test path
+	// pre-populates the escrow so the catch-up branch (which needs a DAG
+	// scanner) is not exercised.
+	_ = escrow_testhelpers.FundAndRegisterEscrowForTest(tl, em, taskID, "poster-1", budget)
 
 	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) float64 { return 1.0 })
 	settler := NewVerificationConsensusSettler(tm, tl, em, nil, calc, "genesis:treasury", nil)
@@ -327,7 +329,7 @@ func setupQWeightedSettler(t *testing.T, budget uint64, qFn ValidatorQScoreFn) (
 	taskID := allTasks[0].ID
 	_ = tm.ClaimTask(taskID, "worker-1")
 	_ = tm.SubmitResult(taskID, "worker-1", "sha256:q", "note", "")
-	_ = em.Hold(taskID, "poster-1", budget)
+	_ = escrow_testhelpers.FundAndRegisterEscrowForTest(tl, em, taskID, "poster-1", budget)
 	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) float64 { return 1.0 })
 	settler := NewVerificationConsensusSettler(tm, tl, em, nil, calc, "genesis:treasury", qFn)
 	return settler, tm
