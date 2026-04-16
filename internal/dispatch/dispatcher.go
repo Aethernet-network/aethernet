@@ -17,6 +17,11 @@ type AdmissionStore interface {
 	AllAdmissions() ([]*AdmissionRecord, error)
 }
 
+// EvidenceEmitter publishes a canonical event to the DAG. Injected to
+// break the circular dependency dispatch → localpub → dag → dispatch.
+// In production, wired to localpub.Publisher.Publish via cmd/node/main.go.
+type EvidenceEmitter func(ev *event.Event) error
+
 // Dispatcher is the CanonicalEventDispatcher primitive. It sits between
 // the recognition fabric and all canonical-event consumers, guaranteeing
 // exactly-once successful Apply per (event, consumer) pair (C-1).
@@ -26,22 +31,33 @@ type AdmissionStore interface {
 // per event — the dispatcher absorbs duplication at a single
 // architectural choke point.
 type Dispatcher struct {
-	mu        sync.RWMutex
-	consumers map[string]Consumer
-	store     AdmissionStore
-	dag       DAGAnchorReader
-	epochFn   func() uint64
+	mu              sync.RWMutex
+	consumers       map[string]Consumer
+	store           AdmissionStore
+	dag             DAGAnchorReader
+	epochFn         func() uint64
+	evidenceEmitter EvidenceEmitter
+	deferralIndex   map[event.EventID][]string // prereq EventID → admission keys waiting
 }
 
 // NewDispatcher constructs a dispatcher. All parameters are required.
 // Register consumers before calling Recover or Admit.
 func NewDispatcher(store AdmissionStore, dag DAGAnchorReader, epochFn func() uint64) *Dispatcher {
 	return &Dispatcher{
-		consumers: make(map[string]Consumer),
-		store:     store,
-		dag:       dag,
-		epochFn:   epochFn,
+		consumers:     make(map[string]Consumer),
+		store:         store,
+		dag:           dag,
+		epochFn:       epochFn,
+		deferralIndex: make(map[event.EventID][]string),
 	}
+}
+
+// SetEvidenceEmitter wires the function used to emit PrerequisiteWithholding
+// evidence events to the DAG. Must be called before Admit.
+func (d *Dispatcher) SetEvidenceEmitter(fn EvidenceEmitter) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.evidenceEmitter = fn
 }
 
 // Register adds a consumer. Must be called before Recover or Admit.

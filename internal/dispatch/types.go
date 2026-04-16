@@ -116,6 +116,16 @@ type AdmissionRecord struct {
 	EventID                   event.EventID                `json:"event_id"`
 	EventType                 string                       `json:"event_type"`
 	CreatedAtEpoch            uint64                       `json:"created_at_epoch"`
+
+	// MissingPrerequisites lists EventIDs that are DAG-reachable from the
+	// triggering event but not yet projected locally. Updated on each re-check.
+	// Empty means all prerequisites are satisfied.
+	MissingPrerequisites []event.EventID `json:"missing_prerequisites,omitempty"`
+
+	// EvidenceEmitted is true once a PrerequisiteWithholding canonical evidence
+	// event has been emitted for this admission record. Prevents duplicate
+	// evidence emission per D-5.
+	EvidenceEmitted bool `json:"evidence_emitted,omitempty"`
 }
 
 // computeTopLevelState derives the admission record's top-level state
