@@ -32,14 +32,14 @@ func (s *stubDAG) Get(id event.EventID) (*event.Event, error) {
 
 func TestDAGAnchor_EmptyAnchor_FirstAdmission(t *testing.T) {
 	dag := &stubDAG{tips: []event.EventID{"tip1"}}
-	if err := verifyAnchor(dag, ""); err != nil {
+	if err := VerifyAnchor(dag, ""); err != nil {
 		t.Fatalf("empty anchor should pass: %v", err)
 	}
 }
 
 func TestDAGAnchor_AnchorEqualsTip(t *testing.T) {
 	dag := &stubDAG{tips: []event.EventID{"tip1", "tip2"}}
-	if err := verifyAnchor(dag, "tip1"); err != nil {
+	if err := VerifyAnchor(dag, "tip1"); err != nil {
 		t.Fatalf("anchor == tip should pass: %v", err)
 	}
 }
@@ -51,7 +51,7 @@ func TestDAGAnchor_ValidAncestorRelationship(t *testing.T) {
 			{"old-anchor", "tip1"}: true,
 		},
 	}
-	if err := verifyAnchor(dag, "old-anchor"); err != nil {
+	if err := VerifyAnchor(dag, "old-anchor"); err != nil {
 		t.Fatalf("valid ancestor should pass: %v", err)
 	}
 }
@@ -61,7 +61,7 @@ func TestDAGAnchor_CorruptedAnchor(t *testing.T) {
 		tips:      []event.EventID{"tip1"},
 		ancestors: map[[2]event.EventID]bool{},
 	}
-	err := verifyAnchor(dag, "unreachable-anchor")
+	err := VerifyAnchor(dag, "unreachable-anchor")
 	if !errors.Is(err, ErrCorruptedAdmissionState) {
 		t.Fatalf("want ErrCorruptedAdmissionState, got %v", err)
 	}
@@ -69,7 +69,7 @@ func TestDAGAnchor_CorruptedAnchor(t *testing.T) {
 
 func TestDAGAnchor_EmptyTips(t *testing.T) {
 	dag := &stubDAG{tips: nil}
-	err := verifyAnchor(dag, "some-anchor")
+	err := VerifyAnchor(dag, "some-anchor")
 	if !errors.Is(err, ErrCorruptedAdmissionState) {
 		t.Fatalf("empty tips should fail: %v", err)
 	}

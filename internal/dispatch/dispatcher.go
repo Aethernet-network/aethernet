@@ -102,7 +102,7 @@ func (d *Dispatcher) Admit(ctx context.Context, ev *event.Event) error {
 		return fmt.Errorf("dispatch: admission key: %w", err)
 	}
 
-	if err := verifyAnchor(d.dag, d.currentAnchor()); err != nil {
+	if err := VerifyAnchor(d.dag, d.currentAnchor()); err != nil {
 		return err
 	}
 

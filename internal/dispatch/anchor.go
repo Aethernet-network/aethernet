@@ -19,13 +19,16 @@ type DAGAnchorReader interface {
 	Get(id event.EventID) (*event.Event, error)
 }
 
-// verifyAnchor confirms that storedAnchor is an ancestor of (or equal to)
+// VerifyAnchor confirms that storedAnchor is an ancestor of (or equal to)
 // at least one current DAG tip. Per C-6: verified on every admission, not
 // just at startup. Per C-13: the anchor is the canonical content-addressed
 // identifier of the DAG tip at reservation time.
 //
-// An empty storedAnchor (first admission) passes unconditionally.
-func verifyAnchor(dag DAGAnchorReader, storedAnchor event.EventID) error {
+// An empty storedAnchor (first admission / empty store) passes unconditionally.
+//
+// Exported for reuse by Parts A and B (applicator and escrow load-time
+// DAG-anchor verification).
+func VerifyAnchor(dag DAGAnchorReader, storedAnchor event.EventID) error {
 	if storedAnchor == "" {
 		return nil
 	}
