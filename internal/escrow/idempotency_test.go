@@ -9,8 +9,22 @@ import (
 	"testing"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 )
+
+// fundAndRegisterLocal is the same-package equivalent of the test-helpers
+// module's FundAndRegisterEscrowForTest, used here because these whitebox
+// tests must live in package escrow to access unexported fields.
+func fundAndRegisterLocal(t *testing.T, tl *ledger.TransferLedger, e *Escrow, taskID string, poster crypto.AgentID, amount uint64) {
+	t.Helper()
+	if err := tl.TransferFromBucket(poster, crypto.AgentID("escrow:"+taskID), amount); err != nil {
+		t.Fatalf("TransferFromBucket: %v", err)
+	}
+	if err := e.RegisterEscrowForTest(taskID, poster, amount, event.EventID("test-funding:"+taskID)); err != nil {
+		t.Fatalf("RegisterEscrowForTest: %v", err)
+	}
+}
 
 // TestReleaseNet_Idempotency_WorkerAlreadyPaid verifies that when WorkerPaid is
 // already set (e.g. from a prior partially-successful call), the worker is NOT
@@ -22,9 +36,7 @@ func TestReleaseNet_Idempotency_WorkerAlreadyPaid(t *testing.T) {
 	}
 
 	e := New(tl)
-	if err := e.Hold("task1", crypto.AgentID("poster"), 10_000); err != nil {
-		t.Fatalf("Hold: %v", err)
-	}
+	fundAndRegisterLocal(t, tl, e, "task1", crypto.AgentID("poster"), 10_000)
 
 	// Simulate a prior partial success: the worker payment already went through
 	// but the validator payment failed. Mark WorkerPaid=true in the entry.
@@ -76,9 +88,7 @@ func TestReleaseNet_Idempotency_FullSuccess(t *testing.T) {
 	}
 
 	e := New(tl)
-	if err := e.Hold("task2", crypto.AgentID("poster2"), 10_000); err != nil {
-		t.Fatalf("Hold: %v", err)
-	}
+	fundAndRegisterLocal(t, tl, e, "task2", crypto.AgentID("poster2"), 10_000)
 
 	// First call succeeds.
 	if err := e.ReleaseNet(
