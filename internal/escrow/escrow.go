@@ -54,6 +54,21 @@ type escrowPersistence interface {
 // ErrEscrowNotFound is returned when an operation references an unknown taskID.
 var ErrEscrowNotFound = errors.New("escrow: entry not found")
 
+// Error sentinels for RegisterEscrow funding-transfer validation.
+//
+// ErrFundingTransferNotProjected indicates the fundingTransferRef does not
+// yet resolve in the DAG. Callers classify this as a prerequisite failure
+// handled by Part D deferral.
+//
+// The other three are hard failures (malformed/malicious event, misconfigured
+// registration).
+var (
+	ErrDAGReaderNotConfigured      = errors.New("escrow: DAG reader not configured")
+	ErrFundingTransferNotProjected = errors.New("escrow: funding transfer not projected in DAG")
+	ErrFundingTransferWrongType    = errors.New("escrow: funding transfer event is not a Transfer")
+	ErrFundingTransferMismatch     = errors.New("escrow: funding transfer does not match registration")
+)
+
 // Escrow manages task budget escrow using virtual transfer ledger buckets.
 // It is safe for concurrent use by multiple goroutines.
 type Escrow struct {
@@ -167,6 +182,83 @@ func (e *Escrow) Hold(taskID string, posterID crypto.AgentID, amount uint64) err
 		}
 		return fmt.Errorf("escrow: hold for task %s: %w", taskID, err)
 	}
+	return nil
+}
+
+// RegisterEscrow records an EscrowEntry for taskID without moving funds.
+//
+// The canonical Transfer event identified by fundingTransferRef must already
+// be projected in the DAG and must match the registration's amount, poster,
+// bucket (ToAgent="escrow:"+taskID), taskID, and reason ("escrow-lock"). If the
+// Transfer is not yet projected, RegisterEscrow returns ErrFundingTransferNotProjected
+// — callers treat this as a prerequisite failure handled by Part D deferral.
+// Any other validation failure returns one of the hard sentinels
+// (ErrFundingTransferWrongType, ErrFundingTransferMismatch) with a diagnostic.
+//
+// Idempotent: if an entry already exists for taskID, RegisterEscrow is a no-op
+// and returns nil. This matches the peer-node catch-up contract.
+//
+// Does not call ledger.TransferFromBucket under any path. That distinction is
+// the point of this method — the canonical Transfer has already moved funds
+// before RegisterEscrow is reached.
+func (e *Escrow) RegisterEscrow(
+	taskID string,
+	poster crypto.AgentID,
+	amount uint64,
+	fundingTransferRef event.EventID,
+) error {
+	e.mu.RLock()
+	reader := e.dagReader
+	_, alreadyExists := e.entries[taskID]
+	e.mu.RUnlock()
+
+	if alreadyExists {
+		return nil
+	}
+	if reader == nil {
+		return ErrDAGReaderNotConfigured
+	}
+
+	fundingEvt, err := reader.Get(fundingTransferRef)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrFundingTransferNotProjected, fundingTransferRef, err)
+	}
+	if fundingEvt.Type != event.EventTypeTransfer {
+		return fmt.Errorf("%w: %s is %s", ErrFundingTransferWrongType, fundingTransferRef, fundingEvt.Type)
+	}
+	tp, err := event.GetPayload[event.TransferPayload](fundingEvt)
+	if err != nil {
+		return fmt.Errorf("%w: decode payload: %v", ErrFundingTransferWrongType, err)
+	}
+
+	switch {
+	case tp.Reason != "escrow-lock":
+		return fmt.Errorf("%w: reason=%q want escrow-lock", ErrFundingTransferMismatch, tp.Reason)
+	case tp.FromAgent != string(poster):
+		return fmt.Errorf("%w: from_agent=%s want %s", ErrFundingTransferMismatch, tp.FromAgent, poster)
+	case tp.ToAgent != "escrow:"+taskID:
+		return fmt.Errorf("%w: to_agent=%s want escrow:%s", ErrFundingTransferMismatch, tp.ToAgent, taskID)
+	case tp.Amount != amount:
+		return fmt.Errorf("%w: amount=%d want %d", ErrFundingTransferMismatch, tp.Amount, amount)
+	case tp.TaskID != taskID:
+		return fmt.Errorf("%w: task_id=%s want %s", ErrFundingTransferMismatch, tp.TaskID, taskID)
+	}
+
+	e.mu.Lock()
+	if _, alreadyExists := e.entries[taskID]; alreadyExists {
+		e.mu.Unlock()
+		return nil
+	}
+	entry := &EscrowEntry{
+		TaskID:             taskID,
+		PosterID:           poster,
+		Amount:             amount,
+		FundingTransferRef: fundingTransferRef,
+	}
+	e.entries[taskID] = entry
+	e.mu.Unlock()
+
+	e.persist(entry)
 	return nil
 }
 
