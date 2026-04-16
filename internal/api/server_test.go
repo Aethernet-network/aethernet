@@ -11,6 +11,7 @@ import (
 
 	"github.com/Aethernet-network/aethernet/internal/api"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/dag"
 	"github.com/Aethernet-network/aethernet/internal/genesis"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
@@ -27,6 +28,38 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/wallet"
 )
+
+// stubProtocolClient satisfies api.Server's protoClientInterface. Every call
+// delegates the escrow-lock operation to the in-memory ledger+escrow, so the
+// API server's handlePostTask path exercises the same code paths as
+// production without needing the full protocol.Client wiring.
+type stubProtocolClient struct {
+	tl  *ledger.TransferLedger
+	esc *escrow.Escrow
+}
+
+func (s *stubProtocolClient) SubmitTransfer(from, to crypto.AgentID, amount uint64, reason, taskID string) (event.EventID, error) {
+	if err := s.tl.TransferFromBucket(from, to, amount); err != nil {
+		return "", err
+	}
+	return event.EventID("stub-transfer:" + taskID), nil
+}
+
+func (s *stubProtocolClient) SubmitEscrowLock(posterID crypto.AgentID, taskID string, amount uint64) (event.EventID, error) {
+	bucket := crypto.AgentID("escrow:" + taskID)
+	if err := s.tl.TransferFromBucket(posterID, bucket, amount); err != nil {
+		return "", err
+	}
+	_ = s.esc.RegisterEscrowForTest(taskID, posterID, amount, event.EventID("stub-escrow:"+taskID))
+	return event.EventID("stub-escrow:" + taskID), nil
+}
+
+func (s *stubProtocolClient) SubmitGrant(fromBucket string, toAgent crypto.AgentID, amount uint64, reason string) (event.EventID, error) {
+	if err := s.tl.TransferFromBucket(crypto.AgentID(fromBucket), toAgent, amount); err != nil {
+		return "", err
+	}
+	return event.EventID("stub-grant:" + reason), nil
+}
 
 // testSetup holds the components for a test API server.
 type testSetup struct {
@@ -72,6 +105,7 @@ func newTestSetup(t *testing.T) *testSetup {
 	srv := api.NewServer("", d, tl, gl, reg, eng, sm, nil, kp)
 	srv.SetServiceRegistry(registry.New())
 	srv.SetTaskManager(taskMgr, escrowMgr)
+	srv.SetProtocolClient(&stubProtocolClient{tl: tl, esc: escrowMgr})
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 

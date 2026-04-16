@@ -1496,18 +1496,18 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Escrow the budget via canonical protocol event when available.
-	if s.protoClient != nil {
-		if _, err := s.protoClient.SubmitEscrowLock(crypto.AgentID(posterID), task.ID, req.Budget); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	} else {
-		// Fallback for tests/single-node without protocol client.
-		if err := s.escrowMgr.Hold(task.ID, crypto.AgentID(posterID), req.Budget); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
+	// Escrow the budget via canonical protocol event. Protocol client is
+	// required: tests and single-node deployments must wire a real or
+	// fake protoClient — the legacy Hold fallback was removed in Part E
+	// per audit 2026-04-15 C3-1 resolution, because it conflated the
+	// production escrow-lock path with test fixtures.
+	if s.protoClient == nil {
+		writeError(w, http.StatusInternalServerError, "api: protocol client not configured")
+		return
+	}
+	if _, err := s.protoClient.SubmitEscrowLock(crypto.AgentID(posterID), task.ID, req.Budget); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	// Emit canonical TaskPosted event for cross-node propagation.

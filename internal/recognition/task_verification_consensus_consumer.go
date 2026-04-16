@@ -17,9 +17,17 @@ import (
 // events from the DAG: applies round state for replay safety AND invokes
 // the v4.1 economic settlement (escrow release/refund/split) AND advances
 // per-(category, family) calibration counters.
+// DispatcherAdmitter is the subset of dispatch.Dispatcher used by the
+// consensus consumer to route settlement through the dispatcher's
+// exactly-once admission. Avoids importing the dispatch package directly.
+type DispatcherAdmitter interface {
+	Admit(ctx context.Context, ev *event.Event) error
+}
+
 type TaskVerificationConsensusConsumer struct {
 	rounds      taskverification.Store
 	settler     *settlement.VerificationConsensusSettler // nil if settlement not wired
+	dispatcher  DispatcherAdmitter                      // nil → direct settler call (pre-commit-9 compat)
 	slashing    *taskverification.SlashingEvaluator      // nil if slashing not wired
 	calibration *taskverification.CalibrationStore       // nil if calibration not wired
 }
@@ -38,6 +46,13 @@ func NewTaskVerificationConsensusConsumer(
 		slashing:    slashing,
 		calibration: calibration,
 	}
+}
+
+// SetDispatcher wires the dispatcher for exactly-once settlement
+// mediation. When set, settlement invocations route through
+// dispatcher.Admit instead of calling settler.Settle directly.
+func (c *TaskVerificationConsensusConsumer) SetDispatcher(d DispatcherAdmitter) {
+	c.dispatcher = d
 }
 
 // Name returns the unique consumer identifier.
@@ -96,14 +111,21 @@ func (c *TaskVerificationConsensusConsumer) Consume(_ context.Context, ev *event
 		}
 	}
 
-	// Apply v4.1 economic settlement: escrow release/refund/split.
-	if c.settler != nil {
+	// Apply v4.1 economic settlement via the dispatcher's exactly-once
+	// admission (commit 9 of §9). The dispatcher mediates settlement
+	// invocation through TVConsensusConsumer.Apply; this consumer only
+	// routes the event. Round state, calibration, and slashing remain
+	// here because they do not require cross-node ledger convergence.
+	if c.dispatcher != nil {
+		if err := c.dispatcher.Admit(context.Background(), ev); err != nil {
+			slog.Warn("task_verification_consensus: dispatcher admission failed",
+				"task_id", payload.TaskID, "err", err)
+		}
+	} else if c.settler != nil {
 		settleResult, err := c.settler.Settle(context.Background(), &payload, round)
 		if err != nil {
 			slog.Warn("task_verification_consensus: settlement failed",
 				"task_id", payload.TaskID, "err", err)
-			// Don't fail the consumer — the round state is persisted,
-			// settlement can be retried on the next consensus event replay.
 		} else if settleResult.Applied {
 			slog.Info("task_verification_consensus: settlement applied",
 				"task_id", payload.TaskID,

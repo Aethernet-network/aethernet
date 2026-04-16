@@ -240,7 +240,7 @@ func (sm *StakeManager) Stake(agentID crypto.AgentID, amount uint64) error {
 	// Debit the agent's balance into the staking-pool when a ledger is wired.
 	// Abort on failure: a failed debit must not silently produce collateral.
 	if sm.transfer != nil && amount > 0 {
-		if err := sm.transfer.TransferFromBucket(agentID, "staking-pool", amount); err != nil {
+		if err := sm.transfer.TransferFromBucketLabeled(agentID, "staking-pool", amount, "staking:lock", false); err != nil {
 			return fmt.Errorf("staking: insufficient balance: %w", err)
 		}
 	}
@@ -268,7 +268,7 @@ func (sm *StakeManager) Unstake(agentID crypto.AgentID, amount uint64) bool {
 	// Credit the ledger FIRST. If this fails, abort with no in-memory state
 	// change so the agent's recorded stake remains consistent with reality.
 	if sm.transfer != nil && amount > 0 {
-		if err := sm.transfer.TransferFromBucket("staking-pool", agentID, amount); err != nil {
+		if err := sm.transfer.TransferFromBucketLabeled("staking-pool", agentID, amount, "staking:unlock", false); err != nil {
 			slog.Error("staking: ledger credit failed — unstake aborted", "agent", agentID, "amount", amount, "err", err)
 			return false
 		}

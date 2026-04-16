@@ -52,6 +52,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/verification"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
+	"github.com/Aethernet-network/aethernet/internal/dispatch"
 	"github.com/Aethernet-network/aethernet/internal/discovery"
 	"github.com/Aethernet-network/aethernet/internal/epoch"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
@@ -337,6 +338,7 @@ type nodeStack struct {
 	leaseEnforcer    *roundprogress.LeaseEnforcer
 	roundCounter     *epoch.RoundCounter
 	projReg          *projections.ProjectionRegistry
+	dispatcher       *dispatch.Dispatcher
 }
 
 // nodeProgressTransport adapts node.BroadcastToN for roundprogress.ProgressTransport.
@@ -931,10 +933,25 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 	} else {
 		taskMgr = tasks.NewTaskManager()
 	}
-	escrowMgr := escrow.New(tl)
+	// Part B (B-1): load persisted escrow entries before any listener starts.
+	// LoadFromStore reconstructs in-flight entries from BadgerDB so that
+	// escrow operations after restart can find entries created before the
+	// restart. When no store is present (in-memory mode), start fresh.
+	var escrowMgr *escrow.Escrow
 	if s != nil {
-		escrowMgr.SetStore(s)
+		var loadErr error
+		escrowMgr, loadErr = escrow.LoadFromStore(tl, s)
+		if loadErr != nil {
+			slog.Error("startup: escrow.LoadFromStore failed", "err", loadErr)
+			os.Exit(1)
+		}
+	} else {
+		escrowMgr = escrow.New(tl)
 	}
+	// Wire the DAG reader for RegisterEscrow's funding-transfer validation.
+	// Must be attached before any recognition-fabric listener is started so
+	// consumers that invoke RegisterEscrow have a configured reader.
+	escrowMgr.SetDAGReader(d)
 
 	// Category-specific reputation tracking.
 	reputationMgr := reputation.NewReputationManager()
@@ -1599,6 +1616,13 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	}
 	if stack.store != nil {
 		settlementApp.SetStore(stack.store)
+		// Part A (A-1): load persisted applied-set before any listener starts.
+		// Previously-applied settlements are restored so they are not re-applied
+		// on restart, closing the Layer 3 restart-and-replay state loss.
+		if err := settlementApp.LoadApplied(stack.store.AllMeta); err != nil {
+			slog.Error("startup: applicator.LoadApplied failed", "err", err)
+			os.Exit(1)
+		}
 	}
 	settlementApp.SetFeeCollector(stack.feeCollector, crypto.AgentID(genesis.BucketTreasury))
 	settlementApp.SetStakeManager(stack.stakeManager)
@@ -1625,15 +1649,22 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		claimerID := crypto.AgentID(payload.ClaimerID)
 		treasuryID := crypto.AgentID(genesis.BucketTreasury)
 
-		// Ensure escrow exists on this node. On the posting node, escrow was
-		// locked via canonical Transfer (prompt 2). On peer nodes, the
-		// SettlementApplicator's applyTransfer registered the escrow entry
-		// when the escrow-lock transfer settled. If for any reason the escrow
-		// doesn't exist yet (e.g. deferred settlement), create it now.
+		// Ensure escrow metadata is registered on this node. The canonical
+		// escrow-lock Transfer has already moved funds; if the metadata is
+		// missing (e.g. deferred settlement or peer-node restart), look up
+		// the funding Transfer's EventID and register metadata only —
+		// RegisterEscrow does NOT call TransferFromBucket a second time.
 		if !stack.escrowMgr.IsLocked(payload.TaskID) {
-			if err := stack.escrowMgr.Hold(payload.TaskID, posterID, payload.Budget); err != nil {
-				slog.Warn("task-settler: escrow catch-up hold failed",
-					"task_id", payload.TaskID, "err", err)
+			fundingRef, lookupErr := settlement.LookupEscrowLockTransfer(
+				stack.dag, payload.TaskID, posterID, payload.Budget)
+			if lookupErr != nil {
+				slog.Warn("task-settler: escrow catch-up funding-transfer lookup failed",
+					"task_id", payload.TaskID, "err", lookupErr)
+				return lookupErr
+			}
+			if err := stack.escrowMgr.RegisterEscrow(payload.TaskID, posterID, payload.Budget, fundingRef); err != nil {
+				slog.Warn("task-settler: escrow catch-up register failed",
+					"task_id", payload.TaskID, "funding_ref", fundingRef, "err", err)
 				return err
 			}
 		}
@@ -1896,7 +1927,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		})
 
 		tvSettler := settlement.NewVerificationConsensusSettler(
-			stack.taskMgr, stack.transfer, stack.escrowMgr,
+			stack.taskMgr, stack.transfer, stack.escrowMgr, stack.dag,
 			genLedgerCalc, crypto.AgentID(genesis.BucketTreasury),
 			validatorQFn,
 		)
@@ -1908,6 +1939,28 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			tvCalibrationStore,
 		)
 		tvConsensusConsumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, tvSettler, tvSlashingEvaluator, tvCalibrationStore)
+
+		// Commit 9 of §9: wire the CanonicalEventDispatcher for exactly-once
+		// settlement mediation. The dispatcher owns the admission state machine
+		// (C-1 through C-16) and the causal prerequisite gating (D-1 through D-8).
+		eventDispatcher := dispatch.NewDispatcher(stack.store, stack.dag, func() uint64 {
+			if stack.roundCounter != nil {
+				return stack.roundCounter.CurrentEpoch()
+			}
+			return 0
+		})
+		tvDispatchConsumer := dispatch.NewTVConsensusConsumer(tvSettler, tvStore, stack.taskMgr, stack.escrowMgr)
+		if err := eventDispatcher.Register(tvDispatchConsumer); err != nil {
+			slog.Error("dispatch: register TVConsensusConsumer failed", "err", err)
+			os.Exit(1)
+		}
+		if err := eventDispatcher.Recover(context.Background()); err != nil {
+			slog.Error("dispatch: recovery failed", "err", err)
+			os.Exit(1)
+		}
+		tvConsensusConsumer.SetDispatcher(eventDispatcher)
+		stack.dispatcher = eventDispatcher
+
 		_ = commitBus.Register(tvConsensusConsumer)
 
 		// --- Projection registry (step 2) ---

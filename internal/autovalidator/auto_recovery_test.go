@@ -7,6 +7,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/autovalidator"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
+	"github.com/Aethernet-network/aethernet/internal/escrow_testhelpers"
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
@@ -58,8 +59,8 @@ func buildStuckHeldHarness(t *testing.T) (*autovalidator.AutoValidator, *tasks.T
 	if err != nil {
 		t.Fatalf("PostTask: %v", err)
 	}
-	if err := esc.Hold(task.ID, posterID, budget); err != nil {
-		t.Fatalf("Hold: %v", err)
+	if err := escrow_testhelpers.FundAndRegisterEscrowForTest(tl, esc, task.ID, posterID, budget); err != nil {
+		t.Fatalf("FundAndRegisterEscrowForTest: %v", err)
 	}
 	if err := tm.ClaimTask(task.ID, claimerID); err != nil {
 		t.Fatalf("ClaimTask: %v", err)

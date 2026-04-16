@@ -61,6 +61,22 @@ type Surface struct {
 	Justification string
 }
 
+// Subcategory distinguishes the four kinds of replay-derived persisted
+// node state that register in the single mandatory inventory per
+// invariant C-9 of the F3-B locked design.
+//
+// The zero value (SubcategoryProjection) is the default for existing
+// projection entries, so all pre-Part-C registrations continue to work
+// without modification.
+type Subcategory uint8
+
+const (
+	SubcategoryProjection        Subcategory = iota // existing state projections (default)
+	SubcategoryDispatchAdmission                    // dispatcher admission records
+	SubcategoryEscrowRegistry                       // escrow registries
+	SubcategoryApplicatorApplied                    // applicator applied-sets
+)
+
 // EventType is a string identifier for DAG event types. This package does
 // not import internal/event to keep projections/ dependency-free. Step 2's
 // registrations pass plain strings matching the event type constants.
@@ -141,6 +157,11 @@ type CanonicalProjection struct {
 	// CreatedAt is the ISO-8601 date of the registration's first creation
 	// (e.g. "2026-04-14"). Required; validated non-empty only.
 	CreatedAt string
+
+	// Subcategory distinguishes the four kinds of replay-derived persisted
+	// state per invariant C-9. The zero value (SubcategoryProjection) is the
+	// default, preserving backward compatibility with pre-Part-C entries.
+	Subcategory Subcategory
 
 	// AllowIdleWithJustification permits this Canonical projection to run
 	// idle (empty aggregate) past the eligibility window without a PR-5

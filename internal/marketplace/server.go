@@ -352,6 +352,7 @@ func (s *Server) handlePostTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Budget > 0 && req.PosterID != "" {
+		// dispatch:lint marketplace-exempt "marketplace binary operates own application-layer escrow; protocol-escrow integration tracked as follow-up workstream"
 		if err := s.escrowMgr.Hold(task.ID, crypto.AgentID(req.PosterID), req.Budget); err != nil {
 			slog.Warn("marketplace: escrow hold failed", "task_id", task.ID, "err", err)
 		}

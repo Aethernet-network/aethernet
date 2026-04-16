@@ -33,6 +33,7 @@ type VerificationConsensusSettler struct {
 	taskMgr    *tasks.TaskManager
 	transfer   *ledger.TransferLedger
 	escrowMgr  *escrow.Escrow
+	dagScanner DAGScanner // for LookupEscrowLockTransfer on catch-up
 	genLedger  *GenerationLedgerCalculator
 	treasuryID crypto.AgentID
 	qScoreFn   ValidatorQScoreFn // nil → even-split fallback
@@ -40,10 +41,15 @@ type VerificationConsensusSettler struct {
 
 // NewVerificationConsensusSettler creates a settler with the full v4.1
 // economic model. qScoreFn may be nil for even-split fallback.
+//
+// dagScanner is used on the escrow catch-up path (peer node scenario) to
+// locate the canonical escrow-lock Transfer event that funds the escrow.
+// May be nil only in tests that do not exercise the catch-up path.
 func NewVerificationConsensusSettler(
 	taskMgr *tasks.TaskManager,
 	transfer *ledger.TransferLedger,
 	escrowMgr *escrow.Escrow,
+	dagScanner DAGScanner,
 	genLedger *GenerationLedgerCalculator,
 	treasuryID crypto.AgentID,
 	qScoreFn ValidatorQScoreFn,
@@ -52,6 +58,7 @@ func NewVerificationConsensusSettler(
 		taskMgr:    taskMgr,
 		transfer:   transfer,
 		escrowMgr:  escrowMgr,
+		dagScanner: dagScanner,
 		genLedger:  genLedger,
 		treasuryID: treasuryID,
 		qScoreFn:   qScoreFn,
@@ -98,9 +105,19 @@ func (s *VerificationConsensusSettler) Settle(
 	entry, err := s.escrowMgr.Get(payload.TaskID)
 	if err != nil {
 		// If escrow is not locked, try to catch up (peer node scenario).
+		// The canonical escrow-lock Transfer has already moved funds; we only
+		// need to register metadata linking the escrow entry to that Transfer.
 		if !s.escrowMgr.IsLocked(payload.TaskID) {
-			if holdErr := s.escrowMgr.Hold(payload.TaskID, crypto.AgentID(task.PosterID), task.Budget); holdErr != nil {
-				return result, fmt.Errorf("verification_settler: escrow catch-up failed: %w", holdErr)
+			if s.dagScanner == nil {
+				return result, fmt.Errorf("verification_settler: escrow catch-up required but dagScanner not configured for task %s", payload.TaskID)
+			}
+			fundingRef, lookupErr := LookupEscrowLockTransfer(
+				s.dagScanner, payload.TaskID, crypto.AgentID(task.PosterID), task.Budget)
+			if lookupErr != nil {
+				return result, fmt.Errorf("verification_settler: escrow catch-up funding-transfer lookup failed: %w", lookupErr)
+			}
+			if regErr := s.escrowMgr.RegisterEscrow(payload.TaskID, crypto.AgentID(task.PosterID), task.Budget, fundingRef); regErr != nil {
+				return result, fmt.Errorf("verification_settler: escrow catch-up register failed: %w", regErr)
 			}
 			entry, err = s.escrowMgr.Get(payload.TaskID)
 			if err != nil {
@@ -128,6 +145,11 @@ func (s *VerificationConsensusSettler) Settle(
 	}
 }
 
+// settleAccept distributes the task budget per the v4.1 model:
+// worker: 73%, validators (Q-weighted): 23%, gen-ledger: 2%, treasury: 2%.
+// Integer arithmetic remainders from the share calculations are routed to
+// treasury so the sum across all recipients equals the budget exactly.
+// Cross-node conservation is verified by §10 success criterion 6.
 func (s *VerificationConsensusSettler) settleAccept(
 	budget uint64,
 	escrowBucket, workerID, posterID crypto.AgentID,
@@ -140,32 +162,25 @@ func (s *VerificationConsensusSettler) settleAccept(
 	genPool := budget * generationShareBP / 10000
 	treasuryAmount := budget - workerAmount - validatorPool - genPool // absorbs rounding
 
-	// 1. Worker payout.
-	if err := s.transfer.TransferFromBucket(escrowBucket, workerID, workerAmount); err != nil {
-		return result, fmt.Errorf("verification_settler: worker transfer: %w", err)
-	}
-	result.WorkerPayout = workerAmount
-
-	// 2. Validator payouts: Q-weighted among consensus-agreeing validators.
-	// Q(validator) = AgreementRate from the reputation store (Consistency term
-	// from paper v4.1). New validators default to Q=1.0 (neutral).
-	// TODO prompt future: wire full Q formula with CVD_norm, ChallengeSurvival,
-	// ReplicationRate terms once their infrastructure is built.
+	// Compute per-validator Q-weighted payouts without executing transfers.
 	agreeing := collectAgreeingValidators(round, taskverification.VerdictPass)
+	validators := make(map[crypto.AgentID]uint64)
 	if len(agreeing) == 0 {
 		slog.Warn("verification_settler: no agreeing validators on accept — routing validator pool to treasury",
 			"task_id", payload.TaskID)
 		treasuryAmount += validatorPool
 	} else {
-		result.ValidatorPayouts = s.distributeByQuality(escrowBucket, agreeing, validatorPool, round.Category)
+		validators = s.computeValidatorPayouts(agreeing, validatorPool, round.Category)
+		result.ValidatorPayouts = validators
 	}
 
-	// 3. Generation Ledger royalties (2% on accept only).
+	// Compute gen-ledger royalty payouts without executing transfers.
+	genRecipients := make(map[crypto.AgentID]uint64)
 	if s.genLedger != nil {
 		dist := s.genLedger.Calculate(event.EventID(payload.SubmissionEventID), genPool)
 		for _, r := range dist.Recipients {
 			if r.Amount > 0 {
-				_ = s.transfer.TransferFromBucket(escrowBucket, crypto.AgentID(r.AgentID), r.Amount)
+				genRecipients[crypto.AgentID(r.AgentID)] = r.Amount
 			}
 		}
 		treasuryAmount += dist.Treasury
@@ -174,21 +189,30 @@ func (s *VerificationConsensusSettler) settleAccept(
 		treasuryAmount += genPool
 	}
 
-	// 4. Treasury.
-	if treasuryAmount > 0 {
-		if err := s.transfer.TransferFromBucket(escrowBucket, s.treasuryID, treasuryAmount); err != nil {
-			return result, fmt.Errorf("verification_settler: treasury transfer: %w", err)
-		}
+	// Execute all transfers via ReleaseSettlement with per-recipient
+	// paid-flag idempotency guards (C-11).
+	if err := s.escrowMgr.ReleaseSettlement(
+		payload.TaskID,
+		workerID, workerAmount,
+		posterID, 0,
+		validators,
+		genRecipients,
+		s.treasuryID, treasuryAmount,
+	); err != nil {
+		return result, fmt.Errorf("verification_settler: release settlement: %w", err)
 	}
+
+	result.WorkerPayout = workerAmount
 	result.TreasuryAmount = treasuryAmount
 
-	// 5. Task state transition.
+	// Task state transition — last step; if we reach here, all payouts
+	// completed (or were already completed on a prior attempt via paid flags).
 	if err := s.taskMgr.ApplyVerificationConsensusResolution(
 		payload.TaskID, "pass", payload.FinalScoreBP, payload.RoundID); err != nil {
 		return result, fmt.Errorf("verification_settler: task state: %w", err)
 	}
 	result.Applied = true
-	result.TotalDistributed = workerAmount + sumPayouts(result.ValidatorPayouts) +
+	result.TotalDistributed = workerAmount + sumPayouts(validators) +
 		sumGenLedger(result.GenerationLedger) + treasuryAmount
 
 	slog.Info("verification_settler: accept settled",
@@ -208,40 +232,39 @@ func (s *VerificationConsensusSettler) settleReject(
 ) (SettleResult, error) {
 	posterAmount := budget * workerShareBP / 10000
 	validatorPool := budget * validatorShareBP / 10000
-	// 4% to treasury: 2% protocol + 2% redirected Generation Ledger
 	treasuryAmount := budget - posterAmount - validatorPool
 
-	// 1. Poster refund (73% portion).
-	if err := s.transfer.TransferFromBucket(escrowBucket, posterID, posterAmount); err != nil {
-		return result, fmt.Errorf("verification_settler: poster refund: %w", err)
-	}
-	result.PosterRefund = posterAmount
-
-	// 2. Validator payouts: consensus-agreeing (fail-voting) validators.
 	agreeing := collectAgreeingValidators(round, taskverification.VerdictFail)
+	validators := make(map[crypto.AgentID]uint64)
 	if len(agreeing) == 0 {
 		slog.Warn("verification_settler: no agreeing validators on reject — routing to treasury",
 			"task_id", payload.TaskID)
 		treasuryAmount += validatorPool
 	} else {
-		result.ValidatorPayouts = s.distributeByQuality(escrowBucket, agreeing, validatorPool, round.Category)
+		validators = s.computeValidatorPayouts(agreeing, validatorPool, round.Category)
+		result.ValidatorPayouts = validators
 	}
 
-	// 3. Treasury (protocol fee + redirected Generation Ledger).
-	if treasuryAmount > 0 {
-		if err := s.transfer.TransferFromBucket(escrowBucket, s.treasuryID, treasuryAmount); err != nil {
-			return result, fmt.Errorf("verification_settler: treasury transfer: %w", err)
-		}
+	if err := s.escrowMgr.ReleaseSettlement(
+		payload.TaskID,
+		crypto.AgentID(""), 0, // no worker payout on reject
+		posterID, posterAmount,
+		validators,
+		nil, // no gen-ledger on reject
+		s.treasuryID, treasuryAmount,
+	); err != nil {
+		return result, fmt.Errorf("verification_settler: release settlement: %w", err)
 	}
+
+	result.PosterRefund = posterAmount
 	result.TreasuryAmount = treasuryAmount
 
-	// 4. Task state.
 	if err := s.taskMgr.ApplyVerificationConsensusResolution(
 		payload.TaskID, "fail", 0, payload.RoundID); err != nil {
 		return result, fmt.Errorf("verification_settler: task state: %w", err)
 	}
 	result.Applied = true
-	result.TotalDistributed = posterAmount + sumPayouts(result.ValidatorPayouts) + treasuryAmount
+	result.TotalDistributed = posterAmount + sumPayouts(validators) + treasuryAmount
 
 	slog.Info("verification_settler: reject settled",
 		"task_id", payload.TaskID, "budget", budget,
@@ -256,44 +279,26 @@ func (s *VerificationConsensusSettler) settleDispute(
 	payload *event.TaskVerificationConsensusPayload,
 	result SettleResult,
 ) (SettleResult, error) {
-	// 50/50 split of the 73% worker portion. Extra micro-AET to poster on odd amounts.
 	workerPortion := budget * workerShareBP / 10000
 	workerAmount := workerPortion / 2
-	posterAmount := workerPortion - workerAmount // poster gets the extra on odd splits
-	// 27% to treasury: 23% validator + 2% Generation Ledger + 2% protocol
+	posterAmount := workerPortion - workerAmount
 	treasuryAmount := budget - workerPortion
 
-	// TODO post-prompt-08: Consider Quality-weighted dispute resolution where the 73% worker
-	// portion split is weighted by the worker's historical Quality Score. A worker with a
-	// history of high-quality work being disputed may deserve closer to 70% of the worker
-	// portion; a worker with borderline history may deserve closer to 30%. Requires the
-	// reputation/Quality Score infrastructure from prompt 08.
-
-	// 1. Worker half.
-	if workerAmount > 0 {
-		if err := s.transfer.TransferFromBucket(escrowBucket, workerID, workerAmount); err != nil {
-			return result, fmt.Errorf("verification_settler: worker dispute transfer: %w", err)
-		}
+	if err := s.escrowMgr.ReleaseSettlement(
+		payload.TaskID,
+		workerID, workerAmount,
+		posterID, posterAmount,
+		nil, // no validator payouts on dispute
+		nil, // no gen-ledger on dispute
+		s.treasuryID, treasuryAmount,
+	); err != nil {
+		return result, fmt.Errorf("verification_settler: release settlement: %w", err)
 	}
+
 	result.WorkerPayout = workerAmount
-
-	// 2. Poster half.
-	if posterAmount > 0 {
-		if err := s.transfer.TransferFromBucket(escrowBucket, posterID, posterAmount); err != nil {
-			return result, fmt.Errorf("verification_settler: poster dispute transfer: %w", err)
-		}
-	}
 	result.PosterRefund = posterAmount
-
-	// 3. Treasury (all non-worker portions redirected).
-	if treasuryAmount > 0 {
-		if err := s.transfer.TransferFromBucket(escrowBucket, s.treasuryID, treasuryAmount); err != nil {
-			return result, fmt.Errorf("verification_settler: treasury dispute transfer: %w", err)
-		}
-	}
 	result.TreasuryAmount = treasuryAmount
 
-	// 4. Task state.
 	if err := s.taskMgr.ApplyVerificationConsensusResolution(
 		payload.TaskID, "abstain", 0, payload.RoundID); err != nil {
 		return result, fmt.Errorf("verification_settler: task state: %w", err)
@@ -327,8 +332,12 @@ func collectAgreeingValidators(round *taskverification.TaskVerificationRound, ve
 // distributeByQuality splits a pool among recipients weighted by their
 // Quality Score Q. Falls back to even-split when qScoreFn is nil or when
 // all Q scores sum to zero.
-func (s *VerificationConsensusSettler) distributeByQuality(
-	from crypto.AgentID,
+// computeValidatorPayouts calculates Q-weighted per-validator amounts
+// without executing transfers. The returned map is passed to
+// ReleaseSettlement which handles the actual transfers with per-recipient
+// paid-flag idempotency. Integer arithmetic remainder goes to the last
+// validator for determinism.
+func (s *VerificationConsensusSettler) computeValidatorPayouts(
 	recipients []crypto.AgentID,
 	pool uint64,
 	category string,
@@ -338,7 +347,6 @@ func (s *VerificationConsensusSettler) distributeByQuality(
 		return payouts
 	}
 
-	// Compute Q scores for each recipient.
 	type scored struct {
 		id crypto.AgentID
 		q  float64
@@ -346,18 +354,14 @@ func (s *VerificationConsensusSettler) distributeByQuality(
 	entries := make([]scored, len(recipients))
 	var totalQ float64
 	for i, v := range recipients {
-		q := 1.0 // neutral default
+		q := 1.0
 		if s.qScoreFn != nil {
-			// Use the first vote's family for Q lookup. In practice, agreeing
-			// validators may have voted from different families; use category
-			// as the primary key since family is per-vote not per-validator.
 			q = s.qScoreFn(v, "", category)
 		}
 		entries[i] = scored{id: v, q: q}
 		totalQ += q
 	}
 
-	// Fallback to even-split if total Q is zero.
 	if totalQ == 0 {
 		perValidator := pool / uint64(len(recipients))
 		var distributed uint64
@@ -367,7 +371,6 @@ func (s *VerificationConsensusSettler) distributeByQuality(
 				amount = pool - distributed
 			}
 			if amount > 0 {
-				_ = s.transfer.TransferFromBucket(from, v, amount)
 				payouts[v] = amount
 			}
 			distributed += amount
@@ -375,17 +378,15 @@ func (s *VerificationConsensusSettler) distributeByQuality(
 		return payouts
 	}
 
-	// Q-weighted distribution.
 	var distributed uint64
 	for i, e := range entries {
 		var amount uint64
 		if i == len(entries)-1 {
-			amount = pool - distributed // last gets remainder for determinism
+			amount = pool - distributed
 		} else {
 			amount = uint64(float64(pool) * (e.q / totalQ))
 		}
 		if amount > 0 {
-			_ = s.transfer.TransferFromBucket(from, e.id, amount)
 			payouts[e.id] = amount
 		}
 		distributed += amount

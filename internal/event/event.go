@@ -162,6 +162,13 @@ const (
 	// EventTypeValidatorRecoveryRotateCancel cancels a pending recovery-
 	// authorized key rotation. Signed by the recovery key.
 	EventTypeValidatorRecoveryRotateCancel EventType = "ValidatorRecoveryRotateCancel"
+
+	// EventTypePrerequisiteWithholding is canonical evidence emitted when a
+	// node's dispatcher holds an event in reserved-pending-prerequisites for
+	// more than DeferralComplaintThreshold epochs (locked at 30). The
+	// slashing/challenge-path consumer that acts on this evidence is a
+	// follow-up workstream; Part D only emits it. See locked design §5.4.
+	EventTypePrerequisiteWithholding EventType = "PrerequisiteWithholding"
 )
 
 // SettlementState tracks an event's position in the Optimistic Capability Settlement
@@ -279,12 +286,13 @@ type eventCanonical struct {
 	StakeAmount     uint64          `json:"stake_amount"`
 }
 
-// ComputeID derives the content-addressed EventID from an event's canonical fields.
-// All canonical fields must be set on the event before calling this function.
-// The result is the hex-encoded SHA-256 of the JCS-canonicalized (RFC 8785)
-// JSON representation of the canonical projection. JCS ensures deterministic
-// byte output regardless of struct field order or language implementation.
-func ComputeID(e *Event) (EventID, error) {
+// CanonicalBytes returns the JCS-canonicalized JSON representation of the
+// event's canonical fields. This is the deterministic byte representation
+// used by both ComputeID (SHA-256 → EventID) and the dispatcher's admission
+// key (BLAKE3 → dispatch key). See Invariant Serialization-1 in the locked
+// F3-B design: for any canonical event there exists exactly one valid
+// canonical byte representation.
+func CanonicalBytes(e *Event) ([]byte, error) {
 	canon := eventCanonical{
 		Type:            e.Type,
 		CausalRefs:      e.CausalRefs,
@@ -295,9 +303,18 @@ func ComputeID(e *Event) (EventID, error) {
 	}
 	data, err := json.Marshal(canon)
 	if err != nil {
-		return "", fmt.Errorf("event: failed to marshal canonical form: %w", err)
+		return nil, fmt.Errorf("event: marshal canonical: %w", err)
 	}
-	canonical, err := jcs.Canonicalize(data)
+	return jcs.Canonicalize(data)
+}
+
+// ComputeID derives the content-addressed EventID from an event's canonical fields.
+// All canonical fields must be set on the event before calling this function.
+// The result is the hex-encoded SHA-256 of the JCS-canonicalized (RFC 8785)
+// JSON representation of the canonical projection. JCS ensures deterministic
+// byte output regardless of struct field order or language implementation.
+func ComputeID(e *Event) (EventID, error) {
+	canonical, err := CanonicalBytes(e)
 	if err != nil {
 		return "", fmt.Errorf("event: failed to canonicalize: %w", err)
 	}
@@ -782,4 +799,18 @@ type SlashingChallengePayload struct {
 	ChallengeWindowEndsAt int64  `json:"challenge_window_ends_at,omitempty"`
 	RaisedBy              string `json:"raised_by"`
 	TimestampUnix         int64  `json:"timestamp_unix"`
+}
+
+// PrerequisiteWithholdingPayload is the canonical evidence emitted by the
+// dispatcher when a node holds an event in reserved-pending-prerequisites
+// for more than DeferralComplaintThreshold epochs. The slashing consumer
+// that acts on this evidence is a follow-up workstream; Part D emits only.
+type PrerequisiteWithholdingPayload struct {
+	Version              uint8     `json:"v"`
+	StuckEventID         EventID   `json:"stuck_event_id"`
+	StuckEventType       string    `json:"stuck_event_type"`
+	MissingPrerequisites []EventID `json:"missing_prerequisites"`
+	DeferredSinceEpoch   uint64    `json:"deferred_since_epoch"`
+	CurrentEpoch         uint64    `json:"current_epoch"`
+	EmittingNodeAgent    string    `json:"emitting_node_agent"`
 }

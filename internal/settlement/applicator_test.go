@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/identity"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
@@ -286,3 +287,80 @@ func TestApplicator_Metrics(t *testing.T) {
 
 // Silence the sort import for deterministic test.
 var _ = sort.Strings
+
+// TestApplicator_EscrowLockTransfer_RegistersEntry verifies the F1 fix: when
+// the applicator processes a canonical escrow-lock Transfer, it records the
+// escrow metadata via RegisterEscrow (not Hold) and does NOT double-debit
+// the poster's balance. The canonical Transfer (RecordFromSync above) has
+// already moved funds from poster to the escrow bucket; the escrow entry
+// is metadata only.
+func TestApplicator_EscrowLockTransfer_RegistersEntry(t *testing.T) {
+	e, err := event.New(event.EventTypeTransfer, nil,
+		event.TransferPayload{
+			Version:   1,
+			FromAgent: "poster",
+			ToAgent:   "escrow:task-1",
+			Amount:    300,
+			Currency:  "AET",
+			Reason:    "escrow-lock",
+			TaskID:    "task-1",
+		},
+		"poster", nil, 1000)
+	if err != nil {
+		t.Fatalf("construct: %v", err)
+	}
+	events := map[event.EventID]*event.Event{e.ID: e}
+
+	a, tl, _ := newApplicator(t, events)
+	esc := escrow.New(tl)
+	// Stub DAGReader returns the same event map the applicator lookup uses.
+	esc.SetDAGReader(&applicatorDAGStub{events: events})
+	a.SetEscrowManager(esc)
+
+	if err := tl.FundAgent(crypto.AgentID("poster"), 1000); err != nil {
+		t.Fatalf("FundAgent: %v", err)
+	}
+
+	sp := &settlement.SettlementPayload{
+		Version:       1,
+		TargetEventID: string(e.ID),
+		Verdict:       string(settlement.VerdictAccepted),
+		VerifiedValue: 300,
+	}
+	if err := a.Apply(sp); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	// The canonical Transfer moved 300 from poster to escrow bucket — exactly once.
+	posterBal, _ := tl.Balance(crypto.AgentID("poster"))
+	if posterBal != 700 {
+		t.Errorf("poster balance: got %d want 700 (one debit not two)", posterBal)
+	}
+	bucketBal, _ := tl.Balance(crypto.AgentID("escrow:task-1"))
+	if bucketBal != 300 {
+		t.Errorf("escrow bucket balance: got %d want 300", bucketBal)
+	}
+
+	// Escrow metadata registered.
+	if !esc.IsLocked("task-1") {
+		t.Error("escrow entry not registered")
+	}
+	got, err := esc.Get("task-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.FundingTransferRef != e.ID {
+		t.Errorf("FundingTransferRef: got %s want %s", got.FundingTransferRef, e.ID)
+	}
+}
+
+type applicatorDAGStub struct {
+	events map[event.EventID]*event.Event
+}
+
+func (s *applicatorDAGStub) Get(id event.EventID) (*event.Event, error) {
+	if e, ok := s.events[id]; ok {
+		return e, nil
+	}
+	return nil, fmt.Errorf("applicator-stub: not found: %s", id)
+}

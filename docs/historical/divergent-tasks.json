@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "anomalies": [
+    {
+      "task_id": "a2b588c8b207aa68288020a10b440a67",
+      "anomaly_type": "cross-node-ledger-divergence",
+      "first_observed": "2026-04-15T15:48:24Z",
+      "audit_reference": "docs/audits/2026-04-15-poster-fee-cross-node-consistency.md",
+      "notes": "Reject verdict. Node 1 applied settlement (escrow drained to 0); Nodes 2-5 did not (escrow retained 500M µAET). Pattern: 1-alone-applied vs 4-did-not."
+    },
+    {
+      "task_id": "b2f96181104a8911783cd2600cc630e4",
+      "anomaly_type": "cross-node-ledger-divergence",
+      "first_observed": "2026-04-15T16:14:57Z",
+      "audit_reference": "docs/audits/2026-04-15-poster-fee-cross-node-consistency.md",
+      "notes": "Accept verdict. Multi-layered divergence: Node 1 retained 500M (F1 double-debit 2x escrow, settlement drained 1x), Nodes 3/4/5 drained to 0, Node 2 retained 500M. Both pre-settlement state and application path differed."
+    },
+    {
+      "task_id": "52c5b97a555f8d83dbcee9751ea73d62",
+      "anomaly_type": "cross-node-ledger-divergence",
+      "first_observed": "2026-04-11T17:52:30Z",
+      "audit_reference": "docs/audits/2026-04-15-poster-fee-cross-node-consistency.md",
+      "notes": "First-observed accept verdict. Escrow bucket: 200K µAET on Nodes 1/4, 100K on Nodes 2/3/5. F1 synthetic duplicate fired on 2 of 5 nodes. esc: metadata missing on Nodes 2/3/5."
+    }
+  ]
+}

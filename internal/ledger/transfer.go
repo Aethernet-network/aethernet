@@ -472,7 +472,21 @@ func (l *TransferLedger) FundAgent(agentID crypto.AgentID, amount uint64) error 
 //
 // Returns ErrInsufficientBalance if fromID does not have enough settled balance
 // to cover the allocation.
+// TransferFromBucket moves amount from a virtual bucket to a recipient.
+// Sets IsGenesis=true and Memo="onboarding allocation" for backward
+// compatibility with genesis/onboarding callers. Non-genesis callers
+// (settlement, escrow release, staking) should use TransferFromBucketLabeled
+// with descriptive metadata per cross-cutting §8.2.
 func (l *TransferLedger) TransferFromBucket(fromID crypto.AgentID, toID crypto.AgentID, amount uint64) error {
+	return l.TransferFromBucketLabeled(fromID, toID, amount, "onboarding allocation", true)
+}
+
+// TransferFromBucketLabeled moves amount from a virtual bucket to a
+// recipient with explicit metadata. Per cross-cutting §8.2: non-genesis
+// synthetic transfers set isGenesis=false and a descriptive memo so the
+// ledger is auditable and genesis events are distinguishable from
+// settlement distributions.
+func (l *TransferLedger) TransferFromBucketLabeled(fromID crypto.AgentID, toID crypto.AgentID, amount uint64, memo string, isGenesis bool) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -494,11 +508,11 @@ func (l *TransferLedger) TransferFromBucket(fromID crypto.AgentID, toID crypto.A
 		ToAgent:    toID,
 		Amount:     amount,
 		Currency:   "AET",
-		Memo:       "onboarding allocation",
+		Memo:       memo,
 		Timestamp:  0,
 		Settlement: event.SettlementSettled,
 		RecordedAt: time.Now(),
-		IsGenesis:  true,
+		IsGenesis:  isGenesis,
 	}
 	if l.store != nil {
 		if err := l.store.PutTransfer(l.entries[eid]); err != nil {
