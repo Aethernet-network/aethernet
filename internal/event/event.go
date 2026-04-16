@@ -279,12 +279,13 @@ type eventCanonical struct {
 	StakeAmount     uint64          `json:"stake_amount"`
 }
 
-// ComputeID derives the content-addressed EventID from an event's canonical fields.
-// All canonical fields must be set on the event before calling this function.
-// The result is the hex-encoded SHA-256 of the JCS-canonicalized (RFC 8785)
-// JSON representation of the canonical projection. JCS ensures deterministic
-// byte output regardless of struct field order or language implementation.
-func ComputeID(e *Event) (EventID, error) {
+// CanonicalBytes returns the JCS-canonicalized JSON representation of the
+// event's canonical fields. This is the deterministic byte representation
+// used by both ComputeID (SHA-256 → EventID) and the dispatcher's admission
+// key (BLAKE3 → dispatch key). See Invariant Serialization-1 in the locked
+// F3-B design: for any canonical event there exists exactly one valid
+// canonical byte representation.
+func CanonicalBytes(e *Event) ([]byte, error) {
 	canon := eventCanonical{
 		Type:            e.Type,
 		CausalRefs:      e.CausalRefs,
@@ -295,9 +296,18 @@ func ComputeID(e *Event) (EventID, error) {
 	}
 	data, err := json.Marshal(canon)
 	if err != nil {
-		return "", fmt.Errorf("event: failed to marshal canonical form: %w", err)
+		return nil, fmt.Errorf("event: marshal canonical: %w", err)
 	}
-	canonical, err := jcs.Canonicalize(data)
+	return jcs.Canonicalize(data)
+}
+
+// ComputeID derives the content-addressed EventID from an event's canonical fields.
+// All canonical fields must be set on the event before calling this function.
+// The result is the hex-encoded SHA-256 of the JCS-canonicalized (RFC 8785)
+// JSON representation of the canonical projection. JCS ensures deterministic
+// byte output regardless of struct field order or language implementation.
+func ComputeID(e *Event) (EventID, error) {
+	canonical, err := CanonicalBytes(e)
 	if err != nil {
 		return "", fmt.Errorf("event: failed to canonicalize: %w", err)
 	}
