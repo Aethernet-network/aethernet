@@ -329,7 +329,7 @@ func (e *Escrow) Release(taskID string, claimerID crypto.AgentID) error {
 		return fmt.Errorf("%w: task %s", ErrEscrowNotFound, taskID)
 	}
 
-	if err := e.ledger.TransferFromBucket(bucketID(taskID), claimerID, entry.Amount); err != nil {
+	if err := e.ledger.TransferFromBucketLabeled(bucketID(taskID), claimerID, entry.Amount, "escrow-release:full-release", false); err != nil {
 		return fmt.Errorf("escrow: release for task %s: %w", taskID, err)
 	}
 
@@ -374,7 +374,7 @@ func (e *Escrow) ReleaseNet(
 
 	// Transfer the worker's net share (skip if already paid on a prior attempt).
 	if !entry.WorkerPaid {
-		if err := e.ledger.TransferFromBucket(bucket, claimerID, netAmount); err != nil {
+		if err := e.ledger.TransferFromBucketLabeled(bucket, claimerID, netAmount, "escrow-release-net:worker", false); err != nil {
 			return fmt.Errorf("escrow: release-net worker for task %s: %w", taskID, err)
 		}
 		e.mu.Lock()
@@ -385,7 +385,7 @@ func (e *Escrow) ReleaseNet(
 
 	// Distribute validator share from the remaining escrow balance.
 	if validatorAmount > 0 && !entry.ValidatorPaid {
-		if err := e.ledger.TransferFromBucket(bucket, validatorID, validatorAmount); err != nil {
+		if err := e.ledger.TransferFromBucketLabeled(bucket, validatorID, validatorAmount, "escrow-release-net:validator", false); err != nil {
 			return fmt.Errorf("escrow: release-net validator for task %s: %w", taskID, err)
 		}
 		e.mu.Lock()
@@ -396,7 +396,7 @@ func (e *Escrow) ReleaseNet(
 
 	// Distribute treasury share from the remaining escrow balance.
 	if treasuryAmount > 0 && !entry.TreasuryPaid {
-		if err := e.ledger.TransferFromBucket(bucket, treasuryID, treasuryAmount); err != nil {
+		if err := e.ledger.TransferFromBucketLabeled(bucket, treasuryID, treasuryAmount, "escrow-release-net:treasury", false); err != nil {
 			return fmt.Errorf("escrow: release-net treasury for task %s: %w", taskID, err)
 		}
 		e.mu.Lock()
@@ -450,7 +450,7 @@ func (e *Escrow) ReleaseSettlement(
 
 	// 1. Worker payout.
 	if workerAmount > 0 && !entry.WorkerPaid {
-		if err := e.ledger.TransferFromBucket(bucket, worker, workerAmount); err != nil {
+		if err := e.ledger.TransferFromBucketLabeled(bucket, worker, workerAmount, "escrow-release:worker", false); err != nil {
 			return fmt.Errorf("escrow: settlement worker for task %s: %w", taskID, err)
 		}
 		e.mu.Lock()
@@ -461,7 +461,7 @@ func (e *Escrow) ReleaseSettlement(
 
 	// 2. Poster refund (dispute path; zero on accept/reject).
 	if posterRefundAmount > 0 && !entry.PosterRefundPaid {
-		if err := e.ledger.TransferFromBucket(bucket, posterRefund, posterRefundAmount); err != nil {
+		if err := e.ledger.TransferFromBucketLabeled(bucket, posterRefund, posterRefundAmount, "escrow-release:poster-refund", false); err != nil {
 			return fmt.Errorf("escrow: settlement poster refund for task %s: %w", taskID, err)
 		}
 		e.mu.Lock()
@@ -484,7 +484,7 @@ func (e *Escrow) ReleaseSettlement(
 		if alreadyPaid {
 			continue
 		}
-		if err := e.ledger.TransferFromBucket(bucket, vid, amount); err != nil {
+		if err := e.ledger.TransferFromBucketLabeled(bucket, vid, amount, "escrow-release:validator-distribution", false); err != nil {
 			return fmt.Errorf("escrow: settlement validator %s for task %s: %w", vid, taskID, err)
 		}
 		e.mu.Lock()
@@ -507,7 +507,7 @@ func (e *Escrow) ReleaseSettlement(
 		if alreadyPaid {
 			continue
 		}
-		if err := e.ledger.TransferFromBucket(bucket, rid, amount); err != nil {
+		if err := e.ledger.TransferFromBucketLabeled(bucket, rid, amount, "escrow-release:gen-ledger-royalty", false); err != nil {
 			return fmt.Errorf("escrow: settlement gen-ledger %s for task %s: %w", rid, taskID, err)
 		}
 		e.mu.Lock()
@@ -518,7 +518,7 @@ func (e *Escrow) ReleaseSettlement(
 
 	// 5. Treasury.
 	if treasuryAmount > 0 && !entry.TreasuryPaid {
-		if err := e.ledger.TransferFromBucket(bucket, treasury, treasuryAmount); err != nil {
+		if err := e.ledger.TransferFromBucketLabeled(bucket, treasury, treasuryAmount, "escrow-release:treasury-fee", false); err != nil {
 			return fmt.Errorf("escrow: settlement treasury for task %s: %w", taskID, err)
 		}
 		e.mu.Lock()
@@ -549,7 +549,7 @@ func (e *Escrow) Refund(taskID string) error {
 		return fmt.Errorf("%w: task %s", ErrEscrowNotFound, taskID)
 	}
 
-	if err := e.ledger.TransferFromBucket(bucketID(taskID), entry.PosterID, entry.Amount); err != nil {
+	if err := e.ledger.TransferFromBucketLabeled(bucketID(taskID), entry.PosterID, entry.Amount, "escrow-refund:poster-cancel", false); err != nil {
 		return fmt.Errorf("escrow: refund for task %s: %w", taskID, err)
 	}
 

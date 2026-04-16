@@ -231,10 +231,10 @@ func (c *Collector) CollectFeeFromRecipient(
 	// Move tokens from recipient to each sink — no new tokens created.
 	// Best-effort: errors are ignored so fee distribution never blocks settlement.
 	if validatorAmount > 0 && validatorID != "" {
-		_ = c.transfer.TransferFromBucket(recipientID, validatorID, validatorAmount)
+		_ = c.transfer.TransferFromBucketLabeled(recipientID, validatorID, validatorAmount, "fee-distribution:validator-share", false)
 	}
 	if treasuryAmount > 0 && treasuryID != "" {
-		_ = c.transfer.TransferFromBucket(recipientID, treasuryID, treasuryAmount)
+		_ = c.transfer.TransferFromBucketLabeled(recipientID, treasuryID, treasuryAmount, "fee-distribution:treasury-share", false)
 	}
 	return fee, burned
 }
