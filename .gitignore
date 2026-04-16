@@ -15,6 +15,7 @@ bin/
 # Go
 *.test
 *.out
+go.work.sum
 
 # OS
 .DS_Store
