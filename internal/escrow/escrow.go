@@ -154,7 +154,21 @@ func (e *Escrow) Empty(_ context.Context) (bool, error) {
 	return len(e.entries) == 0, nil
 }
 
-// Hold moves amount from posterID's balance into the escrow bucket for taskID.
+// Hold is the legacy combined fund-and-register primitive retained for the
+// marketplace binary's application-layer escrow only.
+//
+// Production protocol code (applicator, verification-consensus settler,
+// task-settler closure) uses RegisterEscrow instead — the canonical Transfer
+// has already moved funds on those paths, so Hold's TransferFromBucket call
+// would be a duplicate debit (the F1 bug). See the 2026-04-15 audit
+// (docs/audits/2026-04-15-escrow-hold-callers-audit.md) entry C3-2 for the
+// marketplace-only retention rationale, and the Part E plan
+// (docs/plans/2026-04-15-f3b-part-e-escrow-hardening.md §8) for the lint
+// exemption at internal/marketplace/server.go that permits the one retained
+// caller. When the marketplace-escrow-integration workstream lands, Hold is
+// removed.
+//
+// Moves amount from posterID's balance into the escrow bucket for taskID.
 // Returns an error wrapping ledger.ErrInsufficientBalance when the poster
 // has insufficient funds.
 func (e *Escrow) Hold(taskID string, posterID crypto.AgentID, amount uint64) error {
