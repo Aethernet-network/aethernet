@@ -46,7 +46,7 @@ func setupSettlerTest(t *testing.T, budget uint64) (
 	// scanner) is not exercised.
 	_ = escrow_testhelpers.FundAndRegisterEscrowForTest(tl, em, taskID, "poster-1", budget)
 
-	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) float64 { return 1.0 })
+	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) protocolmath.BasisPoints { return protocolmath.NeutralBP }, true)
 	settler := NewVerificationConsensusSettler(tm, tl, em, nil, calc, "genesis:treasury", nil, true)
 
 	return settler, tm, tl, em
@@ -334,7 +334,7 @@ func setupQWeightedSettler(t *testing.T, budget uint64, qFn ValidatorQScoreFn) (
 	_ = tm.ClaimTask(taskID, "worker-1")
 	_ = tm.SubmitResult(taskID, "worker-1", "sha256:q", "note", "")
 	_ = escrow_testhelpers.FundAndRegisterEscrowForTest(tl, em, taskID, "poster-1", budget)
-	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) float64 { return 1.0 })
+	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) protocolmath.BasisPoints { return protocolmath.NeutralBP }, true)
 	settler := NewVerificationConsensusSettler(tm, tl, em, nil, calc, "genesis:treasury", qFn, true)
 	return settler, tm
 }
@@ -473,7 +473,7 @@ func TestVerificationConsensusSettler_EscrowCatchUp_UsesRegisterEscrow(t *testin
 	// The escrow manager needs the DAGReader so RegisterEscrow can validate.
 	em.SetDAGReader(&applicatorStub{events: map[event.EventID]*event.Event{evt.ID: evt}})
 
-	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) float64 { return 1.0 })
+	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) protocolmath.BasisPoints { return protocolmath.NeutralBP }, true)
 	settler := NewVerificationConsensusSettler(tm, tl, em, scanner, calc, "genesis:treasury", nil, true)
 
 	posterBalBefore, _ := tl.Balance(crypto.AgentID("poster-1"))
@@ -553,7 +553,7 @@ func TestComputeValidatorPayouts_ShadowMode_ReturnsFloat(t *testing.T) {
 	tl := ledger.NewTransferLedger()
 	tm := tasks.NewTaskManager()
 	em := escrow.New(tl)
-	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) float64 { return 1.0 })
+	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) protocolmath.BasisPoints { return protocolmath.NeutralBP }, true)
 	settler := NewVerificationConsensusSettler(tm, tl, em, nil, calc, "genesis:treasury", qFn, true)
 
 	// Two recipients, pool=1000.
@@ -580,7 +580,7 @@ func TestComputeValidatorPayouts_ShadowMode_LogsDelta(t *testing.T) {
 	tl := ledger.NewTransferLedger()
 	tm := tasks.NewTaskManager()
 	em := escrow.New(tl)
-	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) float64 { return 1.0 })
+	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) protocolmath.BasisPoints { return protocolmath.NeutralBP }, true)
 	settler := NewVerificationConsensusSettler(tm, tl, em, nil, calc, "genesis:treasury", qFn, true)
 
 	_ = settler.computeValidatorPayouts("task-xyz", []crypto.AgentID{"v1", "v2", "v3"}, 1000, "research")
@@ -616,7 +616,7 @@ func TestComputeValidatorPayoutsInteger_Correctness(t *testing.T) {
 	tl := ledger.NewTransferLedger()
 	tm := tasks.NewTaskManager()
 	em := escrow.New(tl)
-	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) float64 { return 1.0 })
+	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) protocolmath.BasisPoints { return protocolmath.NeutralBP }, true)
 	settler := NewVerificationConsensusSettler(tm, tl, em, nil, calc, "genesis:treasury", qFn, false)
 
 	// Direct integer-path call; pool=1000, totalWeight=10000, shares 6000 / 4000.
@@ -648,7 +648,7 @@ func TestComputeValidatorPayouts_NonShadowMode_ReturnsInt(t *testing.T) {
 	tl := ledger.NewTransferLedger()
 	tm := tasks.NewTaskManager()
 	em := escrow.New(tl)
-	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) float64 { return 1.0 })
+	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) protocolmath.BasisPoints { return protocolmath.NeutralBP }, true)
 	settler := NewVerificationConsensusSettler(tm, tl, em, nil, calc, "genesis:treasury", qFn, false)
 
 	result := settler.computeValidatorPayouts("test-task", []crypto.AgentID{"v1", "v2"}, 1000, "research")
@@ -678,7 +678,7 @@ func TestComputeValidatorPayouts_NegativeQ_ClampedToZero(t *testing.T) {
 	tl := ledger.NewTransferLedger()
 	tm := tasks.NewTaskManager()
 	em := escrow.New(tl)
-	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) float64 { return 1.0 })
+	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) protocolmath.BasisPoints { return protocolmath.NeutralBP }, true)
 	settler := NewVerificationConsensusSettler(tm, tl, em, nil, calc, "genesis:treasury", qFn, false)
 
 	result := settler.computeValidatorPayoutsInteger([]crypto.AgentID{"v1", "v2"}, 1000, "research")

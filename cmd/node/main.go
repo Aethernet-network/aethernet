@@ -1911,9 +1911,15 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		// based on ReplicationRate and ChallengeSurvival once that infrastructure
 		// lands. Ancestor Q is different from validator Q — it measures the
 		// quality of prior verified work, not vote consistency.
+		// qualityFn returns NeutralBP (10000 BP == prior 1.0 float) for all
+		// ancestors until prompt 08 wires real Q from the reputation store.
+		// shadowMode=true: commit-4 of canonical-distribution-integer-migration
+		// runs the integer path alongside the legacy float path and logs
+		// shadow_delta for Part F's cutover corpus.
 		genLedgerCalc := settlement.NewGenerationLedgerCalculator(
 			stack.dag,
-			func(_ event.EventID) float64 { return 1.0 },
+			func(_ event.EventID) protocolmath.BasisPoints { return protocolmath.NeutralBP },
+			true,
 		)
 
 		// Validator Q score function for Q-weighted fee distribution.
