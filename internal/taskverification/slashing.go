@@ -122,7 +122,13 @@ func (e *SlashingEvaluator) EvaluateRound(
 		if e.policy.HardSlashingEnabled && e.reputation != nil && !agreed {
 			rep, err := e.reputation.Get(ctx, vote.ValidatorID, family, round.Category)
 			if err == nil && rep.TotalVotes >= uint64(e.policy.SystematicDivergenceMinVotes) {
-				rate := rep.AgreementRate()
+				rateBP := rep.AgreementRate()
+				// Temp BP→float conversion: AgreementRate migrated to BasisPoints
+				// in the canonical-distribution-integer-migration workstream; the
+				// policy threshold type stays float64 in this Part (policy-type BP
+				// migration is a separate future workstream). Comparison semantics
+				// are unchanged — this is numeric representation only.
+				rate := float64(rateBP) / 10000.0
 				if rate < e.policy.SystematicDivergenceThreshold {
 					actions = append(actions, SlashingAction{
 						ValidatorID:    vote.ValidatorID,

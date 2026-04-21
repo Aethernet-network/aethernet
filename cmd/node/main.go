@@ -1920,10 +1920,15 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		// TODO prompt future: wire CVD_norm (α₁), ChallengeSurvival (α₂),
 		// ReplicationRate (α₃) once their infrastructure is built.
 		validatorQFn := settlement.ValidatorQScoreFn(func(validatorID crypto.AgentID, family, category string) float64 {
-			return tvReputationStore.ValidatorQScore(
+			// Temp BP→float adapter: commit-2 migrated ValidatorQScore to
+			// BasisPoints, but the settler's ValidatorQScoreFn still takes
+			// float64 until commit-3 of the canonical-distribution-integer-
+			// migration workstream. Removed in commit-3.
+			bp := tvReputationStore.ValidatorQScore(
 				context.Background(), validatorID,
 				verification.FamilyID(family), category,
 			)
+			return float64(bp) / 10000.0
 		})
 
 		tvSettler := settlement.NewVerificationConsensusSettler(

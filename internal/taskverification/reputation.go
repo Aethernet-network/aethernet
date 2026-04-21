@@ -9,6 +9,7 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/protocolmath"
 	"github.com/Aethernet-network/aethernet/internal/verification"
 )
 
@@ -29,13 +30,26 @@ type ValidatorReputation struct {
 	LastUpdated        int64                `json:"last_updated"`
 }
 
-// AgreementRate returns the fraction of votes that agreed with consensus.
-// Returns 0.0 if no votes have been recorded.
-func (r *ValidatorReputation) AgreementRate() float64 {
+// AgreementRate returns the fraction of votes that agreed with consensus,
+// expressed in basis points (10000 = 1.0). Returns 0 when no votes have
+// been recorded.
+//
+// This is a numeric-representation change from the prior float64 return
+// type. The computation becomes (AgreeingVotes * 10000) / TotalVotes —
+// integer division, quantized at return time to one of 10001 discrete
+// buckets in [0, 10000]. The prior float version quantized only to IEEE-754
+// precision at computation time. For fractions not representable in
+// 10000ths (e.g. 1/3, 2/3) the two representations differ in the last
+// bucket. See the canonical-distribution-integer-migration workstream for
+// the rationale.
+//
+// Overflow: AgreeingVotes * 10000 stays within uint64 until AgreeingVotes
+// exceeds ~1.8e15; no realistic vote count reaches that bound.
+func (r *ValidatorReputation) AgreementRate() protocolmath.BasisPoints {
 	if r.TotalVotes == 0 {
 		return 0
 	}
-	return float64(r.AgreeingVotes) / float64(r.TotalVotes)
+	return protocolmath.BasisPoints((r.AgreeingVotes * 10000) / r.TotalVotes)
 }
 
 // ValidatorReputationStore persists validator vote agreement metrics.
@@ -176,21 +190,28 @@ func (s *ValidatorReputationStore) RecordEquivocation(
 // ReplicationRate requires the replay coordinator's verification history.
 // For now, only α₄ (Consistency = AgreementRate) is active; others default to 1.0.
 //
-// New validators with no history return 1.0 (neutral) so they can earn
-// while building reputation.
+// New validators with no history return NeutralBP (10000, equivalent to
+// the prior 1.0) so they can earn while building reputation. A validator
+// with full-deviation history returns the 1% floor (100 basis points,
+// equivalent to the prior 0.01) to avoid zero-weight permanently excluding
+// them from fee distribution.
+//
+// Return type migrated from float64 to protocolmath.BasisPoints; see the
+// canonical-distribution-integer-migration workstream. The neutral-1.0
+// and floor-0.01 conventions are preserved exactly in basis-point form.
 func (s *ValidatorReputationStore) ValidatorQScore(
 	ctx context.Context,
 	validatorID crypto.AgentID,
 	family verification.FamilyID,
 	category string,
-) float64 {
+) protocolmath.BasisPoints {
 	rep, err := s.Get(ctx, validatorID, family, category)
 	if err != nil || rep.TotalVotes == 0 {
-		return 1.0 // neutral for new validators
+		return protocolmath.NeutralBP // 10000 == prior 1.0
 	}
 	rate := rep.AgreementRate()
 	if rate == 0 {
-		return 0.01 // minimum floor to avoid zero-weight (allows recovery)
+		return 100 // 1% floor; prior float 0.01 converted to basis points
 	}
 	return rate
 }
