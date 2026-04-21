@@ -98,7 +98,63 @@ jobs:
           echo "| Race detector | enabled |" >> $GITHUB_STEP_SUMMARY
           echo "| Branch | \`${{ github.head_ref }}\` |" >> $GITHUB_STEP_SUMMARY
 
-# ─── Job 3: Build ────────────────────────────────────────────────────────────
+# ─── Job 3: Cross-architecture determinism ──────────────────────────────────
+  cross-arch:
+    name: Cross-architecture determinism
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Install QEMU user-mode emulation
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build amd64 corpus binary
+        run: GOOS=linux GOARCH=amd64 go build -o corpus-amd64 ./cmd/cross-arch-corpus/
+
+      - name: Build arm64 corpus binary
+        run: GOOS=linux GOARCH=arm64 go build -o corpus-arm64 ./cmd/cross-arch-corpus/
+
+      - name: Run amd64 corpus
+        run: ./corpus-amd64 -corpus=cmd/cross-arch-corpus/corpus.json > output-amd64.json
+
+      - name: Run arm64 corpus (via QEMU)
+        run: ./corpus-arm64 -corpus=cmd/cross-arch-corpus/corpus.json > output-arm64.json
+
+      - name: Byte-identical assertion
+        run: |
+          if ! diff -q output-amd64.json output-arm64.json > /dev/null; then
+            echo "::error::CROSS-ARCHITECTURE DETERMINISM FAILURE"
+            echo "amd64 and arm64 produced different outputs for the same corpus."
+            echo "This indicates a nondeterminism in the integer code path."
+            echo "--- diff (first 200 lines) ---"
+            diff output-amd64.json output-arm64.json | head -200
+            exit 1
+          fi
+          echo "amd64 and arm64 outputs byte-identical. Cross-architecture determinism confirmed."
+
+      - name: Upload outputs as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-cross-arch-corpus-outputs-${{ github.sha }}
+          path: |
+            output-amd64.json
+            output-arm64.json
+            cmd/cross-arch-corpus/corpus.json
+          retention-days: 3
+
+# ─── Job 4: Build ────────────────────────────────────────────────────────────
   build:
     name: Build
     needs: test
