@@ -42,7 +42,7 @@ func newTestTVConsumer(t *testing.T) (*dispatch.TVConsensusConsumer, *tasks.Task
 	store := newTVRoundStore(t)
 
 	settler := settlement.NewVerificationConsensusSettler(
-		tm, tl, em, &tvStubDAG{}, nil, "genesis:treasury", nil)
+		tm, tl, em, &tvStubDAG{}, nil, "genesis:treasury", nil, true)
 	consumer := dispatch.NewTVConsensusConsumer(settler, store, tm, em)
 	return consumer, tm, tl, em, store
 }
@@ -477,7 +477,7 @@ func TestTVConsensusConsumer_Conformance(t *testing.T) {
 		store := taskverification.NewBadgerStore(db)
 
 		settler := settlement.NewVerificationConsensusSettler(
-			tm, tl, em, &tvStubDAG{}, nil, "genesis:treasury", nil)
+			tm, tl, em, &tvStubDAG{}, nil, "genesis:treasury", nil, true)
 		c := dispatch.NewTVConsensusConsumer(settler, store, tm, em)
 		return c, func() { db.Close() }
 	})

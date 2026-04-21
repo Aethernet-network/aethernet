@@ -67,6 +67,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/network"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/projections"
+	"github.com/Aethernet-network/aethernet/internal/protocolmath"
 	"github.com/Aethernet-network/aethernet/internal/recognition"
 	"github.com/Aethernet-network/aethernet/internal/roundpolicy"
 	"github.com/Aethernet-network/aethernet/internal/roundprogress"
@@ -1919,22 +1920,26 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		// Uses the Consistency term (α₄) from paper v4.1: AgreementRate.
 		// TODO prompt future: wire CVD_norm (α₁), ChallengeSurvival (α₂),
 		// ReplicationRate (α₃) once their infrastructure is built.
-		validatorQFn := settlement.ValidatorQScoreFn(func(validatorID crypto.AgentID, family, category string) float64 {
-			// Temp BP→float adapter: commit-2 migrated ValidatorQScore to
-			// BasisPoints, but the settler's ValidatorQScoreFn still takes
-			// float64 until commit-3 of the canonical-distribution-integer-
-			// migration workstream. Removed in commit-3.
-			bp := tvReputationStore.ValidatorQScore(
+		// ValidatorQScore now returns BasisPoints natively (commit-2 of the
+		// canonical-distribution-integer-migration workstream); the settler's
+		// ValidatorQScoreFn was migrated to the same type in commit-3, so no
+		// adapter is needed — plug directly.
+		validatorQFn := settlement.ValidatorQScoreFn(func(validatorID crypto.AgentID, family, category string) protocolmath.BasisPoints {
+			return tvReputationStore.ValidatorQScore(
 				context.Background(), validatorID,
 				verification.FamilyID(family), category,
 			)
-			return float64(bp) / 10000.0
 		})
 
+		// shadowMode=true: commit-3 wires the integer path behind the legacy
+		// float path and logs shadow_delta lines for Part F's cutover corpus.
+		// Part E eventually replaces this hardcoded flag with a DAG-epoch-gated
+		// check consulting the canonical cutover event.
 		tvSettler := settlement.NewVerificationConsensusSettler(
 			stack.taskMgr, stack.transfer, stack.escrowMgr, stack.dag,
 			genLedgerCalc, crypto.AgentID(genesis.BucketTreasury),
 			validatorQFn,
+			true,
 		)
 		// tvCalibrationStore and tvReputationStore are used by the slashing evaluator above.
 
