@@ -282,6 +282,18 @@ func TestTVConsensusConsumer_Apply_ConcurrentSameTask_Serialized(t *testing.T) {
 	taskID, round := setupTask(t, tm, tl, em, budget)
 	_ = store.SaveRound(context.Background(), round)
 
+	// Save the round under an alternate RoundID too, so that whichever
+	// goroutine wins the per-task mutex race succeeds in LoadRound. Without
+	// this the test was flaky: if the second goroutine won the mutex, it
+	// would call LoadRound("round-alt") before the first goroutine had
+	// transitioned task status to terminal, and LoadRound would error
+	// before the pre-check could fire. Part B surfaced the flake by
+	// changing the integer-path timing enough that ev2 wins the race a
+	// non-trivial fraction of the time.
+	altRound := *round
+	altRound.RoundID = "round-alt"
+	_ = store.SaveRound(context.Background(), &altRound)
+
 	ev1 := makeConsensusEvent(t, taskID, "round-1", "pass")
 	ev2 := makeConsensusEvent(t, taskID, "round-alt", "pass")
 
