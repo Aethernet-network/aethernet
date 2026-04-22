@@ -117,6 +117,18 @@ func main() {
 	case "agents":
 		runAgents(args)
 
+	// Admin (requires node started with --enable-admin-api)
+	case "admin":
+		if len(args) == 0 {
+			fatal("usage: aet admin <activate-integer-migration>")
+		}
+		switch args[0] {
+		case "activate-integer-migration":
+			runAdminActivateIntegerMigration(args[1:])
+		default:
+			fatal("unknown admin subcommand: %s", args[0])
+		}
+
 	case "version", "--version":
 		fmt.Printf("aet %s\n", cliVersion)
 	case "help", "--help", "-h":
@@ -155,6 +167,10 @@ Tasks:
 Network:
   status                          Node health
   agents [--limit N]              List agents
+
+Admin (requires node --enable-admin-api):
+  admin activate-integer-migration --reason R
+                                  Emit the integer-migration activation event
 
 Global flags:
   --url URL     API URL (default: https://testnet.aethernet.network)

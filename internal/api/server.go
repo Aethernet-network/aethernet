@@ -338,6 +338,15 @@ type Server struct {
 	// When non-nil, GET /v1/network/state returns live bootstrap status,
 	// validator coverage counts, and replay reserve health. When nil, 501.
 	networkState networkStateSource
+
+	// enableAdminAPI registers admin-only routes (e.g. integer-migration
+	// activation) only when set by SetAdminAPI. Disabled by default so
+	// production deployments must opt in explicitly. The testnet rehearsal
+	// pattern from Part F of the canonical-distribution-integer-migration
+	// workstream. Authorization relies on the existing signed-request
+	// envelope; mainnet-grade authorization (operator allowlist, multi-sig,
+	// governance gate) is tracked as a future workstream.
+	enableAdminAPI bool
 }
 
 // NewServer constructs an API Server backed by the provided node components.
@@ -392,6 +401,15 @@ func (s *Server) SetLayerConfig(enableL2, enableL3 bool) {
 	s.rebuildMux()
 }
 
+// SetAdminAPI enables or disables the admin-only route group. When enabled,
+// endpoints like POST /v1/admin/integer-migration/activate become available
+// to signed requests. When disabled (default), those endpoints return 404.
+// Opt-in per-deployment via the node's --enable-admin-api flag.
+func (s *Server) SetAdminAPI(enabled bool) {
+	s.enableAdminAPI = enabled
+	s.rebuildMux()
+}
+
 // rebuildMux reconstructs the route multiplexer based on the current layer
 // configuration. Safe to call before the server starts serving; not safe to
 // call concurrently with active requests.
@@ -406,6 +424,9 @@ func (s *Server) rebuildMux() {
 	}
 	if s.enableL3 {
 		s.registerL3Routes(mux)
+	}
+	if s.enableAdminAPI {
+		s.registerAdminRoutes(mux)
 	}
 	s.mux = mux
 }

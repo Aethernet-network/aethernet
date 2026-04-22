@@ -1139,8 +1139,11 @@ func printStatus(agentID crypto.AgentID, d *dag.DAG, n *network.Node, eng *ocs.E
 // p2pAddr and apiListenAddr override the defaults and may come from flags or
 // environment variables. enableMarketplace controls whether task marketplace
 // components (task routing, auto-settlement, discovery) are started.
+// enableAdminAPI registers admin-only routes on the API server (currently the
+// integer-migration activation endpoint); opt-in per deployment via the start
+// flag so production builds do not expose them by default.
 // cfg controls all tunable protocol parameters; nil falls back to defaults.
-func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr string, enableMarketplace bool, cfg *config.ProtocolConfig, noAuth bool) *network.Node {
+func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr string, enableMarketplace bool, cfg *config.ProtocolConfig, noAuth bool, enableAdminAPI bool) *network.Node {
 	if cfg == nil {
 		cfg = config.DefaultConfig()
 	}
@@ -2591,6 +2594,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	// Configure which route groups are active. L1 is always on; L2 network
 	// coordination is always on; L3 marketplace routes follow --marketplace.
 	apiSrv.SetLayerConfig(true, enableMarketplace)
+	// Admin routes (integer-migration activation etc.) are opt-in via
+	// --enable-admin-api; production deployments leave them disabled.
+	apiSrv.SetAdminAPI(enableAdminAPI)
 	if err := apiSrv.Start(); err != nil {
 		slog.Error("failed to start API server", "addr", apiListenAddr, "err", err)
 		node.Stop()
@@ -2758,6 +2764,7 @@ func cmdStart() {
 	enableMarketplace := fs.Bool("marketplace", false, "Enable built-in marketplace (task routing, escrow, explorer) in the combined single-binary deployment")
 	configPath := fs.String("config", envOr("AETHERNET_CONFIG", ""), "path to protocol config JSON file (default: built-in defaults)")
 	noAuth := fs.Bool("no-auth", false, "Disable API authentication (testnet/development only — NOT safe for production)")
+	enableAdminAPI := fs.Bool("enable-admin-api", false, "Enable admin-only API routes (integer-migration activation etc.). Opt-in; production deployments should leave this disabled unless explicitly required.")
 	_ = fs.Parse(os.Args[2:])
 
 	// The --marketplace flag controls whether marketplace components (tasks,
@@ -2835,7 +2842,7 @@ func cmdStart() {
 		slog.Info("ledger: mint cap enforced", "cap_micro_aet", minted)
 	}
 
-	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, *enableMarketplace, cfg, *noAuth)
+	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, *enableMarketplace, cfg, *noAuth, *enableAdminAPI)
 
 	// Stop the commit bus on shutdown (cannot defer inside startStack because
 	// startStack returns immediately and defers fire before traffic arrives).
@@ -3046,7 +3053,8 @@ func cmdConnect() {
 	}
 	// cmdConnect is the legacy subcommand; marketplace is disabled by default.
 	// Use 'aethernet start --marketplace' for the combined deployment.
-	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, false, cfg, *noAuth)
+	// Admin API is never enabled on the legacy connect path.
+	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, false, cfg, *noAuth, false)
 
 	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\nAPI      : %s\n\n",
 		VERSION, agentID, node.ListenAddr(), *apiListenAddr)
