@@ -1957,7 +1957,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			tvReputationStore,
 			tvCalibrationStore,
 		)
-		tvConsensusConsumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, tvSettler, tvSlashingEvaluator, tvCalibrationStore)
+		tvConsensusConsumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, tvSlashingEvaluator, tvCalibrationStore)
 
 		// Commit 9 of §9: wire the CanonicalEventDispatcher for exactly-once
 		// settlement mediation. The dispatcher owns the admission state machine
@@ -2000,8 +2000,23 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			slog.Error("dispatch: recovery failed", "err", err)
 			os.Exit(1)
 		}
-		tvConsensusConsumer.SetDispatcher(eventDispatcher)
 		stack.dispatcher = eventDispatcher
+
+		// Part E.1: register the general recognition→dispatcher admission
+		// router. Every committed event is forwarded to dispatcher.Admit;
+		// per-consumer Interested() filtering inside the dispatcher handles
+		// routing. Closes the bug class surfaced by Part F Phase D, where
+		// canonical event types with registered dispatcher consumers (e.g.
+		// EventTypeIntegerMigrationActivation) had no admission pathway
+		// because recognition→dispatcher forwarding was per-event-type and
+		// hand-written. Registered AFTER eventDispatcher.Recover to satisfy
+		// the load-before-listener ordering rule (no event can be admitted
+		// before its downstream consumer is ready).
+		admissionRouter := recognition.NewDispatcherAdmissionConsumer(eventDispatcher)
+		if err := commitBus.Register(admissionRouter); err != nil {
+			slog.Error("recognition: register DispatcherAdmissionConsumer failed", "err", err)
+			os.Exit(1)
+		}
 
 		_ = commitBus.Register(tvConsensusConsumer)
 

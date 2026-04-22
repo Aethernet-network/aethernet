@@ -8,51 +8,45 @@ import (
 	"log/slog"
 
 	"github.com/Aethernet-network/aethernet/internal/event"
-	"github.com/Aethernet-network/aethernet/internal/settlement"
 	"github.com/Aethernet-network/aethernet/internal/taskverification"
 	"github.com/Aethernet-network/aethernet/internal/verification"
 )
 
 // TaskVerificationConsensusConsumer processes TaskVerificationConsensus
-// events from the DAG: applies round state for replay safety AND invokes
-// the v4.1 economic settlement (escrow release/refund/split) AND advances
-// per-(category, family) calibration counters.
-// DispatcherAdmitter is the subset of dispatch.Dispatcher used by the
-// consensus consumer to route settlement through the dispatcher's
-// exactly-once admission. Avoids importing the dispatch package directly.
-type DispatcherAdmitter interface {
-	Admit(ctx context.Context, ev *event.Event) error
-}
-
+// events from the DAG: applies round state for replay safety AND advances
+// per-(category, family) calibration counters AND evaluates slashing.
+//
+// Settlement invocation was previously owned by this consumer (via an
+// inline dispatcher.Admit call with a direct settler.Settle fallback).
+// Part E.1 moved that responsibility to the general
+// DispatcherAdmissionConsumer, which forwards every committed event to
+// dispatch.Dispatcher.Admit; the dispatcher routes
+// TaskVerificationConsensus events to dispatch.TVConsensusConsumer.Apply
+// via its Interested() filter. This consumer retains only the local-node
+// replay-safe and best-effort sidework (round state, calibration,
+// slashing) that does not require cross-node ledger convergence.
 type TaskVerificationConsensusConsumer struct {
 	rounds      taskverification.Store
-	settler     *settlement.VerificationConsensusSettler // nil if settlement not wired
-	dispatcher  DispatcherAdmitter                      // nil → direct settler call (pre-commit-9 compat)
-	slashing    *taskverification.SlashingEvaluator      // nil if slashing not wired
-	calibration *taskverification.CalibrationStore       // nil if calibration not wired
+	slashing    *taskverification.SlashingEvaluator // nil if slashing not wired
+	calibration *taskverification.CalibrationStore  // nil if calibration not wired
 }
 
 // NewTaskVerificationConsensusConsumer creates a consensus consumer.
-// settler, slashing, and calibration may be nil (graceful degradation).
+// slashing and calibration may be nil (graceful degradation).
+//
+// The settler parameter was removed in Part E.1: settlement now flows
+// exclusively through the DispatcherAdmissionConsumer →
+// dispatch.Dispatcher → dispatch.TVConsensusConsumer.Apply path.
 func NewTaskVerificationConsensusConsumer(
 	rounds taskverification.Store,
-	settler *settlement.VerificationConsensusSettler,
 	slashing *taskverification.SlashingEvaluator,
 	calibration *taskverification.CalibrationStore,
 ) *TaskVerificationConsensusConsumer {
 	return &TaskVerificationConsensusConsumer{
 		rounds:      rounds,
-		settler:     settler,
 		slashing:    slashing,
 		calibration: calibration,
 	}
-}
-
-// SetDispatcher wires the dispatcher for exactly-once settlement
-// mediation. When set, settlement invocations route through
-// dispatcher.Admit instead of calling settler.Settle directly.
-func (c *TaskVerificationConsensusConsumer) SetDispatcher(d DispatcherAdmitter) {
-	c.dispatcher = d
 }
 
 // Name returns the unique consumer identifier.
@@ -68,8 +62,16 @@ func (c *TaskVerificationConsensusConsumer) Ready(_ context.Context, _ *event.Ev
 	return true, "", nil
 }
 
-// Consume applies the consensus event to the corresponding round. Idempotent:
-// if the round is already finalized in the same way, this is a no-op.
+// Consume applies the consensus event to the corresponding round, runs
+// calibration counters, and evaluates slashing. Idempotent: if the round
+// is already finalized in the same way, finalization is a no-op;
+// calibration is guarded by round.CalibrationApplied; slashing is
+// best-effort.
+//
+// Settlement is NOT invoked here — see the type doc comment. The
+// DispatcherAdmissionConsumer forwards this event to the dispatcher,
+// which routes it to dispatch.TVConsensusConsumer.Apply for the
+// economic settlement.
 func (c *TaskVerificationConsensusConsumer) Consume(_ context.Context, ev *event.Event) error {
 	var payload event.TaskVerificationConsensusPayload
 	if err := json.Unmarshal(ev.Payload, &payload); err != nil {
@@ -91,7 +93,8 @@ func (c *TaskVerificationConsensusConsumer) Consume(_ context.Context, ev *event
 
 	// Apply finalization to the round if not already terminal.
 	// The round may already be finalized by the vote consumer's inline
-	// finalization path — that's fine, settlement still needs to run.
+	// finalization path — that's fine, the admission-router-fed
+	// dispatcher settlement path still runs regardless.
 	if !round.IsTerminal() {
 		verdict := parseConsensusVerdict(payload.FinalVerdict)
 		targetState := consensusVerdictToState(verdict)
@@ -107,33 +110,6 @@ func (c *TaskVerificationConsensusConsumer) Consume(_ context.Context, ev *event
 				"verdict", payload.FinalVerdict,
 				"score_bp", payload.FinalScoreBP,
 				"event_id", ev.ID,
-			)
-		}
-	}
-
-	// Apply v4.1 economic settlement via the dispatcher's exactly-once
-	// admission (commit 9 of §9). The dispatcher mediates settlement
-	// invocation through TVConsensusConsumer.Apply; this consumer only
-	// routes the event. Round state, calibration, and slashing remain
-	// here because they do not require cross-node ledger convergence.
-	if c.dispatcher != nil {
-		if err := c.dispatcher.Admit(context.Background(), ev); err != nil {
-			slog.Warn("task_verification_consensus: dispatcher admission failed",
-				"task_id", payload.TaskID, "err", err)
-		}
-	} else if c.settler != nil {
-		settleResult, err := c.settler.Settle(context.Background(), &payload, round)
-		if err != nil {
-			slog.Warn("task_verification_consensus: settlement failed",
-				"task_id", payload.TaskID, "err", err)
-		} else if settleResult.Applied {
-			slog.Info("task_verification_consensus: settlement applied",
-				"task_id", payload.TaskID,
-				"verdict", payload.FinalVerdict,
-				"worker_payout", settleResult.WorkerPayout,
-				"poster_refund", settleResult.PosterRefund,
-				"treasury", settleResult.TreasuryAmount,
-				"total_distributed", settleResult.TotalDistributed,
 			)
 		}
 	}
@@ -181,8 +157,8 @@ func (c *TaskVerificationConsensusConsumer) Consume(_ context.Context, ev *event
 		}
 	}
 
-	// Evaluate slashing after settlement and calibration. Best-effort —
-	// failures log but do not block the pipeline.
+	// Evaluate slashing after calibration. Best-effort — failures log but
+	// do not block the pipeline.
 	if c.slashing != nil {
 		actions := c.slashing.EvaluateRound(context.Background(), round)
 		for _, action := range actions {
