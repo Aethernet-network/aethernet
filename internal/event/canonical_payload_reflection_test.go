@@ -39,6 +39,7 @@ var canonicalPayloadReflectTypes = []reflect.Type{
 	reflect.TypeOf(SlashingChallengePayload{}),
 	reflect.TypeOf(PrerequisiteWithholdingPayload{}),
 	reflect.TypeOf(TrajectoryCommitPayload{}),
+	reflect.TypeOf(IntegerMigrationActivationPayload{}),
 }
 
 // TestCanonicalPayloadTypes_FloatFree is the runtime-mechanism defense
@@ -141,12 +142,12 @@ func TestCanonicalPayloadList_Complete(t *testing.T) {
 	}
 }
 
-// TestCanonicalPayloadList_Has17Entries pins the list length. Changing
+// TestCanonicalPayloadList_Has18Entries pins the list length. Changing
 // the count requires explicit intent (a future protocol change adding a
 // new canonical payload type will update this test).
-func TestCanonicalPayloadList_Has17Entries(t *testing.T) {
-	if got := len(canonicalPayloadReflectTypes); got != 17 {
-		t.Fatalf("canonicalPayloadReflectTypes len = %d; want 17", got)
+func TestCanonicalPayloadList_Has18Entries(t *testing.T) {
+	if got := len(canonicalPayloadReflectTypes); got != 18 {
+		t.Fatalf("canonicalPayloadReflectTypes len = %d; want 18", got)
 	}
 }
 

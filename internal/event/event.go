@@ -169,6 +169,25 @@ const (
 	// slashing/challenge-path consumer that acts on this evidence is a
 	// follow-up workstream; Part D only emits it. See locked design §5.4.
 	EventTypePrerequisiteWithholding EventType = "PrerequisiteWithholding"
+
+	// EventTypeIntegerMigrationActivation marks the protocol's cutover from
+	// float-based settlement distribution to integer-based (protocolmath)
+	// distribution. Nodes transition to integer-canonical settlement at the
+	// DAG point where this event is projected locally — the consumer's
+	// Apply flips the settler and generation-ledger calculator out of
+	// shadow mode and durably persists the transition.
+	//
+	// Replay: a node replaying from genesis transitions at the DAG point
+	// where this event appears. Settlements before this point use float
+	// math (preserving historical amounts byte-identically); settlements
+	// after use integer math via protocolmath. One-way transition; there
+	// is no corresponding deactivation event.
+	//
+	// Emission is operational, not automatic — a privileged operator
+	// signs and emits the event via a CLI/tool after the shadow-mode
+	// observation period. See
+	// docs/plans/2026-04-20-canonical-distribution-integer-migration-v2.md §4.5.
+	EventTypeIntegerMigrationActivation EventType = "IntegerMigrationActivation"
 )
 
 // SettlementState tracks an event's position in the Optimistic Capability Settlement
@@ -813,4 +832,31 @@ type PrerequisiteWithholdingPayload struct {
 	DeferredSinceEpoch   uint64    `json:"deferred_since_epoch"`
 	CurrentEpoch         uint64    `json:"current_epoch"`
 	EmittingNodeAgent    string    `json:"emitting_node_agent"`
+}
+
+// IntegerMigrationActivationPayload carries the activation event for the
+// canonical-distribution-integer-migration workstream. See the doc on
+// EventTypeIntegerMigrationActivation for semantics.
+//
+// All fields are integer-only (uint8 / int64) or string. The
+// canonical-payload float-freedom lint at internal/event/lint/ includes
+// this type in its hardcoded list; Part C's reflection test likewise.
+type IntegerMigrationActivationPayload struct {
+	// Version is the payload schema version. Must be 1 for current protocol.
+	Version uint8 `json:"v"`
+
+	// EmittingAgent is the capability fingerprint of the node that emitted
+	// this activation event. Informational; the protocol does not validate
+	// the emitter's identity — activation is one-shot and duplicate events
+	// after the first activation are idempotent no-ops at the consumer.
+	EmittingAgent string `json:"emitting_agent"`
+
+	// ActivationReason is a human-readable description of why activation
+	// is being triggered. Expected to reference the observation window
+	// findings (e.g. "shadow observation complete: 23 tasks, max delta 1 µAET").
+	ActivationReason string `json:"activation_reason"`
+
+	// EmittedAtUnix is the unix timestamp at which the emitter constructed
+	// the event. Informational only; not used for protocol decisions.
+	EmittedAtUnix int64 `json:"emitted_at_unix"`
 }

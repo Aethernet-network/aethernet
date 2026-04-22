@@ -3,6 +3,7 @@ package settlement
 import (
 	"context"
 	"log/slog"
+	"sync"
 
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/protocolmath"
@@ -52,12 +53,29 @@ type GenerationLedgerCalculator struct {
 	dag       DAGAncestorReader
 	qualityFn func(event.EventID) protocolmath.BasisPoints
 
-	// shadowMode toggles between canonical float path (true) and canonical
-	// integer path (false). Mirrors the settler's flag; in Part B both
-	// pieces run the float path canonically and log shadow_delta for the
-	// integer path. Part E replaces with a DAG-epoch-gated check consulting
-	// the canonical cutover event.
+	// mu guards shadowMode. Reads happen on every Calculate call; writes
+	// happen rarely (once per IntegerMigration activation). See Part E
+	// of the canonical-distribution-integer-migration workstream.
+	mu         sync.RWMutex
 	shadowMode bool
+}
+
+// isShadowMode returns the current shadow-mode flag under RLock.
+func (g *GenerationLedgerCalculator) isShadowMode() bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.shadowMode
+}
+
+// SetShadowMode switches the calculator between shadow mode (legacy
+// float path canonical, integer path logged) and integer-canonical mode.
+// Driven by the IntegerMigrationActivationConsumer; see SetShadowMode
+// on *VerificationConsensusSettler for the twin method and the
+// activation semantics.
+func (g *GenerationLedgerCalculator) SetShadowMode(shadow bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.shadowMode = shadow
 }
 
 // NewGenerationLedgerCalculator creates a calculator.
@@ -107,7 +125,7 @@ func (g *GenerationLedgerCalculator) Calculate(
 	acceptedTaskEventID event.EventID,
 	poolMicroAET uint64,
 ) GenerationLedgerDistribution {
-	if g.shadowMode {
+	if g.isShadowMode() {
 		floatDist := g.calculateFloat(acceptedTaskEventID, poolMicroAET)
 		intDist := g.calculateInteger(acceptedTaskEventID, poolMicroAET)
 		logGenLedgerShadowDelta(string(acceptedTaskEventID), floatDist, intDist, poolMicroAET)

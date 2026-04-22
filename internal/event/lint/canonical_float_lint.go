@@ -50,6 +50,7 @@ var canonicalPayloadTypeNames = []string{
 	"SlashingChallengePayload",
 	"PrerequisiteWithholdingPayload",
 	"TrajectoryCommitPayload",
+	"IntegerMigrationActivationPayload",
 }
 
 // Violation records one offending field path within a canonical payload.

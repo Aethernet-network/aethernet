@@ -1970,6 +1970,29 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			slog.Error("dispatch: register TVConsensusConsumer failed", "err", err)
 			os.Exit(1)
 		}
+
+		// Part E of canonical-distribution-integer-migration: register the
+		// IntegerMigrationActivation consumer so activation events flip the
+		// settler and generation-ledger out of shadow mode. Adapter wraps
+		// the store's generic PutMeta/GetMeta so no store-layer methods are
+		// added for this one migration.
+		migStore := &migrationStoreAdapter{store: stack.store}
+		migConsumer := dispatch.NewIntegerMigrationActivationConsumer(tvSettler, genLedgerCalc, migStore)
+		if err := eventDispatcher.Register(migConsumer); err != nil {
+			slog.Error("dispatch: register IntegerMigrationActivationConsumer failed", "err", err)
+			os.Exit(1)
+		}
+
+		// Startup load — replay-safe flag restoration. If a prior activation
+		// was persisted, flip the settler and gen-ledger to integer-canonical
+		// mode now so the dispatcher's recovery pass (and any subsequent
+		// settlement processing) sees the correct flag state.
+		if activated, _, _, loadErr := migStore.GetIntegerMigrationActivated(); loadErr == nil && activated {
+			tvSettler.SetShadowMode(false)
+			genLedgerCalc.SetShadowMode(false)
+			slog.Info("startup: integer migration already activated; running integer-canonical")
+		}
+
 		if err := eventDispatcher.Recover(context.Background()); err != nil {
 			slog.Error("dispatch: recovery failed", "err", err)
 			os.Exit(1)
@@ -3361,4 +3384,63 @@ func cmdValidatorSet() {
 		}
 		fmt.Printf("\nDigest verified: %s\n", actual)
 	}
+}
+
+// ─── IntegerMigrationActivation state persistence (Part E) ──────────────────
+
+// migrationMetaKey is the meta: namespace key under which the integer-
+// migration activation record is persisted. Under the hood this uses
+// store.PutMeta/GetMeta (i.e. "meta:integer_migration:activated") so no
+// dedicated prefix or store-layer method is required for this one migration.
+const migrationMetaKey = "integer_migration:activated"
+
+// migrationActivationState is the JSON body persisted at migrationMetaKey.
+// Kept as a struct (not just a byte flag) so the emitting event ID and
+// timestamp are recoverable across restarts — useful for diagnostics and
+// for RecoveryProbe to distinguish a re-delivered activation event from
+// a distinct one.
+type migrationActivationState struct {
+	EventID       event.EventID `json:"event_id"`
+	EmittedAtUnix int64         `json:"emitted_at_unix"`
+}
+
+// migrationStoreAdapter satisfies dispatch.MigrationStateStore by wrapping
+// store.Store's generic PutMeta/GetMeta. Narrow by design — dispatcher
+// consumers should not import store concrete types, and store package
+// should not carry migration-specific methods.
+type migrationStoreAdapter struct {
+	store *store.Store
+}
+
+// PutIntegerMigrationActivated serializes the activation state as JSON
+// and writes it under migrationMetaKey. Called by the activation consumer
+// exactly once per activation (persist before mutate, per Principle 9).
+func (a *migrationStoreAdapter) PutIntegerMigrationActivated(id event.EventID, emittedAtUnix int64) error {
+	body, err := json.Marshal(migrationActivationState{EventID: id, EmittedAtUnix: emittedAtUnix})
+	if err != nil {
+		return fmt.Errorf("migrationStoreAdapter: marshal: %w", err)
+	}
+	if err := a.store.PutMeta(migrationMetaKey, body); err != nil {
+		return fmt.Errorf("migrationStoreAdapter: put meta: %w", err)
+	}
+	return nil
+}
+
+// GetIntegerMigrationActivated reads the activation state. Returns
+// activated=false on any read error or absent record — "absence of
+// evidence is not evidence of absence" per C-14. The caller treats
+// false as "not yet activated" and proceeds with startup normally.
+func (a *migrationStoreAdapter) GetIntegerMigrationActivated() (bool, event.EventID, int64, error) {
+	body, err := a.store.GetMeta(migrationMetaKey)
+	if err != nil {
+		return false, "", 0, nil
+	}
+	if len(body) == 0 {
+		return false, "", 0, nil
+	}
+	var s migrationActivationState
+	if err := json.Unmarshal(body, &s); err != nil {
+		return false, "", 0, fmt.Errorf("migrationStoreAdapter: unmarshal: %w", err)
+	}
+	return true, s.EventID, s.EmittedAtUnix, nil
 }

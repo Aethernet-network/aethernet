@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
@@ -46,13 +47,37 @@ type VerificationConsensusSettler struct {
 	treasuryID crypto.AgentID
 	qScoreFn   ValidatorQScoreFn // nil → even-split fallback
 
-	// shadowMode toggles between canonical float path (true) and canonical
-	// integer path (false). In shadow mode the legacy float distribution is
-	// returned and the integer path runs alongside for delta logging; in
-	// non-shadow mode the integer path is the only one that runs. Part B
-	// hardcodes true everywhere; Part E replaces this with a DAG-epoch-gated
-	// check consulting the canonical cutover event.
+	// mu guards shadowMode. Reads happen on every settlement call (via
+	// isShadowMode); writes happen rarely (once per IntegerMigration
+	// activation event, via SetShadowMode). sync.RWMutex amortizes the
+	// read cost; see Part E of the canonical-distribution-integer-migration
+	// workstream for the activation consumer that drives the write.
+	mu         sync.RWMutex
 	shadowMode bool
+}
+
+// isShadowMode returns the current shadow-mode flag under RLock. Called
+// on every settlement path.
+func (s *VerificationConsensusSettler) isShadowMode() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.shadowMode
+}
+
+// SetShadowMode switches the settler between shadow mode (legacy float
+// path is canonical, integer path runs alongside for delta logging) and
+// integer-canonical mode (integer path is canonical; legacy float path
+// is not run). Called by the IntegerMigrationActivationConsumer when
+// the activation event is applied, and at startup when a prior
+// activation is loaded from the store.
+//
+// Thread-safe. One-way transition is the protocol-level expectation,
+// but SetShadowMode itself accepts either value so tests can restore
+// shadow mode after exercising the integer path in isolation.
+func (s *VerificationConsensusSettler) SetShadowMode(shadow bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.shadowMode = shadow
 }
 
 // NewVerificationConsensusSettler creates a settler with the full v4.1
@@ -62,8 +87,11 @@ type VerificationConsensusSettler struct {
 // locate the canonical escrow-lock Transfer event that funds the escrow.
 // May be nil only in tests that do not exercise the catch-up path.
 //
-// shadowMode: pass true for Part B's shadow-compare behavior. Pass false
-// to make the integer path canonical (Part E territory).
+// shadowMode: pass true for Part B's shadow-compare behavior. Part E's
+// activation consumer flips this to false at runtime when the
+// EventTypeIntegerMigrationActivation event is projected, and startup
+// restores it to false on a post-activation restart via the adapter in
+// cmd/node/main.go.
 func NewVerificationConsensusSettler(
 	taskMgr *tasks.TaskManager,
 	transfer *ledger.TransferLedger,
@@ -370,7 +398,7 @@ func (s *VerificationConsensusSettler) computeValidatorPayouts(
 	pool uint64,
 	category string,
 ) map[crypto.AgentID]uint64 {
-	if s.shadowMode {
+	if s.isShadowMode() {
 		floatResult := s.computeValidatorPayoutsFloat(recipients, pool, category)
 		intResult := s.computeValidatorPayoutsInteger(recipients, pool, category)
 		s.logShadowDelta("validator_distribution", taskID, recipients, floatResult, intResult, pool)
