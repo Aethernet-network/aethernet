@@ -42,7 +42,7 @@ func newTestTVConsumer(t *testing.T) (*dispatch.TVConsensusConsumer, *tasks.Task
 	store := newTVRoundStore(t)
 
 	settler := settlement.NewVerificationConsensusSettler(
-		tm, tl, em, &tvStubDAG{}, nil, "genesis:treasury", nil)
+		tm, tl, em, &tvStubDAG{}, nil, "genesis:treasury", nil, true)
 	consumer := dispatch.NewTVConsensusConsumer(settler, store, tm, em)
 	return consumer, tm, tl, em, store
 }
@@ -295,6 +295,15 @@ func TestTVConsensusConsumer_Apply_ConcurrentSameTask_Serialized(t *testing.T) {
 
 	// Pre-save the alternate round so whichever goroutine wins the per-
 	// task mutex first can load its round if it reaches pre-check 2.
+	// Before this fix, the test was flaky: if the second goroutine won
+	// the mutex it would call LoadRound("round-alt") before the first
+	// goroutine had transitioned task status to terminal, and LoadRound
+	// would error out before the pre-check could fire. Part B of the
+	// canonical-distribution-integer-migration workstream surfaced the
+	// flake by changing integer-path timing enough that ev2 wins the
+	// race a non-trivial fraction of the time; F4B step 0.2 (FINDING #9
+	// fix) then formalized the repro as a test-design bug rather than a
+	// SUT race.
 	roundAlt := *round
 	roundAlt.RoundID = "round-alt"
 	_ = store.SaveRound(context.Background(), &roundAlt)
@@ -494,7 +503,7 @@ func TestTVConsensusConsumer_Conformance(t *testing.T) {
 		store := taskverification.NewBadgerStore(db)
 
 		settler := settlement.NewVerificationConsensusSettler(
-			tm, tl, em, &tvStubDAG{}, nil, "genesis:treasury", nil)
+			tm, tl, em, &tvStubDAG{}, nil, "genesis:treasury", nil, true)
 		c := dispatch.NewTVConsensusConsumer(settler, store, tm, em)
 		return c, func() { db.Close() }
 	})

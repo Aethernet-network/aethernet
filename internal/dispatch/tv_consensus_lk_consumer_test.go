@@ -35,7 +35,7 @@ func newTestTVLKConsumer(t *testing.T, activeWeight uint64) (
 	store := newTVRoundStore(t)
 
 	settler := settlement.NewVerificationConsensusSettler(
-		tm, tl, em, &tvStubDAG{}, nil, "genesis:treasury", nil)
+		tm, tl, em, &tvStubDAG{}, nil, "genesis:treasury", nil, true)
 	aw := func() uint64 { return activeWeight }
 	c := dispatch.NewTVConsensusLogicalKeyConsumer(settler, store, tm, em, aw)
 	return c, tm, tl, em, store
@@ -629,7 +629,7 @@ func TestTVConsensusLKConsumer_Conformance(t *testing.T) {
 		db, _ := badger.Open(opts)
 		store := taskverification.NewBadgerStore(db)
 		settler := settlement.NewVerificationConsensusSettler(
-			tm, tl, em, &tvStubDAG{}, nil, "genesis:treasury", nil)
+			tm, tl, em, &tvStubDAG{}, nil, "genesis:treasury", nil, true)
 		c := dispatch.NewTVConsensusLogicalKeyConsumer(settler, store, tm, em, func() uint64 { return 300 })
 		return c, func() { db.Close() }
 	})

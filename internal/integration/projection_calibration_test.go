@@ -63,8 +63,8 @@ func TestCalibration_AppliesOnRoundFinalization(t *testing.T) {
 		t.Fatalf("SaveRound: %v", err)
 	}
 
-	// Build the consumer with calibration wired; settler and slashing nil.
-	consumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, nil, nil, calibration)
+	// Build the consumer with calibration wired; slashing nil.
+	consumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, nil, calibration)
 
 	payload, _ := json.Marshal(event.TaskVerificationConsensusPayload{
 		Version:              1,

@@ -45,7 +45,7 @@ func TestConsensusConsumer_CalibrationAppliedOnce(t *testing.T) {
 	}
 	_ = store.SaveRound(ctx, r)
 
-	consumer := recognition.NewTaskVerificationConsensusConsumer(store, nil, nil, calibration)
+	consumer := recognition.NewTaskVerificationConsensusConsumer(store, nil, calibration)
 	ev := makeConsensusEvent(string(r.RoundID), "task-cal", "pass", 7500)
 
 	// First Consume — should increment each distinct family once.
@@ -126,7 +126,7 @@ func TestConsensusConsumer_AppliesFinalization(t *testing.T) {
 	})
 	_ = store.SaveRound(ctx, r)
 
-	consumer := recognition.NewTaskVerificationConsensusConsumer(store, nil, nil, nil)
+	consumer := recognition.NewTaskVerificationConsensusConsumer(store, nil, nil)
 	ev := makeConsensusEvent(string(r.RoundID), "task-cc", "pass", 7500)
 
 	if err := consumer.Consume(ctx, ev); err != nil {
@@ -154,7 +154,7 @@ func TestConsensusConsumer_Idempotent(t *testing.T) {
 	})
 	_ = store.SaveRound(ctx, r)
 
-	consumer := recognition.NewTaskVerificationConsensusConsumer(store, nil, nil, nil)
+	consumer := recognition.NewTaskVerificationConsensusConsumer(store, nil, nil)
 	ev := makeConsensusEvent(string(r.RoundID), "task-idem-cc", "fail", 0)
 
 	_ = consumer.Consume(ctx, ev)
@@ -183,7 +183,7 @@ func TestConsensusConsumer_ReplaySafety(t *testing.T) {
 	_ = store.SaveRound(ctx, r)
 
 	// Consensus event from replay.
-	consumer := recognition.NewTaskVerificationConsensusConsumer(store, nil, nil, nil)
+	consumer := recognition.NewTaskVerificationConsensusConsumer(store, nil, nil)
 	ev := makeConsensusEvent(string(r.RoundID), "task-replay", "pass", 8000)
 
 	if err := consumer.Consume(ctx, ev); err != nil {

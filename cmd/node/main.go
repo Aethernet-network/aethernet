@@ -67,6 +67,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/network"
 	"github.com/Aethernet-network/aethernet/internal/ocs"
 	"github.com/Aethernet-network/aethernet/internal/projections"
+	"github.com/Aethernet-network/aethernet/internal/protocolmath"
 	"github.com/Aethernet-network/aethernet/internal/recognition"
 	"github.com/Aethernet-network/aethernet/internal/roundpolicy"
 	"github.com/Aethernet-network/aethernet/internal/roundprogress"
@@ -1138,8 +1139,11 @@ func printStatus(agentID crypto.AgentID, d *dag.DAG, n *network.Node, eng *ocs.E
 // p2pAddr and apiListenAddr override the defaults and may come from flags or
 // environment variables. enableMarketplace controls whether task marketplace
 // components (task routing, auto-settlement, discovery) are started.
+// enableAdminAPI registers admin-only routes on the API server (currently the
+// integer-migration activation endpoint); opt-in per deployment via the start
+// flag so production builds do not expose them by default.
 // cfg controls all tunable protocol parameters; nil falls back to defaults.
-func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr string, enableMarketplace bool, cfg *config.ProtocolConfig, noAuth bool) *network.Node {
+func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr string, enableMarketplace bool, cfg *config.ProtocolConfig, noAuth bool, enableAdminAPI bool) *network.Node {
 	if cfg == nil {
 		cfg = config.DefaultConfig()
 	}
@@ -1923,26 +1927,41 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		// based on ReplicationRate and ChallengeSurvival once that infrastructure
 		// lands. Ancestor Q is different from validator Q — it measures the
 		// quality of prior verified work, not vote consistency.
+		// qualityFn returns NeutralBP (10000 BP == prior 1.0 float) for all
+		// ancestors until prompt 08 wires real Q from the reputation store.
+		// shadowMode=true: commit-4 of canonical-distribution-integer-migration
+		// runs the integer path alongside the legacy float path and logs
+		// shadow_delta for Part F's cutover corpus.
 		genLedgerCalc := settlement.NewGenerationLedgerCalculator(
 			stack.dag,
-			func(_ event.EventID) float64 { return 1.0 },
+			func(_ event.EventID) protocolmath.BasisPoints { return protocolmath.NeutralBP },
+			true,
 		)
 
 		// Validator Q score function for Q-weighted fee distribution.
 		// Uses the Consistency term (α₄) from paper v4.1: AgreementRate.
 		// TODO prompt future: wire CVD_norm (α₁), ChallengeSurvival (α₂),
 		// ReplicationRate (α₃) once their infrastructure is built.
-		validatorQFn := settlement.ValidatorQScoreFn(func(validatorID crypto.AgentID, family, category string) float64 {
+		// ValidatorQScore now returns BasisPoints natively (commit-2 of the
+		// canonical-distribution-integer-migration workstream); the settler's
+		// ValidatorQScoreFn was migrated to the same type in commit-3, so no
+		// adapter is needed — plug directly.
+		validatorQFn := settlement.ValidatorQScoreFn(func(validatorID crypto.AgentID, family, category string) protocolmath.BasisPoints {
 			return tvReputationStore.ValidatorQScore(
 				context.Background(), validatorID,
 				verification.FamilyID(family), category,
 			)
 		})
 
+		// shadowMode=true: commit-3 wires the integer path behind the legacy
+		// float path and logs shadow_delta lines for Part F's cutover corpus.
+		// Part E eventually replaces this hardcoded flag with a DAG-epoch-gated
+		// check consulting the canonical cutover event.
 		tvSettler := settlement.NewVerificationConsensusSettler(
 			stack.taskMgr, stack.transfer, stack.escrowMgr, stack.dag,
 			genLedgerCalc, crypto.AgentID(genesis.BucketTreasury),
 			validatorQFn,
+			true,
 		)
 		// tvCalibrationStore and tvReputationStore are used by the slashing evaluator above.
 
@@ -1951,7 +1970,7 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			tvReputationStore,
 			tvCalibrationStore,
 		)
-		tvConsensusConsumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, tvSettler, tvSlashingEvaluator, tvCalibrationStore)
+		tvConsensusConsumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, tvSlashingEvaluator, tvCalibrationStore)
 
 		// Commit 9 of §9: wire the CanonicalEventDispatcher for exactly-once
 		// settlement mediation. The dispatcher owns the admission state machine
@@ -1995,12 +2014,50 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			slog.Error("dispatch: register TaskSettlementLogicalKeyConsumer failed", "err", err)
 			os.Exit(1)
 		}
+
+		// Part E of canonical-distribution-integer-migration: register the
+		// IntegerMigrationActivation consumer so activation events flip the
+		// settler and generation-ledger out of shadow mode. Adapter wraps
+		// the store's generic PutMeta/GetMeta so no store-layer methods are
+		// added for this one migration.
+		migStore := &migrationStoreAdapter{store: stack.store}
+		migConsumer := dispatch.NewIntegerMigrationActivationConsumer(tvSettler, genLedgerCalc, migStore)
+		if err := eventDispatcher.Register(migConsumer); err != nil {
+			slog.Error("dispatch: register IntegerMigrationActivationConsumer failed", "err", err)
+			os.Exit(1)
+		}
+
+		// Startup load — replay-safe flag restoration. If a prior activation
+		// was persisted, flip the settler and gen-ledger to integer-canonical
+		// mode now so the dispatcher's recovery pass (and any subsequent
+		// settlement processing) sees the correct flag state.
+		if activated, _, _, loadErr := migStore.GetIntegerMigrationActivated(); loadErr == nil && activated {
+			tvSettler.SetShadowMode(false)
+			genLedgerCalc.SetShadowMode(false)
+			slog.Info("startup: integer migration already activated; running integer-canonical")
+		}
+
 		if err := eventDispatcher.Recover(context.Background()); err != nil {
 			slog.Error("dispatch: recovery failed", "err", err)
 			os.Exit(1)
 		}
-		tvConsensusConsumer.SetDispatcher(eventDispatcher)
 		stack.dispatcher = eventDispatcher
+
+		// Part E.1: register the general recognition→dispatcher admission
+		// router. Every committed event is forwarded to dispatcher.Admit;
+		// per-consumer Interested() filtering inside the dispatcher handles
+		// routing. Closes the bug class surfaced by Part F Phase D, where
+		// canonical event types with registered dispatcher consumers (e.g.
+		// EventTypeIntegerMigrationActivation) had no admission pathway
+		// because recognition→dispatcher forwarding was per-event-type and
+		// hand-written. Registered AFTER eventDispatcher.Recover to satisfy
+		// the load-before-listener ordering rule (no event can be admitted
+		// before its downstream consumer is ready).
+		admissionRouter := recognition.NewDispatcherAdmissionConsumer(eventDispatcher)
+		if err := commitBus.Register(admissionRouter); err != nil {
+			slog.Error("recognition: register DispatcherAdmissionConsumer failed", "err", err)
+			os.Exit(1)
+		}
 
 		_ = commitBus.Register(tvConsensusConsumer)
 
@@ -2056,19 +2113,22 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	//
 	// F4B §5.2.4: the recognition consumer is now a thin router. It
 	// routes Settlement events through the dispatcher's logical-key
-	// admission (SettlementLogicalKeyConsumer, registered below)
-	// instead of invoking settlementApp.Apply directly. Under
-	// dispatcher routing, the canonical verdict is derived from the
-	// cluster-uniform VoteRecord — not from the triggering event's
-	// (potentially advisory) payload — closing the selection-race
-	// bug class for Settlement events in parallel with the
-	// TVConsensus migration above.
+	// admission (SettlementLogicalKeyConsumer, registered below). The
+	// general recognition→dispatcher admission router (IM Part E.1 /
+	// commit-13) forwards every committed event to dispatcher.Admit,
+	// so the legacy SetDispatcher per-consumer plumbing was dropped
+	// during the F4C merge (F4B §5.2.4's SetDispatcher call removed
+	// per merge conflict checklist §3.1 Region F). Under dispatcher
+	// routing, the canonical verdict is derived from the cluster-
+	// uniform VoteRecord — not from the triggering event's (potentially
+	// advisory) payload — closing the selection-race bug class for
+	// Settlement events in parallel with the TVConsensus migration
+	// above.
 	//
 	// The adapter below is retained for the backward-compat fallback
 	// path when no dispatcher is wired (e.g., recognition unit tests
-	// with pre-F4B wiring). In production here, SetDispatcher is
-	// called before bus.Start() so the dispatcher-routed path is
-	// always active.
+	// with pre-F4B wiring; SettlementConsumer falls back to the direct
+	// applier when its dispatcher field is nil).
 	settlementConsumerAdapter := recognition.NewSettlementApplierAdapter(func(ev *event.Event) error {
 		sp, err := event.GetPayload[settlement.SettlementPayload](ev)
 		if err != nil {
@@ -2080,9 +2140,8 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	if stack.dispatcher != nil && stack.votingRound != nil {
 		// F4B §5.2.2: register the Settlement logical-key consumer.
 		// Keyed by TargetEventID, derives verdict from the canonical
-		// VoteRecord. Must happen BEFORE SetDispatcher so that the
-		// admission store has a consumer registered to receive
-		// admissions when live events arrive.
+		// VoteRecord. Registered through the general admission router
+		// (no per-consumer SetDispatcher plumbing needed).
 		settlementLKConsumer := dispatch.NewSettlementLogicalKeyConsumer(
 			settlementApp, stack.votingRound, activeWeightFn,
 		)
@@ -2090,8 +2149,6 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			slog.Error("dispatch: register SettlementLogicalKeyConsumer failed", "err", err)
 			os.Exit(1)
 		}
-		// Wire the recognition consumer's dispatcher-routed path.
-		settlementConsumer.SetDispatcher(stack.dispatcher)
 	}
 	_ = commitBus.Register(settlementConsumer)
 
@@ -2641,6 +2698,9 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	// Configure which route groups are active. L1 is always on; L2 network
 	// coordination is always on; L3 marketplace routes follow --marketplace.
 	apiSrv.SetLayerConfig(true, enableMarketplace)
+	// Admin routes (integer-migration activation etc.) are opt-in via
+	// --enable-admin-api; production deployments leave them disabled.
+	apiSrv.SetAdminAPI(enableAdminAPI)
 	if err := apiSrv.Start(); err != nil {
 		slog.Error("failed to start API server", "addr", apiListenAddr, "err", err)
 		node.Stop()
@@ -2808,6 +2868,7 @@ func cmdStart() {
 	enableMarketplace := fs.Bool("marketplace", false, "Enable built-in marketplace (task routing, escrow, explorer) in the combined single-binary deployment")
 	configPath := fs.String("config", envOr("AETHERNET_CONFIG", ""), "path to protocol config JSON file (default: built-in defaults)")
 	noAuth := fs.Bool("no-auth", false, "Disable API authentication (testnet/development only — NOT safe for production)")
+	enableAdminAPI := fs.Bool("enable-admin-api", false, "Enable admin-only API routes (integer-migration activation etc.). Opt-in; production deployments should leave this disabled unless explicitly required.")
 	_ = fs.Parse(os.Args[2:])
 
 	// The --marketplace flag controls whether marketplace components (tasks,
@@ -2885,7 +2946,7 @@ func cmdStart() {
 		slog.Info("ledger: mint cap enforced", "cap_micro_aet", minted)
 	}
 
-	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, *enableMarketplace, cfg, *noAuth)
+	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, *enableMarketplace, cfg, *noAuth, *enableAdminAPI)
 
 	// Stop the commit bus on shutdown (cannot defer inside startStack because
 	// startStack returns immediately and defers fire before traffic arrives).
@@ -3096,7 +3157,8 @@ func cmdConnect() {
 	}
 	// cmdConnect is the legacy subcommand; marketplace is disabled by default.
 	// Use 'aethernet start --marketplace' for the combined deployment.
-	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, false, cfg, *noAuth)
+	// Admin API is never enabled on the legacy connect path.
+	node := startStack(stack, agentID, *p2pAddr, *apiListenAddr, false, cfg, *noAuth, false)
 
 	fmt.Printf("AetherNet %s\nAgentID  : %s\nListening: %s\nAPI      : %s\n\n",
 		VERSION, agentID, node.ListenAddr(), *apiListenAddr)
@@ -3434,4 +3496,63 @@ func cmdValidatorSet() {
 		}
 		fmt.Printf("\nDigest verified: %s\n", actual)
 	}
+}
+
+// ─── IntegerMigrationActivation state persistence (Part E) ──────────────────
+
+// migrationMetaKey is the meta: namespace key under which the integer-
+// migration activation record is persisted. Under the hood this uses
+// store.PutMeta/GetMeta (i.e. "meta:integer_migration:activated") so no
+// dedicated prefix or store-layer method is required for this one migration.
+const migrationMetaKey = "integer_migration:activated"
+
+// migrationActivationState is the JSON body persisted at migrationMetaKey.
+// Kept as a struct (not just a byte flag) so the emitting event ID and
+// timestamp are recoverable across restarts — useful for diagnostics and
+// for RecoveryProbe to distinguish a re-delivered activation event from
+// a distinct one.
+type migrationActivationState struct {
+	EventID       event.EventID `json:"event_id"`
+	EmittedAtUnix int64         `json:"emitted_at_unix"`
+}
+
+// migrationStoreAdapter satisfies dispatch.MigrationStateStore by wrapping
+// store.Store's generic PutMeta/GetMeta. Narrow by design — dispatcher
+// consumers should not import store concrete types, and store package
+// should not carry migration-specific methods.
+type migrationStoreAdapter struct {
+	store *store.Store
+}
+
+// PutIntegerMigrationActivated serializes the activation state as JSON
+// and writes it under migrationMetaKey. Called by the activation consumer
+// exactly once per activation (persist before mutate, per Principle 9).
+func (a *migrationStoreAdapter) PutIntegerMigrationActivated(id event.EventID, emittedAtUnix int64) error {
+	body, err := json.Marshal(migrationActivationState{EventID: id, EmittedAtUnix: emittedAtUnix})
+	if err != nil {
+		return fmt.Errorf("migrationStoreAdapter: marshal: %w", err)
+	}
+	if err := a.store.PutMeta(migrationMetaKey, body); err != nil {
+		return fmt.Errorf("migrationStoreAdapter: put meta: %w", err)
+	}
+	return nil
+}
+
+// GetIntegerMigrationActivated reads the activation state. Returns
+// activated=false on any read error or absent record — "absence of
+// evidence is not evidence of absence" per C-14. The caller treats
+// false as "not yet activated" and proceeds with startup normally.
+func (a *migrationStoreAdapter) GetIntegerMigrationActivated() (bool, event.EventID, int64, error) {
+	body, err := a.store.GetMeta(migrationMetaKey)
+	if err != nil {
+		return false, "", 0, nil
+	}
+	if len(body) == 0 {
+		return false, "", 0, nil
+	}
+	var s migrationActivationState
+	if err := json.Unmarshal(body, &s); err != nil {
+		return false, "", 0, fmt.Errorf("migrationStoreAdapter: unmarshal: %w", err)
+	}
+	return true, s.EventID, s.EmittedAtUnix, nil
 }

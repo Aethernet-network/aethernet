@@ -1,0 +1,386 @@
+{
+  "corpus_version": "v1-2026-04-21",
+  "entries": [
+    {
+      "id": "01-pm-single-neutral-zero-pool",
+      "context": "protocolmath_direct",
+      "pool": 0,
+      "recipients": [
+        { "agent_id": "alpha", "q_bp": 10000 }
+      ]
+    },
+    {
+      "id": "02-pm-single-neutral-pool-1",
+      "context": "protocolmath_direct",
+      "pool": 1,
+      "recipients": [
+        { "agent_id": "alpha", "q_bp": 10000 }
+      ]
+    },
+    {
+      "id": "03-pm-single-neutral-pool-1000000",
+      "context": "protocolmath_direct",
+      "pool": 1000000,
+      "recipients": [
+        { "agent_id": "alpha", "q_bp": 10000 }
+      ]
+    },
+    {
+      "id": "04-pm-single-zeroQ-pool-1000",
+      "context": "protocolmath_direct",
+      "pool": 1000,
+      "recipients": [
+        { "agent_id": "alpha", "q_bp": 0 }
+      ]
+    },
+    {
+      "id": "05-pm-two-equal-pool-100",
+      "context": "protocolmath_direct",
+      "pool": 100,
+      "recipients": [
+        { "agent_id": "alpha", "q_bp": 10000 },
+        { "agent_id": "beta", "q_bp": 10000 }
+      ]
+    },
+    {
+      "id": "06-pm-two-equal-pool-100000",
+      "context": "protocolmath_direct",
+      "pool": 100000,
+      "recipients": [
+        { "agent_id": "alpha", "q_bp": 10000 },
+        { "agent_id": "beta", "q_bp": 10000 }
+      ]
+    },
+    {
+      "id": "07-pm-two-30-70-pool-1000",
+      "context": "protocolmath_direct",
+      "pool": 1000,
+      "recipients": [
+        { "agent_id": "alpha", "q_bp": 30000 },
+        { "agent_id": "beta", "q_bp": 70000 }
+      ]
+    },
+    {
+      "id": "08-pm-three-equal-pool-100",
+      "context": "protocolmath_direct",
+      "pool": 100,
+      "recipients": [
+        { "agent_id": "alpha", "q_bp": 10000 },
+        { "agent_id": "beta", "q_bp": 10000 },
+        { "agent_id": "gamma", "q_bp": 10000 }
+      ]
+    },
+    {
+      "id": "09-pm-three-equal-pool-1000000",
+      "context": "protocolmath_direct",
+      "pool": 1000000,
+      "recipients": [
+        { "agent_id": "alpha", "q_bp": 10000 },
+        { "agent_id": "beta", "q_bp": 10000 },
+        { "agent_id": "gamma", "q_bp": 10000 }
+      ]
+    },
+    {
+      "id": "10-pm-three-tiny-weights-pool-1000",
+      "context": "protocolmath_direct",
+      "pool": 1000,
+      "recipients": [
+        { "agent_id": "alpha", "q_bp": 1 },
+        { "agent_id": "beta", "q_bp": 1 },
+        { "agent_id": "gamma", "q_bp": 1 }
+      ]
+    },
+    {
+      "id": "11-pm-three-all-zero-even-split",
+      "context": "protocolmath_direct",
+      "pool": 1000,
+      "recipients": [
+        { "agent_id": "alpha", "q_bp": 0 },
+        { "agent_id": "beta", "q_bp": 0 },
+        { "agent_id": "gamma", "q_bp": 0 }
+      ]
+    },
+    {
+      "id": "12-pm-five-odd-pool-101",
+      "context": "protocolmath_direct",
+      "pool": 101,
+      "recipients": [
+        { "agent_id": "a", "q_bp": 20000 },
+        { "agent_id": "b", "q_bp": 20000 },
+        { "agent_id": "c", "q_bp": 20000 },
+        { "agent_id": "d", "q_bp": 20000 },
+        { "agent_id": "e", "q_bp": 20000 }
+      ]
+    },
+    {
+      "id": "13-pm-five-dominant-weight",
+      "context": "protocolmath_direct",
+      "pool": 10000,
+      "recipients": [
+        { "agent_id": "big", "q_bp": 100000 },
+        { "agent_id": "small-a", "q_bp": 1 },
+        { "agent_id": "small-b", "q_bp": 1 },
+        { "agent_id": "small-c", "q_bp": 1 },
+        { "agent_id": "small-d", "q_bp": 1 }
+      ]
+    },
+    {
+      "id": "14-pm-ten-neutral-odd-pool",
+      "context": "protocolmath_direct",
+      "pool": 1234567,
+      "recipients": [
+        { "agent_id": "r01", "q_bp": 10000 },
+        { "agent_id": "r02", "q_bp": 10000 },
+        { "agent_id": "r03", "q_bp": 10000 },
+        { "agent_id": "r04", "q_bp": 10000 },
+        { "agent_id": "r05", "q_bp": 10000 },
+        { "agent_id": "r06", "q_bp": 10000 },
+        { "agent_id": "r07", "q_bp": 10000 },
+        { "agent_id": "r08", "q_bp": 10000 },
+        { "agent_id": "r09", "q_bp": 10000 },
+        { "agent_id": "r10", "q_bp": 10000 }
+      ]
+    },
+    {
+      "id": "15-pm-ten-ascending-weights",
+      "context": "protocolmath_direct",
+      "pool": 1000000,
+      "recipients": [
+        { "agent_id": "r01", "q_bp": 1000 },
+        { "agent_id": "r02", "q_bp": 2000 },
+        { "agent_id": "r03", "q_bp": 3000 },
+        { "agent_id": "r04", "q_bp": 4000 },
+        { "agent_id": "r05", "q_bp": 5000 },
+        { "agent_id": "r06", "q_bp": 6000 },
+        { "agent_id": "r07", "q_bp": 7000 },
+        { "agent_id": "r08", "q_bp": 8000 },
+        { "agent_id": "r09", "q_bp": 9000 },
+        { "agent_id": "r10", "q_bp": 10000 }
+      ]
+    },
+    {
+      "id": "16-pm-near-max-pool-10-at-max",
+      "context": "protocolmath_direct",
+      "pool": 1000000000000000000,
+      "recipients": [
+        { "agent_id": "r01", "q_bp": 100000 },
+        { "agent_id": "r02", "q_bp": 100000 },
+        { "agent_id": "r03", "q_bp": 100000 },
+        { "agent_id": "r04", "q_bp": 100000 },
+        { "agent_id": "r05", "q_bp": 100000 },
+        { "agent_id": "r06", "q_bp": 100000 },
+        { "agent_id": "r07", "q_bp": 100000 },
+        { "agent_id": "r08", "q_bp": 100000 },
+        { "agent_id": "r09", "q_bp": 100000 },
+        { "agent_id": "r10", "q_bp": 100000 }
+      ]
+    },
+    {
+      "id": "17-pm-exactly-divisible",
+      "context": "protocolmath_direct",
+      "pool": 600,
+      "recipients": [
+        { "agent_id": "alpha", "q_bp": 10000 },
+        { "agent_id": "beta", "q_bp": 20000 },
+        { "agent_id": "gamma", "q_bp": 30000 }
+      ]
+    },
+    {
+      "id": "18-pm-duplicate-keys-error",
+      "context": "protocolmath_direct",
+      "pool": 1000,
+      "recipients": [
+        { "agent_id": "alpha", "q_bp": 10000 },
+        { "agent_id": "beta", "q_bp": 10000 },
+        { "agent_id": "alpha", "q_bp": 10000 }
+      ]
+    },
+    {
+      "id": "19-pm-empty-nonzero-pool-error",
+      "context": "protocolmath_direct",
+      "pool": 1000,
+      "recipients": []
+    },
+    {
+      "id": "20-pm-empty-zero-pool-noop",
+      "context": "protocolmath_direct",
+      "pool": 0,
+      "recipients": []
+    },
+    {
+      "id": "21-vd-single-neutral-pool-1000",
+      "context": "validator_distribution",
+      "pool": 1000,
+      "recipients": [
+        { "agent_id": "validator-alpha", "q_bp": 10000 }
+      ]
+    },
+    {
+      "id": "22-vd-three-equal-pool-2300",
+      "context": "validator_distribution",
+      "pool": 2300,
+      "recipients": [
+        { "agent_id": "validator-alpha", "q_bp": 10000 },
+        { "agent_id": "validator-beta", "q_bp": 10000 },
+        { "agent_id": "validator-gamma", "q_bp": 10000 }
+      ]
+    },
+    {
+      "id": "23-vd-three-negative-clamp",
+      "context": "validator_distribution",
+      "pool": 1000,
+      "recipients": [
+        { "agent_id": "validator-alpha", "q_bp": 10000 },
+        { "agent_id": "validator-beta", "q_bp": -500 },
+        { "agent_id": "validator-gamma", "q_bp": 10000 }
+      ]
+    },
+    {
+      "id": "24-vd-three-above-ceiling-clamp",
+      "context": "validator_distribution",
+      "pool": 1000,
+      "recipients": [
+        { "agent_id": "validator-alpha", "q_bp": 999999 },
+        { "agent_id": "validator-beta", "q_bp": 100000 },
+        { "agent_id": "validator-gamma", "q_bp": 100000 }
+      ]
+    },
+    {
+      "id": "25-vd-five-mixed-weighted",
+      "context": "validator_distribution",
+      "pool": 10000,
+      "recipients": [
+        { "agent_id": "v1", "q_bp": 10000 },
+        { "agent_id": "v2", "q_bp": 5000 },
+        { "agent_id": "v3", "q_bp": 2500 },
+        { "agent_id": "v4", "q_bp": 1250 },
+        { "agent_id": "v5", "q_bp": 625 }
+      ]
+    },
+    {
+      "id": "26-gl-single-ancestor-depth1",
+      "context": "generation_ledger",
+      "pool": 10000,
+      "accepted_task_event_id": "T0",
+      "dag_topology": [
+        { "event_id": "T0", "agent_id": "agent-child", "causal_refs": ["P1"] },
+        { "event_id": "P1", "agent_id": "agent-parent", "causal_refs": [] }
+      ],
+      "quality_fn_mapping": {
+        "P1": 10000
+      }
+    },
+    {
+      "id": "27-gl-two-parents-equal-depth1",
+      "context": "generation_ledger",
+      "pool": 10000,
+      "accepted_task_event_id": "T0",
+      "dag_topology": [
+        { "event_id": "T0", "agent_id": "agent-child", "causal_refs": ["P1", "P2"] },
+        { "event_id": "P1", "agent_id": "agent-p1", "causal_refs": [] },
+        { "event_id": "P2", "agent_id": "agent-p2", "causal_refs": [] }
+      ],
+      "quality_fn_mapping": {
+        "P1": 10000,
+        "P2": 10000
+      }
+    },
+    {
+      "id": "28-gl-three-generation-chain",
+      "context": "generation_ledger",
+      "pool": 10000,
+      "accepted_task_event_id": "T0",
+      "dag_topology": [
+        { "event_id": "T0", "agent_id": "agent-child", "causal_refs": ["P"] },
+        { "event_id": "P", "agent_id": "agent-p", "causal_refs": ["GP"] },
+        { "event_id": "GP", "agent_id": "agent-gp", "causal_refs": ["GGP"] },
+        { "event_id": "GGP", "agent_id": "agent-ggp", "causal_refs": [] }
+      ],
+      "quality_fn_mapping": {
+        "P": 10000,
+        "GP": 10000,
+        "GGP": 10000
+      }
+    },
+    {
+      "id": "29-gl-fanout-depth1-then-depth2",
+      "context": "generation_ledger",
+      "pool": 10000,
+      "accepted_task_event_id": "T0",
+      "dag_topology": [
+        { "event_id": "T0", "agent_id": "agent-child", "causal_refs": ["P1", "P2"] },
+        { "event_id": "P1", "agent_id": "agent-p1", "causal_refs": ["GP1"] },
+        { "event_id": "P2", "agent_id": "agent-p2", "causal_refs": ["GP2"] },
+        { "event_id": "GP1", "agent_id": "agent-gp1", "causal_refs": [] },
+        { "event_id": "GP2", "agent_id": "agent-gp2", "causal_refs": [] }
+      ],
+      "quality_fn_mapping": {
+        "P1": 10000,
+        "P2": 10000,
+        "GP1": 10000,
+        "GP2": 10000
+      }
+    },
+    {
+      "id": "30-gl-five-ancestors-mixed-q",
+      "context": "generation_ledger",
+      "pool": 100000,
+      "accepted_task_event_id": "T0",
+      "dag_topology": [
+        { "event_id": "T0", "agent_id": "agent-child", "causal_refs": ["P1", "P2"] },
+        { "event_id": "P1", "agent_id": "agent-p1", "causal_refs": ["GP1"] },
+        { "event_id": "P2", "agent_id": "agent-p2", "causal_refs": ["GP2"] },
+        { "event_id": "GP1", "agent_id": "agent-gp1", "causal_refs": ["GGP1"] },
+        { "event_id": "GP2", "agent_id": "agent-gp2", "causal_refs": [] },
+        { "event_id": "GGP1", "agent_id": "agent-ggp1", "causal_refs": [] }
+      ],
+      "quality_fn_mapping": {
+        "P1": 10000,
+        "P2": 5000,
+        "GP1": 7500,
+        "GP2": 2500,
+        "GGP1": 1000
+      }
+    },
+    {
+      "id": "31-gl-empty-ancestors-full-treasury",
+      "context": "generation_ledger",
+      "pool": 1000,
+      "accepted_task_event_id": "T0",
+      "dag_topology": [
+        { "event_id": "T0", "agent_id": "agent-orphan", "causal_refs": [] }
+      ],
+      "quality_fn_mapping": {}
+    },
+    {
+      "id": "32-gl-negative-q-clamp",
+      "context": "generation_ledger",
+      "pool": 10000,
+      "accepted_task_event_id": "T0",
+      "dag_topology": [
+        { "event_id": "T0", "agent_id": "agent-child", "causal_refs": ["P1", "P2"] },
+        { "event_id": "P1", "agent_id": "agent-p1", "causal_refs": [] },
+        { "event_id": "P2", "agent_id": "agent-p2", "causal_refs": [] }
+      ],
+      "quality_fn_mapping": {
+        "P1": -1000,
+        "P2": 10000
+      }
+    },
+    {
+      "id": "33-gl-q-above-ceiling-clamp",
+      "context": "generation_ledger",
+      "pool": 10000,
+      "accepted_task_event_id": "T0",
+      "dag_topology": [
+        { "event_id": "T0", "agent_id": "agent-child", "causal_refs": ["P1", "P2"] },
+        { "event_id": "P1", "agent_id": "agent-p1", "causal_refs": [] },
+        { "event_id": "P2", "agent_id": "agent-p2", "causal_refs": [] }
+      ],
+      "quality_fn_mapping": {
+        "P1": 9999999,
+        "P2": 100000
+      }
+    }
+  ]
+}

@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
+	"github.com/Aethernet-network/aethernet/internal/protocolmath"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/taskverification"
 )
@@ -26,8 +28,15 @@ const (
 // refund on reject, 50/50 on dispute.
 // ValidatorQScoreFn returns the Quality Score Q for a validator in the
 // context of a specific family and category. Used for Q-weighted fee
-// distribution. Returns 1.0 for neutral (new validators with no history).
-type ValidatorQScoreFn func(validatorID crypto.AgentID, family string, category string) float64
+// distribution. Returns NeutralBP (10000, equivalent to the prior 1.0
+// float) for new validators with no history.
+//
+// Return type migrated from float64 to protocolmath.BasisPoints in the
+// canonical-distribution-integer-migration workstream (commit-3). Callers
+// from the reputation store return BasisPoints natively; external
+// callers that previously produced float values should scale by 10000
+// and clamp to MaxBasisPoints.
+type ValidatorQScoreFn func(validatorID crypto.AgentID, family string, category string) protocolmath.BasisPoints
 
 type VerificationConsensusSettler struct {
 	taskMgr    *tasks.TaskManager
@@ -37,6 +46,38 @@ type VerificationConsensusSettler struct {
 	genLedger  *GenerationLedgerCalculator
 	treasuryID crypto.AgentID
 	qScoreFn   ValidatorQScoreFn // nil → even-split fallback
+
+	// mu guards shadowMode. Reads happen on every settlement call (via
+	// isShadowMode); writes happen rarely (once per IntegerMigration
+	// activation event, via SetShadowMode). sync.RWMutex amortizes the
+	// read cost; see Part E of the canonical-distribution-integer-migration
+	// workstream for the activation consumer that drives the write.
+	mu         sync.RWMutex
+	shadowMode bool
+}
+
+// isShadowMode returns the current shadow-mode flag under RLock. Called
+// on every settlement path.
+func (s *VerificationConsensusSettler) isShadowMode() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.shadowMode
+}
+
+// SetShadowMode switches the settler between shadow mode (legacy float
+// path is canonical, integer path runs alongside for delta logging) and
+// integer-canonical mode (integer path is canonical; legacy float path
+// is not run). Called by the IntegerMigrationActivationConsumer when
+// the activation event is applied, and at startup when a prior
+// activation is loaded from the store.
+//
+// Thread-safe. One-way transition is the protocol-level expectation,
+// but SetShadowMode itself accepts either value so tests can restore
+// shadow mode after exercising the integer path in isolation.
+func (s *VerificationConsensusSettler) SetShadowMode(shadow bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.shadowMode = shadow
 }
 
 // NewVerificationConsensusSettler creates a settler with the full v4.1
@@ -45,6 +86,12 @@ type VerificationConsensusSettler struct {
 // dagScanner is used on the escrow catch-up path (peer node scenario) to
 // locate the canonical escrow-lock Transfer event that funds the escrow.
 // May be nil only in tests that do not exercise the catch-up path.
+//
+// shadowMode: pass true for Part B's shadow-compare behavior. Part E's
+// activation consumer flips this to false at runtime when the
+// EventTypeIntegerMigrationActivation event is projected, and startup
+// restores it to false on a post-activation restart via the adapter in
+// cmd/node/main.go.
 func NewVerificationConsensusSettler(
 	taskMgr *tasks.TaskManager,
 	transfer *ledger.TransferLedger,
@@ -53,6 +100,7 @@ func NewVerificationConsensusSettler(
 	genLedger *GenerationLedgerCalculator,
 	treasuryID crypto.AgentID,
 	qScoreFn ValidatorQScoreFn,
+	shadowMode bool,
 ) *VerificationConsensusSettler {
 	return &VerificationConsensusSettler{
 		taskMgr:    taskMgr,
@@ -62,6 +110,7 @@ func NewVerificationConsensusSettler(
 		genLedger:  genLedger,
 		treasuryID: treasuryID,
 		qScoreFn:   qScoreFn,
+		shadowMode: shadowMode,
 	}
 }
 
@@ -170,7 +219,7 @@ func (s *VerificationConsensusSettler) settleAccept(
 			"task_id", payload.TaskID)
 		treasuryAmount += validatorPool
 	} else {
-		validators = s.computeValidatorPayouts(agreeing, validatorPool, round.Category)
+		validators = s.computeValidatorPayouts(payload.TaskID, agreeing, validatorPool, round.Category)
 		result.ValidatorPayouts = validators
 	}
 
@@ -241,7 +290,7 @@ func (s *VerificationConsensusSettler) settleReject(
 			"task_id", payload.TaskID)
 		treasuryAmount += validatorPool
 	} else {
-		validators = s.computeValidatorPayouts(agreeing, validatorPool, round.Category)
+		validators = s.computeValidatorPayouts(payload.TaskID, agreeing, validatorPool, round.Category)
 		result.ValidatorPayouts = validators
 	}
 
@@ -329,15 +378,52 @@ func collectAgreeingValidators(round *taskverification.TaskVerificationRound, ve
 	return result
 }
 
-// distributeByQuality splits a pool among recipients weighted by their
-// Quality Score Q. Falls back to even-split when qScoreFn is nil or when
-// all Q scores sum to zero.
 // computeValidatorPayouts calculates Q-weighted per-validator amounts
 // without executing transfers. The returned map is passed to
 // ReleaseSettlement which handles the actual transfers with per-recipient
-// paid-flag idempotency. Integer arithmetic remainder goes to the last
-// validator for determinism.
+// paid-flag idempotency.
+//
+// This is the shadow-gated entry point introduced in the canonical-
+// distribution-integer-migration workstream. When shadowMode is true, the
+// legacy float path (computeValidatorPayoutsFloat) is canonical; the
+// integer path (computeValidatorPayoutsInteger) runs alongside and the
+// per-recipient delta is logged via shadow_delta. When shadowMode is
+// false (Part E and beyond), the integer path is the only path that runs.
+//
+// taskID is threaded in purely so the shadow_delta log line can identify
+// which settlement the delta belongs to; it has no arithmetic effect.
 func (s *VerificationConsensusSettler) computeValidatorPayouts(
+	taskID string,
+	recipients []crypto.AgentID,
+	pool uint64,
+	category string,
+) map[crypto.AgentID]uint64 {
+	if s.isShadowMode() {
+		floatResult := s.computeValidatorPayoutsFloat(recipients, pool, category)
+		intResult := s.computeValidatorPayoutsInteger(recipients, pool, category)
+		s.logShadowDelta("validator_distribution", taskID, recipients, floatResult, intResult, pool)
+		return floatResult
+	}
+	return s.computeValidatorPayoutsInteger(recipients, pool, category)
+}
+
+// computeValidatorPayoutsFloat is the legacy float-arithmetic payout
+// computation, preserved verbatim from the pre-migration codebase. While
+// shadowMode remains true on every node, this is the canonical path: its
+// output is what the settler returns and what ReleaseSettlement applies.
+// Removed when the shadow gate flips to integer-canonical (separate
+// workstream).
+//
+// Behavior note carried forward from the pre-migration code: the float
+// path absorbs its rounding remainder at the caller-slice-last recipient.
+// Because the caller-supplied recipients slice ordering is not guaranteed
+// to be stable across nodes (collectAgreeingValidators iterates a Votes
+// slice whose ordering depends on local receive-order), the float path's
+// remainder-absorption recipient can differ across nodes by the handful
+// of µAET represented by the rounding remainder. The integer path (via
+// protocolmath.AllocateWithCeiling) fixes this by sorting on CanonicalKey
+// before allocation.
+func (s *VerificationConsensusSettler) computeValidatorPayoutsFloat(
 	recipients []crypto.AgentID,
 	pool uint64,
 	category string,
@@ -356,26 +442,17 @@ func (s *VerificationConsensusSettler) computeValidatorPayouts(
 	for i, v := range recipients {
 		q := 1.0
 		if s.qScoreFn != nil {
-			q = s.qScoreFn(v, "", category)
+			// Down-convert BasisPoints to float64 inside the legacy path so
+			// the pre-migration arithmetic is preserved unchanged. Removed
+			// when the float path itself is removed.
+			q = float64(s.qScoreFn(v, "", category)) / 10000.0
 		}
 		entries[i] = scored{id: v, q: q}
 		totalQ += q
 	}
 
 	if totalQ == 0 {
-		perValidator := pool / uint64(len(recipients))
-		var distributed uint64
-		for i, v := range recipients {
-			amount := perValidator
-			if i == len(recipients)-1 {
-				amount = pool - distributed
-			}
-			if amount > 0 {
-				payouts[v] = amount
-			}
-			distributed += amount
-		}
-		return payouts
+		return evenSplitFallback(recipients, pool)
 	}
 
 	var distributed uint64
@@ -393,6 +470,145 @@ func (s *VerificationConsensusSettler) computeValidatorPayouts(
 	}
 	return payouts
 }
+
+// computeValidatorPayoutsInteger is the integer-arithmetic payout
+// computation introduced by the canonical-distribution-integer-migration
+// workstream. It pre-clamps negative Q to zero (so protocolmath's
+// ErrInvariantViolation remains a true impossibility-signal rather than a
+// routine handling path for upstream bugs) and routes the allocation
+// through protocolmath.AllocateWithCeiling for deterministic cross-node
+// results.
+//
+// Remainder-absorption: protocolmath sorts recipients by CanonicalKey
+// (AgentID bytes) and routes the rounding remainder to the sorted-last
+// recipient. This is deterministic across nodes regardless of receive-
+// ordering of the vote events, which is a correctness improvement over
+// the float path; see the float-path doc comment for the pre-migration
+// non-determinism.
+func (s *VerificationConsensusSettler) computeValidatorPayoutsInteger(
+	recipients []crypto.AgentID,
+	pool uint64,
+	category string,
+) map[crypto.AgentID]uint64 {
+	if len(recipients) == 0 || pool == 0 {
+		return map[crypto.AgentID]uint64{}
+	}
+	pm := make([]protocolmath.Recipient, 0, len(recipients))
+	for _, v := range recipients {
+		q := protocolmath.NeutralBP
+		if s.qScoreFn != nil {
+			q = s.qScoreFn(v, "", category)
+		}
+		if q < 0 {
+			slog.Warn("settlement: qScoreFn returned negative; clamping to zero",
+				"validator", v, "category", category, "returned_bp", q)
+			q = 0
+		}
+		pm = append(pm, protocolmath.Recipient{CanonicalKey: []byte(v), Weight: q})
+	}
+	result, err := protocolmath.AllocateWithCeiling(pm, protocolmath.MicroAET(pool))
+	if err != nil {
+		slog.Error("settlement: protocolmath returned error; falling back to even-split",
+			"err", err, "recipients", len(recipients), "pool", pool)
+		return evenSplitFallback(recipients, pool)
+	}
+	out := make(map[crypto.AgentID]uint64, len(result))
+	for k, v := range result {
+		out[crypto.AgentID(k)] = uint64(v)
+	}
+	return out
+}
+
+// evenSplitFallback distributes pool evenly among recipients, routing any
+// rounding remainder to the caller-slice-last recipient. Used by both the
+// float path (when total Q is zero) and the integer path (when protocolmath
+// returns an unexpected error; the latter should be unreachable in
+// practice because negative Q is pre-clamped and recipient lists are built
+// without duplicates by the settler).
+func evenSplitFallback(recipients []crypto.AgentID, pool uint64) map[crypto.AgentID]uint64 {
+	payouts := make(map[crypto.AgentID]uint64, len(recipients))
+	if len(recipients) == 0 || pool == 0 {
+		return payouts
+	}
+	perValidator := pool / uint64(len(recipients))
+	var distributed uint64
+	for i, v := range recipients {
+		amount := perValidator
+		if i == len(recipients)-1 {
+			amount = pool - distributed
+		}
+		if amount > 0 {
+			payouts[v] = amount
+		}
+		distributed += amount
+	}
+	return payouts
+}
+
+// logShadowDelta emits one line per computeValidatorPayouts invocation
+// comparing the float and integer path outputs. Format documented in the
+// canonical-distribution-integer-migration plan §4.5; Part F parses these
+// lines from testnet logs to validate the cutover corpus.
+//
+// Conservation failures (sum mismatch) elevate to Warn; per-recipient
+// differences stay Info because remainder-absorption-recipient drift is
+// expected (up to the per-recipient rounding remainder) and is exactly
+// the divergence the shadow pass is designed to surface before the
+// cutover event flips the canonical path.
+func (s *VerificationConsensusSettler) logShadowDelta(
+	context, taskID string,
+	recipients []crypto.AgentID,
+	floatResult, intResult map[crypto.AgentID]uint64,
+	pool uint64,
+) {
+	var sumFloat, sumInt uint64
+	// safe: commutative sum; iteration order does not affect result
+	for _, v := range floatResult {
+		sumFloat += v
+	}
+	// safe: commutative sum; iteration order does not affect result
+	for _, v := range intResult {
+		sumInt += v
+	}
+	var maxAbs uint64
+	for _, r := range recipients {
+		f := floatResult[r]
+		i := intResult[r]
+		var d uint64
+		if f > i {
+			d = f - i
+		} else {
+			d = i - f
+		}
+		if d > maxAbs {
+			maxAbs = d
+		}
+	}
+	var sumDelta int64
+	if sumFloat >= sumInt {
+		sumDelta = int64(sumFloat - sumInt)
+	} else {
+		sumDelta = -int64(sumInt - sumFloat)
+	}
+	level := slog.LevelInfo
+	if sumDelta != 0 {
+		level = slog.LevelWarn
+	}
+	slog.Log(context_noop(), level, "shadow_delta",
+		"context", context,
+		"task_id", taskID,
+		"recipient_count", len(recipients),
+		"float_sum", sumFloat,
+		"int_sum", sumInt,
+		"sum_delta", sumDelta,
+		"max_per_recipient_delta", maxAbs,
+		"pool", pool,
+	)
+}
+
+// context_noop returns a background context for slog.Log calls. Extracted
+// so the helper's signature stays readable.
+func context_noop() context.Context { return context.Background() }
 
 func sumPayouts(m map[crypto.AgentID]uint64) uint64 {
 	var s uint64

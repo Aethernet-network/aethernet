@@ -109,6 +109,8 @@ const (
 // IDs participate in payouts (validators that voted for the winning
 // verdict get a share of the validator pool), so the cluster's set of
 // validator IDs is part of the canonical state every node must agree on.
+//
+// projections:lint ignore "in-process cross-node byte-equality test harness; the badger DB here is a hermetic in-memory store used only inside go test -race assertions; not a production persistence surface, not a consensus-adjacent projection, not wired into any live node stack"
 type Node struct {
 	Index       int
 	ValidatorID crypto.AgentID
@@ -208,8 +210,11 @@ func newNode(t *testing.T, idx int) *Node {
 
 	// Even-split validator distribution (qScoreFn=nil falls back to
 	// even-split). Treasury is fixed across all nodes.
+	// shadowMode=true: harness exercises the legacy float path (IM
+	// commit-3 shadow mode default), matching the F4B-end baseline
+	// that this harness validated the bug-class closure against.
 	settler := settlement.NewVerificationConsensusSettler(
-		tm, tl, em, &nilDAGScanner{}, nil, TreasuryID, nil)
+		tm, tl, em, &nilDAGScanner{}, nil, TreasuryID, nil, true)
 	consumer := dispatch.NewTVConsensusConsumer(settler, roundStore, tm, em)
 
 	// F4B §5.2.1: the logical-key variant uses the same settler +
