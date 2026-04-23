@@ -117,6 +117,10 @@ func main() {
 	case "agents":
 		runAgents(args)
 
+	// Operator diagnostics
+	case "invariants":
+		runInvariants(args)
+
 	case "version", "--version":
 		fmt.Printf("aet %s\n", cliVersion)
 	case "help", "--help", "-h":
@@ -155,6 +159,9 @@ Tasks:
 Network:
   status                          Node health
   agents [--limit N]              List agents
+
+Operator:
+  invariants check --peers ...    Cross-node ledger divergence check
 
 Global flags:
   --url URL     API URL (default: https://testnet.aethernet.network)
