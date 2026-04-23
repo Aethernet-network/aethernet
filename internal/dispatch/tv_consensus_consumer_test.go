@@ -276,11 +276,28 @@ func TestTVConsensusConsumer_Apply_EscrowAlreadyReleased_NoOp(t *testing.T) {
 // partial drains and divergent escrow end-state. With the mutex, the
 // second goroutine blocks until the first finishes settlement and terminal-
 // status transition, then observes AlreadyApplied and exits.
+//
+// FINDING #9 fix (F4B step 0.2): the original test pre-saved only round-1
+// and used round-alt for ev2. Whichever goroutine won the per-task mutex
+// first determined whether ev2's Apply hit the LoadRound path (succeeds
+// when ev1 won and set the task terminal — short-circuits in pre-check 1)
+// or hit it before pre-check 1 was satisfied (fails with "round not
+// found"). The test was racy on goroutine scheduling, not on the SUT.
+// Fix: pre-save round-alt as a sibling round so BOTH goroutines have a
+// loadable round if they reach pre-check 2. The test then asserts what
+// it's actually trying to assert — that the per-task mutex serializes
+// concurrent Apply calls and exactly one settlement lands.
 func TestTVConsensusConsumer_Apply_ConcurrentSameTask_Serialized(t *testing.T) {
 	c, tm, tl, em, store := newTestTVConsumer(t)
 	budget := uint64(10000)
 	taskID, round := setupTask(t, tm, tl, em, budget)
 	_ = store.SaveRound(context.Background(), round)
+
+	// Pre-save the alternate round so whichever goroutine wins the per-
+	// task mutex first can load its round if it reaches pre-check 2.
+	roundAlt := *round
+	roundAlt.RoundID = "round-alt"
+	_ = store.SaveRound(context.Background(), &roundAlt)
 
 	ev1 := makeConsensusEvent(t, taskID, "round-1", "pass")
 	ev2 := makeConsensusEvent(t, taskID, "round-alt", "pass")
