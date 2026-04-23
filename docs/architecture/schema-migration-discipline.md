@@ -81,7 +81,7 @@ Each row: BadgerDB key prefix; what's stored; current schema version (if any); v
 | `val:` | Validator registry record | caller-controlled (binary) | no | yes (B.2) | Binary-packed. **Action**: prefix with version byte at next change. |
 | `rsvr:` | Per-category replay reserve balance (uint64 LE) | none (positional) | no — silent-zero on truncation | yes (B.2) | FINDING `replay-reserve-truncated-zero`. **Action**: same dual-read pattern as `stk:`. |
 | `chal:` | Challenge bond record (raw JSON) | caller-controlled | no | yes (B.2) | **Action**: assert `{"v":N}` on the JSON envelope. |
-| `dispatch:` | Dispatcher admission record (`AdmissionRecord` JSON) | `SchemaVersion uint32` (persisted) | **no** | yes (B.2) | FINDING `admission-schema-no-gate`. The field is written and read but never validated — a `SchemaVersion: 999` round-trips opaquely. **Action**: add `if rec.SchemaVersion > AdmissionCurrentVersion { return ErrSchemaTooNew }` to `GetAdmission` + `AllAdmissions`. Highest priority of the gate gaps because the dispatcher's exactly-once admission state machine depends on this record. |
+| `dispatch:` | Dispatcher admission record (`AdmissionRecord` JSON) | `SchemaVersion uint32` (persisted), `AdmissionCurrentVersion = 1` | **yes (F4B step 1)** | yes (B.2 + F4B) | FINDINGs `admission-schema-no-gate` (#5) and `admission-state-no-gate` (#6) **CLOSED**. `validateAdmissionDecode` in `internal/store/store.go` rejects `SchemaVersion > AdmissionCurrentVersion` with `dispatch.ErrAdmissionSchemaTooNew`, and rejects `State` values outside `dispatch.IsKnownAdmissionState` with `dispatch.ErrUnknownAdmissionState`. `PutAdmission` defaults zero `SchemaVersion` to `AdmissionCurrentVersion` for backward-compat with existing callers. |
 | `tsk:` | Task lifecycle blob (raw JSON from `tasks` package) | caller-controlled | no | yes (B.2) | The `tasks.Task` struct has its own version field; verify it's used. **Action**: assert version inside `tsk:` JSON. |
 | `rep:` | Reputation entry (raw JSON) | caller-controlled | no | yes (B.2) | **Action**: assert `{"v":N}`. |
 | `rpj:` | Replay job record (raw JSON) | caller-controlled | no | yes (B.2) | **Action**: assert `{"v":N}`. |
@@ -91,7 +91,7 @@ Each row: BadgerDB key prefix; what's stored; current schema version (if any); v
 | `cnrt:` | Canary task index (raw JSON) | caller-controlled | no | yes (B.2) | Index — rebuildable. Lower priority. |
 | `cal:` | Calibration signal (raw JSON) | caller-controlled | no | yes (B.2) | **Action**: assert `{"v":N}`. |
 
-**Cross-cutting FINDING `store-corruption-fail-stop`**: every `AllX` iterator in `internal/store/store.go` propagates the FIRST JSON unmarshal error and stops, hiding every healthy row that comes after. Combined with the lack of schema gates, a single mis-versioned record halts iteration of every record under that prefix on startup. **Action**: change every `AllX` to skip-with-warn for individual decode errors, OR keep fail-stop and add a schema gate so unknown versions fail loudly with operator guidance. Decision deferred to F4B.
+**Cross-cutting FINDING `store-corruption-fail-stop`**: every `AllX` iterator in `internal/store/store.go` propagates the FIRST JSON unmarshal error and stops, hiding every healthy row that comes after. **F4B step 1 decision** (per locked-invariant review §4.1 recommendation): keep fail-stop on the `AllAdmissions` recovery path because schema gates now fail loudly with operator guidance — the operator wants to see the first mis-versioned record and upgrade the binary, not silently skip it. Other `AllX` paths (events, transfers, generations, identities, etc.) remain fail-stop pending follow-on workstream that introduces the same schema-version + typed-error pattern across the store layer (per the silent-zero-on-truncation family meta-finding tracked for the F5 silent-zero workstream).
 
 ### 2.2 Event payload schema versions (`internal/event/event.go`)
 
@@ -139,7 +139,7 @@ If you add a new `meta:` key in any PR, add it to this table in the same PR.
 The following gaps are not closed by this document. Each is a discrete piece of work that should be planned and sequenced explicitly.
 
 1. **Add `event.GetPayload[T]` version gate.** Single change protects every consumer at once. Highest leverage.
-2. **Add `dispatch:` admission-record schema gate.** Highest individual-record priority because it gates the dispatcher's exactly-once state machine — F4B's LogicalKeyConsumer changes will cross this surface.
+2. ~~**Add `dispatch:` admission-record schema gate.**~~ **CLOSED in F4B step 1.** `validateAdmissionDecode` in `internal/store/store.go`. See §2.1 dispatch: row.
 3. **Decide `AllX` corruption policy: skip-with-warn vs fail-loudly.** Cross-cutting policy decision; affects every store iterator.
 4. **Add `Version uint8` field to records currently without one.** Prioritized list: `vot:` (causal), `txf:` / `gen:` (ledger), `idn:` (identity), `esc:` (escrow), `stk:` / `rsvr:` (binary positional → tagged).
 5. **Surface JSON-envelope versioning for opaque-blob prefixes** (`reg:`, `key:`, `chal:`, `tsk:`, `rep:`, `rpj:`, `rpo:`, `cnr:`, `cnrt:`, `cal:`).

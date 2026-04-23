@@ -12,6 +12,24 @@ package dispatch
 
 import "github.com/Aethernet-network/aethernet/internal/event"
 
+// AdmissionCurrentVersion is the current schema version of AdmissionRecord
+// recognized by this binary. The store layer's GetAdmission and
+// AllAdmissions reject records with SchemaVersion > this value with
+// ErrAdmissionSchemaTooNew, gating mixed-binary clusters per F4A FINDINGs
+// #5 and #6 (admission-schema-no-gate / admission-state-no-gate).
+//
+// Bump rules: increment by 1 for any field addition, removal, or shape
+// change. Document the bump in docs/architecture/schema-migration-discipline.md
+// §2.1 dispatch: row, then implement dual-read (or forward-only cutover)
+// in the same commit.
+//
+// History:
+//
+//	v1: initial F3-B shape (SchemaVersion, Key, State, DAGAnchor,
+//	    PrerequisiteSchemaVersion, Consumers map, EventID, EventType,
+//	    CreatedAtEpoch, MissingPrerequisites, EvidenceEmitted)
+const AdmissionCurrentVersion uint32 = 1
+
 // AdmissionState represents the lifecycle state of a canonical event's
 // admission record in the dispatcher. Five states per invariant C-4;
 // boolean-only state is forbidden.
@@ -24,6 +42,26 @@ const (
 	StateApplied                AdmissionState = 3
 	StateFailedRetryable        AdmissionState = 4
 )
+
+// IsKnownAdmissionState returns true iff s is one of the enum values
+// defined above. The store layer's decode path rejects records with
+// unknown state values via ErrUnknownAdmissionState, gating mixed-
+// binary clusters per F4A FINDING #6.
+//
+// New AdmissionState values must be added to the const block AND to this
+// function in the same commit. Both are caught by the no-bypass dispatch
+// lint suite via TestUnknownAdmissionState_Rejected.
+func IsKnownAdmissionState(s AdmissionState) bool {
+	switch s {
+	case StateAbsent,
+		StateReservedPendingPrereqs,
+		StateProcessing,
+		StateApplied,
+		StateFailedRetryable:
+		return true
+	}
+	return false
+}
 
 func (s AdmissionState) String() string {
 	switch s {

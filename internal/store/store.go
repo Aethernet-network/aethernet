@@ -1505,8 +1505,45 @@ func (s *Store) AllChallenges() (map[string][]byte, error) {
 // Dispatcher Admission Records
 // ---------------------------------------------------------------------------
 
+// validateAdmissionDecode gates a freshly-decoded AdmissionRecord against
+// the running binary's known schema/state surface. F4B step 1 fix for F4A
+// FINDINGs #5 (admission-schema-no-gate) and #6 (admission-state-no-gate).
+//
+// Returns:
+//   - dispatch.ErrAdmissionSchemaTooNew if rec.SchemaVersion exceeds
+//     dispatch.AdmissionCurrentVersion. The running binary cannot safely
+//     decode a record written by a newer binary.
+//   - dispatch.ErrUnknownAdmissionState if rec.State is outside the known
+//     enum. A defaulted-unknown state in the dispatcher's switch would
+//     make an incorrect lifecycle decision.
+//
+// Both errors fail loudly. The dispatcher's storage-error fail-closed
+// invariant (C-7) propagates these to startup-abort, matching the
+// "fail-loudly on Recover() path" recommendation in
+// docs/architecture/locked-invariants-review-f4a.md §4.1.
+func validateAdmissionDecode(rec *dispatch.AdmissionRecord) error {
+	if rec.SchemaVersion > dispatch.AdmissionCurrentVersion {
+		return fmt.Errorf("store: admission %s: %w: persisted=%d binary=%d",
+			rec.Key, dispatch.ErrAdmissionSchemaTooNew,
+			rec.SchemaVersion, dispatch.AdmissionCurrentVersion)
+	}
+	if !dispatch.IsKnownAdmissionState(rec.State) {
+		return fmt.Errorf("store: admission %s: %w: state=%d",
+			rec.Key, dispatch.ErrUnknownAdmissionState, rec.State)
+	}
+	return nil
+}
+
 // PutAdmission serialises record to JSON and stores it under "dispatch:<key>".
+//
+// Records are written with the binary's current AdmissionCurrentVersion
+// when SchemaVersion is unset (zero), preserving the old default-zero
+// behavior callers may rely on. Callers that explicitly populate
+// SchemaVersion (e.g., test fixtures, migration tooling) keep their value.
 func (s *Store) PutAdmission(key string, record *dispatch.AdmissionRecord) error {
+	if record.SchemaVersion == 0 {
+		record.SchemaVersion = dispatch.AdmissionCurrentVersion
+	}
 	data, err := json.Marshal(record)
 	if err != nil {
 		return fmt.Errorf("store: marshal admission %s: %w", key, err)
@@ -1518,6 +1555,12 @@ func (s *Store) PutAdmission(key string, record *dispatch.AdmissionRecord) error
 
 // GetAdmission retrieves the admission record stored at key.
 // Returns badger.ErrKeyNotFound if no record exists.
+//
+// F4B step 1: the decoded record is validated via validateAdmissionDecode
+// before being returned. Records persisted by a newer binary
+// (SchemaVersion > AdmissionCurrentVersion) or with an unknown State
+// value cause GetAdmission to return ErrAdmissionSchemaTooNew or
+// ErrUnknownAdmissionState rather than a silently mis-decoded record.
 func (s *Store) GetAdmission(key string) (*dispatch.AdmissionRecord, error) {
 	var rec dispatch.AdmissionRecord
 	err := s.db.View(func(txn *badger.Txn) error {
@@ -1532,11 +1575,23 @@ func (s *Store) GetAdmission(key string) (*dispatch.AdmissionRecord, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validateAdmissionDecode(&rec); err != nil {
+		return nil, err
+	}
 	return &rec, nil
 }
 
 // AllAdmissions returns every admission record stored under the "dispatch:" prefix.
 // Used by the dispatcher's crash-recovery scan at startup.
+//
+// F4B step 1: each decoded record is validated via validateAdmissionDecode.
+// On the recovery path (Recover scan at startup) the strictest behavior is
+// correct — fail loudly so the operator upgrades the binary before the
+// dispatcher proceeds. AllAdmissions therefore returns the FIRST
+// validation error encountered (matching the existing fail-stop iterator
+// behavior surfaced in F4A FINDING #3 store-corruption-fail-stop). This is
+// the recommended treatment per docs/architecture/locked-invariants-review-
+// f4a.md §4.1.
 func (s *Store) AllAdmissions() ([]*dispatch.AdmissionRecord, error) {
 	var records []*dispatch.AdmissionRecord
 	err := s.db.View(func(txn *badger.Txn) error {
@@ -1550,6 +1605,9 @@ func (s *Store) AllAdmissions() ([]*dispatch.AdmissionRecord, error) {
 			if err := item.Value(func(val []byte) error {
 				return json.Unmarshal(val, &rec)
 			}); err != nil {
+				return err
+			}
+			if err := validateAdmissionDecode(&rec); err != nil {
 				return err
 			}
 			records = append(records, &rec)

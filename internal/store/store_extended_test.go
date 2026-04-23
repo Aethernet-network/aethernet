@@ -828,19 +828,16 @@ func TestConcurrentMultiRecordType_NoCrossContamination(t *testing.T) {
 // 6. Schema-version probe — current behaviour for unrecognised version field
 // ---------------------------------------------------------------------------
 
-func TestAdmission_UnknownSchemaVersion_RoundTripsOpaquely(t *testing.T) {
-	// FINDING (admission-schema-no-gate): AdmissionRecord.SchemaVersion is
-	// persisted as a JSON field but neither GetAdmission nor AllAdmissions
-	// validates it. A record with SchemaVersion=999 round-trips silently
-	// and AllAdmissions returns it like any other record. This means a
-	// future v2 record could be mis-decoded into the v1 struct shape and
-	// the dispatcher would not notice.
-	//
-	// Recommended discipline (to surface in §3.1.3 schema-migration doc):
-	// every Get path should reject SchemaVersion > known-max and every
-	// All path should skip-with-warn.
-	//
-	// This test asserts CURRENT behaviour: opaque round-trip.
+// TestAdmission_UnknownSchemaVersion_RejectedWithErr was previously
+// TestAdmission_UnknownSchemaVersion_RoundTripsOpaquely (F4A B.2)
+// documenting FINDING #5 (admission-schema-no-gate). F4B step 1 added
+// the gate at validateAdmissionDecode in internal/store/store.go; the
+// test is now flipped to assert the gate fires.
+//
+// Records with SchemaVersion > dispatch.AdmissionCurrentVersion MUST
+// surface dispatch.ErrAdmissionSchemaTooNew on read rather than mis-
+// decoding into the older struct shape.
+func TestAdmission_UnknownSchemaVersion_RejectedWithErr(t *testing.T) {
 	s := openStore(t)
 
 	rec := &dispatch.AdmissionRecord{
@@ -855,42 +852,31 @@ func TestAdmission_UnknownSchemaVersion_RoundTripsOpaquely(t *testing.T) {
 	if err := s.PutAdmission(rec.Key, rec); err != nil {
 		t.Fatalf("PutAdmission: %v", err)
 	}
-	got, err := s.GetAdmission(rec.Key)
-	if err != nil {
-		t.Fatalf("GetAdmission: got error %v, want nil (opaque accept is current behaviour)", err)
-	}
-	if got.SchemaVersion != 999 {
-		t.Errorf("SchemaVersion: got %d, want 999", got.SchemaVersion)
+
+	_, err := s.GetAdmission(rec.Key)
+	if !errors.Is(err, dispatch.ErrAdmissionSchemaTooNew) {
+		t.Fatalf("GetAdmission: got %v, want ErrAdmissionSchemaTooNew", err)
 	}
 
-	all, err := s.AllAdmissions()
-	if err != nil {
-		t.Fatalf("AllAdmissions: %v", err)
-	}
-	found := false
-	for _, r := range all {
-		if r.Key == "dispatch:future" {
-			found = true
-			if r.SchemaVersion != 999 {
-				t.Errorf("scanned SchemaVersion: got %d, want 999", r.SchemaVersion)
-			}
-		}
-	}
-	if !found {
-		t.Error("future-version admission missing from AllAdmissions")
+	_, err = s.AllAdmissions()
+	if !errors.Is(err, dispatch.ErrAdmissionSchemaTooNew) {
+		t.Fatalf("AllAdmissions: got %v, want ErrAdmissionSchemaTooNew", err)
 	}
 }
 
-func TestAdmission_UnknownStateValue_RoundTripsOpaquely(t *testing.T) {
-	// FINDING (admission-state-no-gate): AdmissionState is a uint8; JSON
-	// allows arbitrary values. A record persisted with State=99 (no
-	// matching enum) round-trips and is returned as-is, with String()
-	// returning "unknown". The dispatcher must defensively branch on
-	// known states or treat unknowns as failed-retryable; this is not
-	// enforced at the store layer.
+// TestAdmission_UnknownStateValue_RejectedWithErr was previously
+// TestAdmission_UnknownStateValue_RoundTripsOpaquely (F4A B.2)
+// documenting FINDING #6 (admission-state-no-gate). F4B step 1 added
+// the gate at validateAdmissionDecode; the test is now flipped to
+// assert the gate fires.
+//
+// Records with a State value outside dispatch.IsKnownAdmissionState's
+// enum MUST surface dispatch.ErrUnknownAdmissionState on read.
+func TestAdmission_UnknownStateValue_RejectedWithErr(t *testing.T) {
 	s := openStore(t)
 
-	// Hand-craft JSON to bypass typed PutAdmission's enum constraints.
+	// Hand-craft JSON with a known schema_version but unknown state value.
+	// putRaw bypasses PutAdmission's typed enum constraints.
 	raw := []byte(`{
 		"schema_version": 1,
 		"key": "dispatch:weird-state",
@@ -902,15 +888,14 @@ func TestAdmission_UnknownStateValue_RoundTripsOpaquely(t *testing.T) {
 	}`)
 	putRaw(t, s, "dispatch:weird-state", raw)
 
-	got, err := s.GetAdmission("dispatch:weird-state")
-	if err != nil {
-		t.Fatalf("GetAdmission: %v", err)
+	_, err := s.GetAdmission("dispatch:weird-state")
+	if !errors.Is(err, dispatch.ErrUnknownAdmissionState) {
+		t.Fatalf("GetAdmission: got %v, want ErrUnknownAdmissionState", err)
 	}
-	if got.State != dispatch.AdmissionState(99) {
-		t.Errorf("State: got %d, want 99", got.State)
-	}
-	if got.State.String() != "unknown" {
-		t.Errorf("State.String(): got %q, want %q", got.State.String(), "unknown")
+
+	_, err = s.AllAdmissions()
+	if !errors.Is(err, dispatch.ErrUnknownAdmissionState) {
+		t.Fatalf("AllAdmissions: got %v, want ErrUnknownAdmissionState", err)
 	}
 }
 
