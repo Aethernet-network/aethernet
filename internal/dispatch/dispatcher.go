@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 
 	"github.com/Aethernet-network/aethernet/internal/event"
@@ -166,8 +167,21 @@ func (d *Dispatcher) currentAnchor() event.EventID {
 }
 
 func (d *Dispatcher) snapshotInterestedConsumers(ev *event.Event) []Consumer {
+	// E.P1 (F4 plan §6): iterate consumer names in lexicographic order so
+	// the returned slice is deterministic across nodes. Map iteration order
+	// would otherwise leak into the AdmissionRecord.Consumers map's
+	// insertion order, the sequence of safeApply invocations in
+	// invokeConsumers, and any consumer-set-derived diagnostics — all
+	// observable cross-node when consumers count > 1.
+	names := make([]string, 0, len(d.consumers))
+	for name := range d.consumers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	var interested []Consumer
-	for _, c := range d.consumers {
+	for _, name := range names {
+		c := d.consumers[name]
 		if c.Interested(ev) {
 			interested = append(interested, c)
 		}
@@ -253,8 +267,21 @@ func (d *Dispatcher) invokeConsumers(ctx context.Context, ev *event.Event, key s
 	consumers := d.consumers
 	d.mu.RUnlock()
 
+	// E.P1 (F4 plan §6): lex-sort consumer names so safeApply is invoked
+	// in a deterministic order across nodes. Different orders here would
+	// produce different sequences of canonical state mutation when
+	// multiple consumers touch the same canonical surface (e.g., ledger,
+	// escrow). With a single consumer registered today this is decorative;
+	// becomes load-bearing the moment a second consumer is added.
+	names := make([]string, 0, len(rec.Consumers))
+	for name := range rec.Consumers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	changed := false
-	for name, status := range rec.Consumers {
+	for _, name := range names {
+		status := rec.Consumers[name]
 		if status == ConsumerApplied {
 			continue
 		}
@@ -372,7 +399,19 @@ func (d *Dispatcher) Recover(ctx context.Context) error {
 					rec.EventID, evErr)
 			}
 
-			for name, status := range rec.Consumers {
+			// E.P1 (F4 plan §6): lex-sort so RecoveryProbe is invoked in
+			// deterministic order across nodes. Probe order is observable
+			// when consumers share probe-targets; sorting eliminates the
+			// non-determinism even though no current consumer pair shares
+			// targets.
+			probeNames := make([]string, 0, len(rec.Consumers))
+			for name := range rec.Consumers {
+				probeNames = append(probeNames, name)
+			}
+			sort.Strings(probeNames)
+
+			for _, name := range probeNames {
+				status := rec.Consumers[name]
 				if status != ConsumerPending {
 					continue
 				}
@@ -407,7 +446,18 @@ func (d *Dispatcher) Recover(ctx context.Context) error {
 // pending status. Per D-6: mismatch aborts startup with an operator-action
 // diagnostic. No canonical ledger rollback implied.
 func (d *Dispatcher) checkSchemaVersions(rec *AdmissionRecord, consumers map[string]Consumer) error {
-	for name, status := range rec.Consumers {
+	// E.P1 (F4 plan §6): lex-sort so the FIRST mismatch reported is
+	// deterministic across nodes. Without sorting, two nodes could report
+	// different consumers as the mismatch source for the same record;
+	// stable order makes operator triage reproducible.
+	names := make([]string, 0, len(rec.Consumers))
+	for name := range rec.Consumers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		status := rec.Consumers[name]
 		if status == ConsumerApplied {
 			continue
 		}
