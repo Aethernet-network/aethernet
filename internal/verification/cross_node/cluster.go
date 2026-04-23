@@ -45,6 +45,7 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
@@ -58,6 +59,31 @@ import (
 
 	badger "github.com/dgraph-io/badger/v4"
 )
+
+// activeWeightForHarness is the package-level active-validator-weight
+// accessor the harness's LKConsumer closures read. It is set by tests
+// via SetActiveWeightForHarness before they drive Admit. Default value
+// is zero — which IsComplete treats as "no validator set known" and
+// defers. Harness tests that use installDispatcherLK MUST set this
+// before admitting events; otherwise Apply never fires and divergence
+// asserts misleadingly pass.
+//
+// Package-level atomic rather than per-cluster state because the LK
+// consumer is constructed inside newNode before the cluster object
+// exists; the closure needs a stable handle. The sync/atomic wrapper
+// keeps reads/writes safe under the harness's serialized-per-node
+// transport (which is structurally single-goroutine but tests may
+// run in parallel via t.Parallel).
+var activeWeightForHarness atomic.Uint64
+
+// SetActiveWeightForHarness installs the active-validator-weight the
+// LKConsumer's IsComplete seal rule uses. Exposed so tests register
+// their cluster's total stake before driving scenarios; the value
+// MUST be the sum of votes' Stake fields in the corpus (e.g., 3 * 100
+// = 300 for a 3-node cluster where each validator's stake is 100).
+func SetActiveWeightForHarness(w uint64) {
+	activeWeightForHarness.Store(w)
+}
 
 // TreasuryID is the canonical treasury agent ID used by the harness.
 // Settlement payouts route the treasury share here so balance assertions
@@ -94,6 +120,14 @@ type Node struct {
 	RoundStore  taskverification.Store
 	Settler     *settlement.VerificationConsensusSettler
 	Consumer    *dispatch.TVConsensusConsumer
+
+	// LKConsumer is the F4B §5.2.1 TaskVerificationConsensus
+	// logical-key consumer. Populated by newNode in parallel with
+	// Consumer so tests can choose which path to register on the
+	// node's Dispatcher via installDispatcher (legacy, content-
+	// hash) or installDispatcherLK (F4B, logical-key). See
+	// dispatcher_harness.go for the installer shapes.
+	LKConsumer *dispatch.TVConsensusLogicalKeyConsumer
 
 	// Dispatcher is the per-node dispatch.Dispatcher used by the
 	// dispatcher-integrated harness variant (dispatcher_harness.go).
@@ -178,6 +212,36 @@ func newNode(t *testing.T, idx int) *Node {
 		tm, tl, em, &nilDAGScanner{}, nil, TreasuryID, nil)
 	consumer := dispatch.NewTVConsensusConsumer(settler, roundStore, tm, em)
 
+	// F4B §5.2.1: the logical-key variant uses the same settler +
+	// round store + task manager + escrow as the content-hash
+	// consumer. activeWeightFn is derived from the cluster's
+	// validator set — every in-process node assumes the harness's
+	// full validator set, so active weight is constant and
+	// cluster-uniform as required by IsComplete's seal rule.
+	// Each validator in the harness has stake 100 (see uniformVotes
+	// / splitVotes in corpus.go); active weight is 100 per node.
+	//
+	// The closure captures a pointer-to-the-cluster so the value
+	// remains fresh if the caller were to mutate the validator set
+	// mid-run — the harness does not do that today, but the shape
+	// keeps the wiring parallel to production's activeWeightFn.
+	lkActiveWeightFn := func() uint64 {
+		// This is a per-node closure evaluated at IsComplete time.
+		// Under the harness's current corpora every cluster has a
+		// fixed number of validators with stake=100, so active
+		// weight is len(validators) * 100. The closure reads it via
+		// a package-level helper set on the cluster post-construction
+		// (see SetActiveWeightForHarness). Pre-set value of 0 is
+		// acceptable — IsComplete returns false when active weight
+		// is zero, which defers Apply. Tests that exercise Admit
+		// MUST call SetActiveWeightForHarness on the cluster before
+		// driving traffic.
+		return activeWeightForHarness.Load()
+	}
+	lkConsumer := dispatch.NewTVConsensusLogicalKeyConsumer(
+		settler, roundStore, tm, em, lkActiveWeightFn,
+	)
+
 	n := &Node{
 		Index:       idx,
 		ValidatorID: validatorID,
@@ -188,6 +252,7 @@ func newNode(t *testing.T, idx int) *Node {
 		RoundStore:  roundStore,
 		Settler:     settler,
 		Consumer:    consumer,
+		LKConsumer:  lkConsumer,
 		badgerDB:    db,
 	}
 

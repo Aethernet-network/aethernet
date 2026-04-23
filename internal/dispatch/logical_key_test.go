@@ -32,6 +32,7 @@ type syntheticLogicalKeyConsumer struct {
 	stateFn    func(LogicalKey) (RoundState, error)
 	completeFn func(RoundState) (bool, error)
 	outcomeFn  func(RoundState) (Outcome, error)
+	probeFn    func(LogicalKey) (RecoveryStatus, error)
 
 	applyErr error
 
@@ -53,6 +54,7 @@ func newSyntheticLogicalKeyConsumer(name string) *syntheticLogicalKeyConsumer {
 		},
 		completeFn: func(_ RoundState) (bool, error) { return true, nil },
 		outcomeFn:  func(_ RoundState) (Outcome, error) { return Outcome{Verdict: VerdictAccept}, nil },
+		probeFn:    func(_ LogicalKey) (RecoveryStatus, error) { return RecoveryNotStarted, nil },
 	}
 }
 
@@ -78,6 +80,10 @@ func (c *syntheticLogicalKeyConsumer) Apply(_ context.Context, key LogicalKey, o
 	c.mu.Unlock()
 	c.applyCount.Add(1)
 	return c.applyErr
+}
+
+func (c *syntheticLogicalKeyConsumer) RecoveryProbe(_ context.Context, key LogicalKey) (RecoveryStatus, error) {
+	return c.probeFn(key)
 }
 
 func (c *syntheticLogicalKeyConsumer) snapshot() ([]LogicalKey, []Outcome) {

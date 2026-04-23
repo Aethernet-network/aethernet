@@ -156,6 +156,15 @@ func (c *syntheticTypeE) Apply(_ context.Context, key dispatch.LogicalKey, outco
 	return nil
 }
 
+func (c *syntheticTypeE) RecoveryProbe(_ context.Context, key dispatch.LogicalKey) (dispatch.RecoveryStatus, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.applied[key] > 0 {
+		return dispatch.RecoveryCompleted, nil
+	}
+	return dispatch.RecoveryNotStarted, nil
+}
+
 func TestTypeE_SyntheticConsumer(t *testing.T) {
 	conformance.RunLogicalKeyConformance(t, func() (dispatch.LogicalKeyConsumer, func()) {
 		c := &syntheticTypeE{applied: make(map[dispatch.LogicalKey]int)}

@@ -412,6 +412,7 @@ func (d *Dispatcher) Recover(ctx context.Context) error {
 
 	d.mu.RLock()
 	consumers := d.consumers
+	logicalKeyConsumers := d.logicalKeyConsumers
 	d.mu.RUnlock()
 
 	// Rebuild the in-memory deferral index from persisted records.
@@ -420,6 +421,20 @@ func (d *Dispatcher) Recover(ctx context.Context) error {
 	d.mu.Unlock()
 
 	for _, rec := range records {
+		// Logical-key admission records (F4B) have a different recovery
+		// shape than content-hash records: they have no prerequisite
+		// semantics (no Prerequisites interface method on LogicalKeyConsumer),
+		// their recovery probe is consumer-per-(consumer, key) rather than
+		// per-(consumer, event), and their store key encodes the consumer
+		// name for direct lookup. Route them through recoverLogicalKey and
+		// continue; the content-hash recovery path below does not apply.
+		if rec.Strategy == AdmissionStrategyLogicalKey {
+			if err := d.recoverLogicalKey(ctx, rec, logicalKeyConsumers); err != nil {
+				return err
+			}
+			continue
+		}
+
 		// Schema version mismatch check (D-6): refuse to advance records
 		// whose stored PrerequisiteSchemaVersion differs from any current
 		// consumer's version. Abort startup with an operator-action
@@ -516,6 +531,86 @@ func (d *Dispatcher) Recover(ctx context.Context) error {
 		if err := d.store.PutAdmission(rec.Key, rec); err != nil {
 			return fmt.Errorf("dispatch: recovery persist for %s: %w", rec.EventID, err)
 		}
+	}
+	return nil
+}
+
+// recoverLogicalKey resolves one non-terminal logical-key admission
+// record at startup. Per C-14 (recovery probes evidence-based,
+// monotonic, replay-safe): if the consumer reports positive evidence
+// that Apply completed (RecoveryCompleted), promote the record to
+// StateApplied. Otherwise mark it StateFailedRetryable so the next
+// Admit for any event projecting to this key drives a retry.
+//
+// Per F4B: logical-key records use the RecoveryProbe(key) method on
+// LogicalKeyConsumer rather than content-hash RecoveryProbe(ev). The
+// key is carried directly in rec.LogicalKey (populated by
+// reserveOrLoadLogical); no DAG lookup is needed because the probe is
+// over canonical durable state the consumer owns, not over a
+// triggering event.
+//
+// Records whose consumer is no longer registered (orphan — e.g., the
+// consumer was renamed between binary versions) are left in whatever
+// state they were persisted in; the next Admit from a registered
+// consumer of the same kind will write a fresh record. This matches
+// the content-hash path's orphan handling.
+//
+// Records in StateApplied are left untouched (the per-key Apply
+// guarantee is already satisfied). Records in StateFailedRetryable
+// are also left untouched — a subsequent Admit drives retry without
+// probing, mirroring content-hash semantics.
+func (d *Dispatcher) recoverLogicalKey(
+	ctx context.Context,
+	rec *AdmissionRecord,
+	consumers map[string]LogicalKeyConsumer,
+) error {
+	switch rec.State {
+	case StateApplied, StateFailedRetryable:
+		return nil
+	}
+
+	// Probe every consumer recorded on this admission. In practice a
+	// logical-key record carries exactly one consumer (the one that
+	// reserved it under its own name namespace); the loop matches the
+	// content-hash shape for symmetry.
+	//
+	// E.P1 (F4 plan §6): lex-sort so probe order is deterministic
+	// across nodes even though the single-consumer-per-record invariant
+	// makes this decorative today.
+	names := make([]string, 0, len(rec.Consumers))
+	for name := range rec.Consumers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		status := rec.Consumers[name]
+		if status == ConsumerApplied {
+			continue
+		}
+		c, ok := consumers[name]
+		if !ok {
+			// Orphan: consumer no longer registered. Leave record
+			// untouched; next Admit from a registered consumer drives
+			// the state machine. Mirrors content-hash orphan handling.
+			continue
+		}
+		probeResult, probeErr := c.RecoveryProbe(ctx, rec.LogicalKey)
+		if probeErr != nil {
+			return fmt.Errorf("dispatch: logical-key recovery probe %s for key %s: %w",
+				name, rec.LogicalKey, probeErr)
+		}
+		switch probeResult {
+		case RecoveryCompleted:
+			rec.Consumers[name] = ConsumerApplied
+		case RecoveryNotStarted:
+			rec.Consumers[name] = ConsumerFailedRetryable
+		}
+	}
+
+	rec.State = computeTopLevelState(rec.Consumers)
+	if err := d.store.PutAdmission(rec.Key, rec); err != nil {
+		return fmt.Errorf("dispatch: logical-key recovery persist for %s: %w", rec.Key, err)
 	}
 	return nil
 }

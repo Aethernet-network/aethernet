@@ -1949,9 +1949,25 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			}
 			return 0
 		})
-		tvDispatchConsumer := dispatch.NewTVConsensusConsumer(tvSettler, tvStore, stack.taskMgr, stack.escrowMgr)
-		if err := eventDispatcher.Register(tvDispatchConsumer); err != nil {
-			slog.Error("dispatch: register TVConsensusConsumer failed", "err", err)
+		// F4B §5.2.1: TaskVerificationConsensus events are logical-key
+		// admitted by RoundID per C-3'/C-17. The LogicalKeyConsumer
+		// derives the canonical verdict from the round's vote set (not
+		// from the triggering event's advisory FinalVerdict field),
+		// closing the cross-node selection-race bug class characterized
+		// in docs/plans/implementation/selection-race-characterization.md.
+		//
+		// This replaces the F3-B content-hash TVConsensusConsumer —
+		// both consumers cannot be registered simultaneously because
+		// the content-hash path's first-event-past-the-per-task-mutex
+		// selection would still produce divergent settlements, with
+		// the logical-key path arriving too late to redirect the
+		// already-set terminal status. See cmd/node registration
+		// audit §3 for the "(A) exclusive" migration rationale.
+		tvDispatchLKConsumer := dispatch.NewTVConsensusLogicalKeyConsumer(
+			tvSettler, tvStore, stack.taskMgr, stack.escrowMgr, activeWeightFn,
+		)
+		if err := eventDispatcher.RegisterLogicalKey(tvDispatchLKConsumer); err != nil {
+			slog.Error("dispatch: register TVConsensusLogicalKeyConsumer failed", "err", err)
 			os.Exit(1)
 		}
 		if err := eventDispatcher.Recover(context.Background()); err != nil {

@@ -159,6 +159,27 @@ type LogicalKeyConsumer interface {
 	// advisory), the dispatcher prevents the consumer from
 	// accidentally deriving canonical state from advisory fields.
 	Apply(ctx context.Context, key LogicalKey, outcome Outcome) error
+
+	// RecoveryProbe checks whether Apply completed for the
+	// (consumer, key) pair during a prior invocation interrupted by a
+	// crash. Per C-14: evidence-based, monotonic, replay-safe. Must
+	// derive its answer from canonical durable state (not ephemeral
+	// memory, wall-clock, or external systems).
+	//
+	// Returns RecoveryCompleted iff positive evidence of Apply
+	// completion exists in canonical state; RecoveryNotStarted
+	// otherwise. Absence of evidence is not evidence of absence —
+	// return RecoveryNotStarted when uncertain. Errors are fatal —
+	// Dispatcher.Recover aborts startup.
+	//
+	// Dispatcher.Recover invokes this for every non-terminal logical-
+	// key admission record at startup. If a record was left in
+	// StateProcessing or StateFailedRetryable because the node
+	// crashed mid-Apply, RecoveryCompleted promotes it to
+	// StateApplied (Apply ran; no retry needed); RecoveryNotStarted
+	// promotes it to StateFailedRetryable (the next Admit for any
+	// event projecting to this key will drive a retry).
+	RecoveryProbe(ctx context.Context, key LogicalKey) (RecoveryStatus, error)
 }
 
 // validateLogicalKeyConsumer performs structural validation at

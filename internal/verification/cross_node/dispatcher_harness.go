@@ -49,6 +49,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"testing"
 
 	"github.com/Aethernet-network/aethernet/internal/dispatch"
 	"github.com/Aethernet-network/aethernet/internal/event"
@@ -187,6 +188,37 @@ func installDispatcher(n *Node) {
 	}
 	n.Dispatcher = d
 	n.AdmissionStore = store
+}
+
+// installDispatcherLK constructs and registers a Dispatcher on the
+// node, using the node's TVConsensusLogicalKeyConsumer (F4B §5.2.1).
+// This is the parallel of installDispatcher for the logical-key
+// admission path; it REPLACES the content-hash wiring rather than
+// running both, matching the cmd/node registration audit §3's
+// migration shape (A) — both-paths-wired would not fix the
+// selection race because content-hash Apply fires first per-node.
+//
+// Harness tests that want to exercise the F4B fix call
+// installDispatcherLK(cluster) on a freshly-constructed cluster,
+// BEFORE driving any scenarios. The helper overwrites each node's
+// Dispatcher + AdmissionStore with a fresh pair that has only the
+// LK consumer registered.
+//
+// Call site ordering: NewCluster → installDispatcherLK →
+// FundPoster → SetupTask → runScenarioViaDispatcherLK.
+// SetActiveWeightForHarness must be called BEFORE the first Admit
+// so IsComplete's seal rule has a non-zero threshold.
+func installDispatcherLK(t *testing.T, c *Cluster) {
+	t.Helper()
+	for _, n := range c.Nodes {
+		store := newMemAdmissionStore()
+		d := dispatch.NewDispatcher(store, nilDAGAnchorReader{}, func() uint64 { return 1 })
+		if err := d.RegisterLogicalKey(n.LKConsumer); err != nil {
+			t.Fatalf("cross_node: dispatcher RegisterLogicalKey failed on node %d: %v", n.Index, err)
+		}
+		n.Dispatcher = d
+		n.AdmissionStore = store
+	}
 }
 
 // AdmitViaDispatcher routes ev through this node's Dispatcher.Admit,
