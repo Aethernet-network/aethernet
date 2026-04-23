@@ -133,6 +133,7 @@ type AdmissionRecord struct {
 // is applied; failed-retryable if any consumer is failed-retryable.
 func computeTopLevelState(consumers map[string]PerConsumerStatus) AdmissionState {
 	allApplied := true
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, status := range consumers {
 		switch status {
 		case ConsumerFailedRetryable:

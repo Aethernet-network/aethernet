@@ -52,6 +52,7 @@ func (rl *RateLimiter) CleanupRound(roundID string) {
 	prefix := roundID + ":"
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for k := range rl.last {
 		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
 			delete(rl.last, k)

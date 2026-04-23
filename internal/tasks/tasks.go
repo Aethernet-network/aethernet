@@ -453,6 +453,7 @@ func (m *TaskManager) archiveCompleted() {
 	cutoff := time.Now().Add(-maxAge)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for id, task := range m.tasks {
 		if task.CompletedAt == 0 {
 			continue // not yet completed/cancelled
@@ -880,6 +881,7 @@ func (m *TaskManager) GetDisputedTasks() []*Task {
 	defer m.mu.RUnlock()
 
 	var results []*Task
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, task := range m.tasks {
 		if task.ReplayStatus == "replay_disputed" {
 			cp := *task
@@ -1468,6 +1470,7 @@ func (m *TaskManager) Search(status TaskStatus, category string, limit int) []*T
 	defer m.mu.RUnlock()
 
 	var results []*Task
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, task := range m.tasks {
 		if status != "" && task.Status != status {
 			continue
@@ -1500,6 +1503,7 @@ func (m *TaskManager) AgentTasks(agentID string) []*Task {
 	defer m.mu.RUnlock()
 
 	var results []*Task
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, task := range m.tasks {
 		if task.PosterID == agentID || task.ClaimerID == agentID {
 			cp := *task
@@ -1519,6 +1523,7 @@ func (m *TaskManager) Stats() Stats {
 
 	var s Stats
 	s.TotalTasks = len(m.tasks)
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, task := range m.tasks {
 		s.TotalBudget += task.Budget
 		switch task.Status {

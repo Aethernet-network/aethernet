@@ -318,6 +318,7 @@ func (n *Node) processAttachedBlobs(peer *Peer, eventID event.EventID, blobs map
 		return
 	}
 
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for hash, data := range blobs {
 		// Verify content hash. Evidence body hashes are bare hex SHA-256
 		// (no "sha256:" prefix), matching blobstore.FSStore.Put output.

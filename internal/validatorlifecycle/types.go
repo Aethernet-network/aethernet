@@ -384,6 +384,7 @@ type ValidatorSnapshot struct {
 // SortedSeatIDs returns all seat IDs in deterministic (lexicographic) order.
 func (vs *ValidatorSnapshot) SortedSeatIDs() []ValidatorID {
 	ids := make([]ValidatorID, 0, len(vs.Seats))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for id := range vs.Seats {
 		ids = append(ids, id)
 	}

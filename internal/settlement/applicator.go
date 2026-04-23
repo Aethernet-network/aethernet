@@ -397,11 +397,13 @@ func (a *Applicator) reconcile() {
 	a.mu.Lock()
 	// Snapshot deferred set under lock.
 	snapshot := make(map[event.EventID]*SettlementPayload, len(a.deferred))
+	// safe: map-to-map snapshot; the result map preserves no insertion order
 	for id, sp := range a.deferred {
 		snapshot[id] = sp
 	}
 	a.mu.Unlock()
 
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for targetID, sp := range snapshot {
 		target, err := a.lookup(targetID)
 		if err != nil {

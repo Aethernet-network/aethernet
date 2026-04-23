@@ -172,6 +172,7 @@ func (rm *ReputationManager) RankByCategory(category string, limit int) []*Agent
 	}
 	var candidates []ranked
 
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, rep := range rm.reputations {
 		cat, ok := rep.Categories[category]
 		if !ok || cat.TasksCompleted == 0 {
@@ -260,6 +261,7 @@ func (rm *ReputationManager) updateOverallScore(rep *AgentReputation) {
 
 	// Find top category (most completions).
 	maxTasks := uint64(0)
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, cat := range rep.Categories {
 		if cat.TasksCompleted > maxTasks {
 			maxTasks = cat.TasksCompleted

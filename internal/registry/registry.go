@@ -148,6 +148,7 @@ func (r *Registry) Search(query string, category string, maxResults int) []*Serv
 	q := strings.ToLower(query)
 	var results []*ServiceListing
 
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, l := range r.listings {
 		if !l.Active {
 			continue
@@ -184,6 +185,7 @@ func (r *Registry) Categories() map[string]int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	cats := make(map[string]int)
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, l := range r.listings {
 		if l.Active {
 			cats[l.Category]++
@@ -197,6 +199,7 @@ func (r *Registry) All() []*ServiceListing {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var all []*ServiceListing
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, l := range r.listings {
 		if l.Active {
 			cp := *l
@@ -211,6 +214,7 @@ func (r *Registry) Count() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	count := 0
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, l := range r.listings {
 		if l.Active {
 			count++

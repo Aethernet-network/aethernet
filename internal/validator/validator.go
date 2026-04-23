@@ -134,6 +134,7 @@ func (v *AssignmentCoordinator) AssignVerification(eventID event.EventID) (crypt
 
 	// Select the active validator with the fewest current assignments (least-loaded).
 	var selected *ValidatorInfo
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, info := range v.validators {
 		if !info.Active {
 			continue
@@ -191,6 +192,7 @@ func (v *AssignmentCoordinator) SweepExpiredAssignments() []event.EventID {
 	defer v.mu.Unlock()
 
 	var expired []event.EventID
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for eventID, asgn := range v.assignments {
 		if now.Sub(asgn.assignedAt) > v.config.AssignmentTimeout {
 			if info, ok := v.validators[asgn.validatorID]; ok && info.Assignments > 0 {
@@ -208,6 +210,7 @@ func (v *AssignmentCoordinator) ActiveValidators() []*ValidatorInfo {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	out := make([]*ValidatorInfo, 0, len(v.validators))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, info := range v.validators {
 		cp := *info
 		out = append(out, &cp)

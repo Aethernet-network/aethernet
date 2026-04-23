@@ -154,6 +154,7 @@ func (r *Reducer) Seat(id ValidatorID) (*ValidatorSeat, error) {
 // SeatByOperatorKey returns the seat currently operated by the given key, or
 // ErrSeatNotFound if no seat uses that key.
 func (r *Reducer) SeatByOperatorKey(key crypto.AgentID) (*ValidatorSeat, error) {
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, s := range r.seats {
 		if s.OperatorKey == key {
 			return cloneSeat(s), nil
@@ -165,6 +166,7 @@ func (r *Reducer) SeatByOperatorKey(key crypto.AgentID) (*ValidatorSeat, error) 
 // AllSeats returns a deep copy of every seat, sorted by ValidatorID.
 func (r *Reducer) AllSeats() []*ValidatorSeat {
 	ids := make([]ValidatorID, 0, len(r.seats))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for id := range r.seats {
 		ids = append(ids, id)
 	}

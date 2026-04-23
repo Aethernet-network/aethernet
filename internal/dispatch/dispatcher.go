@@ -174,6 +174,7 @@ func (d *Dispatcher) snapshotInterestedConsumers(ev *event.Event) []Consumer {
 	// invokeConsumers, and any consumer-set-derived diagnostics — all
 	// observable cross-node when consumers count > 1.
 	names := make([]string, 0, len(d.consumers))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for name := range d.consumers {
 		names = append(names, name)
 	}
@@ -228,12 +229,14 @@ func (d *Dispatcher) reserveOrLoad(key string, ev *event.Event, consumers []Cons
 
 func (d *Dispatcher) createReservation(key string, ev *event.Event, consumers []Consumer) (*AdmissionRecord, error) {
 	consumerMap := make(map[string]PerConsumerStatus, len(consumers))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, c := range consumers {
 		consumerMap[c.Name()] = ConsumerPending
 	}
 
 	// Capture the max PrerequisiteSchemaVersion across interested consumers.
 	var maxSchemaVer uint32
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, c := range consumers {
 		if v := c.PrerequisiteSchemaVersion(); v > maxSchemaVer {
 			maxSchemaVer = v

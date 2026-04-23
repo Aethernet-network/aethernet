@@ -382,6 +382,7 @@ func jaccardSimilarity(a, b map[string]bool) float64 {
 		return 0
 	}
 	intersection := 0
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for k := range a {
 		if b[k] {
 			intersection++

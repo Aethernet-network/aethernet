@@ -96,6 +96,7 @@ func tfidfCosineSimilarity(doc1, doc2 string) float64 {
 
 	// IDF: log(2 / df) where df is 1 or 2.
 	idf := make(map[string]float64, len(vocab))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for w := range vocab {
 		df := 0
 		if tf1[w] > 0 {
@@ -109,6 +110,7 @@ func tfidfCosineSimilarity(doc1, doc2 string) float64 {
 
 	// Compute TF-IDF vectors and cosine similarity.
 	var dot, mag1, mag2 float64
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for w := range vocab {
 		v1 := tf1[w] * idf[w]
 		v2 := tf2[w] * idf[w]
@@ -139,6 +141,7 @@ func termFrequency(text string) map[string]float64 {
 		return nil
 	}
 	freq := make(map[string]float64, len(counts))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for w, c := range counts {
 		freq[w] = float64(c) / total
 	}

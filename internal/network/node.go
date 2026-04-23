@@ -830,6 +830,7 @@ func (n *Node) PeerIPs() map[string]bool {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	ips := make(map[string]bool, len(n.peers))
+	// safe: building a set of host strings; set membership is order-independent
 	for _, p := range n.peers {
 		host, _, err := net.SplitHostPort(p.Address)
 		if err != nil {
@@ -1139,6 +1140,8 @@ func (n *Node) syncLoop() {
 			n.mu.RLock()
 			var targets []*Peer
 			var legacyCount, fastpathCount int
+			// safe: peer fanout for broadcast — each peer receives the same payload independently;
+			// transmission ordering is non-canonical network plumbing
 			for _, p := range n.peers {
 				if p.SupportsFastPath() {
 					fastpathCount++
@@ -1561,6 +1564,7 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 		sig := string(vp.Signature)
 		n.mu.Lock()
 		// Opportunistic GC: evict expired seen-vote entries while we hold the lock.
+		// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 		for k, ts := range n.seenVotes {
 			if now.Sub(ts) > voteSeenTTL {
 				delete(n.seenVotes, k)
@@ -1572,6 +1576,7 @@ func (n *Node) handleMessage(peer *Peer, msg Message) {
 			n.seenVotes[sig] = now
 			// Snapshot peers to relay to, excluding the sender.
 			relayPeers = make([]*Peer, 0, len(n.peers))
+			// safe: relay fanout — each peer receives the same vote independently
 			for _, p := range n.peers {
 				if p.AgentID != peer.AgentID {
 					relayPeers = append(relayPeers, p)

@@ -169,6 +169,7 @@ func (ps *PeerScore) Metrics() map[string]int64 {
 // Only includes peers that are usable (score >= MinUsableScore).
 func PeersByScore(peers []*Peer) []*Peer {
 	usable := make([]*Peer, 0, len(peers))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, p := range peers {
 		if p.PeerScore() != nil && p.PeerScore().IsUsable() {
 			usable = append(usable, p)
@@ -185,6 +186,7 @@ func PeersByScore(peers []*Peer) []*Peer {
 func BestPeerFor(peers map[crypto.AgentID]*Peer, exclude crypto.AgentID) *Peer {
 	var best *Peer
 	var bestScore int64 = -1
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, p := range peers {
 		if p.AgentID == exclude {
 			continue

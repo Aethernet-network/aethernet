@@ -283,6 +283,7 @@ func uniqueAgents(snaps []LedgerSnapshot) []string {
 		}
 	}
 	out := make([]string, 0, len(seen))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for a := range seen {
 		out = append(out, a)
 	}
@@ -298,6 +299,7 @@ func uniqueTasks(snaps []LedgerSnapshot) []string {
 		}
 	}
 	out := make([]string, 0, len(seen))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for t := range seen {
 		out = append(out, t)
 	}

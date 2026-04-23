@@ -295,6 +295,7 @@ func (m *ChallengeManager) ChallengesForTask(taskID string) []*Challenge {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var out []*Challenge
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, c := range m.challenges {
 		if c.TaskID == taskID {
 			cp := *c

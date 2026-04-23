@@ -749,12 +749,14 @@ func (e *Engine) checkExpired() {
 
 	e.mu.Lock()
 	var expired []event.EventID
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for id, item := range e.pending {
 		if now.Sub(item.OptimisticAt) > item.Deadline {
 			expired = append(expired, id)
 		}
 	}
 	// GC: remove processed entries older than 1 hour from the idempotency maps.
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for id, settledAt := range e.processedAt {
 		if settledAt.Before(processedCutoff) {
 			delete(e.processed, id)
@@ -815,6 +817,7 @@ func (e *Engine) Pending() []*PendingItem {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	items := make([]*PendingItem, 0, len(e.pending))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, item := range e.pending {
 		items = append(items, item)
 	}

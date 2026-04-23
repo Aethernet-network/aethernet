@@ -67,6 +67,7 @@ func (r *AnalyzerRegistry) ListFamilies() []Family {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]Family, 0, len(r.families))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, f := range r.families {
 		out = append(out, f)
 	}
@@ -80,6 +81,7 @@ func (r *AnalyzerRegistry) ListAnalyzersByFamily(id FamilyID) []Analyzer {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var out []Analyzer
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, a := range r.analyzers {
 		if a.Family() == id {
 			out = append(out, a)

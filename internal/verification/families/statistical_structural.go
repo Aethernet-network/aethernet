@@ -97,6 +97,7 @@ func tokenEntropy(text string) float64 {
 	}
 	total := float64(len(words))
 	var h float64
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, count := range freq {
 		p := float64(count) / total
 		if p > 0 {

@@ -108,6 +108,7 @@ func (l *Limiter) cleanupLoop() {
 		case <-ticker.C:
 			cutoff := time.Now().Add(-l.cfg.CleanupAge)
 			l.mu.Lock()
+			// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 			for k, b := range l.buckets {
 				if b.lastSeen.Before(cutoff) {
 					delete(l.buckets, k)

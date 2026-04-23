@@ -86,6 +86,7 @@ func ComputeActorCalibration(signals []*CalibrationSignal) *ActorCalibration {
 		ac.AvgSeverity = totalSeverity / float64(ac.TotalSignals)
 	}
 
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, cat := range ac.ByCategory {
 		if cat.TotalSignals > 0 {
 			cat.Accuracy = (float64(cat.CorrectCount) + 0.5*float64(cat.PartialCount)) / float64(cat.TotalSignals)

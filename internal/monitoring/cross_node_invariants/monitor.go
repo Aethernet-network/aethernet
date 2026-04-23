@@ -315,6 +315,7 @@ func computePeerDelta(addr string, local, peer *LedgerSnapshot) PeerDelta {
 	}
 
 	// Agent balances: union of keys.
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for id, lv := range local.AgentBalances {
 		pv := peer.AgentBalances[id]
 		if pv != lv {
@@ -323,6 +324,7 @@ func computePeerDelta(addr string, local, peer *LedgerSnapshot) PeerDelta {
 			out.Magnitude += absInt64(d)
 		}
 	}
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for id, pv := range peer.AgentBalances {
 		if _, seen := local.AgentBalances[id]; seen {
 			continue
@@ -334,6 +336,7 @@ func computePeerDelta(addr string, local, peer *LedgerSnapshot) PeerDelta {
 	}
 
 	// Escrow residuals: union of keys.
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for tid, lv := range local.EscrowResiduals {
 		pv := peer.EscrowResiduals[tid]
 		if pv != lv {
@@ -342,6 +345,7 @@ func computePeerDelta(addr string, local, peer *LedgerSnapshot) PeerDelta {
 			out.Magnitude += absInt64(d)
 		}
 	}
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for tid, pv := range peer.EscrowResiduals {
 		if _, seen := local.EscrowResiduals[tid]; seen {
 			continue
@@ -406,6 +410,7 @@ func (r *Report) Format() string {
 		if len(p.AgentDeltas) > 0 {
 			b.printf("    agent balance deltas (peer - local):\n")
 			ids := make([]string, 0, len(p.AgentDeltas))
+			// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 			for id := range p.AgentDeltas {
 				ids = append(ids, id)
 			}
@@ -417,6 +422,7 @@ func (r *Report) Format() string {
 		if len(p.EscrowDeltas) > 0 {
 			b.printf("    escrow residual deltas (peer - local):\n")
 			tids := make([]string, 0, len(p.EscrowDeltas))
+			// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 			for tid := range p.EscrowDeltas {
 				tids = append(tids, tid)
 			}

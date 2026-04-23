@@ -4658,6 +4658,7 @@ func (s *Server) handleAdminCalibrationAgents(w http.ResponseWriter, r *http.Req
 	}
 
 	entries := make([]*calibrationAgentEntry, 0, len(byActor))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for actorID, sigs := range byActor {
 		ac := canary.ComputeActorCalibration(sigs)
 		entries = append(entries, &calibrationAgentEntry{

@@ -134,6 +134,7 @@ func CanonicalBytes(ev *Evidence) []byte {
 
 	// Metrics sorted by key for determinism.
 	keys := make([]string, 0, len(ev.Metrics))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for k := range ev.Metrics {
 		keys = append(keys, k)
 	}

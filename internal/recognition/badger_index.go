@@ -97,6 +97,7 @@ func (m *MemoryIndexStore) ScanRecognitionPrefix(prefix string) (map[string][]by
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	result := make(map[string][]byte)
+	// safe: map-to-map snapshot copy; the result map preserves no insertion order
 	for k, v := range m.data {
 		if len(prefix) == 0 || len(k) >= len(prefix) && k[:len(prefix)] == prefix {
 			result[k] = v

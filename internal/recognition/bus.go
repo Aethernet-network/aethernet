@@ -3,6 +3,7 @@ package recognition
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"sync"
 
 	"github.com/Aethernet-network/aethernet/internal/event"
@@ -157,11 +158,27 @@ func (b *Bus) worker(id int) {
 }
 
 // dispatch routes a single committed event to all interested consumers.
+//
+// E.P2.A2 (F4 plan §6): consumers are dispatched in lex-sorted name order
+// so the sequence of processConsumer / Consume invocations is deterministic
+// across nodes. The recognition fabric's idempotency gate
+// (MarkRecognizedOnce) makes the per-consumer effect order-independent for
+// today's single-consumer workload, but cross-consumer ordering becomes
+// observable the moment any consumer's Consume side-effect interacts with
+// shared state — and the F4B LogicalKeyConsumer migration is about to
+// register a second canonical consumer (TVConsensus). Sorting now closes
+// the surface preemptively, mirroring the dispatcher's E.P1 fix.
 func (b *Bus) dispatch(item commitItem) {
 	b.mu.RLock()
-	consumers := make([]CommitConsumer, 0, len(b.consumers))
-	for _, c := range b.consumers {
-		consumers = append(consumers, c)
+	names := make([]string, 0, len(b.consumers))
+	// safe: collecting keys for the sort that immediately follows
+	for name := range b.consumers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	consumers := make([]CommitConsumer, 0, len(names))
+	for _, name := range names {
+		consumers = append(consumers, b.consumers[name])
 	}
 	b.mu.RUnlock()
 

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
@@ -504,7 +505,17 @@ func (e *Escrow) ReleaseSettlement(
 	}
 
 	// 3. Per-validator payouts (Q-weighted).
-	for vid, amount := range validators {
+	//
+	// E.P3 finding (F4 plan §6): iterate validator IDs in lex-sorted order
+	// so the sequence of TransferFromBucketLabeled calls — and therefore the
+	// process-local synthetic event-ID counter assignments and persisted
+	// TransferEntry insertion order — is identical across nodes. Final
+	// per-agent balances were already cluster-uniform (per-recipient amounts
+	// are pre-computed deterministically), but the persisted ledger entry
+	// stream diverged cross-node. Sorting closes the divergence at its source.
+	validatorIDs := sortedAgentIDs(validators)
+	for _, vid := range validatorIDs {
+		amount := validators[vid]
 		if amount == 0 {
 			continue
 		}
@@ -527,7 +538,11 @@ func (e *Escrow) ReleaseSettlement(
 	}
 
 	// 4. Gen-ledger royalty payouts.
-	for rid, amount := range genRecipients {
+	// Same rationale as #3 — sort recipients for deterministic per-node
+	// transfer-stream ordering.
+	genRecipientIDs := sortedAgentIDs(genRecipients)
+	for _, rid := range genRecipientIDs {
+		amount := genRecipients[rid]
 		if amount == 0 {
 			continue
 		}
@@ -617,8 +632,22 @@ func (e *Escrow) TotalEscrowed() uint64 {
 	defer e.mu.RUnlock()
 
 	var total uint64
+	// safe: commutative sum across entries; final scalar is order-independent
 	for _, entry := range e.entries {
 		total += entry.Amount
 	}
 	return total
+}
+
+// sortedAgentIDs returns the keys of m in lex-sorted order. Used to make
+// settlement-distribution transfer streams deterministic across nodes
+// (E.P3 finding, F4 plan §6).
+func sortedAgentIDs(m map[crypto.AgentID]uint64) []crypto.AgentID {
+	ids := make([]crypto.AgentID, 0, len(m))
+	// safe: collecting keys for the sort that immediately follows
+	for id := range m {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return string(ids[i]) < string(ids[j]) })
+	return ids
 }

@@ -3,6 +3,7 @@ package dispatch
 import (
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/Aethernet-network/aethernet/internal/event"
 )
@@ -42,8 +43,21 @@ func (d *Dispatcher) checkPrerequisites(ev *event.Event, consumers []Consumer) (
 		return &prerequisiteResult{allProjected: true}, nil
 	}
 
-	var missing []event.EventID
+	// E.P1.A1 (F4 plan §6): iterate prereqSet in lex-sorted EventID order so
+	// the resulting `missing` slice (which lands in AdmissionRecord.MissingPrerequisites)
+	// is byte-equal across nodes for the same input prereq set. Without this,
+	// nodes with the same DAG state could persist admission records that
+	// differ only by missing-prereq ordering — non-canonical drift but
+	// observable in operator triage and replay-conformance comparisons.
+	prereqIDs := make([]event.EventID, 0, len(prereqSet))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for pid := range prereqSet {
+		prereqIDs = append(prereqIDs, pid)
+	}
+	sort.Slice(prereqIDs, func(i, j int) bool { return prereqIDs[i] < prereqIDs[j] })
+
+	var missing []event.EventID
+	for _, pid := range prereqIDs {
 		isAnc, err := d.dag.IsAncestor(pid, ev.ID)
 		if err != nil {
 			return nil, fmt.Errorf("%w: consumer prerequisite %s for event %s: %v",

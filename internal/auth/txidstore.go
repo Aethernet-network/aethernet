@@ -99,6 +99,7 @@ func (s *TxIDStore) cleanup() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cutoff := time.Now().Add(-txidTTL).Unix()
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for key, ts := range s.local {
 		if ts < cutoff {
 			delete(s.local, key)

@@ -252,6 +252,7 @@ func (l *GenerationLedger) TotalVerifiedValue(window time.Duration) (uint64, err
 
 	cutoff := time.Now().Add(-window)
 	var total uint64
+	// safe: commutative sum over filtered entries
 	for _, e := range l.entries {
 		if e.Settlement == event.SettlementSettled && !e.RecordedAt.Before(cutoff) {
 			total += e.VerifiedValue
@@ -273,6 +274,7 @@ func (l *GenerationLedger) GenerationHistory(agentID crypto.AgentID, limit int, 
 	defer l.mu.RUnlock()
 
 	var matched []*GenerationEntry
+	// safe: filter pass; result is sorted by (Timestamp, EventID) below
 	for _, e := range l.entries {
 		if e.GeneratingAgent == agentID || e.BeneficiaryAgent == agentID {
 			matched = append(matched, e)
@@ -323,6 +325,7 @@ func (l *GenerationLedger) ContributionScore(agentID crypto.AgentID) (uint64, er
 	defer l.mu.RUnlock()
 
 	var sumClaimed, sumVerified uint64
+	// safe: commutative sum over filtered entries; final ratio is order-independent
 	for _, e := range l.entries {
 		if e.GeneratingAgent != agentID || e.Settlement != event.SettlementSettled {
 			continue

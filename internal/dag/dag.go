@@ -420,15 +420,22 @@ func (d *DAG) Get(id event.EventID) (*event.Event, error) {
 // connectivity, and contributes to the causal record that validators score.
 //
 // The returned slice is a copy and is safe to hold after further events are added.
-// The order of elements within the slice is not guaranteed.
+// Elements are returned in lex-sorted EventID order — E.P2.A1 (F4 plan §6).
+// Without this, callers like dispatcher.currentAnchor() that select tips[0] as
+// the per-node admission anchor would land different anchors on different nodes
+// for the same DAG state. Per locked invariant C-15 the anchor is non-canonical
+// node-local, so the divergence is harmless for consensus but pollutes
+// diagnostic comparisons and replay-conformance reasoning.
 func (d *DAG) Tips() []event.EventID {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
 	tips := make([]event.EventID, 0, len(d.tips))
+	// safe: collecting keys for the sort that immediately follows
 	for id := range d.tips {
 		tips = append(tips, id)
 	}
+	sort.Slice(tips, func(i, j int) bool { return tips[i] < tips[j] })
 	return tips
 }
 
@@ -448,6 +455,7 @@ func (d *DAG) PrimaryTips() []event.EventID {
 	defer d.mu.RUnlock()
 
 	primary := make([]event.EventID, 0, len(d.tips))
+	// safe: collecting keys for the sort that follows the filter
 	for id := range d.tips {
 		ev, ok := d.events[id]
 		if !ok {
@@ -461,11 +469,14 @@ func (d *DAG) PrimaryTips() []event.EventID {
 
 	// Fallback: if all tips are trajectory commits, return all tips.
 	if len(primary) == 0 && len(d.tips) > 0 {
+		// safe: fallback collection of keys; sort applied at the bottom of the function
 		for id := range d.tips {
 			primary = append(primary, id)
 		}
 	}
 
+	// Sort for cross-node determinism (E.P2.A1 — same rationale as Tips()).
+	sort.Slice(primary, func(i, j int) bool { return primary[i] < primary[j] })
 	return primary
 }
 
@@ -484,6 +495,7 @@ func (d *DAG) LocalTips(agentID string) []event.EventID {
 	defer d.mu.RUnlock()
 
 	local := make([]event.EventID, 0, 4)
+	// safe: collecting keys for the sort that follows the filter
 	for id := range d.tips {
 		ev, ok := d.events[id]
 		if !ok {
@@ -497,6 +509,8 @@ func (d *DAG) LocalTips(agentID string) []event.EventID {
 		}
 		local = append(local, id)
 	}
+	// Sort for cross-node determinism (E.P2.A1 — same rationale as Tips()).
+	sort.Slice(local, func(i, j int) bool { return local[i] < local[j] })
 	return local
 }
 
@@ -514,6 +528,7 @@ func (d *DAG) All() []*event.Event {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	result := make([]*event.Event, 0, len(d.events))
+	// safe: documented as unordered; callers requiring a canonical order use TopologicalSort
 	for _, e := range d.events {
 		result = append(result, e)
 	}
@@ -528,6 +543,7 @@ func (d *DAG) RecentEvents(minTimestamp uint64, maxCount int) []*event.Event {
 	defer d.mu.RUnlock()
 
 	var result []*event.Event
+	// safe: filter pass; final result sorted by CausalTimestamp below
 	for _, e := range d.events {
 		if e.CausalTimestamp >= minTimestamp {
 			result = append(result, e)
@@ -547,6 +563,7 @@ func (d *DAG) MaxTimestamp() uint64 {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	var max uint64
+	// safe: commutative max-reduction; final scalar is order-independent
 	for _, e := range d.events {
 		if e.CausalTimestamp > max {
 			max = e.CausalTimestamp
@@ -556,10 +573,16 @@ func (d *DAG) MaxTimestamp() uint64 {
 }
 
 // EventIDs returns all event IDs currently in the DAG.
+//
+// The returned slice is intentionally NOT sorted; the sole production
+// caller (Node.BuildCheckpoint) sorts the slice itself before hashing.
+// Calling sort here would duplicate the work without affecting any
+// observable property.
 func (d *DAG) EventIDs() []event.EventID {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	ids := make([]event.EventID, 0, len(d.events))
+	// safe: caller sorts (Node.BuildCheckpoint) before any deterministic use
 	for id := range d.events {
 		ids = append(ids, id)
 	}
@@ -710,11 +733,14 @@ func (d *DAG) TopologicalSort() ([]*event.Event, error) {
 	// Start by processing events whose in-degree is 0 (genesis events),
 	// then iteratively "remove" them and decrement their children's in-degrees.
 	inDegree := make(map[event.EventID]int, len(d.events))
+	// safe: building per-key inDegree counts; assignment commutes across keys
 	for id, e := range d.events {
 		inDegree[id] = len(e.CausalRefs)
 	}
 
 	queue := make([]event.EventID, 0)
+	// safe: queue ordering does not affect output; the final sort.Slice below
+	// imposes a deterministic (CausalTimestamp, EventID) total order on result
 	for id, deg := range inDegree {
 		if deg == 0 {
 			queue = append(queue, id)
@@ -727,6 +753,8 @@ func (d *DAG) TopologicalSort() ([]*event.Event, error) {
 		queue = queue[1:]
 		result = append(result, d.events[cur])
 
+		// safe: in-degree decrement is commutative; final sort.Slice below
+		// imposes the canonical (CausalTimestamp, EventID) total order
 		for childID := range d.children[cur] {
 			inDegree[childID]--
 			if inDegree[childID] == 0 {

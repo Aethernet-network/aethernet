@@ -174,6 +174,7 @@ func (r *Registry) GetByDisplayName(name string) (*CapabilityFingerprint, bool) 
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, fp := range r.agents {
 		if fp.DisplayName == name {
 			return fp.clone(), true
@@ -345,6 +346,7 @@ func (r *Registry) All(limit, offset int) []*CapabilityFingerprint {
 	defer r.mu.RUnlock()
 
 	result := make([]*CapabilityFingerprint, 0, len(r.agents))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, fp := range r.agents {
 		result = append(result, fp.clone())
 	}

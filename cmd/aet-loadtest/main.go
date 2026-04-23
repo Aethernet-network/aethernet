@@ -499,6 +499,7 @@ func runTransfers(c *sdk.Client, m int) transfersResult {
 	stateMu.Lock()
 	if len(stateCounts) > 0 {
 		fmt.Printf("  Phase 2 state breakdown:")
+		// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 		for state, count := range stateCounts {
 			fmt.Printf("  %s=%d", state, count)
 		}
@@ -691,6 +692,7 @@ func runTasks(c *sdk.Client, t int) tasksResult {
 	stateMu.Lock()
 	if len(stateCounts) > 0 {
 		fmt.Printf("  Phase 3 state breakdown:")
+		// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 		for state, count := range stateCounts {
 			fmt.Printf("  %s=%d", state, count)
 		}

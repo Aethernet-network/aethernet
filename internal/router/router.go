@@ -413,6 +413,7 @@ func (r *Router) RegisteredAgents() []*AgentCapability {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	result := make([]*AgentCapability, 0, len(r.capabilities))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, cap := range r.capabilities {
 		cp := *cap
 		result = append(result, &cp)
@@ -525,6 +526,7 @@ func (r *Router) findBestMatchLocked(task RoutableTask) *matchCandidate {
 	var best *matchCandidate
 	bestScore := 0.0 // require positive score (zero means no category alignment)
 
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, cap := range r.capabilities {
 		if !cap.Available {
 			continue
@@ -564,6 +566,7 @@ func (r *Router) findBestMatchLocked(task RoutableTask) *matchCandidate {
 func (r *Router) findNewcomerMatchLocked(task RoutableTask) *matchCandidate {
 	var candidates []matchCandidate
 
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, cap := range r.capabilities {
 		if !cap.Available || (cap.MaxConcurrent > 0 && cap.ActiveTasks >= cap.MaxConcurrent) {
 			continue
@@ -694,6 +697,7 @@ func (r *Router) maxBudgetForAgent(agentID crypto.AgentID, category string) uint
 // countAvailableLocked counts available agents. Must be called with r.mu held.
 func (r *Router) countAvailableLocked() int {
 	count := 0
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, cap := range r.capabilities {
 		if cap.Available {
 			count++
@@ -792,6 +796,7 @@ func (r *Router) applyCalibrationModifier(agentID crypto.AgentID, category strin
 	now := time.Now()
 
 	// Lazy eviction: remove entries that have aged past calibCacheMaxAge.
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for k, e := range r.calibCache {
 		if now.Sub(e.fetchedAt) > calibCacheMaxAge {
 			delete(r.calibCache, k)

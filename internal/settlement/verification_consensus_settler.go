@@ -396,6 +396,7 @@ func (s *VerificationConsensusSettler) computeValidatorPayouts(
 
 func sumPayouts(m map[crypto.AgentID]uint64) uint64 {
 	var s uint64
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, v := range m {
 		s += v
 	}

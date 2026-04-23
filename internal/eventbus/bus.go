@@ -124,6 +124,7 @@ func (b *Bus) Publish(evt Event) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, sub := range b.subscribers {
 		if !matchesFilter(sub.Filter, evt.Type) {
 			continue

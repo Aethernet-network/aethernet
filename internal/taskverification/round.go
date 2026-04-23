@@ -206,6 +206,7 @@ func (r *TaskVerificationRound) DeadlineForCurrentPhase() int64 {
 // that have contributed pass-weight to this round.
 func (r *TaskVerificationRound) DistinctPassFamilies() int {
 	count := 0
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, w := range r.ParticipatingFamilies {
 		if w > 0 {
 			count++
@@ -248,6 +249,7 @@ type canonicalFamilyEntry struct {
 func (r *TaskVerificationRound) Canonical() ([]byte, error) {
 	// Sort participating families by key for deterministic output.
 	families := make([]canonicalFamilyEntry, 0, len(r.ParticipatingFamilies))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for k, v := range r.ParticipatingFamilies {
 		families = append(families, canonicalFamilyEntry{Key: k, Value: v})
 	}

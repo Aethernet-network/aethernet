@@ -110,6 +110,7 @@ func (idx *Index) Put(state *RecognitionState) error {
 		idx.prereqIndex[state.PrerequisiteKey][key] = struct{}{}
 	} else if state.PrerequisiteKey == "" || state.Ready {
 		// Clean up prereq index when item becomes ready or prereq cleared.
+		// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 		for pk, set := range idx.prereqIndex {
 			if _, ok := set[key]; ok {
 				delete(set, key)
@@ -293,6 +294,7 @@ func (idx *Index) Stats() IndexStats {
 	defer idx.mu.RUnlock()
 	var s IndexStats
 	s.Total = len(idx.items)
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, item := range idx.items {
 		if item.Recognized {
 			s.Recognized++

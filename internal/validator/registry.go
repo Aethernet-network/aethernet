@@ -262,6 +262,7 @@ func (r *ValidatorRegistry) CheckStakeRequirements() {
 	maxTask := r.maxRecentTaskSize
 	// Count active validators (Active + Probationary).
 	activeCnt := 0
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, v := range r.validators {
 		if v.Status == StatusActive || v.Status == StatusProbationary {
 			activeCnt++
@@ -276,6 +277,7 @@ func (r *ValidatorRegistry) CheckStakeRequirements() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, v := range r.validators {
 		if v.Status != StatusActive && v.Status != StatusProbationary {
 			continue
@@ -533,6 +535,7 @@ func (r *ValidatorRegistry) ActiveValidators() []*Validator {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var out []*Validator
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, v := range r.validators {
 		if v.Status == StatusActive || v.Status == StatusProbationary {
 			cp := *v
@@ -549,6 +552,7 @@ func (r *ValidatorRegistry) ActiveValidatorsForCategory(category string) []*Vali
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var out []*Validator
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, v := range r.validators {
 		if v.Status != StatusActive && v.Status != StatusProbationary {
 			continue
@@ -571,6 +575,7 @@ func (r *ValidatorRegistry) ActiveEligibleCount() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	count := 0
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, v := range r.validators {
 		if v.Status == StatusActive || v.Status == StatusProbationary {
 			count++
@@ -592,6 +597,7 @@ func (r *ValidatorRegistry) ActiveCountForCategory(category string) int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	count := 0
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, v := range r.validators {
 		if v.Status != StatusActive && v.Status != StatusProbationary {
 			continue

@@ -102,6 +102,7 @@ func printReport(report *harness.HarnessReport, corpus []harness.BenchmarkCase) 
 		}
 	}
 	catNames := make([]string, 0, len(cats))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for c := range cats {
 		catNames = append(catNames, c)
 	}

@@ -290,6 +290,7 @@ func imdsRequest(method, url string, headers map[string]string) (string, error) 
 	if err != nil {
 		return "", err
 	}
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}

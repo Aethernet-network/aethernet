@@ -148,6 +148,7 @@ func (e *AssignmentEngine) clusterTotal(category string, validatorID string) int
 		return e.assignmentCount[category][validatorID]
 	}
 	total := 0
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for vid, cid := range e.clusters {
 		if cid == clusterID {
 			total += e.assignmentCount[category][vid]
@@ -218,11 +219,13 @@ func (e *AssignmentEngine) selectValidatorLocked(category string, excludeIDs []s
 	}
 
 	// Expand exclusions: also exclude all cluster mates of any excluded validator.
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for excludedID := range excluded {
 		clusterID, ok := e.clusters[excludedID]
 		if !ok {
 			continue
 		}
+		// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 		for vid, cid := range e.clusters {
 			if cid == clusterID {
 				excluded[vid] = true
@@ -392,6 +395,7 @@ func (e *AssignmentEngine) CheckPairwiseClusters(isStructured bool) [][]string {
 	}
 
 	// Ensure all known validators are in the parent map.
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for k1, inner := range e.pairwise {
 		find(k1)
 		for k2 := range inner {
@@ -400,6 +404,7 @@ func (e *AssignmentEngine) CheckPairwiseClusters(isStructured bool) [][]string {
 	}
 
 	// Flag pairs above threshold.
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for k1, inner := range e.pairwise {
 		for k2, rec := range inner {
 			if rec.SharedTasks < e.cfg.ClusterPairwiseMinShared {
@@ -413,6 +418,7 @@ func (e *AssignmentEngine) CheckPairwiseClusters(isStructured bool) [][]string {
 
 	// Build cluster groups.
 	groups := make(map[string][]string)
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for vid := range parent {
 		root := find(vid)
 		groups[root] = append(groups[root], vid)
@@ -422,6 +428,7 @@ func (e *AssignmentEngine) CheckPairwiseClusters(isStructured bool) [][]string {
 	// Clear old assignments first.
 	newClusters := make(map[string]string)
 	var result [][]string
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for root, members := range groups {
 		if len(members) < 2 {
 			continue // singleton — not a cluster
@@ -459,6 +466,7 @@ func (e *AssignmentEngine) SelectReplayExecutor(category string, originalVerifie
 		clusterID = originalVerifierCluster
 	}
 	if clusterID != "" {
+		// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 		for vid, cid := range e.clusters {
 			if cid == clusterID && vid != originalVerifierID {
 				excludeIDs = append(excludeIDs, vid)

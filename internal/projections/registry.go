@@ -109,6 +109,7 @@ func (r *ProjectionRegistry) List() []CanonicalProjection {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]CanonicalProjection, 0, len(r.entries))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, e := range r.entries {
 		out = append(out, e.projection)
 	}

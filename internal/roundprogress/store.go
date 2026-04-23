@@ -53,6 +53,7 @@ func (s *MemorySnapshotStore) GetAllForRound(roundID string) ([]*RoundProgressSn
 	defer s.mu.Unlock()
 	prefix := roundID + ":"
 	var result []*RoundProgressSnapshot
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for k, v := range s.snaps {
 		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
 			cp := *v
@@ -74,6 +75,7 @@ func (s *MemorySnapshotStore) DeleteRound(roundID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prefix := roundID + ":"
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for k := range s.snaps {
 		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
 			delete(s.snaps, k)

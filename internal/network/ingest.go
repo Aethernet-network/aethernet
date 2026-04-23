@@ -298,6 +298,7 @@ func (im *IngestManager) StageCount() map[EventStage]int {
 	im.mu.RLock()
 	defer im.mu.RUnlock()
 	counts := make(map[EventStage]int, 4)
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, t := range im.tracked {
 		counts[t.Stage]++
 	}
@@ -351,6 +352,7 @@ func (im *IngestManager) gc() {
 
 	now := time.Now()
 	var evicted int
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for id, t := range im.tracked {
 		switch t.Stage {
 		case StageAnnounced:
@@ -382,6 +384,7 @@ func (im *IngestManager) gc() {
 func (im *IngestManager) evictOldestAnnouncedLocked() {
 	var oldestID event.EventID
 	var oldestTime time.Time
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for id, t := range im.tracked {
 		if t.Stage == StageAnnounced {
 			if oldestTime.IsZero() || t.ReceivedAt.Before(oldestTime) {

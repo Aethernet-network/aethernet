@@ -540,6 +540,7 @@ func (vr *VotingRound) tallyVotesLocked(record *VoteRecord, advanceRound bool) e
 	// All correct nodes with the same bound snapshot and same votes compute
 	// the same weights and reach the same conclusion independently.
 	var totalWeight, yesWeight, noWeight uint64
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for voterID, yesVote := range record.Votes {
 		w, err := vr.computeWeightForRecord(record, voterID)
 		if err != nil {
@@ -633,6 +634,7 @@ type weightedValue struct {
 // of vote arrival order. Only approve votes (Votes[id] == true) contribute.
 func computeWeightedMedian(record *VoteRecord) uint64 {
 	var entries []weightedValue
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for voterID, approved := range record.Votes {
 		if !approved {
 			continue
@@ -726,10 +728,12 @@ func (vr *VotingRound) GetRecord(eventID event.EventID) (*VoteRecord, error) {
 	// concurrent RegisterVote calls on the original.
 	copied := *record
 	copied.Votes = make(map[crypto.AgentID]bool, len(record.Votes))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for k, v := range record.Votes {
 		copied.Votes[k] = v
 	}
 	copied.VerifiedValues = make(map[crypto.AgentID]uint64, len(record.VerifiedValues))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for k, v := range record.VerifiedValues {
 		copied.VerifiedValues[k] = v
 	}
@@ -760,6 +764,7 @@ func (vr *VotingRound) FinalizedCount() int {
 	defer vr.mu.RUnlock()
 
 	n := 0
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, r := range vr.records {
 		if r.Finalized {
 			n++
@@ -775,6 +780,7 @@ func (vr *VotingRound) PendingCount() int {
 	defer vr.mu.RUnlock()
 
 	n := 0
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, r := range vr.records {
 		if !r.Finalized {
 			n++

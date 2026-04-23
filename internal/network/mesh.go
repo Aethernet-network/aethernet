@@ -76,6 +76,7 @@ func NewMeshManager(config MeshConfig) *MeshManager {
 func (mm *MeshManager) SelectRelayTargets(peers map[crypto.AgentID]*Peer, exclude crypto.AgentID) []*Peer {
 	// Collect eligible V2 peers.
 	candidates := make([]*Peer, 0, len(peers))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, p := range peers {
 		if p.AgentID == exclude {
 			continue

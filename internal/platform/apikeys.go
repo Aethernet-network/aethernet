@@ -213,6 +213,7 @@ func (km *KeyManager) Stats() map[string]any {
 
 	var totalRequests uint64
 	active := 0
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for _, key := range km.keys {
 		if key.Active {
 			active++

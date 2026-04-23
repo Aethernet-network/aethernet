@@ -283,6 +283,7 @@ func (t *applyTracker) appliedIDs() []event.EventID {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	ids := make([]event.EventID, 0, len(t.applied))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for id := range t.applied {
 		ids = append(ids, id)
 	}
@@ -352,6 +353,7 @@ func expectedInterested(c dispatch.Consumer, events []*event.Event) []event.Even
 		}
 	}
 	ids := make([]event.EventID, 0, len(seen))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for id := range seen {
 		ids = append(ids, id)
 	}

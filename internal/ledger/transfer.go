@@ -372,6 +372,7 @@ func (l *TransferLedger) Balance(agentID crypto.AgentID) (uint64, error) {
 // Settled entry ever recorded.
 func (l *TransferLedger) balanceLocked(agentID crypto.AgentID) uint64 {
 	var inSettled, outReserved uint64
+	// safe: commutative sum across all entries; final balance is order-independent
 	for _, e := range l.entries {
 		if e.ToAgent == agentID && e.Settlement == event.SettlementSettled {
 			inSettled += e.Amount
@@ -532,6 +533,7 @@ func (l *TransferLedger) PendingOutgoing(agentID crypto.AgentID) (uint64, error)
 	defer l.mu.RUnlock()
 
 	var total uint64
+	// safe: commutative sum; final scalar is order-independent
 	for _, e := range l.entries {
 		if e.FromAgent == agentID && e.Settlement == event.SettlementOptimistic {
 			total += e.Amount
@@ -562,6 +564,7 @@ func (l *TransferLedger) ResetOptimisticOutflows(agentID crypto.AgentID) int {
 	defer l.mu.Unlock()
 
 	var removed int
+	// safe: GC by predicate; per-entry delete is independent and final state is set-difference
 	for id, e := range l.entries {
 		if e.FromAgent == agentID && e.Settlement == event.SettlementOptimistic {
 			delete(l.entries, id)
@@ -584,6 +587,7 @@ func (l *TransferLedger) LastTransferByReason(agentID crypto.AgentID, reason str
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	var latest time.Time
+	// safe: commutative max-by-After reduction; final timestamp is order-independent
 	for _, e := range l.entries {
 		if e.ToAgent == agentID && e.Settlement == event.SettlementSettled && e.Reason == reason {
 			if e.RecordedAt.After(latest) {
@@ -608,6 +612,7 @@ func (l *TransferLedger) History(agentID crypto.AgentID, limit int, offset int) 
 	defer l.mu.RUnlock()
 
 	var matched []*TransferEntry
+	// safe: filter pass; result is sorted by (CausalTimestamp, EventID) before paging below
 	for _, e := range l.entries {
 		if e.IsGenesis {
 			continue // genesis credits are internal funding mechanics, not transfer history

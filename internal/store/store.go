@@ -1113,6 +1113,7 @@ func (s *Store) AllVoteEventIDs() ([]string, error) {
 		return nil, err
 	}
 	ids := make([]string, 0, len(seen))
+	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
 	for id := range seen {
 		ids = append(ids, id)
 	}
