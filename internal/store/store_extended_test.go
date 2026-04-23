@@ -899,6 +899,82 @@ func TestAdmission_UnknownStateValue_RejectedWithErr(t *testing.T) {
 	}
 }
 
+// TestAdmission_UnknownStrategyValue_RejectedWithErr is the F4B step 1
+// slice 3 generalization of the FINDING #5/#6 gating discipline to the
+// new Strategy field. A hand-crafted v2 record with Strategy outside
+// dispatch.IsKnownAdmissionStrategy's enum MUST surface
+// dispatch.ErrUnknownAdmissionStrategy on read.
+//
+// The gate prevents a future binary from writing a record with a new
+// AdmissionStrategy value that the running binary cannot route. Without
+// this gate, the dispatcher's admit-strategy switch would default-
+// fallthrough into the wrong path (e.g., treating a logical-key record
+// as content-hash), corrupting per-(consumer, key) lifecycle.
+func TestAdmission_UnknownStrategyValue_RejectedWithErr(t *testing.T) {
+	s := openStore(t)
+
+	raw := []byte(`{
+		"schema_version": 2,
+		"key": "dispatch:weird-strategy",
+		"strategy": 99,
+		"state": 3,
+		"dag_anchor": "anchor-weird-strat",
+		"consumers": {"c": 1},
+		"event_id": "evt-weird-strat",
+		"event_type": "task-verification-consensus"
+	}`)
+	putRaw(t, s, "dispatch:weird-strategy", raw)
+
+	_, err := s.GetAdmission("dispatch:weird-strategy")
+	if !errors.Is(err, dispatch.ErrUnknownAdmissionStrategy) {
+		t.Fatalf("GetAdmission: got %v, want ErrUnknownAdmissionStrategy", err)
+	}
+
+	_, err = s.AllAdmissions()
+	if !errors.Is(err, dispatch.ErrUnknownAdmissionStrategy) {
+		t.Fatalf("AllAdmissions: got %v, want ErrUnknownAdmissionStrategy", err)
+	}
+}
+
+// TestAdmission_v1Record_DefaultsContentHashStrategy verifies the
+// dual-read backward-compat for v1 records. A pre-F4B v1 record on
+// disk has no `strategy` field; JSON-decoding it into the v2
+// AdmissionRecord struct MUST default Strategy to
+// AdmissionStrategyContentHash (zero value), which matches the
+// content-hash flow the v1 record describes.
+//
+// This test confirms validateAdmissionDecode does NOT reject
+// a legacy v1 record once the binary bumps to AdmissionCurrentVersion=2.
+func TestAdmission_v1Record_DefaultsContentHashStrategy(t *testing.T) {
+	s := openStore(t)
+
+	// v1 record shape — no strategy field, no logical_key field.
+	raw := []byte(`{
+		"schema_version": 1,
+		"key": "dispatch:legacy-v1",
+		"state": 3,
+		"dag_anchor": "anchor-legacy",
+		"consumers": {"c": 1},
+		"event_id": "evt-legacy",
+		"event_type": "Transfer"
+	}`)
+	putRaw(t, s, "dispatch:legacy-v1", raw)
+
+	got, err := s.GetAdmission("dispatch:legacy-v1")
+	if err != nil {
+		t.Fatalf("GetAdmission v1 record: %v", err)
+	}
+	if got.Strategy != dispatch.AdmissionStrategyContentHash {
+		t.Errorf("Strategy: got %v, want content-hash (zero-value default for v1 records)", got.Strategy)
+	}
+	if got.LogicalKey != "" {
+		t.Errorf("LogicalKey: got %q, want empty (correct for content-hash flow)", got.LogicalKey)
+	}
+	if got.SchemaVersion != 1 {
+		t.Errorf("SchemaVersion: got %d, want 1 (preserved on read)", got.SchemaVersion)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 7. Coverage of remaining typed surfaces — round-trip + delete + scan
 // ---------------------------------------------------------------------------

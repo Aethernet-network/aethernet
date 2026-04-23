@@ -26,31 +26,37 @@ type EvidenceEmitter func(ev *event.Event) error
 
 // Dispatcher is the CanonicalEventDispatcher primitive. It sits between
 // the recognition fabric and all canonical-event consumers, guaranteeing
-// exactly-once successful Apply per (event, consumer) pair (C-1).
+// exactly-once successful Apply per (event, consumer) pair (C-1) for
+// content-hash consumers and exactly-once successful Apply per
+// (consumer, logical_key) pair for logical-key consumers (F4B,
+// locked-invariant review §3.5).
 //
-// Consumers register before startup via Register. Events are delivered
-// via Admit, which may be called from any goroutine, any number of times
-// per event — the dispatcher absorbs duplication at a single
-// architectural choke point.
+// Consumers register before startup via Register (content-hash) or
+// RegisterLogicalKey (logical-key). Events are delivered via Admit,
+// which may be called from any goroutine, any number of times per
+// event — the dispatcher absorbs duplication at a single architectural
+// choke point.
 type Dispatcher struct {
-	mu              sync.RWMutex
-	consumers       map[string]Consumer
-	store           AdmissionStore
-	dag             DAGAnchorReader
-	epochFn         func() uint64
-	evidenceEmitter EvidenceEmitter
-	deferralIndex   map[event.EventID][]string // prereq EventID → admission keys waiting
+	mu                  sync.RWMutex
+	consumers           map[string]Consumer
+	logicalKeyConsumers map[string]LogicalKeyConsumer
+	store               AdmissionStore
+	dag                 DAGAnchorReader
+	epochFn             func() uint64
+	evidenceEmitter     EvidenceEmitter
+	deferralIndex       map[event.EventID][]string // prereq EventID → admission keys waiting
 }
 
 // NewDispatcher constructs a dispatcher. All parameters are required.
 // Register consumers before calling Recover or Admit.
 func NewDispatcher(store AdmissionStore, dag DAGAnchorReader, epochFn func() uint64) *Dispatcher {
 	return &Dispatcher{
-		consumers:     make(map[string]Consumer),
-		store:         store,
-		dag:           dag,
-		epochFn:       epochFn,
-		deferralIndex: make(map[event.EventID][]string),
+		consumers:           make(map[string]Consumer),
+		logicalKeyConsumers: make(map[string]LogicalKeyConsumer),
+		store:               store,
+		dag:                 dag,
+		epochFn:             epochFn,
+		deferralIndex:       make(map[event.EventID][]string),
 	}
 }
 
@@ -62,10 +68,11 @@ func (d *Dispatcher) SetEvidenceEmitter(fn EvidenceEmitter) {
 	d.evidenceEmitter = fn
 }
 
-// Register adds a consumer. Must be called before Recover or Admit.
-// Performs structural validation per C-8. Returns an error if the
-// consumer fails validation or if a consumer with the same Name is
-// already registered.
+// Register adds a content-hash consumer. Must be called before Recover
+// or Admit. Performs structural validation per C-8. Returns an error if
+// the consumer fails validation or if a consumer with the same Name is
+// already registered (in either the content-hash OR logical-key map —
+// names are unique across both kinds).
 func (d *Dispatcher) Register(c Consumer) error {
 	if err := validateConsumer(c); err != nil {
 		return err
@@ -75,29 +82,98 @@ func (d *Dispatcher) Register(c Consumer) error {
 	if _, exists := d.consumers[c.Name()]; exists {
 		return fmt.Errorf("dispatch: consumer %q already registered", c.Name())
 	}
+	if _, exists := d.logicalKeyConsumers[c.Name()]; exists {
+		return fmt.Errorf("dispatch: consumer name %q already registered as logical-key consumer; names must be unique across both kinds", c.Name())
+	}
 	d.consumers[c.Name()] = c
 	return nil
 }
 
-// ConsumerCount returns the number of registered consumers.
+// RegisterLogicalKey adds a logical-key consumer (Type E, F4B). Must be
+// called before Recover or Admit. Performs structural validation
+// (mirroring Register's C-8 check). Returns an error if the consumer
+// fails validation or if a consumer with the same Name is already
+// registered (in either the content-hash OR logical-key map — names
+// are unique across both kinds).
+//
+// Per F4 plan v2 §4.4 and locked-invariant review §3.4. The dispatcher
+// routes events through admitLogicalKey for any LogicalKeyConsumer
+// whose Interested(ev) returns true; the same event can independently
+// flow through both the logical-key path AND the content-hash path
+// when consumers of both kinds are interested in it.
+func (d *Dispatcher) RegisterLogicalKey(c LogicalKeyConsumer) error {
+	if err := validateLogicalKeyConsumer(c); err != nil {
+		return err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, exists := d.logicalKeyConsumers[c.Name()]; exists {
+		return fmt.Errorf("dispatch: logical-key consumer %q already registered", c.Name())
+	}
+	if _, exists := d.consumers[c.Name()]; exists {
+		return fmt.Errorf("dispatch: consumer name %q already registered as content-hash consumer; names must be unique across both kinds", c.Name())
+	}
+	d.logicalKeyConsumers[c.Name()] = c
+	return nil
+}
+
+// ConsumerCount returns the number of registered content-hash consumers.
+// Logical-key consumers are counted separately via LogicalKeyConsumerCount.
 func (d *Dispatcher) ConsumerCount() int {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return len(d.consumers)
 }
 
+// LogicalKeyConsumerCount returns the number of registered logical-key
+// consumers (F4B Type E).
+func (d *Dispatcher) LogicalKeyConsumerCount() int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return len(d.logicalKeyConsumers)
+}
+
 // Admit processes a canonical event delivery. Thread-safe; may be called
 // from multiple goroutines concurrently. The dispatcher guarantees
-// exactly-once invocation of each interested consumer's Apply method
-// per canonical event (C-1).
+// exactly-once invocation of each interested content-hash consumer's
+// Apply method per canonical event (C-1) and exactly-once invocation
+// of each interested logical-key consumer's Apply method per
+// (consumer, logical_key) pair (F4B; locked-invariant review §3.5).
 //
 // The admission flow:
-//  1. Canonicalize the event and compute the BLAKE3 admission key (outside
-//     any transaction, per C-3/C-5).
-//  2. Read-modify-write the admission record (atomic, per C-2).
-//  3. Verify the DAG anchor (per C-6).
-//  4. Invoke consumers outside the transaction (per C-5).
+//  1. Logical-key admission path (F4B). Fires for any registered
+//     LogicalKeyConsumer whose Interested(ev) returns true. Independent
+//     of the content-hash path; both flows can run for the same event.
+//     Cheap fast-path when no logical-key consumers are registered.
+//  2. Content-hash admission path (F3-B, unchanged):
+//     a. Canonicalize the event and compute the BLAKE3 admission key
+//        (outside any transaction, per C-3/C-5).
+//     b. Verify the DAG anchor (per C-6).
+//     c. Read-modify-write the admission record (atomic, per C-2).
+//     d. Invoke consumers outside the transaction (per C-5).
+//
+// The two paths are kept structurally separate so the F3-B content-hash
+// behavior — including error precedence (AdmissionKey before
+// VerifyAnchor) and persistence layout — is preserved bit-exact for
+// the no-logical-key-consumer configuration that production runs today.
 func (d *Dispatcher) Admit(ctx context.Context, ev *event.Event) error {
+	// F4B logical-key admission. Cheap fast-path when no logical-key
+	// consumers are registered (the snapshot returns empty, no
+	// iteration, no per-event work, no anchor verification).
+	if err := d.admitLogicalKey(ctx, ev); err != nil {
+		return err
+	}
+
+	// Existing F3-B content-hash flow — preserved bit-exact.
+	return d.admitContentHash(ctx, ev)
+}
+
+// admitContentHash runs the F3-B content-hash admission flow. Extracted
+// from the original Admit body in F4B step 1 slice 4 so the logical-key
+// branch can sit ahead of it without altering this path. Behavior is
+// bit-identical to the pre-F4B body, including error precedence
+// (AdmissionKey computed before VerifyAnchor).
+func (d *Dispatcher) admitContentHash(ctx context.Context, ev *event.Event) error {
 	key, err := AdmissionKey(ev)
 	if err != nil {
 		return fmt.Errorf("dispatch: admission key: %w", err)

@@ -28,7 +28,17 @@ import "github.com/Aethernet-network/aethernet/internal/event"
 //	v1: initial F3-B shape (SchemaVersion, Key, State, DAGAnchor,
 //	    PrerequisiteSchemaVersion, Consumers map, EventID, EventType,
 //	    CreatedAtEpoch, MissingPrerequisites, EvidenceEmitted)
-const AdmissionCurrentVersion uint32 = 1
+//
+//	v2: F4B logical-key admission. Adds Strategy field
+//	    (content-hash | logical-key) and LogicalKey field. v1 records
+//	    dual-read: missing Strategy field defaults to
+//	    AdmissionStrategyContentHash (zero value), missing LogicalKey
+//	    defaults to "" (correct for content-hash). Backward-compat
+//	    preserved — existing v1 records on disk decode into the v2
+//	    struct with Strategy=AdmissionStrategyContentHash and
+//	    LogicalKey="", which is the correct interpretation for the
+//	    content-hash flow they describe.
+const AdmissionCurrentVersion uint32 = 2
 
 // AdmissionState represents the lifecycle state of a canonical event's
 // admission record in the dispatcher. Five states per invariant C-4;
@@ -103,6 +113,60 @@ func (s PerConsumerStatus) String() string {
 	}
 }
 
+// AdmissionStrategy is the consumer-declared admission-key derivation
+// strategy. Per locked-invariant review §3.1 (C-3'): every consumer
+// declares its strategy at registration; the dispatcher routes events
+// into the appropriate admission flow based on which consumers are
+// interested.
+//
+// Strategy is part of the persisted AdmissionRecord shape so storage-
+// layer reads can defensively assert the on-disk record matches the
+// running binary's understanding of the strategy enum (analogous to
+// the SchemaVersion / State gating from F4A FINDINGs #5/#6).
+type AdmissionStrategy uint8
+
+const (
+	// AdmissionStrategyContentHash is the F3-B content-hash flow:
+	// admission key is BLAKE3(canonical-bytes(ev)). Default value (0)
+	// preserves zero-value semantics for v1 records that predate the
+	// Strategy field.
+	AdmissionStrategyContentHash AdmissionStrategy = 0
+	// AdmissionStrategyLogicalKey is the F4B logical-key flow:
+	// admission key is "lk:" + consumer_name + ":" + LogicalKey.
+	// One admission record per (consumer, key); Apply fires exactly
+	// once per (consumer, key), regardless of how many byte-distinct
+	// canonical events project into that key.
+	AdmissionStrategyLogicalKey AdmissionStrategy = 1
+)
+
+// IsKnownAdmissionStrategy returns true iff s is one of the enum values
+// defined above. The store layer's decode path rejects records with
+// unknown strategy values via ErrUnknownAdmissionStrategy, gating
+// mixed-binary clusters in the same shape as IsKnownAdmissionState.
+//
+// New AdmissionStrategy values must be added to the const block AND to
+// this function in the same commit. Both are caught by the no-bypass
+// dispatch lint suite via TestUnknownAdmissionStrategy_Rejected.
+func IsKnownAdmissionStrategy(s AdmissionStrategy) bool {
+	switch s {
+	case AdmissionStrategyContentHash,
+		AdmissionStrategyLogicalKey:
+		return true
+	}
+	return false
+}
+
+func (s AdmissionStrategy) String() string {
+	switch s {
+	case AdmissionStrategyContentHash:
+		return "content-hash"
+	case AdmissionStrategyLogicalKey:
+		return "logical-key"
+	default:
+		return "unknown"
+	}
+}
+
 // ConsumerType is the taxonomy category from §12 of the locked design.
 // Determines which conformance template applies and which additional
 // invariants (Invariant 8.1, 8.2) the consumer must satisfy.
@@ -141,12 +205,23 @@ const (
 )
 
 // AdmissionRecord is the on-disk representation of a canonical event's
-// dispatcher state. Keyed by the BLAKE3 hash of the event's canonical
-// bytes (invariant C-3). Persisted in BadgerDB under the "dispatch:"
-// prefix. Non-canonical node-local machinery per C-15.
+// dispatcher state. For content-hash admissions (the F3-B default),
+// keyed by the BLAKE3 hash of the event's canonical bytes (invariant
+// C-3). For logical-key admissions (F4B, locked-invariant review §3.5),
+// keyed by "lk:" + consumer_name + ":" + LogicalKey. Persisted in
+// BadgerDB under the "dispatch:" prefix. Non-canonical node-local
+// machinery per C-15.
+//
+// Strategy and LogicalKey were introduced in v2 (F4B). v1 records on
+// disk decode into the v2 struct shape with Strategy=0
+// (AdmissionStrategyContentHash, the zero-value default) and
+// LogicalKey="", which is the correct interpretation for the
+// content-hash flow they describe.
 type AdmissionRecord struct {
 	SchemaVersion             uint32                       `json:"schema_version"`
 	Key                       string                       `json:"key"`
+	Strategy                  AdmissionStrategy            `json:"strategy"`
+	LogicalKey                LogicalKey                   `json:"logical_key,omitempty"`
 	State                     AdmissionState               `json:"state"`
 	DAGAnchor                 event.EventID                `json:"dag_anchor"`
 	PrerequisiteSchemaVersion uint32                       `json:"prerequisite_schema_version"`

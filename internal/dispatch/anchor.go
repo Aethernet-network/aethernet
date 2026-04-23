@@ -35,6 +35,29 @@ var ErrAdmissionSchemaTooNew = errors.New("dispatch: admission record schema_ver
 // upstream of state-value gating).
 var ErrUnknownAdmissionState = errors.New("dispatch: admission record state value not in AdmissionState enum — operator action: upgrade binary")
 
+// ErrUnknownAdmissionStrategy indicates an AdmissionRecord persisted with
+// a Strategy value not in the AdmissionStrategy enum (per
+// IsKnownAdmissionStrategy). Returned by store.GetAdmission and
+// store.AllAdmissions for the same reason as ErrAdmissionSchemaTooNew /
+// ErrUnknownAdmissionState: silently surfacing an unknown strategy
+// would let the dispatcher's admission-path switch make an incorrect
+// routing decision (F4B step 1 slice 3 generalization of FINDINGs #5/#6).
+//
+// Adding a new AdmissionStrategy value requires bumping
+// AdmissionCurrentVersion in the same commit (so SchemaVersion gating
+// catches the situation upstream of strategy-value gating).
+var ErrUnknownAdmissionStrategy = errors.New("dispatch: admission record strategy value not in AdmissionStrategy enum — operator action: upgrade binary")
+
+// errLogicalKeyConsumerNil indicates RegisterLogicalKey was called with
+// a nil consumer. Sentinel error so registration test cases can assert
+// the precise failure mode.
+var errLogicalKeyConsumerNil = errors.New("dispatch: logical-key consumer is nil")
+
+// errLogicalKeyConsumerEmptyName indicates RegisterLogicalKey was called
+// with a consumer whose Name() returns the empty string. Mirrors the
+// empty-name check in validateConsumer.
+var errLogicalKeyConsumerEmptyName = errors.New("dispatch: logical-key consumer Name() must be non-empty")
+
 // DAGAnchorReader is the subset of *dag.DAG used by the dispatcher for
 // anchor verification. *dag.DAG satisfies this interface.
 type DAGAnchorReader interface {

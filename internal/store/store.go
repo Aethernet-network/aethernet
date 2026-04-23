@@ -1506,8 +1506,10 @@ func (s *Store) AllChallenges() (map[string][]byte, error) {
 // ---------------------------------------------------------------------------
 
 // validateAdmissionDecode gates a freshly-decoded AdmissionRecord against
-// the running binary's known schema/state surface. F4B step 1 fix for F4A
-// FINDINGs #5 (admission-schema-no-gate) and #6 (admission-state-no-gate).
+// the running binary's known schema/state/strategy surface. F4B step 1
+// fix for F4A FINDINGs #5 (admission-schema-no-gate) and #6
+// (admission-state-no-gate); slice 3 generalizes the same shape to the
+// new Strategy field.
 //
 // Returns:
 //   - dispatch.ErrAdmissionSchemaTooNew if rec.SchemaVersion exceeds
@@ -1516,10 +1518,13 @@ func (s *Store) AllChallenges() (map[string][]byte, error) {
 //   - dispatch.ErrUnknownAdmissionState if rec.State is outside the known
 //     enum. A defaulted-unknown state in the dispatcher's switch would
 //     make an incorrect lifecycle decision.
+//   - dispatch.ErrUnknownAdmissionStrategy if rec.Strategy is outside the
+//     known enum. A defaulted-unknown strategy in the admission-path
+//     switch would route the record into the wrong flow.
 //
-// Both errors fail loudly. The dispatcher's storage-error fail-closed
-// invariant (C-7) propagates these to startup-abort, matching the
-// "fail-loudly on Recover() path" recommendation in
+// All three errors fail loudly. The dispatcher's storage-error
+// fail-closed invariant (C-7) propagates these to startup-abort,
+// matching the "fail-loudly on Recover() path" recommendation in
 // docs/architecture/locked-invariants-review-f4a.md §4.1.
 func validateAdmissionDecode(rec *dispatch.AdmissionRecord) error {
 	if rec.SchemaVersion > dispatch.AdmissionCurrentVersion {
@@ -1530,6 +1535,10 @@ func validateAdmissionDecode(rec *dispatch.AdmissionRecord) error {
 	if !dispatch.IsKnownAdmissionState(rec.State) {
 		return fmt.Errorf("store: admission %s: %w: state=%d",
 			rec.Key, dispatch.ErrUnknownAdmissionState, rec.State)
+	}
+	if !dispatch.IsKnownAdmissionStrategy(rec.Strategy) {
+		return fmt.Errorf("store: admission %s: %w: strategy=%d",
+			rec.Key, dispatch.ErrUnknownAdmissionStrategy, rec.Strategy)
 	}
 	return nil
 }
