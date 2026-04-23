@@ -1,8 +1,8 @@
 // Package lint implements the no-bypass CI check for the
 // CanonicalEventDispatcher per invariant C-10. Fails the build if any
-// type that satisfies dispatch.Consumer is found in the codebase without
-// a corresponding dispatcher registration, unless suppressed by a
-// structured pragma.
+// canonical settlement effect (currently: VerificationConsensusSettler.Settle)
+// is invoked outside the dispatcher's own consumer Apply path, unless the
+// call site is justified by an inline dispatch:lint pragma.
 //
 // Runs as part of go test ./... via TestNoBypassDispatchLint.
 package lint
@@ -10,6 +10,7 @@ package lint
 import (
 	"fmt"
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -19,19 +20,39 @@ import (
 
 var dispatchPragmaRE = regexp.MustCompile(`dispatch:lint\s+(\S+)\s+"([^"]*)"`)
 
-// Violation records a type that satisfies dispatch.Consumer without
-// registration through the dispatcher.
+// canonicalSettlerTypeNames lists receiver types whose method calls are
+// canonical settlement effects subject to the no-bypass rule. The lint
+// flags any call to .Settle() on a value whose declared type matches one
+// of these names (matched as the trailing ident of the type expression).
+//
+// To extend the rule to a new canonical-effect emitter, add its type
+// name here. Tests for this lint use a fixture-only sentinel name
+// ("FixtureCanonicalSettler") to verify detection without requiring a
+// real production type for the test.
+var canonicalSettlerTypeNames = map[string]bool{
+	"VerificationConsensusSettler": true,
+	"FixtureCanonicalSettler":      true, // test-only fixture sentinel
+}
+
+// dispatcherInternalPrefix marks files whose Settle calls are the
+// legitimate dispatcher-mediated settlement path. The dispatcher's own
+// consumer Apply path IS the canonical settlement entrypoint; flagging
+// it would be circular.
+const dispatcherInternalPrefix = "internal/dispatch/"
+
+// Violation records a canonical settler call site that bypasses the
+// dispatcher without an authorizing pragma.
 type Violation struct {
-	File    string
-	Line    int
+	File     string
+	Line     int
 	TypeName string
-	Detail  string
+	Detail   string
 }
 
 // Report is the output of Check.
 type Report struct {
-	Violations              []Violation
-	RecognizedPragmas       []string
+	Violations               []Violation
+	RecognizedPragmas        []string
 	InsufficientSuppressions []Violation
 }
 
@@ -42,20 +63,22 @@ func (r *Report) HasFailures() bool {
 
 // Check scans the module rooted at moduleRoot for no-bypass violations.
 //
-// Current implementation (Part C, zero consumers registered): scans for
-// any Go source file that imports the dispatch package and contains a
-// direct fabric wiring pattern (Bus.Register call with a type that
-// implements Consumer methods). Also validates dispatch:lint pragma
-// suppression format.
-//
-// This is deliberately lightweight for Part C (no consumers exist yet).
-// When the first consumer is wired in commit 9 of §9, this function
-// will be extended with full type-graph analysis matching the projection
-// lint's AST-walking pattern.
+// The check runs in two passes per file:
+//  1. Pragma scan: validates dispatch:lint pragma format (>=20 chars,
+//     >=3 words justification) and records line numbers for later
+//     suppression matching.
+//  2. AST scan: parses every non-test .go file under internal/, walks
+//     for CallExpr whose method is "Settle" and whose receiver resolves
+//     (via per-file struct-field and var-decl tables) to one of the
+//     canonical settler types listed in canonicalSettlerTypeNames.
+//     A flagged call is suppressed iff (a) its file is under
+//     internal/dispatch/, or (b) a valid dispatch:lint pragma appears
+//     within 3 lines above the call.
 func Check(moduleRoot string) (*Report, error) {
 	report := &Report{}
-
 	internalDir := filepath.Join(moduleRoot, "internal")
+	fset := token.NewFileSet()
+
 	err := filepath.Walk(internalDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -75,20 +98,20 @@ func Check(moduleRoot string) (*Report, error) {
 			return readErr
 		}
 		content := string(data)
+		rel := relPath(moduleRoot, path)
 
-		// Scan for dispatch:lint pragmas.
-		for _, match := range dispatchPragmaRE.FindAllStringSubmatch(content, -1) {
-			tag := match[1]
-			justification := match[2]
-			if len(justification) < 20 || len(strings.Fields(justification)) < 3 {
-				report.InsufficientSuppressions = append(report.InsufficientSuppressions, Violation{
-					File:   relPath(moduleRoot, path),
-					Detail: fmt.Sprintf("dispatch:lint pragma %q has insufficient justification %q (need >=20 chars, >=3 words)", tag, justification),
-				})
-			} else {
-				report.RecognizedPragmas = append(report.RecognizedPragmas, relPath(moduleRoot, path)+": "+tag)
-			}
+		// Pragma scan + per-line line-number index.
+		pragmaLines := scanPragmas(content, rel, report)
+
+		// AST scan for Settle bypass.
+		file, parseErr := parser.ParseFile(fset, path, data, parser.ParseComments)
+		if parseErr != nil {
+			// Non-fatal — file may have intentional parse-incompatible test
+			// fixtures elsewhere. Skip and continue.
+			return nil
 		}
+		settlerNames := collectSettlerReceivers(file)
+		findSettleBypass(file, fset, settlerNames, pragmaLines, rel, report)
 
 		return nil
 	})
@@ -97,6 +120,206 @@ func Check(moduleRoot string) (*Report, error) {
 	}
 
 	return report, nil
+}
+
+// scanPragmas extracts dispatch:lint pragmas, validates them, appends to
+// the report's RecognizedPragmas/InsufficientSuppressions, and returns
+// the set of line numbers (1-indexed) carrying valid pragmas. Line
+// numbers are derived by counting newlines up to each match offset.
+func scanPragmas(content, rel string, report *Report) map[int]bool {
+	pragmaLines := make(map[int]bool)
+	for _, idx := range dispatchPragmaRE.FindAllStringSubmatchIndex(content, -1) {
+		start := idx[0]
+		match := content[start:idx[1]]
+		sub := dispatchPragmaRE.FindStringSubmatch(match)
+		if len(sub) < 3 {
+			continue
+		}
+		tag := sub[1]
+		justification := sub[2]
+		line := 1 + strings.Count(content[:start], "\n")
+		if len(justification) < 20 || len(strings.Fields(justification)) < 3 {
+			report.InsufficientSuppressions = append(report.InsufficientSuppressions, Violation{
+				File:   rel,
+				Line:   line,
+				Detail: fmt.Sprintf("dispatch:lint pragma %q has insufficient justification %q (need >=20 chars, >=3 words)", tag, justification),
+			})
+			continue
+		}
+		report.RecognizedPragmas = append(report.RecognizedPragmas, rel+": "+tag)
+		pragmaLines[line] = true
+	}
+	return pragmaLines
+}
+
+// collectSettlerReceivers returns the set of identifier names within
+// file that resolve to one of the canonical settler types listed in
+// canonicalSettlerTypeNames. Includes:
+//   - struct field names whose type is *<canonical>
+//   - top-level var names whose type is *<canonical>
+//   - function parameter / local var names whose type is *<canonical>
+//
+// The check is conservative: receiver identifier names matching are
+// candidates, but the final bypass decision still requires the call's
+// .Sel.Name to be "Settle".
+func collectSettlerReceivers(file *ast.File) map[string]bool {
+	names := make(map[string]bool)
+
+	// Walk struct field declarations.
+	ast.Inspect(file, func(n ast.Node) bool {
+		ts, ok := n.(*ast.TypeSpec)
+		if !ok {
+			return true
+		}
+		st, ok := ts.Type.(*ast.StructType)
+		if !ok {
+			return true
+		}
+		for _, field := range st.Fields.List {
+			if !isCanonicalSettlerType(field.Type) {
+				continue
+			}
+			for _, name := range field.Names {
+				names[name.Name] = true
+			}
+		}
+		return true
+	})
+
+	// Walk var/local declarations (DeclStmt + GenDecl + ValueSpec).
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch d := n.(type) {
+		case *ast.GenDecl:
+			if d.Tok != token.VAR {
+				return true
+			}
+			for _, spec := range d.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				if vs.Type != nil && isCanonicalSettlerType(vs.Type) {
+					for _, name := range vs.Names {
+						names[name.Name] = true
+					}
+				}
+			}
+		case *ast.FuncDecl:
+			if d.Type.Params != nil {
+				for _, field := range d.Type.Params.List {
+					if !isCanonicalSettlerType(field.Type) {
+						continue
+					}
+					for _, name := range field.Names {
+						names[name.Name] = true
+					}
+				}
+			}
+		}
+		return true
+	})
+
+	return names
+}
+
+// isCanonicalSettlerType reports whether expr is a pointer to one of
+// canonicalSettlerTypeNames. Accepts both bare-type form
+// (*VerificationConsensusSettler) and qualified form
+// (*settlement.VerificationConsensusSettler).
+func isCanonicalSettlerType(expr ast.Expr) bool {
+	star, ok := expr.(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	switch t := star.X.(type) {
+	case *ast.Ident:
+		return canonicalSettlerTypeNames[t.Name]
+	case *ast.SelectorExpr:
+		return canonicalSettlerTypeNames[t.Sel.Name]
+	}
+	return false
+}
+
+// findSettleBypass walks file for CallExpr nodes invoking .Settle on a
+// receiver in settlerNames and records violations subject to file-path
+// and pragma-based exemptions.
+func findSettleBypass(
+	file *ast.File,
+	fset *token.FileSet,
+	settlerNames map[string]bool,
+	pragmaLines map[int]bool,
+	rel string,
+	report *Report,
+) {
+	if len(settlerNames) == 0 {
+		return
+	}
+	if strings.HasPrefix(filepath.ToSlash(rel), dispatcherInternalPrefix) {
+		// Path-based exemption: the dispatcher's own consumer Apply path
+		// is the legitimate settlement entrypoint. F3-B C-10 explicitly
+		// whitelists internal/dispatch/ as the canonical mediator.
+		return
+	}
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if sel.Sel.Name != "Settle" {
+			return true
+		}
+		// Receiver must resolve to a known canonical settler identifier.
+		recvName := receiverIdent(sel.X)
+		if recvName == "" || !settlerNames[recvName] {
+			return true
+		}
+
+		pos := fset.Position(call.Lparen)
+		// Pragma exemption: a valid dispatch:lint pragma within 3 lines
+		// above the call site authorizes the bypass. The recognition
+		// legacy else-branch uses this pattern.
+		if hasNearbyPragma(pragmaLines, pos.Line, 3) {
+			return true
+		}
+
+		report.Violations = append(report.Violations, Violation{
+			File:     rel,
+			Line:     pos.Line,
+			TypeName: recvName,
+			Detail:   "direct call to canonical settler.Settle bypasses the dispatcher; route through dispatcher.Admit or add a justified dispatch:lint pragma within 3 lines above the call",
+		})
+		return true
+	})
+}
+
+// receiverIdent returns the trailing identifier name of a receiver
+// expression. For `c.settler` returns "settler"; for `settler` returns
+// "settler"; for unsupported expressions returns "".
+func receiverIdent(expr ast.Expr) string {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return e.Name
+	case *ast.SelectorExpr:
+		return e.Sel.Name
+	}
+	return ""
+}
+
+// hasNearbyPragma reports whether any pragmaLine lies within window
+// lines above callLine (inclusive). Window=3 matches the "comment
+// directly above the call" convention used elsewhere in the repo.
+func hasNearbyPragma(pragmaLines map[int]bool, callLine, window int) bool {
+	for delta := 0; delta <= window; delta++ {
+		if pragmaLines[callLine-delta] {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidatePragma checks a dispatch:lint pragma's justification for
@@ -118,7 +341,3 @@ func relPath(base, path string) string {
 	}
 	return rel
 }
-
-// Ensure ast and token are importable for future type-graph analysis.
-var _ ast.Node
-var _ token.FileSet

@@ -122,6 +122,7 @@ func (c *TaskVerificationConsensusConsumer) Consume(_ context.Context, ev *event
 				"task_id", payload.TaskID, "err", err)
 		}
 	} else if c.settler != nil {
+		// dispatch:lint legacy-direct-settler "F3-B pre-commit-9 backward-compat path; only fires when SetDispatcher was never called, e.g. unit tests with old wiring; production wiring in cmd/node always sets the dispatcher"
 		settleResult, err := c.settler.Settle(context.Background(), &payload, round)
 		if err != nil {
 			slog.Warn("task_verification_consensus: settlement failed",
