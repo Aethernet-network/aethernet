@@ -1,0 +1,3 @@
+{"timestamp":"2026-04-22T20:35:53Z","node_idx":1,"node_ip":"44.200.60.102","status":{"agent_id":"d839e1ffed3bf84d3fb7794ea25acb9858a9eddc244afa7d844a4b0c0a1f5aff","version":"0.1.0-testnet","peers":4,"dag_size":1021,"ocs_pending":0,"supply_ratio":1,"projections":{"overall":"OK","counts":{"Advisory":3,"NotYetEligible":6}}}
+,"economics":{"total_supply":1000000000000000,"circulating_supply":1000000000000000,"onboarding_pool_total":300000000000000,"onboarding_max_agents":800000,"onboarding_allocated":50000000000,"total_collected":0,"total_burned":0,"treasury_accrued":0,"treasury_balance":100000029892000,"fee_basis_points":10,"total_generated_value":0}
+}
