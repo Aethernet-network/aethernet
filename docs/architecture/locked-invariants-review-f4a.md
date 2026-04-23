@@ -129,6 +129,50 @@ Companion to C-12. For logical-key consumers, the exactly-once boundary is `(con
 
 This is a NEW shape for the admission record's key space. F4B's persistence-layer changes must accommodate it.
 
+### 3.6 Type E state-fetching convention — generic RoundState + consumer-local typed helper
+
+Codified after F4B §5.2.1 landed `TVConsensusLogicalKeyConsumer`. Future Type E consumers (Settlement, TaskSettlement, and beyond) MUST follow this pattern or surface an explicit deviation at review time.
+
+**The pattern**
+
+`LogicalKeyConsumer.RoundState(ctx, key) (RoundState, error)` returns the shared `RoundState` struct declared in `internal/dispatch/logical_key.go`. That struct is a typed union of the fields any Type E consumer might need (`Votes []*event.Event`, `Attestations []*event.Event`, `ObservedEvents []*event.Event`, `Epoch uint64`, plus additions as new consumers require them — never `interface{}`).
+
+In practice, each Type E consumer has a concrete underlying data shape that does NOT fit cleanly into the shared field types. For TVConsensus the backing store is `[]taskverification.TaskVerificationVoteRecord` — aggregated per-round records, NOT canonical `[]*event.Event` DAG vote events. Converting between the two at every IsComplete/DeriveOutcome call would either:
+
+- Leak consumer-specific types (`TaskVerificationVoteRecord`) into the generic `dispatch` package, OR
+- Require re-serializing every decision as a slice of synthetic DAG events, which is work the consumer does not need.
+
+**Convention**
+
+1. The consumer populates `RoundState` with the fields it is confident fit the shared shape (for TVConsensus: `LogicalKey`, `Epoch`; `Votes` is left nil because the taskverification types don't fit the declared `[]*event.Event`).
+2. The consumer keeps a **consumer-local typed helper** (for TVConsensus: `roundFor(ctx, key) (*taskverification.TaskVerificationRound, error)`) that returns its native shape.
+3. `IsComplete`, `DeriveOutcome`, `Apply`, and `RecoveryProbe` call the local helper as needed — they do NOT rely on the generic fields of `RoundState` being populated for the current consumer.
+4. The local helper's signature mirrors `RoundState` in spirit (takes `key`, returns typed state) but in the consumer package. This keeps the consumer self-contained and the `dispatch` package generic.
+
+**Why this is correct**
+
+- `RoundState` exists so that a future Type E consumer with simpler state needs (e.g., an attestation-set Settlement consumer whose shape DOES fit `[]*event.Event`) can use the shared fields directly without repeating the helper pattern.
+- When the shared fields do fit, prefer them.
+- When they don't fit, don't force them. The consumer-local helper is the escape valve.
+- The cost is one extra helper method per consumer; the benefit is the `dispatch` package stays type-clean.
+
+**When a new consumer arrives**
+
+Decision procedure at review time:
+
+1. Does the consumer's canonical state fit `RoundState.Votes` / `.Attestations` / `.ObservedEvents` / `.Epoch`? If yes: populate those fields in `RoundState(ctx, key)` directly; no local helper needed. Design is done.
+2. If no, but the shared fields *could* be extended to fit (e.g., add `Challenges []*event.Event` alongside `Attestations`): extend the shared struct. Shared fields are cheap to add; they stay `[]*event.Event` or similar generic shape.
+3. If no and the shared fields *cannot* be extended without leaking consumer types: use a consumer-local typed helper, keep `RoundState` fields unpopulated where irrelevant. Document the reason inline at the helper's site (one sentence pointing back to this §3.6).
+
+**Anti-pattern to avoid**
+
+- Adding `interface{}` or `any` to `RoundState`. Never. The struct is typed by intent; type-erased carrying of consumer-specific state defeats the review-visibility this convention provides.
+- Inventing a parallel "RoundState2" struct for each consumer. The shared one is the standard; deviations use local helpers, not type duplication.
+
+**Prior art**
+
+- `TVConsensusLogicalKeyConsumer.roundFor` — consumer-local helper, returns `*taskverification.TaskVerificationRound`. Used by IsComplete, DeriveOutcome, Apply, RecoveryProbe. See `internal/dispatch/tv_consensus_lk_consumer.go`.
+
 ---
 
 ## 4. Coupling to F4A FINDINGs — F4B implementation MUST address
