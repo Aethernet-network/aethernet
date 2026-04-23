@@ -46,7 +46,7 @@ Same shape as LoadApplied for escrow. Sound. F4B does not touch the escrow surfa
 - **C-11 atomic local commit.** Authoritative local state mutation happens within a single durable commit. Sound. F4B logical-key Apply runs within the same atomic-batch boundary.
 - **C-12 per-(event, consumer) completion.** For content-hash consumers, exactly-once Apply per (event, consumer). Sound — preserved unchanged for content-hash. F4B introduces a NEW invariant for logical-key consumers (per-(consumer, key) completion, see §3 below) that complements rather than replacing C-12.
 - **C-13 DAG anchor identity.** `EventID` recorded in admission record matches the event that triggered admission. Sound.
-- **C-14 recovery probes evidence-based, monotonic, replay-safe.** `RecoveryProbe` consults canonical state to determine whether a prior crash left settlement complete. Sound. F4B logical-key consumers will need their own RecoveryProbe shape (per-key not per-event), but the invariant is preserved.
+- **C-14 recovery probes evidence-based, monotonic, replay-safe.** `RecoveryProbe` consults canonical state to determine whether a prior crash left settlement complete. Sound. **Extended in F4B §5.2.1** to cover logical-key consumers: `LogicalKeyConsumer.RecoveryProbe(ctx, key) (RecoveryStatus, error)` added to the interface (locked-invariant review §3.4 below). `Dispatcher.Recover` now iterates logical-key admission records alongside content-hash records; for each non-terminal logical-key record, calls the consumer's `RecoveryProbe` with the logical key; transitions to StateApplied on RecoveryCompleted or StateFailedRetryable on RecoveryNotStarted. The evidence source for logical-key recovery is consumer-specific — TVConsensus checks `RoundStateFinalizedAccept`/`RoundStateFinalizedReject` in the taskverification store; Settlement checks `settlementApp.IsApplied(TargetEventID)`; TaskSettlement's no-op Apply returns `RecoveryCompleted` unconditionally (no side effects to recover). The invariant itself (evidence-based, monotonic, replay-safe) is preserved bit-exact for both admission strategies.
 - **C-15 admission state is non-canonical node-local.** Sound — and load-bearing for F4A FINDING #8 (`dag-tips-unsorted`): the per-node anchor choice landing in admission records is acceptable BECAUSE C-15 holds.
 - **C-16 future-consumer inheritance.** New consumers register before the dispatcher starts admitting events; no admission state pre-exists for them. Sound. F4B logical-key consumers register the same way.
 
@@ -109,12 +109,24 @@ Replaces v1's `SelectionRule`. Simpler: no winner selection, no tiebreaker, no `
 // readiness signals and derives canonical outcome from underlying
 // state that is cluster-uniform.
 type LogicalKeyConsumer interface {
+    Name() string
+    Interested(ev *event.Event) bool
     Key(ev *event.Event) (LogicalKey, error)
+    RoundState(ctx context.Context, key LogicalKey) (RoundState, error)
     IsComplete(roundState RoundState) (bool, error)
     DeriveOutcome(roundState RoundState) (Outcome, error)
     Apply(ctx context.Context, key LogicalKey, outcome Outcome) error
+    RecoveryProbe(ctx context.Context, key LogicalKey) (RecoveryStatus, error)
 }
 ```
+
+**Plan deviations** (documented here for F4B completion gate traceability; architect-approved):
+
+1. **`RoundState(ctx, key)` method**: plan v2 §4.4 sketched the interface with four canonical methods (Key / IsComplete / DeriveOutcome / Apply) and spoke of "the dispatcher querying canonical round state" in §4.5 step (c). F4B §5.2.1 added `RoundState` as a consumer method rather than a dispatcher responsibility. Rationale: the dispatcher does not have universal DAG-query knowledge of every event-type-to-state mapping, and `RoundState` (the struct) is a typed UNION of all consumer-needed fields. Putting the query on the consumer keeps the dispatcher generic.
+
+2. **`RecoveryProbe` method**: not listed in plan v2 §4.4's interface sketch. Added in F4B §5.2.1 to preserve locked invariant C-14 (see §2.1 above) for logical-key admission. Without `RecoveryProbe`, a crashed-mid-Apply record in `StateProcessing` would either never retry (lost settlement) or silently re-attempt on next event arrival (double settlement) — both violate C-14.
+
+3. **`Name()` and `Interested()`**: plan v2 §4.4 omitted these from the listed interface but they are required for dispatcher registration (name uniqueness across content-hash + logical-key consumers) and event routing (cross-kind Interested() filter). Both are consistent with the existing content-hash `Consumer` shape. Trivial addition; listed here for completeness.
 
 Critical properties:
 

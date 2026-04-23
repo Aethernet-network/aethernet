@@ -68,16 +68,10 @@ func (f ReplayCorpusFunc) Events(t *testing.T) []*event.Event { return f(t) }
 // F4 plan exists to prevent (events committed via LoadFromStore never
 // reaching bus consumers because the bus pathway was bypassed).
 //
-// TODO(F4B Part D / consumer migration, F4 plan v2 §5.2): the replay
-// template currently exercises content-hash dispatch.Consumer only.
-// Logical-key consumers (LogicalKeyConsumer, F4 plan v2 §4.5 step (g))
-// require a parallel template that asserts: "Future events for this
-// key are observed but do not trigger Apply" across replay. The
-// template's surface is intentionally NOT extended in F4B step 1
-// (this commit) because no production logical-key consumer exists
-// yet to wrap. When TVConsensusLogicalKeyConsumer (and successors)
-// land in Part D, add RunLogicalKeyReplayConformance here mirroring
-// the three sub-tests above with per-key (not per-event) assertions.
+// Logical-key counterpart: RunLogicalKeyReplayConformance in
+// logical_key_replay.go mirrors this template for Type E consumers
+// (per-key assertions rather than per-event; drives the full bus →
+// dispatcher → LogicalKeyConsumer chain end-to-end).
 func RunReplayConformance(t *testing.T, factory ConsumerFactory, corpus ReplayCorpus) {
 	t.Helper()
 
