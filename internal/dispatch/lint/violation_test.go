@@ -66,16 +66,20 @@ func (b *Bypasser) Run(ctx context.Context) error {
 		t.Fatalf("expected violation for fixture bypass call; got none. recognized=%v", report.RecognizedPragmas)
 	}
 
-	// Confirm the violation points at our fixture file and the right method.
+	// Confirm the violation points at our fixture file and the right
+	// canonical type. Post-F4B §5.2.4 the TypeName field reports the
+	// resolved canonical settler type (e.g. "FixtureCanonicalSettler"),
+	// not the receiver identifier, since the lint now dispatches on
+	// (type, method) pairs via canonicalMethodsByType.
 	found := false
 	for _, v := range report.Violations {
-		if strings.HasSuffix(v.File, "bypass.go") && v.TypeName == "settler" {
+		if strings.HasSuffix(v.File, "bypass.go") && v.TypeName == "FixtureCanonicalSettler" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("expected violation in bypass.go on receiver 'settler'; got %+v", report.Violations)
+		t.Fatalf("expected violation in bypass.go on canonical type 'FixtureCanonicalSettler'; got %+v", report.Violations)
 	}
 }
 

@@ -1813,6 +1813,25 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	// store can be wired later (BlobSync prompt 06).
 	var tvDeadlineChecker *taskverification.DeadlineChecker
 
+	// activeWeightFn returns the sum of active validator weights from
+	// the lifecycle reducer's snapshot. Hoisted out of the taskMgr
+	// guard so it's reachable by both the TVConsensus LK consumer
+	// (registered under taskMgr) and the Settlement LK consumer
+	// (registered at the recognition-fabric wiring point, F4B §5.2.4).
+	// Returns 0 when no reducer is wired — callers treat that as
+	// "defer, no decision" (see TVConsensusLogicalKeyConsumer.IsComplete
+	// and SettlementLogicalKeyConsumer.IsComplete).
+	activeWeightFn := func() uint64 {
+		if stack.lifecycleReducer == nil {
+			return 0
+		}
+		snap := stack.lifecycleReducer.Snapshot()
+		if snap == nil {
+			return 0
+		}
+		return snap.ActiveWeight()
+	}
+
 	// Task lifecycle consumer — TaskPosted/Claimed/Submitted/Approved/Disputed.
 	if stack.taskMgr != nil {
 		taskConsumer := recognition.NewTaskLifecycleConsumer(stack.taskMgr)
@@ -1859,16 +1878,10 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		// deadline checker.
 		tvFinalizer := taskverification.NewFinalizer(taskverification.DefaultFinalizerConfig())
 
-		activeWeightFn := func() uint64 {
-			if stack.lifecycleReducer == nil {
-				return 0
-			}
-			snap := stack.lifecycleReducer.Snapshot()
-			if snap == nil {
-				return 0
-			}
-			return snap.ActiveWeight()
-		}
+		// activeWeightFn is hoisted above the taskMgr guard (F4B §5.2.4)
+		// so the Settlement LK consumer registered later in the
+		// recognition-fabric wiring can share it. See the hoisted
+		// declaration above.
 
 		// Task verification vote consumer — aggregates votes into rounds
 		// and invokes the finalizer after each vote.
@@ -1970,6 +1983,18 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			slog.Error("dispatch: register TVConsensusLogicalKeyConsumer failed", "err", err)
 			os.Exit(1)
 		}
+		// F4B §5.2.3: TaskSettlement events are logical-key admitted
+		// by TaskID. Apply is a no-op; the admission record itself
+		// is the value-add (per-TaskID dedup so downstream consumers
+		// observe a canonical admission boundary regardless of how
+		// many autovalidators emit for the same task). Verdict
+		// derivation for tasks flows through the Settlement LK
+		// consumer (§5.2.2) keyed by TargetEventID.
+		taskSettlementLKConsumer := dispatch.NewTaskSettlementLogicalKeyConsumer()
+		if err := eventDispatcher.RegisterLogicalKey(taskSettlementLKConsumer); err != nil {
+			slog.Error("dispatch: register TaskSettlementLogicalKeyConsumer failed", "err", err)
+			os.Exit(1)
+		}
 		if err := eventDispatcher.Recover(context.Background()); err != nil {
 			slog.Error("dispatch: recovery failed", "err", err)
 			os.Exit(1)
@@ -2028,6 +2053,22 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 	}
 
 	// Settlement consumer — Settlement → SettlementApplicator.
+	//
+	// F4B §5.2.4: the recognition consumer is now a thin router. It
+	// routes Settlement events through the dispatcher's logical-key
+	// admission (SettlementLogicalKeyConsumer, registered below)
+	// instead of invoking settlementApp.Apply directly. Under
+	// dispatcher routing, the canonical verdict is derived from the
+	// cluster-uniform VoteRecord — not from the triggering event's
+	// (potentially advisory) payload — closing the selection-race
+	// bug class for Settlement events in parallel with the
+	// TVConsensus migration above.
+	//
+	// The adapter below is retained for the backward-compat fallback
+	// path when no dispatcher is wired (e.g., recognition unit tests
+	// with pre-F4B wiring). In production here, SetDispatcher is
+	// called before bus.Start() so the dispatcher-routed path is
+	// always active.
 	settlementConsumerAdapter := recognition.NewSettlementApplierAdapter(func(ev *event.Event) error {
 		sp, err := event.GetPayload[settlement.SettlementPayload](ev)
 		if err != nil {
@@ -2036,6 +2077,22 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		return settlementApp.Apply(&sp)
 	})
 	settlementConsumer := recognition.NewSettlementConsumer(settlementConsumerAdapter)
+	if stack.dispatcher != nil && stack.votingRound != nil {
+		// F4B §5.2.2: register the Settlement logical-key consumer.
+		// Keyed by TargetEventID, derives verdict from the canonical
+		// VoteRecord. Must happen BEFORE SetDispatcher so that the
+		// admission store has a consumer registered to receive
+		// admissions when live events arrive.
+		settlementLKConsumer := dispatch.NewSettlementLogicalKeyConsumer(
+			settlementApp, stack.votingRound, activeWeightFn,
+		)
+		if err := stack.dispatcher.RegisterLogicalKey(settlementLKConsumer); err != nil {
+			slog.Error("dispatch: register SettlementLogicalKeyConsumer failed", "err", err)
+			os.Exit(1)
+		}
+		// Wire the recognition consumer's dispatcher-routed path.
+		settlementConsumer.SetDispatcher(stack.dispatcher)
+	}
 	_ = commitBus.Register(settlementConsumer)
 
 	stack.commitBus = commitBus

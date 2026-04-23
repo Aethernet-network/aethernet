@@ -1,6 +1,7 @@
 package recognition_test
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 	"testing"
@@ -9,6 +10,27 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/recognition"
 )
+
+// mockDispatcherAdmitter records Admit invocations. Used by the §5.2.4
+// dispatcher-routed tests.
+type mockDispatcherAdmitter struct {
+	mu        sync.Mutex
+	admitted  []*event.Event
+	returnErr error
+}
+
+func (m *mockDispatcherAdmitter) Admit(_ context.Context, ev *event.Event) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.admitted = append(m.admitted, ev)
+	return m.returnErr
+}
+
+func (m *mockDispatcherAdmitter) admitCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.admitted)
+}
 
 // mockSettlementApplier records ApplyFromEvent calls with idempotency.
 type mockSettlementApplier struct {
@@ -226,6 +248,84 @@ func TestSettlementConsumer_IgnoresNonSettlementTypes(t *testing.T) {
 		if consumer.Interested(ev) {
 			t.Errorf("should not be interested in %q", typ)
 		}
+	}
+}
+
+// TestSettlementConsumer_DispatcherRouted_CallsAdmit verifies the
+// F4B §5.2.4 primary path: when a dispatcher is wired via
+// SetDispatcher, Consume routes Settlement events through
+// dispatcher.Admit instead of the legacy applier.ApplyFromEvent.
+func TestSettlementConsumer_DispatcherRouted_CallsAdmit(t *testing.T) {
+	applier := newMockSettlementApplier()
+	consumer := recognition.NewSettlementConsumer(applier)
+	disp := &mockDispatcherAdmitter{}
+	consumer.SetDispatcher(disp)
+
+	store := recognition.NewMemoryIndexStore()
+	idx := recognition.NewIndex(store)
+	rm := makeTestReadModel()
+
+	bus := recognition.NewBus(recognition.BusConfig{QueueSize: 64, Workers: 1}, idx, rm)
+	bus.Register(consumer)
+	bus.Start()
+	defer bus.Stop()
+
+	ev := makeSettlementEvent("settle-dispatcher-1", "target-disp-1", "accepted")
+	rm.events[ev.ID] = ev
+
+	recognition.EmitCommit(bus, ev, recognition.SourceLocal, false)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if disp.admitCount() > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if disp.admitCount() != 1 {
+		t.Fatalf("dispatcher.Admit calls = %d; want 1", disp.admitCount())
+	}
+	// Legacy applier must NOT be invoked when dispatcher is wired —
+	// the dispatcher-routed path is exclusive.
+	if applier.totalApplies() != 0 {
+		t.Errorf("applier.ApplyFromEvent calls = %d; want 0 (dispatcher routes should bypass legacy path)", applier.totalApplies())
+	}
+}
+
+// TestSettlementConsumer_NoDispatcher_LegacyPath verifies the
+// backward-compat fallback: with no dispatcher wired, Consume falls
+// back to the legacy applier path. This covers test environments
+// that use the pre-F4B wiring.
+func TestSettlementConsumer_NoDispatcher_LegacyPath(t *testing.T) {
+	applier := newMockSettlementApplier()
+	consumer := recognition.NewSettlementConsumer(applier)
+	// No SetDispatcher — legacy path should fire.
+
+	store := recognition.NewMemoryIndexStore()
+	idx := recognition.NewIndex(store)
+	rm := makeTestReadModel()
+
+	bus := recognition.NewBus(recognition.BusConfig{QueueSize: 64, Workers: 1}, idx, rm)
+	bus.Register(consumer)
+	bus.Start()
+	defer bus.Stop()
+
+	ev := makeSettlementEvent("settle-legacy-1", "target-legacy-1", "accepted")
+	rm.events[ev.ID] = ev
+
+	recognition.EmitCommit(bus, ev, recognition.SourceLocal, false)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if applier.applyCount(ev.ID) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if applier.applyCount(ev.ID) != 1 {
+		t.Fatalf("legacy path ApplyFromEvent calls = %d; want 1", applier.applyCount(ev.ID))
 	}
 }
 

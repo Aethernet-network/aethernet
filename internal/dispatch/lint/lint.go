@@ -22,16 +22,42 @@ var dispatchPragmaRE = regexp.MustCompile(`dispatch:lint\s+(\S+)\s+"([^"]*)"`)
 
 // canonicalSettlerTypeNames lists receiver types whose method calls are
 // canonical settlement effects subject to the no-bypass rule. The lint
-// flags any call to .Settle() on a value whose declared type matches one
-// of these names (matched as the trailing ident of the type expression).
+// flags any call to a canonical method (see canonicalMethodsByType) on
+// a value whose declared type matches one of these names (matched as
+// the trailing ident of the type expression).
 //
-// To extend the rule to a new canonical-effect emitter, add its type
-// name here. Tests for this lint use a fixture-only sentinel name
+// To extend the rule to a new canonical-effect emitter:
+//  1. Add its type name here.
+//  2. Add the canonical-effect method name(s) to canonicalMethodsByType.
+//
+// Tests for this lint use a fixture-only sentinel name
 // ("FixtureCanonicalSettler") to verify detection without requiring a
 // real production type for the test.
 var canonicalSettlerTypeNames = map[string]bool{
 	"VerificationConsensusSettler": true,
-	"FixtureCanonicalSettler":      true, // test-only fixture sentinel
+	// F4B §5.2.4: settlement.Applicator.Apply is a canonical effect
+	// once Settlement events are routed through the dispatcher's
+	// logical-key admission. Direct Apply calls outside
+	// internal/dispatch/ bypass the cluster-uniform verdict derivation
+	// and re-introduce the per-node selection-race bug class.
+	"Applicator":               true,
+	"FixtureCanonicalSettler":  true, // test-only fixture sentinel
+	"FixtureCanonicalApplicator": true, // test-only fixture sentinel (Applicator-shape)
+}
+
+// canonicalMethodsByType maps a canonical receiver type to the set of
+// methods on that type whose invocation is a canonical-effect call.
+// The lint flags call sites where the (type, method) pair is in this
+// map AND the call is outside internal/dispatch/ AND the call is not
+// authorized by a nearby dispatch:lint pragma.
+//
+// An empty map value (nil) means "any method on this type" — reserved
+// for future use; today every entry names an explicit method set.
+var canonicalMethodsByType = map[string]map[string]bool{
+	"VerificationConsensusSettler": {"Settle": true},
+	"Applicator":                   {"Apply": true},
+	"FixtureCanonicalSettler":      {"Settle": true},
+	"FixtureCanonicalApplicator":   {"Apply": true},
 }
 
 // dispatcherInternalPrefix marks files whose Settle calls are the
@@ -110,8 +136,8 @@ func Check(moduleRoot string) (*Report, error) {
 			// fixtures elsewhere. Skip and continue.
 			return nil
 		}
-		settlerNames := collectSettlerReceivers(file)
-		findSettleBypass(file, fset, settlerNames, pragmaLines, rel, report)
+		settlerReceivers := collectSettlerReceivers(file)
+		findSettleBypass(file, fset, settlerReceivers, pragmaLines, rel, report)
 
 		return nil
 	})
@@ -152,18 +178,19 @@ func scanPragmas(content, rel string, report *Report) map[int]bool {
 	return pragmaLines
 }
 
-// collectSettlerReceivers returns the set of identifier names within
-// file that resolve to one of the canonical settler types listed in
-// canonicalSettlerTypeNames. Includes:
+// collectSettlerReceivers returns a map from identifier name to the
+// canonical settler type name it resolves to within file. The returned
+// map covers:
 //   - struct field names whose type is *<canonical>
 //   - top-level var names whose type is *<canonical>
 //   - function parameter / local var names whose type is *<canonical>
 //
-// The check is conservative: receiver identifier names matching are
+// The check is conservative: receiver identifier names in the map are
 // candidates, but the final bypass decision still requires the call's
-// .Sel.Name to be "Settle".
-func collectSettlerReceivers(file *ast.File) map[string]bool {
-	names := make(map[string]bool)
+// .Sel.Name to match the canonical method registered for the receiver's
+// type in canonicalMethodsByType.
+func collectSettlerReceivers(file *ast.File) map[string]string {
+	names := make(map[string]string)
 
 	// Walk struct field declarations.
 	ast.Inspect(file, func(n ast.Node) bool {
@@ -176,11 +203,12 @@ func collectSettlerReceivers(file *ast.File) map[string]bool {
 			return true
 		}
 		for _, field := range st.Fields.List {
-			if !isCanonicalSettlerType(field.Type) {
+			typeName := canonicalSettlerTypeName(field.Type)
+			if typeName == "" {
 				continue
 			}
 			for _, name := range field.Names {
-				names[name.Name] = true
+				names[name.Name] = typeName
 			}
 		}
 		return true
@@ -198,20 +226,24 @@ func collectSettlerReceivers(file *ast.File) map[string]bool {
 				if !ok {
 					continue
 				}
-				if vs.Type != nil && isCanonicalSettlerType(vs.Type) {
-					for _, name := range vs.Names {
-						names[name.Name] = true
+				if vs.Type != nil {
+					typeName := canonicalSettlerTypeName(vs.Type)
+					if typeName != "" {
+						for _, name := range vs.Names {
+							names[name.Name] = typeName
+						}
 					}
 				}
 			}
 		case *ast.FuncDecl:
 			if d.Type.Params != nil {
 				for _, field := range d.Type.Params.List {
-					if !isCanonicalSettlerType(field.Type) {
+					typeName := canonicalSettlerTypeName(field.Type)
+					if typeName == "" {
 						continue
 					}
 					for _, name := range field.Names {
-						names[name.Name] = true
+						names[name.Name] = typeName
 					}
 				}
 			}
@@ -222,36 +254,43 @@ func collectSettlerReceivers(file *ast.File) map[string]bool {
 	return names
 }
 
-// isCanonicalSettlerType reports whether expr is a pointer to one of
-// canonicalSettlerTypeNames. Accepts both bare-type form
-// (*VerificationConsensusSettler) and qualified form
+// canonicalSettlerTypeName returns the canonical type name (e.g.,
+// "VerificationConsensusSettler", "Applicator") if expr is a pointer
+// to one of canonicalSettlerTypeNames; "" otherwise. Accepts both
+// bare-type form (*VerificationConsensusSettler) and qualified form
 // (*settlement.VerificationConsensusSettler).
-func isCanonicalSettlerType(expr ast.Expr) bool {
+func canonicalSettlerTypeName(expr ast.Expr) string {
 	star, ok := expr.(*ast.StarExpr)
 	if !ok {
-		return false
+		return ""
 	}
 	switch t := star.X.(type) {
 	case *ast.Ident:
-		return canonicalSettlerTypeNames[t.Name]
+		if canonicalSettlerTypeNames[t.Name] {
+			return t.Name
+		}
 	case *ast.SelectorExpr:
-		return canonicalSettlerTypeNames[t.Sel.Name]
+		if canonicalSettlerTypeNames[t.Sel.Name] {
+			return t.Sel.Name
+		}
 	}
-	return false
+	return ""
 }
 
-// findSettleBypass walks file for CallExpr nodes invoking .Settle on a
-// receiver in settlerNames and records violations subject to file-path
-// and pragma-based exemptions.
+// findSettleBypass walks file for CallExpr nodes invoking a canonical
+// method on a receiver in settlerReceivers and records violations
+// subject to file-path and pragma-based exemptions. The (receiver
+// type, method) pair must match canonicalMethodsByType for a
+// violation to register.
 func findSettleBypass(
 	file *ast.File,
 	fset *token.FileSet,
-	settlerNames map[string]bool,
+	settlerReceivers map[string]string,
 	pragmaLines map[int]bool,
 	rel string,
 	report *Report,
 ) {
-	if len(settlerNames) == 0 {
+	if len(settlerReceivers) == 0 {
 		return
 	}
 	if strings.HasPrefix(filepath.ToSlash(rel), dispatcherInternalPrefix) {
@@ -270,19 +309,24 @@ func findSettleBypass(
 		if !ok {
 			return true
 		}
-		if sel.Sel.Name != "Settle" {
-			return true
-		}
 		// Receiver must resolve to a known canonical settler identifier.
 		recvName := receiverIdent(sel.X)
-		if recvName == "" || !settlerNames[recvName] {
+		if recvName == "" {
+			return true
+		}
+		typeName, known := settlerReceivers[recvName]
+		if !known {
+			return true
+		}
+		methods, ok := canonicalMethodsByType[typeName]
+		if !ok || !methods[sel.Sel.Name] {
 			return true
 		}
 
 		pos := fset.Position(call.Lparen)
 		// Pragma exemption: a valid dispatch:lint pragma within 3 lines
 		// above the call site authorizes the bypass. The recognition
-		// legacy else-branch uses this pattern.
+		// legacy else-branches use this pattern.
 		if hasNearbyPragma(pragmaLines, pos.Line, 3) {
 			return true
 		}
@@ -290,8 +334,8 @@ func findSettleBypass(
 		report.Violations = append(report.Violations, Violation{
 			File:     rel,
 			Line:     pos.Line,
-			TypeName: recvName,
-			Detail:   "direct call to canonical settler.Settle bypasses the dispatcher; route through dispatcher.Admit or add a justified dispatch:lint pragma within 3 lines above the call",
+			TypeName: typeName,
+			Detail:   "direct call to canonical " + typeName + "." + sel.Sel.Name + " bypasses the dispatcher; route through dispatcher.Admit or add a justified dispatch:lint pragma within 3 lines above the call",
 		})
 		return true
 	})
