@@ -1,0 +1,28 @@
+Cross-node divergence summary (3 nodes):
+
+=== Per-node total supply ===
+  node[0] total_supply = 1000000000000
+  node[1] total_supply = 1000000000000
+  node[2] total_supply = 1000000000000
+
+=== Per-agent balance divergences ===
+  98ebfc3155b78ce7b3040eb62013cf96c3df88d7e285fc657c0b9ccedbabaf18    [0 115000 0]
+  e45ccd34aa409aeb3f2138d87758feaf5e9bd1f35442fc47f5952ba7292fd6e2    [0 115000 0]
+  f1d9d2803ef3a3533f101e0190eb60a51b5729d0846d2cac8fd7fbecbafdfbd4    [230000 0 230000]
+  poster                                                              [999999000000 999999730000 999999000000]
+  worker                                                              [730000 0 730000]
+
+=== Per-task status divergences ===
+  tied-00                         [completed rejected completed]
+  tied-01                         [completed rejected completed]
+  tied-02                         [completed rejected completed]
+  tied-03                         [completed rejected completed]
+  tied-04                         [completed rejected completed]
+  tied-05                         [completed rejected completed]
+  tied-06                         [completed rejected completed]
+  tied-07                         [completed rejected completed]
+  tied-08                         [completed rejected completed]
+  tied-09                         [completed rejected completed]
+
+=== Per-escrow-bucket residual divergences ===
+  (none — escrow residuals byte-equal)
