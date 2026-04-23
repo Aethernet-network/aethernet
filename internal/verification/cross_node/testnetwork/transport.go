@@ -28,11 +28,25 @@ import (
 // satisfies this interface via its Apply method.
 //
 // This interface is the ONLY coupling between testnetwork and the
-// cross_node package. We intentionally do not import cross_node here
-// to break the obvious circular dependency (cross_node tests use
-// testnetwork; testnetwork would otherwise import cross_node).
+// cross_node package for the direct-Apply path. We intentionally do not
+// import cross_node here to break the obvious circular dependency
+// (cross_node tests use testnetwork; testnetwork would otherwise import
+// cross_node).
 type Applier interface {
 	Apply(ctx context.Context, ev *event.Event) error
+}
+
+// Admitter is the minimal interface the dispatcher-integrated transport
+// path needs: a node-shaped thing that can route an event through
+// dispatch.Dispatcher.Admit. *cross_node.Node satisfies this interface
+// via its AdmitViaDispatcher method (defined in dispatcher_harness.go).
+//
+// Same circular-dependency-avoidance rationale as Applier — we keep the
+// coupling at the smallest possible interface. Tests that want the
+// dispatcher path call DeliverViaDispatcher; tests that want the legacy
+// direct-Apply path call DeliverTo / DeliverInOrder.
+type Admitter interface {
+	AdmitViaDispatcher(ctx context.Context, ev *event.Event) error
 }
 
 // Transport is the deterministic delivery driver for a cluster of
@@ -71,6 +85,37 @@ func (t Transport) DeliverInOrder(ctx context.Context, target Applier, evs []*ev
 	errs := make([]error, len(evs))
 	for i, ev := range evs {
 		errs[i] = t.DeliverTo(ctx, target, ev)
+	}
+	return errs
+}
+
+// DeliverToViaDispatcher invokes AdmitViaDispatcher on a single target
+// node. Production-equivalent to one canonical event arriving at the
+// node's recognition fabric and being dispatched. Returns the
+// dispatcher's error (typically nil; the dispatcher reserves errors for
+// storage failures, anchor-verification failures, and prerequisite
+// forgery — none of which the harness's current corpora can trigger).
+func (Transport) DeliverToViaDispatcher(ctx context.Context, target Admitter, ev *event.Event) error {
+	if target == nil {
+		return fmt.Errorf("testnetwork: target Admitter is nil")
+	}
+	if ev == nil {
+		return fmt.Errorf("testnetwork: event is nil")
+	}
+	return target.AdmitViaDispatcher(ctx, ev)
+}
+
+// DeliverInOrderViaDispatcher delivers a sequence of events to a single
+// target node via Dispatcher.Admit, in the given order. The
+// dispatcher-integrated parallel of DeliverInOrder.
+//
+// Returns a slice of per-event errors (nil entries indicate success).
+// Mirrors DeliverInOrder's contract: callers that don't care about
+// per-event errors can ignore the return.
+func (t Transport) DeliverInOrderViaDispatcher(ctx context.Context, target Admitter, evs []*event.Event) []error {
+	errs := make([]error, len(evs))
+	for i, ev := range evs {
+		errs[i] = t.DeliverToViaDispatcher(ctx, target, ev)
 	}
 	return errs
 }

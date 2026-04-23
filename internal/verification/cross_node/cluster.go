@@ -95,6 +95,22 @@ type Node struct {
 	Settler     *settlement.VerificationConsensusSettler
 	Consumer    *dispatch.TVConsensusConsumer
 
+	// Dispatcher is the per-node dispatch.Dispatcher used by the
+	// dispatcher-integrated harness variant (dispatcher_harness.go).
+	// Wired via installDispatcher in newNode AFTER Consumer is built.
+	// The existing direct-Apply tests (cluster_test.go,
+	// tied_weight_test.go) do not touch this field; the new tests
+	// (dispatcher_tied_weight_test.go) route every delivery through
+	// Dispatcher.Admit.
+	Dispatcher *dispatch.Dispatcher
+
+	// AdmissionStore is the per-node dispatch.AdmissionStore (in-memory
+	// implementation; see memAdmissionStore in dispatcher_harness.go)
+	// backing Dispatcher. Held on Node for test-side inspection (e.g.,
+	// asserting how many distinct admission keys were created for a
+	// scenario).
+	AdmissionStore dispatch.AdmissionStore
+
 	// badgerDB is the in-memory BadgerDB backing the round store; held
 	// so it can be closed on cleanup.
 	badgerDB *badger.DB
@@ -162,7 +178,7 @@ func newNode(t *testing.T, idx int) *Node {
 		tm, tl, em, &nilDAGScanner{}, nil, TreasuryID, nil)
 	consumer := dispatch.NewTVConsensusConsumer(settler, roundStore, tm, em)
 
-	return &Node{
+	n := &Node{
 		Index:       idx,
 		ValidatorID: validatorID,
 		KeyPair:     kp,
@@ -174,6 +190,17 @@ func newNode(t *testing.T, idx int) *Node {
 		Consumer:    consumer,
 		badgerDB:    db,
 	}
+
+	// Wire the dispatcher-integrated path. Additive: existing tests that
+	// call n.Apply(...) hit the same direct consumer.Apply boundary they
+	// always did. The new dispatcher_tied_weight_test.go uses
+	// n.AdmitViaDispatcher(...) instead, routing through the production
+	// admission state machine. See dispatcher_harness.go for the wiring
+	// rationale (in particular: nil DAGAnchorReader, in-memory admission
+	// store, constant epoch).
+	installDispatcher(n)
+
+	return n
 }
 
 // deterministicKeyPair builds an ed25519 keypair from a fixed seed
