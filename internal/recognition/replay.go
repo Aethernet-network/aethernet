@@ -2,7 +2,9 @@ package recognition
 
 import (
 	"context"
-	"errors"
+	"fmt"
+	"log/slog"
+	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/dag"
 )
@@ -51,32 +53,66 @@ import (
 // # Backpressure
 //
 // Bus.Emit is non-blocking and returns ErrQueueFull when the dispatch
-// queue is at capacity. The replay pass treats ErrQueueFull as a fatal
-// startup error: a healthy startup has the queue drained by the worker
-// pool faster than the replay can fill it (the bus is started before this
-// runs). If the queue fills, something is wrong upstream and silently
-// dropping historical events would re-introduce the bug this function
-// closes. Other Emit errors are also returned as fatal.
-//
-// # Current state: STUB
-//
-// Returns nil without emitting anything. The synthetic replay-conformance
-// test (internal/dispatch/conformance/replay_path_test.go) intentionally
-// fails against this stub. F4A step 3 (plan §8.1) implements the body and
-// the test flips RED → GREEN. The captured RED failure baseline is in
-// internal/dispatch/conformance/testdata/replay_template_red_baseline.txt.
+// queue is at capacity. The replay pass treats ErrQueueFull as a
+// retryable condition: it spins on the same event with a short backoff
+// until the worker pool drains the queue or the context is cancelled.
+// Silently dropping historical events would re-introduce the bug this
+// function closes; failing fast on transient backpressure would make
+// startup brittle on large DAGs. The retry loop is bounded by the
+// caller's context — a startup that cannot drain its own bus within
+// the context deadline is correctly treated as a fatal startup error.
 func ReplayHistoricalToBusConsumers(ctx context.Context, d *dag.DAG, bus *Bus) error {
-	_ = ctx
-	_ = d
-	_ = bus
-	return nil // STUB — F4A step 3 implements the walk + Emit loop.
-}
+	if d == nil {
+		return fmt.Errorf("recognition: replay: nil dag")
+	}
+	if bus == nil {
+		return fmt.Errorf("recognition: replay: nil bus")
+	}
 
-// ErrReplayNotImplemented is a sentinel returned by tests that want to
-// assert the SUT body has not yet landed. It is not currently returned
-// by ReplayHistoricalToBusConsumers (the stub returns nil so existing
-// startup code paths are unaffected); the test inspects observable
-// post-conditions rather than this error to detect the RED state.
-//
-// Removed in F4A step 3 along with this stub's no-op body.
-var ErrReplayNotImplemented = errors.New("recognition: ReplayHistoricalToBusConsumers stub — pending F4A step 3")
+	events, err := d.TopologicalSort()
+	if err != nil {
+		return fmt.Errorf("recognition: replay: topological sort: %w", err)
+	}
+
+	const backpressureBackoff = 5 * time.Millisecond
+	now := time.Now()
+
+	emitted := 0
+	for _, ev := range events {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("recognition: replay: cancelled after %d/%d events: %w",
+				emitted, len(events), err)
+		}
+
+		record := CommitRecord{
+			EventID:     ev.ID,
+			EventType:   ev.Type,
+			Source:      SourceReplay,
+			Replay:      true,
+			CommittedAt: now,
+		}
+
+		for {
+			emitErr := bus.Emit(record, ev)
+			if emitErr == nil {
+				break
+			}
+			if emitErr != ErrQueueFull {
+				return fmt.Errorf("recognition: replay: emit %s: %w", ev.ID, emitErr)
+			}
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("recognition: replay: cancelled while waiting for bus drain at %d/%d: %w",
+					emitted, len(events), ctx.Err())
+			case <-time.After(backpressureBackoff):
+			}
+		}
+		emitted++
+	}
+
+	slog.Info("recognition: replay complete",
+		"events_emitted", emitted,
+		"consumers", bus.ConsumerCount(),
+	)
+	return nil
+}

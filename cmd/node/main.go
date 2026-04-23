@@ -2039,12 +2039,28 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		"workers", recognition.DefaultWorkers,
 	)
 
+	// F4 plan §8.1: replay every historical DAG event through the bus with
+	// CommitSource=SourceReplay so that consumers registered above observe
+	// events that were committed during dag.LoadFromStore (which fired the
+	// then-nil onCommit hook). Per-consumer MarkRecognizedOnce guarantees
+	// idempotency, so this is safe across restarts and re-runs. Must happen
+	// AFTER SetOnCommit + commitBus.Start() and BEFORE the network node
+	// accepts inbound events (otherwise live events would interleave with
+	// historical ones, breaking the topological-order invariant the replay
+	// pass provides).
+	if err := recognition.ReplayHistoricalToBusConsumers(context.Background(), stack.dag, commitBus); err != nil {
+		slog.Error("recognition: historical replay failed", "err", err)
+		stack.engine.Stop()
+		os.Exit(1)
+	}
+
 	// ── Start network node ────────────────────────────────────────────────
-	// MUST happen AFTER SetOnCommit + commitBus.Start() so that events
-	// arriving from peers fire the recognition hook. Starting the node
-	// before the hook is set causes events to enter the DAG without
-	// notifying the recognition fabric — the root cause of the production
-	// "no commit events dispatched" bug.
+	// MUST happen AFTER SetOnCommit + commitBus.Start() + replay pass so
+	// that events arriving from peers fire the recognition hook against an
+	// already-warm consumer state. Starting the node before the hook is set
+	// causes events to enter the DAG without notifying the recognition
+	// fabric — the root cause of the production "no commit events
+	// dispatched" bug.
 	if err := node.Start(); err != nil {
 		slog.Error("failed to start network listener", "addr", p2pAddr, "err", err)
 		stack.engine.Stop()

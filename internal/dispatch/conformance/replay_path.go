@@ -94,12 +94,13 @@ func runReplayPopulatedDAG(t *testing.T, factory ConsumerFactory, corpus ReplayC
 
 	tracker := newApplyTracker(consumer)
 
-	d, _ := buildPopulatedDAG(t, corpus)
+	events := corpus.Events(t)
+	d := buildPopulatedDAG(t, events)
 	bus := buildBusWith(tracker)
 	bus.Start()
 	defer bus.Stop()
 
-	expected := expectedInterested(consumer, corpus.Events(t))
+	expected := expectedInterested(consumer, events)
 
 	if err := recognition.ReplayHistoricalToBusConsumers(context.Background(), d, bus); err != nil {
 		t.Fatalf("ReplayHistoricalToBusConsumers: %v", err)
@@ -116,9 +117,7 @@ func runReplayPopulatedDAG(t *testing.T, factory ConsumerFactory, corpus ReplayC
 			"  expected (%d): %v\n"+
 			"  got      (%d): %v\n"+
 			"  missing  (%d): %v\n"+
-			"  extra    (%d): %v\n"+
-			"This is the RED gate — F4A step 3 (recognition.ReplayHistoricalToBusConsumers "+
-			"implementation, F4 plan §8.1) must make this pass.",
+			"  extra    (%d): %v",
 			len(expected), expected, len(got), got,
 			len(missing), missing, len(extra), extra)
 	}
@@ -134,12 +133,13 @@ func runReplayIdempotent(t *testing.T, factory ConsumerFactory, corpus ReplayCor
 
 	tracker := newApplyTracker(consumer)
 
-	d, _ := buildPopulatedDAG(t, corpus)
+	events := corpus.Events(t)
+	d := buildPopulatedDAG(t, events)
 	bus := buildBusWith(tracker)
 	bus.Start()
 	defer bus.Stop()
 
-	expected := expectedInterested(consumer, corpus.Events(t))
+	expected := expectedInterested(consumer, events)
 
 	// First replay populates the recognition index and fires Apply.
 	if err := recognition.ReplayHistoricalToBusConsumers(context.Background(), d, bus); err != nil {
@@ -186,7 +186,8 @@ func runReplayNonInterestedSkipped(t *testing.T, factory ConsumerFactory, corpus
 
 	tracker := newApplyTracker(consumer)
 
-	d, _ := buildPopulatedDAG(t, corpus)
+	events := corpus.Events(t)
+	d := buildPopulatedDAG(t, events)
 	// Append the non-matching event last so it's a topological leaf.
 	if err := d.Add(probe); err != nil {
 		t.Fatalf("add non-matching probe to DAG: %v", err)
@@ -195,7 +196,7 @@ func runReplayNonInterestedSkipped(t *testing.T, factory ConsumerFactory, corpus
 	bus.Start()
 	defer bus.Stop()
 
-	expected := expectedInterested(consumer, corpus.Events(t))
+	expected := expectedInterested(consumer, events)
 
 	if err := recognition.ReplayHistoricalToBusConsumers(context.Background(), d, bus); err != nil {
 		t.Fatalf("ReplayHistoricalToBusConsumers: %v", err)
@@ -293,24 +294,26 @@ func (t *applyTracker) appliedIDs() []event.EventID {
 // Harness wiring helpers.
 // ---------------------------------------------------------------------------
 
-// buildPopulatedDAG creates a fresh DAG and inserts every corpus event
-// in order via dag.Add. The DAG is left without a SetOnCommit hook —
+// buildPopulatedDAG creates a fresh DAG and inserts every event in the
+// supplied slice via dag.Add. The DAG is left without a SetOnCommit hook —
 // this is intentional: it mirrors the LoadFromStore-before-SetOnCommit
 // gap §8.1 closes. The replay function under test must observe these
-// events from a clean DAG snapshot, not from a SetOnCommit-fired
-// stream.
+// events from a clean DAG snapshot, not from a SetOnCommit-fired stream.
 //
-// Returns the DAG and the corpus events for assertion convenience.
-func buildPopulatedDAG(t *testing.T, corpus ReplayCorpus) (*dag.DAG, []*event.Event) {
+// Takes a pre-materialized event slice (rather than a ReplayCorpus) so
+// callers can compute the corpus once per sub-test and reuse it for both
+// DAG population and the Interested() expectation set. Calling
+// corpus.Events(t) twice within a sub-test would generate two unrelated
+// fixtures whose EventIDs do not match, breaking the assertion.
+func buildPopulatedDAG(t *testing.T, events []*event.Event) *dag.DAG {
 	t.Helper()
 	d := dag.New()
-	events := corpus.Events(t)
 	for i, ev := range events {
 		if err := d.Add(ev); err != nil {
 			t.Fatalf("buildPopulatedDAG: add event[%d] %s: %v", i, ev.ID, err)
 		}
 	}
-	return d, events
+	return d
 }
 
 // buildBusWith creates a fresh recognition.Bus with the given tracker

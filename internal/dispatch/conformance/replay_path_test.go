@@ -2,7 +2,6 @@ package conformance_test
 
 import (
 	"context"
-	"os"
 	"sync"
 	"testing"
 
@@ -91,9 +90,7 @@ func makeReplayCorpus(t *testing.T) []*event.Event {
 	return events
 }
 
-// TestSyntheticConsumer_ReplayConformance is the F4A step 2 RED gate.
-//
-// The synthetic consumer + corpus exercise the replay-conformance
+// TestSyntheticConsumer_ReplayConformance exercises the replay-conformance
 // template defined in replay_path.go. The template drives the full
 // recognition bus → consumer chain:
 //
@@ -102,24 +99,11 @@ func makeReplayCorpus(t *testing.T) []*event.Event {
 //  3. invoke recognition.ReplayHistoricalToBusConsumers,
 //  4. assert Apply fired for every Interested() corpus event.
 //
-// The test FAILS today because recognition.ReplayHistoricalToBusConsumers
-// is a stub (internal/recognition/replay.go) that returns nil without
-// emitting anything. F4A step 3 implements the body and the test flips
-// RED → GREEN.
-//
-// To keep CI green during the RED window, the test is skipped by
-// default. Set F4_REPLAY_TEMPLATE_RED=1 to lift the skip and observe the
-// captured failure (snapshot in
-// testdata/replay_template_red_baseline.txt). When step 3 lands the
-// skip is removed permanently.
+// History: this test was the F4A step 2 RED gate against an intentionally
+// stubbed SUT. F4A step 3 (plan §8.1) implemented the SUT body and the
+// test flipped RED → GREEN. The captured RED failure is preserved at
+// testdata/replay_template_red_baseline.txt as evidence of the contract.
 func TestSyntheticConsumer_ReplayConformance(t *testing.T) {
-	if os.Getenv("F4_REPLAY_TEMPLATE_RED") != "1" {
-		t.Skip("RED — pending F4A step 3 (recognition.ReplayHistoricalToBusConsumers " +
-			"implementation, F4 plan §8.1). " +
-			"Captured failure: testdata/replay_template_red_baseline.txt. " +
-			"Re-run with F4_REPLAY_TEMPLATE_RED=1 to confirm the RED state.")
-	}
-
 	conformance.RunReplayConformance(t,
 		func() (dispatch.Consumer, func()) {
 			c := newReplayConsumer()
