@@ -421,14 +421,17 @@ func (l *TransferLedger) AllBalances() map[crypto.AgentID]uint64 {
 	defer l.mu.RUnlock()
 
 	known := make(map[crypto.AgentID]struct{})
+	// safe: collecting set membership; order-independent
 	for _, e := range l.entries {
 		known[e.FromAgent] = struct{}{}
 		known[e.ToAgent] = struct{}{}
 	}
+	// safe: collecting set membership; order-independent
 	for agent := range l.archivedNetSettled {
 		known[agent] = struct{}{}
 	}
 	out := make(map[crypto.AgentID]uint64, len(known))
+	// safe: per-key balance read; result map values are pure functions of the key
 	for agent := range known {
 		bal := l.balanceLocked(agent)
 		if bal > 0 {

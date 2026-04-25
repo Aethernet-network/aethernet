@@ -75,6 +75,7 @@ func (s *Server) handleAdminLedgerSnapshot(w http.ResponseWriter, r *http.Reques
 
 	balances := s.transfer.AllBalances()
 	resp.AgentBalances = make(map[string]uint64, len(balances))
+	// safe: copying map to map; key/value pairs preserved regardless of iteration order
 	for agent, bal := range balances {
 		resp.AgentBalances[string(agent)] = bal
 	}
@@ -89,9 +90,11 @@ func (s *Server) handleAdminLedgerSnapshot(w http.ResponseWriter, r *http.Reques
 	resp.Treasury = treasury
 
 	var total uint64
+	// safe: commutative sum; final scalar is order-independent
 	for _, bal := range resp.AgentBalances {
 		total += bal
 	}
+	// safe: commutative sum; final scalar is order-independent
 	for _, residual := range resp.EscrowResiduals {
 		total += residual
 	}

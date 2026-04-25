@@ -535,6 +535,7 @@ func (e *Escrow) AllResiduals() map[string]uint64 {
 	defer e.mu.RUnlock()
 
 	out := make(map[string]uint64, len(e.entries))
+	// safe: copying map to map; key/value pairs preserved regardless of iteration order
 	for taskID, entry := range e.entries {
 		if entry.Amount > 0 {
 			out[taskID] = entry.Amount
