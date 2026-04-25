@@ -13,17 +13,11 @@ import (
 // SnapshotEndpointPath is the conventional HTTP path the production
 // SnapshotFetcher queries on each peer to retrieve a LedgerSnapshot.
 //
-// FINDING (F4 Plan v2 §2.1.3, A.3 implementation): as of branch
-// feat/selection-consistency-fix this endpoint is NOT yet served by
-// internal/api/server.go. The fetcher is wired against this path so
-// that operator follow-up can ship the endpoint without changing the
-// monitor's surface. Until the endpoint exists, HTTPFetcher.Fetch
-// will return a 404-style error from every peer; the monitor handles
-// per-peer fetch failures gracefully (see Monitor.Check), so wiring
-// the monitor in production today produces no false-positive
-// divergence alerts — only fetch errors recorded per peer.
-//
-// Adding the endpoint is intentionally NOT part of step-10 scope.
+// Endpoint shipped in F5 5B Phase 1.3 (criterion 12 prep) at
+// internal/api/admin_handlers.go's handleAdminLedgerSnapshot. Available
+// when the node is started with --enable-admin-api. Production-deploy
+// surface should also gate via network ACL since the snapshot exposes
+// per-agent balances + per-task escrow residuals.
 const SnapshotEndpointPath = "/v1/admin/ledger-snapshot"
 
 // HTTPFetcher is the production SnapshotFetcher. It issues a GET to

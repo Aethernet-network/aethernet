@@ -35,12 +35,10 @@ func runInvariants(args []string) {
 //   - Compares and prints per-peer divergence; exits 0 if no divergence,
 //     exit code 2 if any divergence detected (CI-friendly).
 //
-// FINDING (F4 Plan v2 §2.1.3, A.3 implementation): the
-// /v1/admin/ledger-snapshot endpoint is NOT yet served by
-// internal/api/server.go on this branch. Until an operator ships the
-// endpoint, this command will surface fetch errors for every node it
-// queries (including the local one). The CLI surface is correct;
-// production wiring is the gap.
+// Endpoint requirement: every node MUST be started with --enable-admin-api
+// so /v1/admin/ledger-snapshot is served. Endpoint implementation lives at
+// internal/api/admin_handlers.go (handleAdminLedgerSnapshot, shipped in
+// F5 5B Phase 1.3 prep for testnet criterion 12).
 func runInvariantsCheck(args []string) {
 	fs := flag.NewFlagSet("invariants check", flag.ExitOnError)
 	url := fs.String("url", defaultURL(), "Local node URL")

@@ -19,7 +19,10 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/auth"
 	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/dag"
+	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/event"
+	"github.com/Aethernet-network/aethernet/internal/genesis"
+	"github.com/Aethernet-network/aethernet/internal/ledger"
 )
 
 // captureTestPublisher records events passed to Publish for assertion.
@@ -245,4 +248,135 @@ func TestAdminAPI_EnabledRoutes_Register(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Errorf("enabled admin API should serve handler; got %d body=%s", w.Code, w.Body.String())
 	}
+}
+
+// TestAdminLedgerSnapshot_IdenticalStateProducesIdenticalBytes verifies
+// the load-bearing F5 5B testnet criterion 12 invariant: two servers
+// observing identical canonical state MUST produce identical snapshot
+// payloads (modulo NodeID, which encodes per-server identity).
+//
+// Two servers share the same TransferLedger + Escrow instance (the
+// canonical state); their snapshot endpoints emit byte-identical
+// AgentBalances + EscrowResiduals + Treasury + TotalSupply values.
+func TestAdminLedgerSnapshot_IdenticalStateProducesIdenticalBytes(t *testing.T) {
+	tl := ledger.NewTransferLedger()
+	if err := tl.FundAgent(crypto.AgentID(genesis.BucketTreasury), 100_000); err != nil {
+		t.Fatalf("fund treasury: %v", err)
+	}
+	if err := tl.FundAgent(crypto.AgentID("agent-a"), 50_000); err != nil {
+		t.Fatalf("fund agent-a: %v", err)
+	}
+	em := escrow.New(tl)
+
+	s1 := &Server{transfer: tl, escrowMgr: em, agentID: "node-1", enableAdminAPI: true}
+	s2 := &Server{transfer: tl, escrowMgr: em, agentID: "node-2", enableAdminAPI: true}
+
+	snap1 := fetchSnapshot(t, s1)
+	snap2 := fetchSnapshot(t, s2)
+
+	if snap1.NodeID == snap2.NodeID {
+		t.Fatalf("NodeID should differ: %q == %q", snap1.NodeID, snap2.NodeID)
+	}
+	if snap1.Treasury != snap2.Treasury {
+		t.Errorf("Treasury divergence: %d vs %d", snap1.Treasury, snap2.Treasury)
+	}
+	if snap1.TotalSupply != snap2.TotalSupply {
+		t.Errorf("TotalSupply divergence: %d vs %d", snap1.TotalSupply, snap2.TotalSupply)
+	}
+	if !mapsEqualUint64(snap1.AgentBalances, snap2.AgentBalances) {
+		t.Errorf("AgentBalances divergence:\n  s1=%v\n  s2=%v", snap1.AgentBalances, snap2.AgentBalances)
+	}
+	if !mapsEqualUint64(snap1.EscrowResiduals, snap2.EscrowResiduals) {
+		t.Errorf("EscrowResiduals divergence:\n  s1=%v\n  s2=%v", snap1.EscrowResiduals, snap2.EscrowResiduals)
+	}
+}
+
+// TestAdminLedgerSnapshot_DivergedStateProducesDifferentBytes verifies
+// the negative case: two servers with diverged ledger state produce
+// snapshots whose AgentBalances diverge.
+func TestAdminLedgerSnapshot_DivergedStateProducesDifferentBytes(t *testing.T) {
+	tl1 := ledger.NewTransferLedger()
+	tl2 := ledger.NewTransferLedger()
+	if err := tl1.FundAgent(crypto.AgentID("agent-a"), 50_000); err != nil {
+		t.Fatalf("fund tl1: %v", err)
+	}
+	if err := tl2.FundAgent(crypto.AgentID("agent-a"), 75_000); err != nil {
+		t.Fatalf("fund tl2: %v", err)
+	}
+
+	s1 := &Server{transfer: tl1, agentID: "node-1", enableAdminAPI: true}
+	s2 := &Server{transfer: tl2, agentID: "node-2", enableAdminAPI: true}
+
+	snap1 := fetchSnapshot(t, s1)
+	snap2 := fetchSnapshot(t, s2)
+
+	if snap1.AgentBalances["agent-a"] == snap2.AgentBalances["agent-a"] {
+		t.Fatalf("agent-a balances should differ; both = %d", snap1.AgentBalances["agent-a"])
+	}
+	if snap1.TotalSupply == snap2.TotalSupply {
+		t.Fatalf("TotalSupply should differ; both = %d", snap1.TotalSupply)
+	}
+}
+
+// TestAdminLedgerSnapshot_TotalSupplyConservation verifies TotalSupply
+// equals the sum of AgentBalances + EscrowResiduals at any moment. This
+// is the conservation invariant that the cross-node monitor uses to
+// flag protocol-level conservation violations (sum mismatch on a single
+// node's snapshot indicates internal accounting bug, not just cross-
+// node divergence).
+func TestAdminLedgerSnapshot_TotalSupplyConservation(t *testing.T) {
+	tl := ledger.NewTransferLedger()
+	if err := tl.FundAgent(crypto.AgentID("agent-a"), 30_000); err != nil {
+		t.Fatalf("fund: %v", err)
+	}
+	if err := tl.FundAgent(crypto.AgentID("agent-b"), 20_000); err != nil {
+		t.Fatalf("fund: %v", err)
+	}
+	if err := tl.FundAgent(crypto.AgentID(genesis.BucketTreasury), 50_000); err != nil {
+		t.Fatalf("fund treasury: %v", err)
+	}
+	em := escrow.New(tl)
+
+	s := &Server{transfer: tl, escrowMgr: em, agentID: "node", enableAdminAPI: true}
+	snap := fetchSnapshot(t, s)
+
+	var sumBalances, sumResiduals uint64
+	for _, v := range snap.AgentBalances {
+		sumBalances += v
+	}
+	for _, v := range snap.EscrowResiduals {
+		sumResiduals += v
+	}
+	want := sumBalances + sumResiduals
+	if snap.TotalSupply != want {
+		t.Fatalf("TotalSupply=%d, want sum(balances)=%d + sum(residuals)=%d = %d",
+			snap.TotalSupply, sumBalances, sumResiduals, want)
+	}
+}
+
+func fetchSnapshot(t *testing.T, s *Server) adminLedgerSnapshotResponse {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/ledger-snapshot", nil)
+	w := httptest.NewRecorder()
+	s.handleAdminLedgerSnapshot(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("snapshot status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp adminLedgerSnapshotResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return resp
+}
+
+func mapsEqualUint64(a, b map[string]uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
 }

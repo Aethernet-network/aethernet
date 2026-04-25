@@ -16,13 +16,88 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Aethernet-network/aethernet/internal/crypto"
 	"github.com/Aethernet-network/aethernet/internal/event"
+	"github.com/Aethernet-network/aethernet/internal/genesis"
 )
 
 // registerAdminRoutes wires admin-only routes onto the provided mux. Called
 // from rebuildMux only when enableAdminAPI is true.
 func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/admin/integer-migration/activate", s.handleAdminActivateIntegerMigration)
+	mux.HandleFunc("GET /v1/admin/ledger-snapshot", s.handleAdminLedgerSnapshot)
+}
+
+// adminLedgerSnapshotResponse is the JSON shape returned by
+// GET /v1/admin/ledger-snapshot. Field shape MUST match
+// internal/monitoring/cross_node_invariants.LedgerSnapshot — the
+// `aet invariants check` CLI decodes responses into that struct.
+//
+// Per F5 5B testnet criterion 12 (cross-node byte-equality verification):
+// two nodes computing identical canonical state MUST produce snapshots
+// whose AgentBalances + EscrowResiduals + Treasury + TotalSupply values
+// are byte-identical (for the value-equality semantic; map iteration
+// order is irrelevant since the comparator iterates by key).
+type adminLedgerSnapshotResponse struct {
+	NodeID          string            `json:"NodeID"`
+	AgentBalances   map[string]uint64 `json:"AgentBalances"`
+	EscrowResiduals map[string]uint64 `json:"EscrowResiduals"`
+	Treasury        uint64            `json:"Treasury"`
+	TotalSupply     uint64            `json:"TotalSupply"`
+}
+
+// handleAdminLedgerSnapshot serves GET /v1/admin/ledger-snapshot.
+//
+// Returns the node's current view of the canonical ledger projection:
+// per-agent balances (positive only), per-task escrow residuals,
+// treasury balance, total supply (sum of all balances + residuals).
+//
+// Authorization: admin-only (gated on Server.enableAdminAPI). NO signed-
+// request envelope is required — observation is read-only and the
+// endpoint does not mutate canonical state. Production deployments that
+// expose the admin route should still front it with a network-level ACL
+// (load-balancer-side IP allowlist or VPN gating); the handler logs
+// remote address for audit.
+//
+// Per F5 5B testnet criterion 12: this endpoint is the substrate the
+// `aet invariants check` tool uses to compare cross-node ledger byte-
+// equality. Divergence between nodes for identical canonical state
+// indicates a D-1 violation — halt-trigger per Plan v3 §5.
+func (s *Server) handleAdminLedgerSnapshot(w http.ResponseWriter, r *http.Request) {
+	if s.transfer == nil {
+		writeError(w, http.StatusServiceUnavailable, "ledger not available on this node")
+		return
+	}
+
+	resp := adminLedgerSnapshotResponse{
+		NodeID: string(s.agentID),
+	}
+
+	balances := s.transfer.AllBalances()
+	resp.AgentBalances = make(map[string]uint64, len(balances))
+	for agent, bal := range balances {
+		resp.AgentBalances[string(agent)] = bal
+	}
+
+	if s.escrowMgr != nil {
+		resp.EscrowResiduals = s.escrowMgr.AllResiduals()
+	} else {
+		resp.EscrowResiduals = map[string]uint64{}
+	}
+
+	treasury, _ := s.transfer.Balance(crypto.AgentID(genesis.BucketTreasury))
+	resp.Treasury = treasury
+
+	var total uint64
+	for _, bal := range resp.AgentBalances {
+		total += bal
+	}
+	for _, residual := range resp.EscrowResiduals {
+		total += residual
+	}
+	resp.TotalSupply = total
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleAdminActivateIntegerMigration emits a canonical

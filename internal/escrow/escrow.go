@@ -521,6 +521,28 @@ func (e *Escrow) Get(taskID string) (*EscrowEntry, error) {
 }
 
 // TotalEscrowed returns the total amount currently held in escrow across all tasks.
+// AllResiduals returns a map of taskID → µAET still locked in the
+// task's escrow bucket. Used by the /v1/admin/ledger-snapshot endpoint
+// (F5 5B testnet criterion 12 — cross-node byte-equality verification).
+//
+// Production accounting drains every bucket to zero post-settlement;
+// non-zero residuals are themselves an alert. The endpoint surfaces
+// every residual so the cross-node comparator can flag divergence.
+//
+// Result map is a fresh allocation; caller may mutate.
+func (e *Escrow) AllResiduals() map[string]uint64 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	out := make(map[string]uint64, len(e.entries))
+	for taskID, entry := range e.entries {
+		if entry.Amount > 0 {
+			out[taskID] = entry.Amount
+		}
+	}
+	return out
+}
+
 func (e *Escrow) TotalEscrowed() uint64 {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

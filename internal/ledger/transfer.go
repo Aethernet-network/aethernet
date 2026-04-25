@@ -405,6 +405,39 @@ func (l *TransferLedger) balanceLocked(agentID crypto.AgentID) uint64 {
 // BalanceCheck returns an error if agentID does not have enough spendable
 // balance to cover amount. It is a convenience wrapper used by the OCS engine
 // before recording a transfer.
+// AllBalances returns the spendable µAET balance of every known agent.
+// Used by the /v1/admin/ledger-snapshot endpoint (F5 5B testnet
+// criterion 12 — cross-node byte-equality verification).
+//
+// Iterates l.entries under l.mu.RLock(). Result map is a fresh
+// allocation — caller may mutate freely. Order of map iteration is
+// unspecified; consumers compare values, not byte-order.
+//
+// Includes only agents with positive balance after netting outgoing
+// transfers. Genesis entries are included so the cluster-wide
+// conservation accounting reconciles.
+func (l *TransferLedger) AllBalances() map[crypto.AgentID]uint64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	known := make(map[crypto.AgentID]struct{})
+	for _, e := range l.entries {
+		known[e.FromAgent] = struct{}{}
+		known[e.ToAgent] = struct{}{}
+	}
+	for agent := range l.archivedNetSettled {
+		known[agent] = struct{}{}
+	}
+	out := make(map[crypto.AgentID]uint64, len(known))
+	for agent := range known {
+		bal := l.balanceLocked(agent)
+		if bal > 0 {
+			out[agent] = bal
+		}
+	}
+	return out
+}
+
 func (l *TransferLedger) BalanceCheck(agentID crypto.AgentID, amount uint64) error {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
