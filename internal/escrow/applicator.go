@@ -105,7 +105,13 @@ func (e *Escrow) ApplySettlementRecords(taskID string, records []derivation.Payo
 
 	bucket := bucketID(taskID)
 
-	for _, rec := range records {
+	for i, rec := range records {
+		// Crash-injection feature flag (testnet-only — F5 5B criterion
+		// 11a self-heal verification). When AETHERNET_CRASH_AFTER_NTH_RECORD
+		// is set to integer N AND current index == N, the process exits.
+		// PRODUCTION DEPLOYMENTS MUST NOT SET THIS FLAG. See crash_inject.go.
+		maybeCrashAfterRecord(i, taskID, rec.CanonicalID)
+
 		// Skip-optimization (fast path, never a correctness gate per
 		// Plan v3 §3.4 obligation c). Paid-flag READ here decides ONLY
 		// whether to skip a redundant ledger call we've already made;

@@ -965,6 +965,12 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 	// consumers that invoke RegisterEscrow have a configured reader.
 	escrowMgr.SetDAGReader(d)
 
+	// Surface the testnet-only crash-injection flag at startup so any
+	// production deployment that accidentally inherits AETHERNET_CRASH_AFTER_NTH_RECORD
+	// in its environment sees an explicit warning before serving traffic.
+	// PRODUCTION DEPLOYMENTS MUST NOT SET THIS FLAG.
+	escrow.LogCrashFlagAtStartup()
+
 	// Category-specific reputation tracking.
 	reputationMgr := reputation.NewReputationManager()
 	if s != nil {
