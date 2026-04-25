@@ -423,7 +423,7 @@ func TestSettlementLKConsumer_Apply_InvokesApplicator(t *testing.T) {
 		Verdict:          dispatch.VerdictAccept,
 		ParticipatingIDs: []crypto.AgentID{"v1", "v2", "v3"},
 	}
-	if err := c.Apply(context.Background(), dispatch.LogicalKey(target), outcome); err != nil {
+	if err := c.Apply(context.Background(), event.EventID("trigger"), dispatch.LogicalKey(target), outcome); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	// Deferred path — IsApplied stays false because target is not in
@@ -440,7 +440,7 @@ func TestSettlementLKConsumer_Apply_UnknownVerdictErrors(t *testing.T) {
 
 	// Outcome with no Verdict set.
 	outcome := dispatch.Outcome{}
-	if err := c.Apply(context.Background(), dispatch.LogicalKey(target), outcome); err == nil {
+	if err := c.Apply(context.Background(), event.EventID("trigger"), dispatch.LogicalKey(target), outcome); err == nil {
 		t.Error("Apply with empty Verdict should error")
 	}
 }
@@ -453,7 +453,7 @@ func TestSettlementLKConsumer_Apply_MissingVoteRecordErrors(t *testing.T) {
 	c, _, _ := newTestSettlementLKConsumer(t, "target-other", []crypto.AgentID{"v1", "v2", "v3"}, nil)
 
 	outcome := dispatch.Outcome{Verdict: dispatch.VerdictAccept}
-	if err := c.Apply(context.Background(), "nope-no-record", outcome); err == nil {
+	if err := c.Apply(context.Background(), event.EventID("trigger"), "nope-no-record", outcome); err == nil {
 		t.Error("Apply on missing VoteRecord should error")
 	}
 }

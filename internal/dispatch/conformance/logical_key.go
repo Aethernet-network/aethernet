@@ -82,14 +82,14 @@ func RunLogicalKeyConformance(t *testing.T, factory LogicalKeyConsumerFactory) {
 		if err != nil {
 			t.Fatalf("DeriveOutcome: %v", err)
 		}
-		if err := c.Apply(ctx, key, outcome); err != nil {
+		if err := c.Apply(ctx, ev.ID, key, outcome); err != nil {
 			t.Fatalf("Apply (first): %v", err)
 		}
 		// Second Apply for the same key must be idempotent — the consumer
 		// is free to no-op or to re-apply (real consumers MUST no-op per
 		// C-1 generalized; the harness doesn't enforce no-op here, only
 		// that no error is returned).
-		if err := c.Apply(ctx, key, outcome); err != nil {
+		if err := c.Apply(ctx, ev.ID, key, outcome); err != nil {
 			t.Fatalf("Apply (second, idempotent): %v", err)
 		}
 	})

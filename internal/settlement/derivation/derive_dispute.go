@@ -10,6 +10,36 @@ import (
 // No validator payouts, no gen-ledger; worker portion is split 50/50
 // between worker and poster; treasury absorbs the remainder.
 //
+// **Forward-compat scaffolding (Shape 3, founder direction 2026-04-25)**:
+// NOT reachable from F5 5B LK-consumer-driven settlement path.
+// DeriveSettlement's terminalVerdict switch only handles
+// TerminalAccept | TerminalReject (per the LK consumer's IsComplete
+// seal-rule which requires passSealed || failSealed). Round-disputed
+// cases (RoundStateDisputed = abstain on deadline expiry without
+// supermajority) route through a SEPARATE pipeline:
+//
+//   1. DeadlineChecker emits TaskVerificationConsensus event with
+//      FinalVerdict="abstain" → recognition fabric transitions
+//      round.State to RoundStateDisputed
+//   2. Dispatcher routes the TVConsensus event to TVConsensusLogicalKeyConsumer
+//   3. LK consumer's IsComplete returns false (no seal achieved)
+//   4. Apply NEVER fires → DeriveSettlement is NEVER invoked for
+//      RoundStateDisputed cases
+//   5. Task disputes (poster-initiated, task.Status==TaskStatusDisputed)
+//      route through autovalidator.processDisputedTasks via legacy
+//      escrow.ReleaseNet (one of the 11 non-settlement
+//      CanonicalSyntheticID callers per #134 audit)
+//
+// deriveDispute is preserved for:
+//   - Unit-test coverage of the dispute calculation (Plan v3 §2.3 step 6
+//     reference implementation)
+//   - Forward-compat scaffolding for a future workstream that wires
+//     round-disputed cases into the canonical settlement path. When
+//     that ships, DeriveSettlement's switch + the LK consumer's
+//     Outcome.Verdict will both extend to carry a Dispute variant; this
+//     function then becomes reachable through the canonical path
+//     without arithmetic changes.
+//
 // Mirrors pre-5B settler integer-path arithmetic at
 // internal/settlement/verification_consensus_settler.go:331-334:
 //   workerPortion  = budget * WorkerShareBP / SharesDenominator

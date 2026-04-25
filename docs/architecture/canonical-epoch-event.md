@@ -2,7 +2,9 @@
 
 **Workstream**: F5 — Canonical Settlement Derivation
 **Phase**: 5B — sub-spec for the canonical-epoch primitive absorbed into 5B per secondary-halt resolution.
-**Status**: v2.3 — post-breakpoint-C precision patch (one-sentence layer-separation clarification; no design change). All v2.2 substance preserved. Sub-spec implementation complete across breakpoints A/B/C; ready for sub-spec completion gate.
+**Status**: v2.4 — post-Shape-3 race-resolution precision patch (§8.2 update; no design change to the canonical-epoch primitive itself). v2.3 substance preserved. Sub-spec implementation complete across breakpoints A/B/C; ready for sub-spec completion gate.
+
+**v2.4 patch summary** (founder direction Shape 3, 2026-04-25): §8.2 updated to clarify that round-struct fields `CanonicalSealContext` + `EpochAtFinalization` are observability/projection at the recognition fabric layer; `DeriveSettlement` computes the canonical values at call time independently from canonical-DAG primitives (`consensusEventID` parameter + `dagReader.CountAncestorsByType` at call time). Race-free dispatch under concurrent commit-bus dispatch — eliminates the cross-fabric race where the dispatcher LK consumer could fire BEFORE the recognition fabric's terminal-transition population had completed. The canonical-epoch primitive itself is unchanged; same value computed by the same primitive at both call sites.
 **Branch base**: `51bce89` (F4-frozen) + uncommitted 5A.4 working tree.
 **Date**: 2026-04-24
 
@@ -438,6 +440,10 @@ Both are canonical-frozen at terminal transition. The field shapes stand.
 
 ### 8.2 What changes: the source of EpochAtFinalization
 
+**Status (v2.4 — Shape 3 race-resolution precision patch, 2026-04-25)**: round-struct fields `CanonicalSealContext` + `EpochAtFinalization` are now **observability/projection** at the recognition fabric layer; **DeriveSettlement computes the canonical values at call time independently from canonical-DAG primitives** (race-free dispatch under concurrent commit-bus dispatch).
+
+The recognition fabric continues to populate `round.CanonicalSealContext` + `round.EpochAtFinalization` atomically with terminal-state transition for cross-node verification observability (criterion 12 ledger-snapshot-style audit) and for any future workstream consumer that wants the projected values. F5 5B's correctness no longer depends on the recognition consumer having populated them before the dispatcher LK consumer fires.
+
 Per prior halt's plan: `EpochAtFinalization = RoundCounter.Total() / RoundsPerEpoch` at the finalizing consumer's moment of Apply.
 
 Per this sub-spec: **EpochAtFinalization is derived from canonical DAG state**, not from RoundCounter.
@@ -454,9 +460,23 @@ The consumer needs access to a dag.AnchorReader (specifically the CountAncestors
 
 The `dagReader` passed to the finalizing consumer MUST be backed by the same canonical DAG view used by activation checks and settlement ancestry reads. Shadow caches, stale wrappers, or local-only views are not permitted in this path — consistency with canonical-state queries elsewhere is load-bearing for cross-node byte-equality at round finalization. A wrapper that silently returns stale counts (or worse, returns "unknown" when the canonical reader would return a precise count) breaks the D-1 guarantee that the finalization path exists to uphold.
 
+**Shape 3 (founder direction 2026-04-25)**: in addition to the recognition-fabric population above, `DeriveSettlement` at the dispatcher LK consumer call site **independently** computes `EpochAtFinalization` via the same primitive:
+
+```go
+// In DeriveSettlement (internal/settlement/derivation/derive.go), called
+// per dispatcher LK consumer Apply with consensusEventID = ev.ID
+// (the TVConsensus event being settled):
+epochOf, err := dagReader.CountAncestorsByType(consensusEventID, event.EventTypeEpochBoundary)
+if err != nil { ... }  // ErrEventNotFound → Cause=DeferredCauseDAGAncestorBFS
+```
+
+Same canonical primitive (sub-spec §3); same canonical value (sub-spec §4.1); cluster-uniform across both call sites. The duplicate computation is intentional under Shape 3 — it eliminates the cross-fabric race where the dispatcher LK consumer could dispatch BEFORE the recognition fabric's terminal-transition population had completed. Each layer reads canonical DAG state independently; both layers get the same answer.
+
 ### 8.3 Canonical guarantee
 
 Two nodes finalizing the same round R (same canonical-TVConsensus event ID) compute the same `EpochAtFinalization` because both run `CountAncestorsByType(ev.ID, EventTypeEpochBoundary)` against DAGs with the same canonical content. No concurrency defect; no counter state.
+
+**Shape 3 extension**: same canonical guarantee applies at the DeriveSettlement layer. The recognition consumer's `round.EpochAtFinalization` and DeriveSettlement's at-call-time `CountAncestorsByType` produce the same value for the same canonical (consensusEventID, EpochBoundary, DAG-state) tuple.
 
 ### 8.4 Materialization-lag semantic
 
@@ -464,11 +484,19 @@ If `CountAncestorsByType` returns `ErrEventNotFound` (the sealContext's ancestor
 
 The field is populated exactly once per round, atomically with the terminal transition. No drift window.
 
+**Shape 3 extension**: DeriveSettlement's at-call-time `CountAncestorsByType` failure surfaces as `Status=StatusDeferred, Cause=DeferredCauseDAGAncestorBFS` — same F3-B causal-prerequisite-gating semantic, same retry-on-materialization-catchup convergence.
+
 ### 8.5 Downstream usage
 
-`DeriveSettlement` at `internal/settlement/derivation/derive.go` reads:
+**Pre-Shape-3 (v2.3 and earlier)**: `DeriveSettlement` at `internal/settlement/derivation/derive.go` reads:
 - `round.CanonicalSealContext` — for V-1 ActivationCheck (§2.3 step 3).
 - `round.EpochAtFinalization` — for `cutoff_epoch = max(epoch - 1, 0)` per §4.4.
+
+**Post-Shape-3 (v2.4)**: `DeriveSettlement` reads from per-event canonical-DAG primitives instead of round-struct projections:
+- `consensusEventID` parameter (passed by dispatcher LK consumer per `LogicalKeyConsumer.Apply` interface) — for V-1 ActivationCheck (§2.3 step 3).
+- `inputs.dagReader.CountAncestorsByType(consensusEventID, EventTypeEpochBoundary)` at call time — for `cutoff_epoch = max(epoch - 1, 0)` per §4.4.
+
+`round.CanonicalSealContext` + `round.EpochAtFinalization` remain on the round struct as observability/projection fields; recognition consumer continues populating them; any future workstream consumer that wants the projected values continues to read them. F5 5B's correctness no longer depends on the recognition consumer having populated them before LK consumer fires.
 
 No other derivation-path reads of RoundCounter. No drift.
 

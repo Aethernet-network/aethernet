@@ -158,7 +158,17 @@ type LogicalKeyConsumer interface {
 	// from canonical state) rather than ev.Payload (potentially
 	// advisory), the dispatcher prevents the consumer from
 	// accidentally deriving canonical state from advisory fields.
-	Apply(ctx context.Context, key LogicalKey, outcome Outcome) error
+	//
+	// triggerEventID is the canonical EventID of the event that drove
+	// this Apply invocation (the event whose admission satisfied the
+	// IsComplete gate). The consumer MAY use it for:
+	//   - canonical seal context where downstream code requires the
+	//     specific event identity (e.g., F5 5B Shape 3: TVConsensus
+	//     event ID as DeriveSettlement's CanonicalSealContext source,
+	//     replacing recognition-fabric-projected round.CanonicalSealContext)
+	//   - audit / observability (which canonical event was the trigger)
+	// Consumers that don't need it ignore the parameter.
+	Apply(ctx context.Context, triggerEventID event.EventID, key LogicalKey, outcome Outcome) error
 
 	// RecoveryProbe checks whether Apply completed for the
 	// (consumer, key) pair during a prior invocation interrupted by a

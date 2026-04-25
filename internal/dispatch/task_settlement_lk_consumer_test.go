@@ -129,7 +129,7 @@ func TestTaskSettlementLKConsumer_DeriveOutcome_Empty(t *testing.T) {
 // the sole durable artifact of this consumer.
 func TestTaskSettlementLKConsumer_Apply_NoOp(t *testing.T) {
 	c := dispatch.NewTaskSettlementLogicalKeyConsumer()
-	err := c.Apply(context.Background(), "task-1", dispatch.Outcome{})
+	err := c.Apply(context.Background(), event.EventID("trigger"), "task-1", dispatch.Outcome{})
 	if err != nil {
 		t.Errorf("Apply should be a no-op (no error); got %v", err)
 	}

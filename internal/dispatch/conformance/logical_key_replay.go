@@ -280,12 +280,12 @@ func (t *lkApplyTracker) DeriveOutcome(rs dispatch.RoundState) (dispatch.Outcome
 // Apply records the invocation then delegates to the wrapped consumer.
 // The tracking MUST happen before the inner call so that even if the
 // inner Apply panics, the test sees the invocation.
-func (t *lkApplyTracker) Apply(ctx context.Context, key dispatch.LogicalKey, outcome dispatch.Outcome) error {
+func (t *lkApplyTracker) Apply(ctx context.Context, triggerEventID event.EventID, key dispatch.LogicalKey, outcome dispatch.Outcome) error {
 	t.mu.Lock()
 	t.appliesInOrder = append(t.appliesInOrder, key)
 	t.appliedByKey[key]++
 	t.mu.Unlock()
-	return t.inner.Apply(ctx, key, outcome)
+	return t.inner.Apply(ctx, triggerEventID, key, outcome)
 }
 
 func (t *lkApplyTracker) RecoveryProbe(ctx context.Context, key dispatch.LogicalKey) (dispatch.RecoveryStatus, error) {

@@ -180,10 +180,31 @@ type SettleResult struct {
 // always wires dagReader); it remains for the float-path companion-PR's
 // transitional window per Plan v3 §0.10. Companion-PR removal eliminates
 // the legacy branch entirely.
+// triggerEventID is the canonical TaskVerificationConsensus EventID
+// being settled (passed by the dispatcher LK consumer per F5 5B
+// Shape 3 founder direction 2026-04-25); flows through to
+// DeriveSettlement as the canonical seal context, replacing the
+// previous recognition-fabric-projected round.CanonicalSealContext
+// read that raced with LK consumer dispatch.
+//
+// terminalVerdict is the canonical TerminalStatus derived from the
+// LK consumer's Outcome.Verdict (Accept/Reject only via IsComplete
+// seal-rule); flows through to DeriveSettlement as the terminal
+// verdict switch input, replacing the previous round.State switch.
+// Caller (LK consumer) maps dispatch.Verdict → derivation.TerminalStatus
+// before invocation; settlement package cannot import dispatch (cycle:
+// dispatch already imports settlement).
+//
+// Both params satisfy the canonical-state-only contract per Shape 3
+// design rationale: triggerEventID is the canonical event identity
+// (DAG-derived), terminalVerdict is computed from the canonical vote
+// set in the LK consumer's IsComplete + DeriveOutcome flow.
 func (s *VerificationConsensusSettler) Settle(
 	ctx context.Context,
 	payload *event.TaskVerificationConsensusPayload,
 	round *taskverification.TaskVerificationRound,
+	triggerEventID event.EventID,
+	terminalVerdict derivation.TerminalStatus,
 ) (SettleResult, error) {
 	result := SettleResult{Verdict: payload.FinalVerdict}
 
@@ -241,7 +262,7 @@ func (s *VerificationConsensusSettler) Settle(
 	if s.dagReader == nil {
 		return result, fmt.Errorf("verification_settler: dagReader not wired — SetDAGReader must be called before Settle (post-F5 5B canonical path requires the DAG view for DeriveSettlement)")
 	}
-	return s.settleViaDerivation(ctx, payload, round, result)
+	return s.settleViaDerivation(ctx, payload, round, triggerEventID, terminalVerdict, result)
 }
 
 // settleViaDerivation is the F5 5B canonical path: build
@@ -258,6 +279,8 @@ func (s *VerificationConsensusSettler) settleViaDerivation(
 	ctx context.Context,
 	payload *event.TaskVerificationConsensusPayload,
 	round *taskverification.TaskVerificationRound,
+	triggerEventID event.EventID,
+	terminalVerdict derivation.TerminalStatus,
 	result SettleResult,
 ) (SettleResult, error) {
 	inputs, err := s.buildDerivationInputs()
@@ -265,7 +288,11 @@ func (s *VerificationConsensusSettler) settleViaDerivation(
 		return result, fmt.Errorf("verification_settler: buildDerivationInputs: %w", err)
 	}
 
-	derived, err := derivation.DeriveSettlement(ctx, round, inputs)
+	// F5 5B Shape 3: thread triggerEventID + terminalVerdict to
+	// DeriveSettlement. Replaces the prior reads of
+	// round.CanonicalSealContext / round.State that raced with
+	// recognition-fabric terminal-transition population.
+	derived, err := derivation.DeriveSettlement(ctx, round, triggerEventID, terminalVerdict, inputs)
 	if err != nil {
 		return result, fmt.Errorf("verification_settler: DeriveSettlement: %w", err)
 	}

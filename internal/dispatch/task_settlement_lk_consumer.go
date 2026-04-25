@@ -128,7 +128,7 @@ func (c *TaskSettlementLogicalKeyConsumer) DeriveOutcome(rs RoundState) (Outcome
 // Apply is invoked at most once per TaskID; recording that fact in
 // the admission record (StateApplied) is the only output this
 // consumer needs.
-func (c *TaskSettlementLogicalKeyConsumer) Apply(ctx context.Context, key LogicalKey, outcome Outcome) error {
+func (c *TaskSettlementLogicalKeyConsumer) Apply(ctx context.Context, _ event.EventID, key LogicalKey, outcome Outcome) error {
 	_ = ctx
 	_ = key
 	_ = outcome

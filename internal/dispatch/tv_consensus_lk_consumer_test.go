@@ -371,7 +371,7 @@ func TestTVConsensusLKConsumer_Apply_AcceptPath(t *testing.T) {
 		ScoreBP:          7000,
 		ParticipatingIDs: []crypto.AgentID{"v0", "v1", "v2"},
 	}
-	if err := c.Apply(context.Background(), "round-1", outcome); err != nil {
+	if err := c.Apply(context.Background(), event.EventID("trigger"), "round-1", outcome); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 
@@ -419,7 +419,7 @@ func TestTVConsensusLKConsumer_Apply_TerminalTask_NoOp(t *testing.T) {
 	beforeTreasury, _ := tl.Balance(crypto.AgentID("genesis:treasury"))
 
 	outcome := dispatch.Outcome{Verdict: dispatch.VerdictAccept, ScoreBP: 7000}
-	if err := c.Apply(context.Background(), "round-1", outcome); err != nil {
+	if err := c.Apply(context.Background(), event.EventID("trigger"), "round-1", outcome); err != nil {
 		t.Fatalf("Apply on terminal task should not error: %v", err)
 	}
 
@@ -471,7 +471,7 @@ func TestTVConsensusLKConsumer_Apply_HasSettlementStarted_NoOp(t *testing.T) {
 	beforeWorker, _ := tl.Balance(crypto.AgentID("worker"))
 
 	outcome := dispatch.Outcome{Verdict: dispatch.VerdictAccept, ScoreBP: 7000}
-	if err := c.Apply(context.Background(), "round-1", outcome); err != nil {
+	if err := c.Apply(context.Background(), event.EventID("trigger"), "round-1", outcome); err != nil {
 		t.Fatalf("Apply with HasSettlementStarted should not error: %v", err)
 	}
 

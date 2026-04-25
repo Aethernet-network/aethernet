@@ -101,10 +101,10 @@ func (s *slowApplyLKConsumer) IsComplete(rs RoundState) (bool, error) {
 func (s *slowApplyLKConsumer) DeriveOutcome(rs RoundState) (Outcome, error) {
 	return s.inner.DeriveOutcome(rs)
 }
-func (s *slowApplyLKConsumer) Apply(ctx context.Context, key LogicalKey, outcome Outcome) error {
+func (s *slowApplyLKConsumer) Apply(ctx context.Context, triggerEventID event.EventID, key LogicalKey, outcome Outcome) error {
 	s.applyEntered.Add(1)
 	time.Sleep(s.applyDelay)
-	return s.inner.Apply(ctx, key, outcome)
+	return s.inner.Apply(ctx, triggerEventID, key, outcome)
 }
 func (s *slowApplyLKConsumer) RecoveryProbe(ctx context.Context, key LogicalKey) (RecoveryStatus, error) {
 	return s.inner.RecoveryProbe(ctx, key)

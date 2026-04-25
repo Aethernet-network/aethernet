@@ -11,6 +11,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/settlement"
+	"github.com/Aethernet-network/aethernet/internal/settlement/derivation"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/taskverification"
 )
@@ -375,7 +376,7 @@ func (c *TVConsensusLogicalKeyConsumer) DeriveOutcome(rs RoundState) (Outcome, e
 // FinalScoreBP reflects Outcome. FinalizationTimeUnix is the
 // wall-clock moment Apply fires on this node — observability
 // metadata, not canonical state (C-17 advisory).
-func (c *TVConsensusLogicalKeyConsumer) Apply(ctx context.Context, key LogicalKey, outcome Outcome) error {
+func (c *TVConsensusLogicalKeyConsumer) Apply(ctx context.Context, triggerEventID event.EventID, key LogicalKey, outcome Outcome) error {
 	round, err := c.roundFor(key)
 	if err != nil {
 		return fmt.Errorf("tv_consensus_lk: load round: %w", err)
@@ -419,10 +420,44 @@ func (c *TVConsensusLogicalKeyConsumer) Apply(ctx context.Context, key LogicalKe
 		FinalizationTimeUnix: c.nowFn(),
 	}
 
-	if _, err := c.settler.Settle(ctx, &payload, round); err != nil {
+	// F5 5B Shape 3 (founder direction 2026-04-25): pass triggerEventID
+	// + terminalVerdict to the settler so DeriveSettlement sources canonical
+	// seal context + terminal verdict from canonical-DAG primitives instead
+	// of recognition-fabric-projected round.CanonicalSealContext / round.State
+	// (which races with dispatcher LK consumer dispatch). triggerEventID is
+	// the canonical TVConsensus event ID being settled (per dispatcher
+	// admitOneLogicalKey threading). terminalVerdict is the dispatch.Verdict
+	// → derivation.TerminalStatus mapping; settlement package cannot import
+	// dispatch (cycle), so the conversion happens here at the LK consumer.
+	terminalVerdict, err := dispatchVerdictToTerminalStatus(outcome.Verdict)
+	if err != nil {
+		return fmt.Errorf("tv_consensus_lk: outcome verdict map for round %s: %w", key, err)
+	}
+	if _, err := c.settler.Settle(ctx, &payload, round, triggerEventID, terminalVerdict); err != nil {
 		return fmt.Errorf("tv_consensus_lk: settle round %s: %w", key, err)
 	}
 	return nil
+}
+
+// dispatchVerdictToTerminalStatus maps the dispatcher Outcome.Verdict
+// to the derivation TerminalStatus enum the settler.Settle signature
+// requires. Per F5 5B Shape 3 (2026-04-25): conversion happens here
+// because the settlement package cannot import dispatch (would create
+// a cycle: dispatch already imports settlement).
+//
+// Only Accept and Reject are reachable through the LK consumer path
+// (IsComplete seal-rule guarantees passSealed || failSealed). An
+// unmapped verdict returns an error rather than silently producing
+// TerminalDispute (which is unreachable through this path per
+// derive_dispute.go forward-compat scaffolding doc).
+func dispatchVerdictToTerminalStatus(v Verdict) (derivation.TerminalStatus, error) {
+	switch v {
+	case VerdictAccept:
+		return derivation.TerminalAccept, nil
+	case VerdictReject:
+		return derivation.TerminalReject, nil
+	}
+	return 0, fmt.Errorf("dispatchVerdictToTerminalStatus: unknown Verdict %q", v)
 }
 
 // RecoveryProbe checks whether Apply completed for (consumer, key)

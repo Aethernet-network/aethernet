@@ -148,7 +148,7 @@ func (c *syntheticTypeE) DeriveOutcome(_ dispatch.RoundState) (dispatch.Outcome,
 	return dispatch.Outcome{Verdict: dispatch.VerdictAccept, ScoreBP: 7777}, nil
 }
 
-func (c *syntheticTypeE) Apply(_ context.Context, key dispatch.LogicalKey, outcome dispatch.Outcome) error {
+func (c *syntheticTypeE) Apply(_ context.Context, _ event.EventID, key dispatch.LogicalKey, outcome dispatch.Outcome) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.applied[key]++

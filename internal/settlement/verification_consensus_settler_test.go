@@ -13,6 +13,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/protocolmath"
+	"github.com/Aethernet-network/aethernet/internal/settlement/derivation"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/taskverification"
 )
@@ -119,7 +120,10 @@ func TestSettle_Accept_73_23_2_2(t *testing.T) {
 		PosterID:     "poster-1",
 	}
 
-	result, err := settler.Settle(context.Background(), payload, round)
+	// F5 5B Shape 3: settler.Settle gains triggerEventID + terminalVerdict
+	// per founder direction (2026-04-25). Tests pass synthetic test-trigger
+	// EventID + the appropriate TerminalStatus for the verdict.
+	result, err := settler.Settle(context.Background(), payload, round, event.EventID("test-trigger"), derivation.TerminalAccept)
 	if err != nil {
 		t.Fatalf("Settle: %v", err)
 	}
@@ -168,7 +172,7 @@ func TestSettle_AcceptValidatorVotedFailGetsNothing(t *testing.T) {
 		WorkerID: "worker-1", PosterID: "poster-1",
 	}
 
-	result, _ := settler.Settle(context.Background(), payload, round)
+	result, _ := settler.Settle(context.Background(), payload, round, event.EventID("test-trigger"), derivation.TerminalAccept)
 
 	// validator-3 voted fail — should get nothing.
 	if amt, ok := result.ValidatorPayouts["validator-3"]; ok && amt > 0 {
@@ -198,7 +202,7 @@ func TestSettle_Reject(t *testing.T) {
 		WorkerID: "worker-1", PosterID: "poster-1",
 	}
 
-	result, err := settler.Settle(context.Background(), payload, round)
+	result, err := settler.Settle(context.Background(), payload, round, event.EventID("test-trigger"), derivation.TerminalReject)
 	if err != nil {
 		t.Fatalf("Settle: %v", err)
 	}
@@ -223,74 +227,16 @@ func TestSettle_Reject(t *testing.T) {
 	}
 }
 
-func TestSettle_Dispute_50_50(t *testing.T) {
-	budget := uint64(10000)
-	settler, tm, _, _ := setupSettlerTest(t, budget)
-	allTasks := tm.Search(tasks.TaskStatusSubmitted, "", 0)
-	taskID := allTasks[0].ID
-
-	round := makeRoundWithVotes(taskID, map[string]taskverification.Verdict{})
-	round.State = taskverification.RoundStateDisputed
-	round.FinalVerdict = taskverification.VerdictAbstain
-
-	payload := &event.TaskVerificationConsensusPayload{
-		RoundID: "round-test", TaskID: taskID, FinalVerdict: "abstain",
-		WorkerID: "worker-1", PosterID: "poster-1",
-	}
-
-	result, err := settler.Settle(context.Background(), payload, round)
-	if err != nil {
-		t.Fatalf("Settle: %v", err)
-	}
-
-	workerPortion := budget * 7300 / 10000
-	expectedWorker := workerPortion / 2
-	expectedPoster := workerPortion - expectedWorker
-	expectedTreasury := budget - workerPortion
-
-	if result.WorkerPayout != expectedWorker {
-		t.Errorf("WorkerPayout = %d; want %d", result.WorkerPayout, expectedWorker)
-	}
-	if result.PosterRefund != expectedPoster {
-		t.Errorf("PosterRefund = %d; want %d", result.PosterRefund, expectedPoster)
-	}
-	if result.TreasuryAmount != expectedTreasury {
-		t.Errorf("TreasuryAmount = %d; want %d", result.TreasuryAmount, expectedTreasury)
-	}
-	if result.TotalDistributed != budget {
-		t.Errorf("TotalDistributed = %d; want %d", result.TotalDistributed, budget)
-	}
-
-	task, _ := tm.Get(taskID)
-	if task.Status != tasks.TaskStatusDisputedResolved {
-		t.Errorf("task status = %s; want disputed_resolved", task.Status)
-	}
-}
-
-func TestSettle_DisputeOddMicroAET(t *testing.T) {
-	budget := uint64(10001)
-	settler, tm, _, _ := setupSettlerTest(t, budget)
-	allTasks := tm.Search(tasks.TaskStatusSubmitted, "", 0)
-	taskID := allTasks[0].ID
-
-	round := makeRoundWithVotes(taskID, map[string]taskverification.Verdict{})
-	round.State = taskverification.RoundStateDisputed
-	round.FinalVerdict = taskverification.VerdictAbstain
-	payload := &event.TaskVerificationConsensusPayload{
-		RoundID: "round-test", TaskID: taskID, FinalVerdict: "abstain",
-		WorkerID: "worker-1", PosterID: "poster-1",
-	}
-
-	result, _ := settler.Settle(context.Background(), payload, round)
-
-	// Extra micro-AET goes to poster on odd splits.
-	if result.PosterRefund < result.WorkerPayout {
-		t.Errorf("poster (%d) should get >= worker (%d) on odd split", result.PosterRefund, result.WorkerPayout)
-	}
-	if result.TotalDistributed != budget {
-		t.Errorf("TotalDistributed = %d; want %d", result.TotalDistributed, budget)
-	}
-}
+// Dispute-path arithmetic regression tests moved to
+// internal/settlement/derivation/derive_dispute_test.go per F5 5B
+// Shape 3 (founder direction Option (a) 2026-04-25): the
+// DeriveSettlement switch under Shape 3 only handles
+// TerminalAccept | TerminalReject; round-disputed cases are not
+// reachable through settler.Settle / DeriveSettlement. Production
+// dispute path is autovalidator.processDisputedTasks →
+// escrow.ReleaseNet (separate from F5 5B canonical settlement). The
+// dispute-arithmetic regression coverage now lives at the
+// architecturally correct layer (deriveDispute called directly).
 
 func TestSettle_Idempotent(t *testing.T) {
 	budget := uint64(10000)
@@ -306,9 +252,9 @@ func TestSettle_Idempotent(t *testing.T) {
 		WorkerID: "worker-1", PosterID: "poster-1",
 	}
 
-	_, _ = settler.Settle(context.Background(), payload, round)
+	_, _ = settler.Settle(context.Background(), payload, round, event.EventID("test-trigger"), derivation.TerminalAccept)
 	// Second call should be idempotent.
-	result2, err := settler.Settle(context.Background(), payload, round)
+	result2, err := settler.Settle(context.Background(), payload, round, event.EventID("test-trigger"), derivation.TerminalAccept)
 	if err != nil {
 		t.Fatalf("second Settle should not error: %v", err)
 	}
@@ -317,13 +263,25 @@ func TestSettle_Idempotent(t *testing.T) {
 	}
 }
 
+// TestSettle_TotalDistributionEqualsBudget exercises budget-conservation
+// across the verdict types reachable through settler.Settle under
+// Shape 3: Accept and Reject only. The Dispute case (pre-existing
+// "abstain" verdict in this loop) is no longer reachable via
+// settler.Settle per founder direction (2026-04-25); deriveDispute's
+// budget conservation is exercised directly in
+// internal/settlement/derivation/derive_dispute_test.go.
 func TestSettle_TotalDistributionEqualsBudget(t *testing.T) {
-	// Test across all three verdict types with various budgets.
 	budgets := []uint64{1, 100, 999, 10000, 100001, 1000000}
-	verdicts := []string{"pass", "fail", "abstain"}
+	cases := []struct {
+		verdictString string
+		terminal      derivation.TerminalStatus
+	}{
+		{"pass", derivation.TerminalAccept},
+		{"fail", derivation.TerminalReject},
+	}
 
 	for _, budget := range budgets {
-		for _, verdict := range verdicts {
+		for _, c := range cases {
 			settler, tm, _, _ := setupSettlerTest(t, budget)
 			allTasks := tm.Search(tasks.TaskStatusSubmitted, "", 0)
 			taskID := allTasks[0].ID
@@ -333,17 +291,17 @@ func TestSettle_TotalDistributionEqualsBudget(t *testing.T) {
 				"v2": taskverification.VerdictFail,
 			})
 			payload := &event.TaskVerificationConsensusPayload{
-				RoundID: "round-test", TaskID: taskID, FinalVerdict: verdict,
+				RoundID: "round-test", TaskID: taskID, FinalVerdict: c.verdictString,
 				WorkerID: "worker-1", PosterID: "poster-1",
 			}
 
-			result, err := settler.Settle(context.Background(), payload, round)
+			result, err := settler.Settle(context.Background(), payload, round, event.EventID("test-trigger"), c.terminal)
 			if err != nil {
-				t.Fatalf("budget=%d verdict=%s: %v", budget, verdict, err)
+				t.Fatalf("budget=%d verdict=%s: %v", budget, c.verdictString, err)
 			}
 			if result.TotalDistributed != budget {
 				t.Errorf("budget=%d verdict=%s: total=%d want=%d",
-					budget, verdict, result.TotalDistributed, budget)
+					budget, c.verdictString, result.TotalDistributed, budget)
 			}
 		}
 	}
@@ -387,7 +345,7 @@ func TestSettle_QWeighted_AllNeutral_EqualsEvenSplit(t *testing.T) {
 		WorkerID: "worker-1", PosterID: "poster-1",
 	}
 
-	result, err := settler.Settle(context.Background(), payload, round)
+	result, err := settler.Settle(context.Background(), payload, round, event.EventID("test-trigger"), derivation.TerminalAccept)
 	if err != nil {
 		t.Fatalf("Settle: %v", err)
 	}
@@ -421,7 +379,7 @@ func TestSettle_QWeighted_HighAndLow(t *testing.T) {
 		WorkerID: "worker-1", PosterID: "poster-1",
 	}
 
-	result, _ := settler.Settle(context.Background(), payload, round)
+	result, _ := settler.Settle(context.Background(), payload, round, event.EventID("test-trigger"), derivation.TerminalAccept)
 	if result.ValidatorPayouts["v1"] <= result.ValidatorPayouts["v2"] {
 		t.Errorf("high-Q v1 (%d) should get more than low-Q v2 (%d)",
 			result.ValidatorPayouts["v1"], result.ValidatorPayouts["v2"])
@@ -447,7 +405,7 @@ func TestSettle_QWeighted_AllZero_FallsBackToEvenSplit(t *testing.T) {
 		WorkerID: "worker-1", PosterID: "poster-1",
 	}
 
-	result, _ := settler.Settle(context.Background(), payload, round)
+	result, _ := settler.Settle(context.Background(), payload, round, event.EventID("test-trigger"), derivation.TerminalAccept)
 	if len(result.ValidatorPayouts) != 2 {
 		t.Fatalf("expected 2 payouts; got %d", len(result.ValidatorPayouts))
 	}
@@ -523,7 +481,7 @@ func TestVerificationConsensusSettler_EscrowCatchUp_UsesRegisterEscrow(t *testin
 		WorkerID:     "worker-1",
 		PosterID:     "poster-1",
 	}
-	result, err := settler.Settle(context.Background(), payload, round)
+	result, err := settler.Settle(context.Background(), payload, round, event.EventID("test-trigger"), derivation.TerminalAccept)
 	if err != nil {
 		t.Fatalf("Settle: %v", err)
 	}

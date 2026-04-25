@@ -184,7 +184,11 @@ func (d *Dispatcher) admitOneLogicalKey(ctx context.Context, ev *event.Event, c 
 	// recorded as StateFailedRetryable so a subsequent re-Admit of any
 	// event for this key drives a retry (mirrors the F3-B
 	// failed-retryable retry pattern at the (consumer, event) grain).
-	if applyErr := safeApplyLogicalKey(ctx, c, key, outcome); applyErr != nil {
+	//
+	// triggerEventID is ev.ID — the canonical event whose admission
+	// satisfied the IsComplete gate. Threaded through to Apply per the
+	// LogicalKeyConsumer.Apply contract (F5 5B Shape 3).
+	if applyErr := safeApplyLogicalKey(ctx, c, ev.ID, key, outcome); applyErr != nil {
 		rec.State = StateFailedRetryable
 		rec.Consumers[c.Name()] = ConsumerFailedRetryable
 		if persistErr := d.store.PutAdmission(storeKey, rec); persistErr != nil {
@@ -244,11 +248,11 @@ func (d *Dispatcher) reserveOrLoadLogical(storeKey string, ev *event.Event, c Lo
 // safeApplyLogicalKey calls consumer.Apply with panic recovery,
 // mirroring safeApply for content-hash consumers. A panic is treated
 // as a failed-retryable error.
-func safeApplyLogicalKey(ctx context.Context, c LogicalKeyConsumer, key LogicalKey, outcome Outcome) (err error) {
+func safeApplyLogicalKey(ctx context.Context, c LogicalKeyConsumer, triggerEventID event.EventID, key LogicalKey, outcome Outcome) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("dispatch: logical-key consumer %s panicked on key %s: %v", c.Name(), key, r)
 		}
 	}()
-	return c.Apply(ctx, key, outcome)
+	return c.Apply(ctx, triggerEventID, key, outcome)
 }

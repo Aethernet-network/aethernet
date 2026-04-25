@@ -123,7 +123,7 @@ func TestEpochBoundaryLK_IsCompleteAlwaysTrue(t *testing.T) {
 // presence; no per-Apply side effect.
 func TestEpochBoundaryLK_ApplyIsNoOp(t *testing.T) {
 	c := NewEpochBoundaryLogicalKeyConsumer()
-	if err := c.Apply(context.Background(), LogicalKey("5"), Outcome{}); err != nil {
+	if err := c.Apply(context.Background(), event.EventID("trigger-event-id"), LogicalKey("5"), Outcome{}); err != nil {
 		t.Fatalf("Apply should be no-op, got: %v", err)
 	}
 }

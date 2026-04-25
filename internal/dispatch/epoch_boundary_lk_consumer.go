@@ -110,7 +110,7 @@ func (c *EpochBoundaryLogicalKeyConsumer) DeriveOutcome(_ RoundState) (Outcome, 
 // If a future workstream introduces a side-effect that should fire
 // once per canonical EpochBoundary (e.g., snapshot emission per
 // sub-spec §5.1), this is the hook to extend.
-func (c *EpochBoundaryLogicalKeyConsumer) Apply(_ context.Context, _ LogicalKey, _ Outcome) error {
+func (c *EpochBoundaryLogicalKeyConsumer) Apply(_ context.Context, _ event.EventID, _ LogicalKey, _ Outcome) error {
 	return nil
 }
 

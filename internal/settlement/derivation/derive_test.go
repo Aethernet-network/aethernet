@@ -12,7 +12,7 @@ import (
 func TestDeriveSettlement_NilRoundReturnsError(t *testing.T) {
 	t.Parallel()
 
-	_, err := DeriveSettlement(context.Background(), nil, DerivationInputs{})
+	_, err := DeriveSettlement(context.Background(), nil, "test-trigger", TerminalAccept, DerivationInputs{})
 	if err == nil {
 		t.Fatalf("DeriveSettlement(nil round) should error")
 	}

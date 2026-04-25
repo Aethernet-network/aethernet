@@ -73,7 +73,7 @@ func (c *syntheticLogicalKeyConsumer) DeriveOutcome(rs RoundState) (Outcome, err
 	return c.outcomeFn(rs)
 }
 
-func (c *syntheticLogicalKeyConsumer) Apply(_ context.Context, key LogicalKey, outcome Outcome) error {
+func (c *syntheticLogicalKeyConsumer) Apply(_ context.Context, _ event.EventID, key LogicalKey, outcome Outcome) error {
 	c.mu.Lock()
 	c.appliedKeys = append(c.appliedKeys, key)
 	c.appliedOuts = append(c.appliedOuts, outcome)

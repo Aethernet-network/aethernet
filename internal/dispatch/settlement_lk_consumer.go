@@ -240,7 +240,7 @@ func (c *SettlementLogicalKeyConsumer) DeriveOutcome(rs RoundState) (Outcome, er
 // "rejected"). Outcome.Verdict is VerdictAccept / VerdictReject.
 // The mapping below is explicit; unknown Verdict values return an
 // error rather than falling through to a silent default.
-func (c *SettlementLogicalKeyConsumer) Apply(ctx context.Context, key LogicalKey, outcome Outcome) error {
+func (c *SettlementLogicalKeyConsumer) Apply(ctx context.Context, _ event.EventID, key LogicalKey, outcome Outcome) error {
 	record, err := c.voteRecordFor(key)
 	if err != nil {
 		return fmt.Errorf("settlement_lk: load vote record: %w", err)

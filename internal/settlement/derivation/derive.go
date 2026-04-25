@@ -6,14 +6,16 @@ import (
 	"fmt"
 
 	"github.com/Aethernet-network/aethernet/internal/dag"
+	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/taskverification"
 )
 
 // DeriveSettlement is the F5 Phase 5B pure derivation function. Given
-// a finalized TaskVerificationRound and a bundle of canonical-state
-// primitives, returns the ordered slice of PayoutRecord values that
-// fully settle the round (or a StatusDeferred signal if required
-// canonical state is not yet locally materialized).
+// a finalized TaskVerificationRound, the canonical TaskVerificationConsensus
+// event ID being settled, the canonical terminal verdict, and a bundle
+// of canonical-state primitives, returns the ordered slice of
+// PayoutRecord values that fully settle the round (or a StatusDeferred
+// signal if required canonical state is not yet locally materialized).
 //
 // Purity (plan §2.4): no time.Now, no math/rand, no crypto/rand, no
 // mutation of inputs, no package-level mutable state read, no
@@ -31,35 +33,56 @@ import (
 // canonical state is locally available, node A's retry converges to
 // the byte-identical DerivationResult node B produced.
 //
+// **Shape 3 (founder direction 2026-04-25)**: canonical seal context
+// and epoch-at-finalization are sourced from canonical DAG primitives
+// at call time (consensusEventID + dagReader.CountAncestorsByType),
+// NOT from recognition-fabric projections on the round struct (which
+// race with dispatcher LK consumer dispatch). Round-struct
+// CanonicalSealContext + EpochAtFinalization are preserved as
+// observability/projection per sub-spec §8.2 v2.4.
+//
 // Preconditions (caller responsibility):
-//   - round is a finalized TaskVerificationRound
-//     (State ∈ {FinalizedAccept, FinalizedReject, Disputed}).
-//   - round.Votes is the canonical vote set (cluster-uniform per F4).
-//   - round.CanonicalSealContext is populated (per F5 5B canonical-
-//     epoch sub-spec §8.1; finalizing consumer wires this at terminal
-//     transition).
+//   - round is a TaskVerificationRound with vote set populated by the
+//     vote consumer (race-free: votes appended pre-terminal-transition).
+//     round.State is NOT consulted; the verdict is supplied via
+//     terminalVerdict (Outcome.Verdict from LK consumer DeriveOutcome).
+//   - consensusEventID is the EventID of the TaskVerificationConsensus
+//     event triggering this settlement. The dispatcher LK consumer
+//     guarantees this is the canonical event whose causal position
+//     defines the settlement's seal context.
+//   - terminalVerdict ∈ {TerminalAccept, TerminalReject}.
+//     TerminalDispute is unreachable through the LK-consumer-driven
+//     settlement path (IsComplete seal-rule gate; see derive_dispute.go
+//     doc for the dispute-path semantics).
 //   - inputs.escrowMgr has a canonical escrow entry for round.TaskID
 //     (settler guarantees this by only calling DeriveSettlement for
 //     rounds whose escrow was registered).
 func DeriveSettlement(
 	_ context.Context,
 	round *taskverification.TaskVerificationRound,
+	consensusEventID event.EventID,
+	terminalVerdict TerminalStatus,
 	inputs DerivationInputs,
 ) (DerivationResult, error) {
 	if round == nil {
 		return DerivationResult{}, errors.New("derivation: nil round")
 	}
-	if !round.IsTerminal() {
-		return DerivationResult{}, fmt.Errorf("derivation: round %s is not terminal (state=%v)", round.RoundID, round.State)
+	if consensusEventID == "" {
+		return DerivationResult{}, errors.New("derivation: consensusEventID required (Shape 3 canonical seal context)")
 	}
 
 	// Step 3: V-1 activation check for W. Determines stub-W vs real-W
-	// per round's canonical position relative to
+	// per the consensus event's canonical position relative to
 	// inputs.reputationActivationEventID. Multi-AI Item 1 composite
 	// (2026-04-25): performed via the canonical AnchorReader.IsAncestor
 	// primitive directly through the `isActivated` helper — no function-
 	// field surface, so no closure-captured runtime state can hide here.
-	useRealW, err := isActivated(inputs.dagReader, inputs.reputationActivationEventID, round.CanonicalSealContext)
+	//
+	// **Shape 3**: seal context is consensusEventID (the TVConsensus
+	// event ID being settled), sourced directly from the dispatcher LK
+	// consumer call site rather than from round.CanonicalSealContext
+	// (which races with terminal-transition population).
+	useRealW, err := isActivated(inputs.dagReader, inputs.reputationActivationEventID, consensusEventID)
 	if err != nil {
 		if errors.Is(err, dag.ErrEventNotFound) {
 			return DerivationResult{Status: StatusDeferred, Cause: DeferredCauseV1AncestorCheck}, nil
@@ -67,9 +90,27 @@ func DeriveSettlement(
 		return DerivationResult{}, fmt.Errorf("derivation: V-1 activation check: %w", err)
 	}
 
-	// Step 1: compute canonical cutoff (anchor + epoch). Anchor depends
-	// on V-1 outcome (Fix A); epoch is independent.
-	cutoff := computeCutoff(round, useRealW)
+	// Step 1: compute canonical cutoff (anchor + epoch).
+	//
+	// **Shape 3**: epoch_of(R) is computed at call time via
+	// CountAncestorsByType(consensusEventID, EventTypeEpochBoundary)
+	// rather than read from round.EpochAtFinalization. Same canonical
+	// value (sub-spec §3); cluster-uniform via the canonical DAG
+	// primitive; race-free dispatch under concurrent commit-bus dispatch
+	// (the recognition fabric's terminal-transition population is no
+	// longer in the critical path).
+	//
+	// CountAncestorsByType materialization-lag (ErrEventNotFound) is
+	// surfaced as Cause=DeferredCauseDAGAncestorBFS — same semantic as
+	// ReadAtAnchor failures since both signal "a canonical-DAG ancestor-
+	// traversal could not complete due to local materialization lag."
+	cutoff, err := computeCutoff(inputs.dagReader, consensusEventID, useRealW)
+	if err != nil {
+		if errors.Is(err, dag.ErrEventNotFound) {
+			return DerivationResult{Status: StatusDeferred, Cause: DeferredCauseDAGAncestorBFS}, nil
+		}
+		return DerivationResult{}, fmt.Errorf("derivation: cutoff: %w", err)
+	}
 
 	// Step 4: select implementations.
 	var wImpl CanonicalWProjection
@@ -96,7 +137,7 @@ func DeriveSettlement(
 	// inputs.qualityActivationEventID is the empty-string placeholder so
 	// `isActivated` short-circuits to (false, nil) and we always select
 	// Stub.
-	useRealQuality, err := isActivated(inputs.dagReader, inputs.qualityActivationEventID, round.CanonicalSealContext)
+	useRealQuality, err := isActivated(inputs.dagReader, inputs.qualityActivationEventID, consensusEventID)
 	if err != nil {
 		if errors.Is(err, dag.ErrEventNotFound) {
 			return DerivationResult{Status: StatusDeferred, Cause: DeferredCauseV1AncestorCheck}, nil
@@ -129,10 +170,22 @@ func DeriveSettlement(
 	}
 	posterID := round.PosterID
 
-	// Step 5: route on round.State (the canonical finalization state
-	// set by the recognition fabric's TaskVerificationConsensusConsumer
-	// at terminal transition; per breakpoint-C wiring, atomically with
-	// CanonicalSealContext + EpochAtFinalization population).
+	// Step 5: route on the canonical terminalVerdict supplied by the LK
+	// consumer (Outcome.Verdict from DeriveOutcome via IsComplete seal-
+	// rule). Replaces the prior round.State switch which was a
+	// recognition-fabric projection populated atomically with terminal
+	// transition (Shape 3 race-resolution).
+	//
+	// TerminalDispute is NEVER reached through this path: the LK
+	// consumer's IsComplete seal-rule guarantees Apply only fires on
+	// passSealed || failSealed → Accept or Reject. Dispute settlements
+	// route through the legacy escrow.ReleaseNet path via
+	// autovalidator.processDisputedTasks per dispute-path tracing
+	// (2026-04-25). derive_dispute.go is preserved as forward-compat
+	// scaffolding (see its doc comment); the default branch errors out
+	// per Item 2 V#4 enum-exhaustiveness pattern so any future
+	// terminalVerdict extension that doesn't update this dispatch
+	// surfaces at runtime.
 	var (
 		records  []PayoutRecord
 		status   DerivationStatus
@@ -141,18 +194,15 @@ func DeriveSettlement(
 		terminal TerminalStatus
 		eerr     error
 	)
-	switch round.State {
-	case taskverification.RoundStateFinalizedAccept:
+	switch terminalVerdict {
+	case TerminalAccept:
 		records, status, cause, summary, eerr = deriveAccept(round, cutoff, wImpl, qualityImpl, inputs, budget, posterID, fundingRef, inputs.treasuryID)
 		terminal = TerminalAccept
-	case taskverification.RoundStateFinalizedReject:
+	case TerminalReject:
 		records, status, cause, summary, eerr = deriveReject(round, cutoff, wImpl, inputs, budget, posterID, fundingRef, inputs.treasuryID)
 		terminal = TerminalReject
-	case taskverification.RoundStateDisputed:
-		records, status, cause, summary, eerr = deriveDispute(round, inputs, budget, posterID, fundingRef, inputs.treasuryID)
-		terminal = TerminalDispute
 	default:
-		return DerivationResult{}, fmt.Errorf("derivation: unsupported terminal round state %v", round.State)
+		return DerivationResult{}, fmt.Errorf("derivation: unsupported terminalVerdict %v (LK-consumer-driven path produces TerminalAccept | TerminalReject only; TerminalDispute routes via legacy escrow.ReleaseNet)", terminalVerdict)
 	}
 	if eerr != nil {
 		return DerivationResult{}, eerr

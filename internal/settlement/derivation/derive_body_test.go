@@ -2,7 +2,7 @@ package derivation
 
 import (
 	"context"
-	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
@@ -199,7 +199,7 @@ func TestDeriveSettlement_AcceptPath_ConservesBudget(t *testing.T) {
 		posterID:   poster,
 	}, &fakeTask{category: "test-category"}, treasury)
 
-	result, err := DeriveSettlement(context.Background(), round, inputs)
+	result, err := DeriveSettlement(context.Background(), round, "seal-context-1", TerminalAccept, inputs)
 	if err != nil {
 		t.Fatalf("DeriveSettlement: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestDeriveSettlement_AcceptPath_CanonicalIDsUnique(t *testing.T) {
 		posterID:   poster,
 	}, &fakeTask{category: "test-category"}, treasury)
 
-	result, err := DeriveSettlement(context.Background(), round, inputs)
+	result, err := DeriveSettlement(context.Background(), round, "seal-context-1", TerminalAccept, inputs)
 	if err != nil {
 		t.Fatalf("DeriveSettlement: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestDeriveSettlement_AcceptPath_OrdinalsMonotone(t *testing.T) {
 		posterID:   poster,
 	}, &fakeTask{category: "test-category"}, treasury)
 
-	result, err := DeriveSettlement(context.Background(), round, inputs)
+	result, err := DeriveSettlement(context.Background(), round, "seal-context-1", TerminalAccept, inputs)
 	if err != nil {
 		t.Fatalf("DeriveSettlement: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestDeriveSettlement_RejectPath_NoGenLedgerNoWorker(t *testing.T) {
 		posterID:   poster,
 	}, &fakeTask{category: "test-category"}, treasury)
 
-	result, err := DeriveSettlement(context.Background(), round, inputs)
+	result, err := DeriveSettlement(context.Background(), round, "seal-context-1", TerminalReject, inputs)
 	if err != nil {
 		t.Fatalf("DeriveSettlement: %v", err)
 	}
@@ -332,50 +332,13 @@ func TestDeriveSettlement_RejectPath_NoGenLedgerNoWorker(t *testing.T) {
 	}
 }
 
-// TestDeriveSettlement_DisputePath_FiftyFiftyWorkerPoster verifies
-// dispute splits the worker share 50/50 between worker and poster.
-func TestDeriveSettlement_DisputePath_FiftyFiftyWorkerPoster(t *testing.T) {
-	t.Parallel()
-
-	worker := crypto.AgentID("worker-agent")
-	poster := crypto.AgentID("poster-agent")
-	treasury := crypto.AgentID("treasury-agent")
-
-	round := makeAcceptRound(worker, poster, nil)
-	round.State = taskverification.RoundStateDisputed
-	round.FinalVerdict = taskverification.VerdictAbstain
-
-	reader := fixedReader(round.SubmissionEventID, "parent-1", "grandparent-1")
-	inputs := stubInputs(reader, &fakeEscrow{
-		fundingRef: "funding-1",
-		amount:     100_000,
-		posterID:   poster,
-	}, &fakeTask{category: "test-category"}, treasury)
-
-	result, err := DeriveSettlement(context.Background(), round, inputs)
-	if err != nil {
-		t.Fatalf("DeriveSettlement: %v", err)
-	}
-	if result.TerminalStatus != TerminalDispute {
-		t.Fatalf("TerminalStatus = %v, want TerminalDispute", result.TerminalStatus)
-	}
-
-	var workerAmt, posterAmt uint64
-	for _, r := range result.Records {
-		switch r.Recipient.Role {
-		case RoleWorker:
-			workerAmt = r.Amount.Value
-		case RolePosterRefund:
-			posterAmt = r.Amount.Value
-		}
-	}
-	// workerPortion = 100000 * 7300 / 10000 = 73000
-	// workerAmt = 73000 / 2 = 36500
-	// posterAmt = 73000 - 36500 = 36500
-	if workerAmt != 36_500 || posterAmt != 36_500 {
-		t.Fatalf("dispute split not 50/50: worker=%d poster=%d", workerAmt, posterAmt)
-	}
-}
+// (Pre-Shape-3 TestDeriveSettlement_DisputePath_FiftyFiftyWorkerPoster
+// removed per founder direction Option (a) 2026-04-25. Shape 3's
+// DeriveSettlement switch handles only TerminalAccept | TerminalReject;
+// dispute-arithmetic regression coverage moved to
+// derive_dispute_test.go's TestDeriveDispute_50_50 +
+// TestDeriveDispute_OddMicroAET, calling deriveDispute directly per
+// derive_dispute.go's forward-compat-scaffolding doc.)
 
 // TestDeriveSettlement_DeterminismAcrossInvocations is the load-bearing
 // D-1 test: same canonical inputs → byte-identical Records (incl.
@@ -395,7 +358,7 @@ func TestDeriveSettlement_DeterminismAcrossInvocations(t *testing.T) {
 			amount:     250_000,
 			posterID:   poster,
 		}, &fakeTask{category: "test-category"}, treasury)
-		return DeriveSettlement(context.Background(), round, inputs)
+		return DeriveSettlement(context.Background(), round, "seal-context-1", TerminalAccept, inputs)
 	}
 
 	r1, err := build()
@@ -464,7 +427,7 @@ func TestDeriveSettlement_DeferralOnActivationCheckErr(t *testing.T) {
 		treasuryID:                  treasury,
 	}
 
-	result, err := DeriveSettlement(context.Background(), round, inputs)
+	result, err := DeriveSettlement(context.Background(), round, "seal-context-1", TerminalAccept, inputs)
 	if err != nil {
 		t.Fatalf("DeriveSettlement: %v", err)
 	}
@@ -502,7 +465,7 @@ func TestDeriveSettlement_DeferralOnWLookupErr(t *testing.T) {
 		// (false, nil) → stub-W selected → deferringWStub.Lookup fires.
 	}
 
-	result, err := DeriveSettlement(context.Background(), round, inputs)
+	result, err := DeriveSettlement(context.Background(), round, "seal-context-1", TerminalAccept, inputs)
 	if err != nil {
 		t.Fatalf("DeriveSettlement: %v", err)
 	}
@@ -573,7 +536,7 @@ func TestDeriveSettlement_DeferralOnDAGAncestorBFSErr(t *testing.T) {
 		// missing-parent and surfaces ErrEventNotFound.
 	}
 
-	result, err := DeriveSettlement(context.Background(), round, inputs)
+	result, err := DeriveSettlement(context.Background(), round, "seal-context-1", TerminalAccept, inputs)
 	if err != nil {
 		t.Fatalf("DeriveSettlement: %v", err)
 	}
@@ -619,7 +582,7 @@ func TestDeriveSettlement_DeferralOnQualityLookupErr(t *testing.T) {
 		// (false, nil) → stub-Quality selected → deferringQualityStub.Lookup fires.
 	}
 
-	result, err := DeriveSettlement(context.Background(), round, inputs)
+	result, err := DeriveSettlement(context.Background(), round, "seal-context-1", TerminalAccept, inputs)
 	if err != nil {
 		t.Fatalf("DeriveSettlement: %v", err)
 	}
@@ -640,19 +603,33 @@ func (deferringQualityStub) Lookup(_ event.EventID, _ uint64) (protocolmath.Basi
 	return 0, dag.ErrEventNotFound
 }
 
-// TestDeriveSettlement_NotTerminalErrors verifies precondition: a
-// non-finalized round causes DeriveSettlement to error.
-func TestDeriveSettlement_NotTerminalErrors(t *testing.T) {
+// (Pre-Shape-3 TestDeriveSettlement_NotTerminalErrors removed per
+// founder direction 2026-04-25. The IsTerminal precondition was
+// removed from DeriveSettlement under Shape 3 because the canonical
+// "ready to settle" signal now flows from the LK consumer's
+// terminalVerdict + IsComplete-seal gate, not from a recognition-
+// fabric-projected round.State terminal transition. round.State == Open
+// is no longer a precondition violation for DeriveSettlement; the LK
+// consumer's seal-rule is the canonical readiness gate. Replaced by
+// TestDeriveSettlement_RequiresConsensusEventID below — Shape 3's new
+// per-event canonical-state precondition.)
+
+// TestDeriveSettlement_RequiresConsensusEventID verifies the Shape 3
+// precondition: consensusEventID is required because it is the
+// canonical seal context (replaces the prior round.CanonicalSealContext
+// read which raced with recognition-fabric terminal-transition
+// population). Empty consensusEventID surfaces as an explicit error
+// rather than producing a derivation with empty seal context.
+func TestDeriveSettlement_RequiresConsensusEventID(t *testing.T) {
 	t.Parallel()
 
 	round := makeAcceptRound("w", "p", nil)
-	round.State = taskverification.RoundStateOpen
 	inputs := stubInputs(&fakeAnchorReader{}, &fakeEscrow{}, &fakeTask{}, "treasury")
-	_, err := DeriveSettlement(context.Background(), round, inputs)
+	_, err := DeriveSettlement(context.Background(), round, "", TerminalAccept, inputs)
 	if err == nil {
-		t.Fatal("expected error on non-terminal round")
+		t.Fatal("expected error on empty consensusEventID")
 	}
-	if !errors.Is(err, errors.New("derivation: round")) && err == nil {
-		// loose error-shape check
+	if !strings.Contains(err.Error(), "consensusEventID") {
+		t.Errorf("error should mention consensusEventID; got: %v", err)
 	}
 }

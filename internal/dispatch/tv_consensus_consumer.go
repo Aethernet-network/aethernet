@@ -8,6 +8,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/settlement"
+	"github.com/Aethernet-network/aethernet/internal/settlement/derivation"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/taskverification"
 )
@@ -171,7 +172,20 @@ func (c *TVConsensusConsumer) Apply(ctx context.Context, ev *event.Event) error 
 		return fmt.Errorf("tv_consensus_settlement: load round %s: %w", payload.RoundID, err)
 	}
 
-	result, err := c.settler.Settle(ctx, &payload, round)
+	// F5 5B Shape 3 (founder direction 2026-04-25): pass triggerEventID
+	// + terminalVerdict per the new settler.Settle signature. This
+	// content-hash F3-B consumer is unregistered in production
+	// (replaced by the LK consumer per cmd/node/main.go:2037-2049
+	// "(A) exclusive" migration); kept compiling for back-compat /
+	// test coverage. The verdict mapping uses the payload's advisory
+	// FinalVerdict (which is the C-17 anti-pattern the LK consumer
+	// fixes — but acceptable here because this consumer is
+	// unregistered).
+	terminalVerdict, mapErr := payloadVerdictToTerminalStatus(payload.FinalVerdict)
+	if mapErr != nil {
+		return fmt.Errorf("tv_consensus_settlement: verdict map: %w", mapErr)
+	}
+	result, err := c.settler.Settle(ctx, &payload, round, ev.ID, terminalVerdict)
 	if err != nil {
 		return fmt.Errorf("tv_consensus_settlement: settle: %w", err)
 	}
@@ -212,4 +226,21 @@ func (c *TVConsensusConsumer) RecoveryProbe(ctx context.Context, ev *event.Event
 		return RecoveryCompleted, nil
 	}
 	return RecoveryNotStarted, nil
+}
+
+// payloadVerdictToTerminalStatus maps the wire-string verdict in
+// TaskVerificationConsensusPayload.FinalVerdict to the derivation
+// TerminalStatus enum. Only Accept ("pass") and Reject ("fail") are
+// handled here; Dispute ("abstain") is not reachable through this
+// consumer per the LK consumer migration (the LK consumer never
+// fires Apply on disputed rounds, and the F3-B content-hash consumer
+// at this site is unregistered in production).
+func payloadVerdictToTerminalStatus(s string) (derivation.TerminalStatus, error) {
+	switch s {
+	case "pass":
+		return derivation.TerminalAccept, nil
+	case "fail":
+		return derivation.TerminalReject, nil
+	}
+	return 0, fmt.Errorf("payloadVerdictToTerminalStatus: unsupported verdict %q (this consumer is unregistered; LK consumer is the production settlement path)", s)
 }
