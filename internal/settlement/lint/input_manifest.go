@@ -112,6 +112,15 @@ func Check(modulePath string) (*Report, error) {
 	// failing the build for an intentional cross-package reference.
 	report.ManifestIntegrityIssues = checkManifestIntegrity(manifest, modulePath)
 
+	// DerivationInputs construction-discipline check (multi-AI Item 1
+	// composite, 2026-04-25). External composite-literal construction of
+	// derivation.DerivationInputs is forbidden — all such construction
+	// must go through derivation.NewDerivationInputs to satisfy the §2.1
+	// contract validation. The unexported fields prevent field assignment
+	// from outside, but a zero-value `derivation.DerivationInputs{}`
+	// would still compile; this check catches that residual surface.
+	report.DerivationInputsConstructions = extractDerivationInputsConstructions(pkgs, moduleImportPath, modulePath)
+
 	return report, nil
 }
 
@@ -240,6 +249,12 @@ type Report struct {
 	// reference unreadable files or out-of-range line numbers.
 	ManifestIntegrityIssues []ManifestIntegrityIssue
 
+	// DerivationInputsConstructions lists illegal composite-literal
+	// constructions of derivation.DerivationInputs found outside the
+	// derivation package. Per multi-AI Item 1 composite (2026-04-25):
+	// external callers must use derivation.NewDerivationInputs.
+	DerivationInputsConstructions []DerivationInputsConstruction
+
 	// Warnings are non-failure diagnostics (package load errors, etc.).
 	Warnings []string
 }
@@ -295,7 +310,8 @@ func (r *Report) HasFailures() bool {
 	return len(r.UndeclaredReads) > 0 ||
 		len(r.InsufficientPragmas) > 0 ||
 		len(r.StaleManifestEntries) > 0 ||
-		len(r.ManifestIntegrityIssues) > 0
+		len(r.ManifestIntegrityIssues) > 0 ||
+		len(r.DerivationInputsConstructions) > 0
 }
 
 // Format renders a human-readable failure report. Stable formatting so
@@ -316,6 +332,10 @@ func (r *Report) Format() string {
 	}
 	for _, i := range r.ManifestIntegrityIssues {
 		b.WriteString(formatIntegrityIssue(i))
+		b.WriteString("\n")
+	}
+	for _, c := range r.DerivationInputsConstructions {
+		b.WriteString(formatDerivationInputsConstruction(c))
 		b.WriteString("\n")
 	}
 	if len(r.Warnings) > 0 {

@@ -38,18 +38,21 @@ func TestLintRepository(t *testing.T) {
 		t.Fatalf("settlement/lint: Check returned nil Report")
 	}
 
-	// Hard failures: integrity, stale entries, insufficient pragmas.
+	// Hard failures: integrity, stale entries, insufficient pragmas,
+	// illegal DerivationInputs constructions.
 	if len(report.ManifestIntegrityIssues) > 0 ||
 		len(report.StaleManifestEntries) > 0 ||
-		len(report.InsufficientPragmas) > 0 {
+		len(report.InsufficientPragmas) > 0 ||
+		len(report.DerivationInputsConstructions) > 0 {
 		// Build a focused failure report (omit the noisy
 		// undeclared-reads section while it is still informational).
 		focused := &Report{
-			ManifestIntegrityIssues: report.ManifestIntegrityIssues,
-			StaleManifestEntries:    report.StaleManifestEntries,
-			InsufficientPragmas:     report.InsufficientPragmas,
+			ManifestIntegrityIssues:       report.ManifestIntegrityIssues,
+			StaleManifestEntries:          report.StaleManifestEntries,
+			InsufficientPragmas:           report.InsufficientPragmas,
+			DerivationInputsConstructions: report.DerivationInputsConstructions,
 		}
-		t.Fatalf("settlement/lint: manifest has structural failures (drift, integrity, or insufficient pragmas)\n\n%s",
+		t.Fatalf("settlement/lint: structural failures (drift, integrity, insufficient pragmas, or illegal DerivationInputs construction)\n\n%s",
 			focused.Format())
 	}
 
