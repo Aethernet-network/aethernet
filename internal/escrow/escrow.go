@@ -363,8 +363,15 @@ func (e *Escrow) Release(taskID string, claimerID crypto.AgentID) error {
 		return fmt.Errorf("%w: task %s", ErrEscrowNotFound, taskID)
 	}
 
-	if err := e.ledger.TransferFromBucketLabeled(bucketID(taskID), claimerID, entry.Amount, "escrow-release:full-release", false); err != nil {
-		return fmt.Errorf("escrow: release for task %s: %w", taskID, err)
+	{
+		const memo = "escrow-release:full-release"
+		eid, idErr := ledger.CanonicalSyntheticID(bucketID(taskID), claimerID, entry.Amount, memo, false)
+		if idErr != nil {
+			return fmt.Errorf("escrow: canonical-id for task %s: %w", taskID, idErr)
+		}
+		if err := e.ledger.TransferFromBucketLabeled(eid, bucketID(taskID), claimerID, entry.Amount, memo, false); err != nil {
+			return fmt.Errorf("escrow: release for task %s: %w", taskID, err)
+		}
 	}
 
 	e.mu.Lock()
@@ -408,7 +415,12 @@ func (e *Escrow) ReleaseNet(
 
 	// Transfer the worker's net share (skip if already paid on a prior attempt).
 	if !entry.WorkerPaid {
-		if err := e.ledger.TransferFromBucketLabeled(bucket, claimerID, netAmount, "escrow-release-net:worker", false); err != nil {
+		const memo = "escrow-release-net:worker"
+		eid, idErr := ledger.CanonicalSyntheticID(bucket, claimerID, netAmount, memo, false)
+		if idErr != nil {
+			return fmt.Errorf("escrow: canonical-id for task %s: %w", taskID, idErr)
+		}
+		if err := e.ledger.TransferFromBucketLabeled(eid, bucket, claimerID, netAmount, memo, false); err != nil {
 			return fmt.Errorf("escrow: release-net worker for task %s: %w", taskID, err)
 		}
 		e.mu.Lock()
@@ -419,7 +431,12 @@ func (e *Escrow) ReleaseNet(
 
 	// Distribute validator share from the remaining escrow balance.
 	if validatorAmount > 0 && !entry.ValidatorPaid {
-		if err := e.ledger.TransferFromBucketLabeled(bucket, validatorID, validatorAmount, "escrow-release-net:validator", false); err != nil {
+		const memo = "escrow-release-net:validator"
+		eid, idErr := ledger.CanonicalSyntheticID(bucket, validatorID, validatorAmount, memo, false)
+		if idErr != nil {
+			return fmt.Errorf("escrow: canonical-id for task %s: %w", taskID, idErr)
+		}
+		if err := e.ledger.TransferFromBucketLabeled(eid, bucket, validatorID, validatorAmount, memo, false); err != nil {
 			return fmt.Errorf("escrow: release-net validator for task %s: %w", taskID, err)
 		}
 		e.mu.Lock()
@@ -430,7 +447,12 @@ func (e *Escrow) ReleaseNet(
 
 	// Distribute treasury share from the remaining escrow balance.
 	if treasuryAmount > 0 && !entry.TreasuryPaid {
-		if err := e.ledger.TransferFromBucketLabeled(bucket, treasuryID, treasuryAmount, "escrow-release-net:treasury", false); err != nil {
+		const memo = "escrow-release-net:treasury"
+		eid, idErr := ledger.CanonicalSyntheticID(bucket, treasuryID, treasuryAmount, memo, false)
+		if idErr != nil {
+			return fmt.Errorf("escrow: canonical-id for task %s: %w", taskID, idErr)
+		}
+		if err := e.ledger.TransferFromBucketLabeled(eid, bucket, treasuryID, treasuryAmount, memo, false); err != nil {
 			return fmt.Errorf("escrow: release-net treasury for task %s: %w", taskID, err)
 		}
 		e.mu.Lock()
@@ -451,141 +473,6 @@ func (e *Escrow) ReleaseNet(
 	return nil
 }
 
-// ReleaseSettlement distributes the escrowed budget across the full v4.1
-// economic model's recipient set: worker, N validators (Q-weighted),
-// gen-ledger recipients, poster refund (dispute path), and treasury.
-//
-// Each individual transfer is guarded by a per-recipient paid flag persisted
-// to BadgerDB after each successful transfer. On retry after a crash,
-// already-paid recipients are skipped. This provides per-transfer idempotency
-// equivalent to a single BadgerDB transaction, satisfying C-11.
-//
-// Integer arithmetic remainders from the share calculations are routed to
-// treasury so the sum across all recipients equals the budget exactly.
-// Cross-node conservation is verified by §10 success criterion 6.
-//
-// Returns ErrEscrowNotFound if no escrow exists for taskID.
-func (e *Escrow) ReleaseSettlement(
-	taskID string,
-	worker crypto.AgentID, workerAmount uint64,
-	posterRefund crypto.AgentID, posterRefundAmount uint64,
-	validators map[crypto.AgentID]uint64,
-	genRecipients map[crypto.AgentID]uint64,
-	treasury crypto.AgentID, treasuryAmount uint64,
-) error {
-	e.mu.Lock()
-	entry, ok := e.entries[taskID]
-	e.mu.Unlock()
-	if !ok {
-		return fmt.Errorf("%w: task %s", ErrEscrowNotFound, taskID)
-	}
-
-	bucket := bucketID(taskID)
-
-	// 1. Worker payout.
-	if workerAmount > 0 && !entry.WorkerPaid {
-		if err := e.ledger.TransferFromBucketLabeled(bucket, worker, workerAmount, "escrow-release:worker", false); err != nil {
-			return fmt.Errorf("escrow: settlement worker for task %s: %w", taskID, err)
-		}
-		e.mu.Lock()
-		entry.WorkerPaid = true
-		e.mu.Unlock()
-		e.persist(entry)
-	}
-
-	// 2. Poster refund (dispute path; zero on accept/reject).
-	if posterRefundAmount > 0 && !entry.PosterRefundPaid {
-		if err := e.ledger.TransferFromBucketLabeled(bucket, posterRefund, posterRefundAmount, "escrow-release:poster-refund", false); err != nil {
-			return fmt.Errorf("escrow: settlement poster refund for task %s: %w", taskID, err)
-		}
-		e.mu.Lock()
-		entry.PosterRefundPaid = true
-		e.mu.Unlock()
-		e.persist(entry)
-	}
-
-	// 3. Per-validator payouts (Q-weighted).
-	//
-	// E.P3 finding (F4 plan §6): iterate validator IDs in lex-sorted order
-	// so the sequence of TransferFromBucketLabeled calls — and therefore the
-	// process-local synthetic event-ID counter assignments and persisted
-	// TransferEntry insertion order — is identical across nodes. Final
-	// per-agent balances were already cluster-uniform (per-recipient amounts
-	// are pre-computed deterministically), but the persisted ledger entry
-	// stream diverged cross-node. Sorting closes the divergence at its source.
-	validatorIDs := sortedAgentIDs(validators)
-	for _, vid := range validatorIDs {
-		amount := validators[vid]
-		if amount == 0 {
-			continue
-		}
-		e.mu.Lock()
-		if entry.ValidatorsPaid == nil {
-			entry.ValidatorsPaid = make(map[string]bool)
-		}
-		alreadyPaid := entry.ValidatorsPaid[string(vid)]
-		e.mu.Unlock()
-		if alreadyPaid {
-			continue
-		}
-		if err := e.ledger.TransferFromBucketLabeled(bucket, vid, amount, "escrow-release:validator-distribution", false); err != nil {
-			return fmt.Errorf("escrow: settlement validator %s for task %s: %w", vid, taskID, err)
-		}
-		e.mu.Lock()
-		entry.ValidatorsPaid[string(vid)] = true
-		e.mu.Unlock()
-		e.persist(entry)
-	}
-
-	// 4. Gen-ledger royalty payouts.
-	// Same rationale as #3 — sort recipients for deterministic per-node
-	// transfer-stream ordering.
-	genRecipientIDs := sortedAgentIDs(genRecipients)
-	for _, rid := range genRecipientIDs {
-		amount := genRecipients[rid]
-		if amount == 0 {
-			continue
-		}
-		e.mu.Lock()
-		if entry.GenLedgerPaid == nil {
-			entry.GenLedgerPaid = make(map[string]bool)
-		}
-		alreadyPaid := entry.GenLedgerPaid[string(rid)]
-		e.mu.Unlock()
-		if alreadyPaid {
-			continue
-		}
-		if err := e.ledger.TransferFromBucketLabeled(bucket, rid, amount, "escrow-release:gen-ledger-royalty", false); err != nil {
-			return fmt.Errorf("escrow: settlement gen-ledger %s for task %s: %w", rid, taskID, err)
-		}
-		e.mu.Lock()
-		entry.GenLedgerPaid[string(rid)] = true
-		e.mu.Unlock()
-		e.persist(entry)
-	}
-
-	// 5. Treasury.
-	if treasuryAmount > 0 && !entry.TreasuryPaid {
-		if err := e.ledger.TransferFromBucketLabeled(bucket, treasury, treasuryAmount, "escrow-release:treasury-fee", false); err != nil {
-			return fmt.Errorf("escrow: settlement treasury for task %s: %w", taskID, err)
-		}
-		e.mu.Lock()
-		entry.TreasuryPaid = true
-		e.mu.Unlock()
-		e.persist(entry)
-	}
-
-	// All disbursements complete — remove the entry.
-	e.mu.Lock()
-	delete(e.entries, taskID)
-	e.mu.Unlock()
-	if e.store != nil {
-		if err := e.store.DeleteEscrow(taskID); err != nil {
-			slog.Error("escrow: failed to delete settled entry", "task_id", taskID, "err", err)
-		}
-	}
-	return nil
-}
 
 // Refund returns the escrowed amount from the task bucket back to the poster.
 // Returns ErrEscrowNotFound if no escrow exists for taskID.
@@ -597,8 +484,15 @@ func (e *Escrow) Refund(taskID string) error {
 		return fmt.Errorf("%w: task %s", ErrEscrowNotFound, taskID)
 	}
 
-	if err := e.ledger.TransferFromBucketLabeled(bucketID(taskID), entry.PosterID, entry.Amount, "escrow-refund:poster-cancel", false); err != nil {
-		return fmt.Errorf("escrow: refund for task %s: %w", taskID, err)
+	{
+		const memo = "escrow-refund:poster-cancel"
+		eid, idErr := ledger.CanonicalSyntheticID(bucketID(taskID), entry.PosterID, entry.Amount, memo, false)
+		if idErr != nil {
+			return fmt.Errorf("escrow: canonical-id refund for task %s: %w", taskID, idErr)
+		}
+		if err := e.ledger.TransferFromBucketLabeled(eid, bucketID(taskID), entry.PosterID, entry.Amount, memo, false); err != nil {
+			return fmt.Errorf("escrow: refund for task %s: %w", taskID, err)
+		}
 	}
 
 	e.mu.Lock()

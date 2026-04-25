@@ -45,6 +45,44 @@ type Dispatcher struct {
 	epochFn             func() uint64
 	evidenceEmitter     EvidenceEmitter
 	deferralIndex       map[event.EventID][]string // prereq EventID → admission keys waiting
+
+	// keyLocks holds per-(consumer, key) sync.Mutex entries for
+	// intra-node defense-in-depth serialization within
+	// admitOneLogicalKey. Per F5 5B post-#133 dispatcher LK race fix
+	// (Path A): the lock spans the read-modify-write region of the
+	// per-(consumer, key) admission state machine, eliminating the
+	// race window where two concurrent commit-bus workers (DefaultWorkers=4)
+	// processing byte-distinct events for the same logical key both
+	// pass the StateApplied gate and both invoke consumer.Apply.
+	//
+	// **Defense-in-depth framing** (architect direction, mirrors
+	// internal/escrow/applicator.go's recordLocks):
+	//
+	// The lock is INTRA-NODE defense-in-depth only. Cross-node
+	// correctness on logical-key admission is guaranteed by:
+	//   1. Each LK consumer's Apply being canonically deterministic
+	//      per its consumer contract.
+	//   2. Ledger ErrDuplicateEntry idempotency at any transfer layer
+	//      Apply might invoke (internal/ledger/transfer.go:531).
+	//   3. LK consumer's Apply being idempotent or no-op for byte-
+	//      distinct events with the same logical key (F4B contract).
+	//
+	// The lock prevents wasted intra-node Apply calls on race-loss,
+	// not cross-node correctness divergence. Removing it would not
+	// affect canonical correctness — same V-1-class layer separation
+	// as recordLocks. The lock exists to skip redundant work, not to
+	// enforce uniqueness.
+	//
+	// Per-key granularity preserves cross-key parallelism: different
+	// logical keys still run concurrently across workers; only same-
+	// key races serialize.
+	//
+	// Map values are *sync.Mutex; entries are kept for the dispatcher's
+	// lifetime. At testnet scale this is bounded by the count of
+	// distinct (consumer, key) pairs ever observed; for mainnet a
+	// future enhancement may add a TTL-based eviction once the key's
+	// admission record reaches StateApplied terminal.
+	keyLocks sync.Map // storeKey (string) → *sync.Mutex
 }
 
 // NewDispatcher constructs a dispatcher. All parameters are required.

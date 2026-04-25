@@ -14,6 +14,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/settlement"
+	"github.com/Aethernet-network/aethernet/internal/settlement/derivation"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/taskverification"
 )
@@ -21,6 +22,26 @@ import (
 type tvStubDAG struct{}
 
 func (d *tvStubDAG) All() []*event.Event { return nil }
+
+// tvStubAnchorReader satisfies derivation.AnchorReader for tests that
+// do NOT exercise canonical-DAG-derived inputs (no real EpochBoundary
+// events, no real activation event, no gen-ledger ancestors).
+//
+// CountAncestorsByType returns 0 (genesis epoch — no boundaries
+// committed; rounds settle in epoch 0 with stub W/quality).
+// IsAncestor returns false (no canonical ancestry; matches the
+// empty-ReputationActivationEventID branch of the V-1 isActivated check).
+// Get returns a synthetic empty-CausalRefs event for any ID so
+// ReadAtAnchor's BFS terminates on the seed without traversing further.
+type tvStubAnchorReader struct{}
+
+func (tvStubAnchorReader) IsAncestor(_, _ event.EventID) (bool, error) { return false, nil }
+func (tvStubAnchorReader) Get(id event.EventID) (*event.Event, error) {
+	return &event.Event{ID: id, CausalRefs: nil}, nil
+}
+func (tvStubAnchorReader) CountAncestorsByType(_ event.EventID, _ event.EventType) (uint64, error) {
+	return 0, nil
+}
 
 func newTVRoundStore(t *testing.T) taskverification.Store {
 	t.Helper()
@@ -43,6 +64,7 @@ func newTestTVConsumer(t *testing.T) (*dispatch.TVConsensusConsumer, *tasks.Task
 
 	settler := settlement.NewVerificationConsensusSettler(
 		tm, tl, em, &tvStubDAG{}, nil, "genesis:treasury", nil, true)
+	settler.SetDAGReader(tvStubAnchorReader{})
 	consumer := dispatch.NewTVConsensusConsumer(settler, store, tm, em)
 	return consumer, tm, tl, em, store
 }
@@ -65,6 +87,18 @@ func setupTask(t *testing.T, tm *tasks.TaskManager, tl *ledger.TransferLedger, e
 		WorkerID: "worker",
 		PosterID: "poster",
 		Category: "research",
+		// F5 5B: DeriveSettlement requires the round to be terminal at
+		// settler invocation. The recognition fabric's
+		// TaskVerificationConsensusConsumer transitions the round to
+		// terminal BEFORE the dispatcher's TVConsensusConsumer.Apply
+		// fires in production; tests construct the round in the
+		// post-transition state to mirror that ordering.
+		State:        taskverification.RoundStateFinalizedAccept,
+		FinalVerdict: taskverification.VerdictPass,
+		// CanonicalSealContext + EpochAtFinalization populated by the
+		// finalizing consumer in production; tests use empty/zero values
+		// (the isActivated helper short-circuits to (false, nil) on empty
+		// activation EventID, so V-1 check never reaches DAG).
 		Votes: []taskverification.TaskVerificationVoteRecord{
 			{ValidatorID: "validator-1", Verdict: taskverification.VerdictPass, ScoreBP: 7000, AnalyzerFamily: "heuristic", Stake: 100},
 		},
@@ -417,20 +451,35 @@ func TestTVConsensusConsumer_Apply_MidSettlement_NoOp(t *testing.T) {
 	taskID, round := setupTask(t, tm, tl, em, budget)
 	_ = store.SaveRound(context.Background(), round)
 
-	// Drive a partial settlement directly against the escrow: worker
-	// payout (5000 ≤ 10000) succeeds and sets WorkerPaid=true; the
-	// subsequent validator payout (10000 > 5000 remaining) fails. Result:
-	// entry persists with WorkerPaid=true and no other flags.
-	err := em.ReleaseSettlement(
-		taskID,
-		crypto.AgentID("worker"), 5000,
-		crypto.AgentID(""), 0,
-		map[crypto.AgentID]uint64{"validator-1": 10000},
-		nil,
-		crypto.AgentID("genesis:treasury"), 0,
-	)
-	if err == nil {
-		t.Fatalf("ReleaseSettlement should have failed on the validator leg")
+	// Drive a partial settlement via the F5 5B canonical applicator:
+	// two records sized so the second fails (insufficient bucket
+	// balance). Worker record (5000 ≤ 10000) succeeds and sets
+	// WorkerPaid=true; the treasury record (20000 > 5000 remaining)
+	// fails. Result: entry persists with WorkerPaid=true and no other
+	// flags — equivalent state to the legacy ReleaseSettlement
+	// partial-failure case (Plan v3 §0 decision 9 reframe; the
+	// behavioral invariant tested — HasSettlementStarted pre-check
+	// short-circuits subsequent Apply — is preserved).
+	partialRecords := []derivation.PayoutRecord{
+		{
+			CanonicalID:       "test-mid-settlement-worker",
+			DerivationVersion: derivation.DerivationVersion,
+			SettlementKey:     derivation.SettlementKey{TaskID: taskID, RoundID: "round-1", FundingReference: "funding-1"},
+			Recipient:         derivation.Recipient{ID: "worker", Role: derivation.RoleWorker},
+			Amount:            derivation.Amount{Value: 5000, Currency: derivation.CurrencyAET},
+			Purpose:           derivation.Purpose{Tag: derivation.TagWorkerPayout},
+		},
+		{
+			CanonicalID:       "test-mid-settlement-treasury-fails",
+			DerivationVersion: derivation.DerivationVersion,
+			SettlementKey:     derivation.SettlementKey{TaskID: taskID, RoundID: "round-1", FundingReference: "funding-1"},
+			Recipient:         derivation.Recipient{ID: "genesis:treasury", Role: derivation.RoleTreasury},
+			Amount:            derivation.Amount{Value: 20000, Currency: derivation.CurrencyAET}, // bigger than remaining bucket; fails
+			Purpose:           derivation.Purpose{Tag: derivation.TagTreasuryRemainder},
+		},
+	}
+	if err := em.ApplySettlementRecords(taskID, partialRecords); err == nil {
+		t.Fatalf("ApplySettlementRecords should have failed on the treasury leg")
 	}
 	if !em.IsLocked(taskID) {
 		t.Fatalf("entry should still be locked after partial failure")

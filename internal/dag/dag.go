@@ -86,7 +86,98 @@ var (
 
 	// ErrMissingSignature is returned when a non-genesis event has no signature.
 	ErrMissingSignature = errors.New("dag: event has no signature")
+
+	// ErrCrossCheckRejected is returned when an admission-cross-check
+	// validator rejects an event during Add. The wrapped error from the
+	// validator is preserved for diagnostic purposes.
+	ErrCrossCheckRejected = errors.New("dag: admission cross-check rejected")
+
+	// ErrCrossCheckAlreadyRegistered is returned by RegisterAdmissionCrossCheck
+	// when a validator is already registered for the given event type.
+	// Validators are one-shot per type; reconfiguration is not supported.
+	ErrCrossCheckAlreadyRegistered = errors.New("dag: admission cross-check already registered for event type")
 )
+
+// AdmissionCrossCheck is a per-event-type, admission-time, canonical-state-
+// dependent payload validator. See RegisterAdmissionCrossCheck.
+type AdmissionCrossCheck func(ev *event.Event, reader WhileLockedReader) error
+
+// WhileLockedReader is the lock-free read interface available to admission-
+// cross-check validators while dag.Add holds its write lock. Methods on
+// WhileLockedReader access DAG state directly without re-acquiring the lock
+// — the caller (dag.Add) already holds it.
+//
+// RESTRICTED API. Validators MUST use only methods on this interface; they
+// MUST NOT call *DAG methods like d.IsAncestor or d.CountAncestorsByType,
+// which acquire RLock and would deadlock against the held write lock.
+//
+// New canonical-state read methods are added here as future
+// admission-cross-check users require them. Each addition is one entry per
+// canonical query the validators need; non-canonical or runtime-state reads
+// are explicitly out of scope for this interface.
+type WhileLockedReader interface {
+	// GetWhileLocked returns the event with the given ID, or
+	// ErrEventNotFound if absent. Lock-free equivalent of (*DAG).Get.
+	GetWhileLocked(id event.EventID) (*event.Event, error)
+
+	// CountAncestorsByTypeWhileLocked counts the canonical strict ancestors
+	// of descendant whose event type equals eventType. Lock-free equivalent
+	// of (*DAG).CountAncestorsByType. Same all-or-defer semantic per
+	// canonical-epoch sub-spec §3.1.
+	CountAncestorsByTypeWhileLocked(descendant event.EventID, eventType event.EventType) (uint64, error)
+}
+
+// whileLockedReader is the *DAG-backed implementation of WhileLockedReader.
+// Methods read d.events directly without acquiring d.mu; constructor must
+// only hand this out under a held write lock.
+type whileLockedReader struct {
+	d *DAG
+}
+
+func (r *whileLockedReader) GetWhileLocked(id event.EventID) (*event.Event, error) {
+	e, ok := r.d.events[id]
+	if !ok {
+		return nil, fmt.Errorf("dag: %w: %s", ErrEventNotFound, id)
+	}
+	return e, nil
+}
+
+func (r *whileLockedReader) CountAncestorsByTypeWhileLocked(descendant event.EventID, eventType event.EventType) (uint64, error) {
+	if _, ok := r.d.events[descendant]; !ok {
+		return 0, fmt.Errorf("dag: %w: %s", ErrEventNotFound, descendant)
+	}
+
+	visited := map[event.EventID]struct{}{descendant: {}}
+	queue := []event.EventID{descendant}
+	var count uint64
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+
+		e, ok := r.d.events[cur]
+		if !ok {
+			return 0, fmt.Errorf("dag: %w: %s (ancestor traversal incomplete for %s)", ErrEventNotFound, cur, descendant)
+		}
+		for _, ref := range e.CausalRefs {
+			if _, seen := visited[ref]; seen {
+				continue
+			}
+			visited[ref] = struct{}{}
+			queue = append(queue, ref)
+
+			refEvent, ok := r.d.events[ref]
+			if !ok {
+				return 0, fmt.Errorf("dag: %w: %s (ancestor traversal incomplete for %s)", ErrEventNotFound, ref, descendant)
+			}
+			if refEvent.Type == eventType {
+				count++
+			}
+		}
+	}
+
+	return count, nil
+}
 
 // DAG is a concurrent, append-only causal directed acyclic graph of AetherNet events.
 // The zero value is not usable; construct via New.
@@ -126,6 +217,14 @@ type DAG struct {
 	// to the recognition bus directly with the correct CommitSource. The
 	// onCommit hook provides replay-path coverage that no call site handles.
 	onCommit func(ev *event.Event, replay bool)
+
+	// crossChecks holds the admission-time canonical-state cross-check
+	// validators, keyed by event type. Populated via
+	// RegisterAdmissionCrossCheck at startup; read in Add under the write
+	// lock. One validator per event type; registration is one-shot.
+	//
+	// See RegisterAdmissionCrossCheck for the restricted-API discipline.
+	crossChecks map[event.EventType]AdmissionCrossCheck
 }
 
 // SetStore attaches a persistence backend to the DAG. After this call every
@@ -150,10 +249,60 @@ func (d *DAG) SetOnCommit(fn func(ev *event.Event, replay bool)) {
 // New creates and returns an empty DAG ready to accept events.
 func New() *DAG {
 	return &DAG{
-		events:   make(map[event.EventID]*event.Event),
-		children: make(map[event.EventID]map[event.EventID]struct{}),
-		tips:     make(map[event.EventID]struct{}),
+		events:      make(map[event.EventID]*event.Event),
+		children:    make(map[event.EventID]map[event.EventID]struct{}),
+		tips:        make(map[event.EventID]struct{}),
+		crossChecks: make(map[event.EventType]AdmissionCrossCheck),
 	}
+}
+
+// RegisterAdmissionCrossCheck registers a validation function that runs
+// synchronously during dag.Add, after signature+causal-refs verification
+// and before the event is stored. Per F5 5B canonical-epoch sub-spec
+// v2.2 §1.4.1.
+//
+// RESTRICTED API. The validator MUST:
+//   - Be a pure function of the candidate event and canonical DAG state.
+//   - Use the provided WhileLockedReader; never call *DAG methods that
+//     acquire locks (reentrancy deadlock — d.mu is already held).
+//   - Return an error to reject; nil to admit.
+//   - Be fast (runs under the DAG write lock, blocking all other Add and
+//     read traffic).
+//   - Have no I/O, no goroutines, no side effects beyond the return value.
+//
+// One validator per event type; registration at startup, not reconfigurable.
+// Returns ErrCrossCheckAlreadyRegistered if a validator is already set
+// for eventType.
+//
+// Use case: canonical cross-checks where payload validity depends on
+// canonical DAG state at admission (e.g., EpochBoundary's Payload.Epoch
+// equals CountAncestorsByType + 1). NOT for policy, rate-limiting, or
+// non-canonical concerns. Mis-use is a halt-worthy regression per
+// canonical-epoch sub-spec §9.
+//
+// The substrate enforces single-registration but cannot enforce purity
+// — the discipline is on the validator author, with code review as the
+// primary defense and the §9 halt-trigger as the implementation-time
+// catch.
+func (d *DAG) RegisterAdmissionCrossCheck(eventType event.EventType, validator AdmissionCrossCheck) error {
+	if eventType == "" {
+		return errors.New("dag: RegisterAdmissionCrossCheck requires non-empty event type")
+	}
+	if validator == nil {
+		return errors.New("dag: RegisterAdmissionCrossCheck requires non-nil validator")
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.crossChecks == nil {
+		d.crossChecks = make(map[event.EventType]AdmissionCrossCheck)
+	}
+	if _, exists := d.crossChecks[eventType]; exists {
+		return fmt.Errorf("%w: %s", ErrCrossCheckAlreadyRegistered, eventType)
+	}
+	d.crossChecks[eventType] = validator
+	return nil
 }
 
 // Add inserts event e into the DAG and updates the causal graph.
@@ -202,6 +351,21 @@ func (d *DAG) Add(e *event.Event) error {
 	if !crypto.VerifyEvent(e) {
 		d.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrInvalidSignature, e.ID)
+	}
+
+	// Admission cross-check: per-type canonical-state-dependent payload
+	// validation, registered via RegisterAdmissionCrossCheck. Runs after
+	// signature + causal-refs verification, before any state mutation.
+	// The validator is a pure function of (event, canonical DAG state)
+	// and uses WhileLockedReader for lock-free reads under our held write
+	// lock. Restricted-API discipline per F5 5B canonical-epoch sub-spec
+	// v2.2 §1.4.1.
+	if validator, ok := d.crossChecks[e.Type]; ok {
+		reader := &whileLockedReader{d: d}
+		if err := validator(e, reader); err != nil {
+			d.mu.Unlock()
+			return fmt.Errorf("%w: %s: %w", ErrCrossCheckRejected, e.ID, err)
+		}
 	}
 
 	// Commit phase — all preconditions are satisfied; mutate state.
@@ -702,6 +866,78 @@ func (d *DAG) IsAncestor(ancestor, descendant event.EventID) (bool, error) {
 	}
 
 	return false, nil
+}
+
+// CountAncestorsByType counts the canonical strict ancestors of descendant
+// whose event type equals eventType. The count does NOT include descendant
+// itself (strict / irreflexive, matching IsAncestor semantics).
+//
+// Canonical: two nodes with identical DAG content compute identical counts
+// for identical (descendant, eventType) arguments. The count is a pure
+// function of DAG topology; no local-admission-order dependence.
+//
+// All-or-defer (per F5 5B canonical-epoch sub-spec §3.1): if descendant is
+// not locally materialized, OR if any traversed ancestor needed to
+// determine the count is not locally materialized, returns ErrEventNotFound.
+// Callers MUST defer rather than use a partial count — partial counts
+// would diverge across nodes with different materialization progress and
+// break the D-1 cross-node byte-equality guarantee. Strict CausalRefs
+// admission in Add (lines 187-192) makes the second clause defensive
+// against future semantic changes; the first clause covers the genuine
+// materialization-lag case.
+//
+// Returns (0, nil) if descendant exists but has no ancestors of the
+// requested type. Not an error.
+//
+// Complexity: O(A) where A is the number of ancestors of descendant.
+// Sub-spec §9 names a 1ms p99 latency gate at 10^6 ancestors;
+// implementation may add an LRU cache or projection-assisted counting if
+// benchmarking shows the gate is exceeded.
+func (d *DAG) CountAncestorsByType(descendant event.EventID, eventType event.EventType) (uint64, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if _, ok := d.events[descendant]; !ok {
+		return 0, fmt.Errorf("dag: %w: %s", ErrEventNotFound, descendant)
+	}
+
+	// BFS from descendant over CausalRefs. Strict / irreflexive: descendant
+	// itself is not counted. Visited set guards against revisiting events
+	// reachable via multiple paths.
+	visited := map[event.EventID]struct{}{descendant: {}}
+	queue := []event.EventID{descendant}
+	var count uint64
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+
+		e, ok := d.events[cur]
+		if !ok {
+			// Defensive: should not happen given strict CausalRefs admission
+			// in Add. If it does, the local DAG is missing an ancestor needed
+			// to determine the count — defer per §3.1 all-or-defer rather
+			// than return a partial count.
+			return 0, fmt.Errorf("dag: %w: %s (ancestor traversal incomplete for %s)", ErrEventNotFound, cur, descendant)
+		}
+		for _, ref := range e.CausalRefs {
+			if _, seen := visited[ref]; seen {
+				continue
+			}
+			visited[ref] = struct{}{}
+			queue = append(queue, ref)
+
+			refEvent, ok := d.events[ref]
+			if !ok {
+				return 0, fmt.Errorf("dag: %w: %s (ancestor traversal incomplete for %s)", ErrEventNotFound, ref, descendant)
+			}
+			if refEvent.Type == eventType {
+				count++
+			}
+		}
+	}
+
+	return count, nil
 }
 
 // TopologicalSort returns all events in a deterministic causal order.

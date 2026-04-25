@@ -48,16 +48,41 @@ func setupSettlerTest(t *testing.T, budget uint64) (
 
 	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) protocolmath.BasisPoints { return protocolmath.NeutralBP }, true)
 	settler := NewVerificationConsensusSettler(tm, tl, em, nil, calc, "genesis:treasury", nil, true)
+	settler.SetDAGReader(settlerTestStubDAG{})
 
 	return settler, tm, tl, em
 }
 
+// settlerTestStubDAG satisfies derivation.AnchorReader for tests that
+// don't exercise canonical-DAG-derived inputs (no real EpochBoundary
+// events, no V-1 activation event, no gen-ledger ancestors). Same shape
+// as the dispatch package's tvStubAnchorReader; declared locally to keep
+// the settler tests self-contained.
+type settlerTestStubDAG struct{}
+
+func (settlerTestStubDAG) IsAncestor(_, _ event.EventID) (bool, error) { return false, nil }
+func (settlerTestStubDAG) Get(id event.EventID) (*event.Event, error) {
+	return &event.Event{ID: id, CausalRefs: nil}, nil
+}
+func (settlerTestStubDAG) CountAncestorsByType(_ event.EventID, _ event.EventType) (uint64, error) {
+	return 0, nil
+}
+
+// makeRoundWithVotes constructs a finalized round with the given vote
+// map. State + FinalVerdict default to FinalizedAccept/Pass; tests that
+// exercise reject/dispute branches override after the call. Per F5 5B:
+// DeriveSettlement requires the round to be terminal at settler
+// invocation; in production the recognition fabric transitions the
+// round before the dispatcher's Apply fires, so test fixtures mirror
+// the post-transition state.
 func makeRoundWithVotes(taskID string, verdicts map[string]taskverification.Verdict) *taskverification.TaskVerificationRound {
 	round := &taskverification.TaskVerificationRound{
 		RoundID:               "round-test",
 		TaskID:                taskID,
 		WorkerID:              "worker-1",
 		PosterID:              "poster-1",
+		State:                 taskverification.RoundStateFinalizedAccept,
+		FinalVerdict:          taskverification.VerdictPass,
 		ParticipatingFamilies: map[string]uint64{},
 		Votes:                 []taskverification.TaskVerificationVoteRecord{},
 	}
@@ -165,6 +190,8 @@ func TestSettle_Reject(t *testing.T) {
 		"validator-1": taskverification.VerdictFail,
 		"validator-2": taskverification.VerdictFail,
 	})
+	round.State = taskverification.RoundStateFinalizedReject
+	round.FinalVerdict = taskverification.VerdictFail
 
 	payload := &event.TaskVerificationConsensusPayload{
 		RoundID: "round-test", TaskID: taskID, FinalVerdict: "fail",
@@ -203,6 +230,8 @@ func TestSettle_Dispute_50_50(t *testing.T) {
 	taskID := allTasks[0].ID
 
 	round := makeRoundWithVotes(taskID, map[string]taskverification.Verdict{})
+	round.State = taskverification.RoundStateDisputed
+	round.FinalVerdict = taskverification.VerdictAbstain
 
 	payload := &event.TaskVerificationConsensusPayload{
 		RoundID: "round-test", TaskID: taskID, FinalVerdict: "abstain",
@@ -245,6 +274,8 @@ func TestSettle_DisputeOddMicroAET(t *testing.T) {
 	taskID := allTasks[0].ID
 
 	round := makeRoundWithVotes(taskID, map[string]taskverification.Verdict{})
+	round.State = taskverification.RoundStateDisputed
+	round.FinalVerdict = taskverification.VerdictAbstain
 	payload := &event.TaskVerificationConsensusPayload{
 		RoundID: "round-test", TaskID: taskID, FinalVerdict: "abstain",
 		WorkerID: "worker-1", PosterID: "poster-1",
@@ -336,6 +367,7 @@ func setupQWeightedSettler(t *testing.T, budget uint64, qFn ValidatorQScoreFn) (
 	_ = escrow_testhelpers.FundAndRegisterEscrowForTest(tl, em, taskID, "poster-1", budget)
 	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) protocolmath.BasisPoints { return protocolmath.NeutralBP }, true)
 	settler := NewVerificationConsensusSettler(tm, tl, em, nil, calc, "genesis:treasury", qFn, true)
+	settler.SetDAGReader(settlerTestStubDAG{})
 	return settler, tm
 }
 
@@ -475,6 +507,7 @@ func TestVerificationConsensusSettler_EscrowCatchUp_UsesRegisterEscrow(t *testin
 
 	calc := NewGenerationLedgerCalculator(nil, func(_ event.EventID) protocolmath.BasisPoints { return protocolmath.NeutralBP }, true)
 	settler := NewVerificationConsensusSettler(tm, tl, em, scanner, calc, "genesis:treasury", nil, true)
+	settler.SetDAGReader(settlerTestStubDAG{})
 
 	posterBalBefore, _ := tl.Balance(crypto.AgentID("poster-1"))
 

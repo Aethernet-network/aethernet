@@ -230,11 +230,21 @@ func (c *Collector) CollectFeeFromRecipient(
 
 	// Move tokens from recipient to each sink — no new tokens created.
 	// Best-effort: errors are ignored so fee distribution never blocks settlement.
+	// F5 Phase 5A.4.b: synthetic-transfer EventIDs computed via
+	// CanonicalSyntheticID (canonical_id.go) for cross-node determinism.
 	if validatorAmount > 0 && validatorID != "" {
-		_ = c.transfer.TransferFromBucketLabeled(recipientID, validatorID, validatorAmount, "fee-distribution:validator-share", false)
+		const memo = "fee-distribution:validator-share"
+		eid, err := ledger.CanonicalSyntheticID(recipientID, validatorID, validatorAmount, memo, false)
+		if err == nil {
+			_ = c.transfer.TransferFromBucketLabeled(eid, recipientID, validatorID, validatorAmount, memo, false)
+		}
 	}
 	if treasuryAmount > 0 && treasuryID != "" {
-		_ = c.transfer.TransferFromBucketLabeled(recipientID, treasuryID, treasuryAmount, "fee-distribution:treasury-share", false)
+		const memo = "fee-distribution:treasury-share"
+		eid, err := ledger.CanonicalSyntheticID(recipientID, treasuryID, treasuryAmount, memo, false)
+		if err == nil {
+			_ = c.transfer.TransferFromBucketLabeled(eid, recipientID, treasuryID, treasuryAmount, memo, false)
+		}
 	}
 	return fee, burned
 }

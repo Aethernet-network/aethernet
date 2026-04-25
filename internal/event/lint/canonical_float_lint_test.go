@@ -259,9 +259,9 @@ type SyntheticInjectedPayload struct {
 	}
 }
 
-func TestCanonicalPayloadTypeNames_HasEighteen(t *testing.T) {
-	if got := len(canonicalPayloadTypeNames); got != 18 {
-		t.Errorf("canonicalPayloadTypeNames len = %d; want 18 (updating requires explicit intent)", got)
+func TestCanonicalPayloadTypeNames_HasNineteen(t *testing.T) {
+	if got := len(canonicalPayloadTypeNames); got != 19 {
+		t.Errorf("canonicalPayloadTypeNames len = %d; want 19 (updating requires explicit intent)", got)
 	}
 }
 

@@ -19,7 +19,6 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
@@ -44,9 +43,21 @@ type transferPersistence interface {
 // without scanning all transfer entries.
 const mintedMetaKey = "ledger:total_minted"
 
-// bucketCounter is a package-level monotonic counter for TransferFromBucket
-// entry IDs. Replaces len(l.entries) which is non-deterministic across restarts.
-var bucketCounter atomic.Uint64
+// bucketCounter REMOVED at F5 Phase 5A.4.b. The historical synthetic-ID
+// format `bucket:fromID:toID:amount:counter` used a process-local atomic
+// counter (this var) to disambiguate IDs, but the counter was non-
+// canonical: two nodes producing the same (fromID, toID, amount, memo)
+// transfer would generate different IDs depending on call ordering.
+//
+// Per F5 Phase 5A.4.b: synthetic-transfer EventIDs are now content-
+// addressed via CanonicalSyntheticID (canonical_id.go) using SHA-256 +
+// RFC 8785 JCS over the canonical inputs. ID generation moves to the
+// callsite (derivation-layer-equivalent for 5A.4.b interim; F5 Phase 5B
+// will centralize via PayoutRecord derivation per
+// docs/architecture/payout-artifact-schema.yaml).
+//
+// Removing bucketCounter eliminates the cross-node-divergence surface
+// identified in F5 5A.1 audit §4.7 and Plan v3 characterization §3.4.
 
 // Sentinel errors returned by TransferLedger methods.
 var (
@@ -478,16 +489,36 @@ func (l *TransferLedger) FundAgent(agentID crypto.AgentID, amount uint64) error 
 // compatibility with genesis/onboarding callers. Non-genesis callers
 // (settlement, escrow release, staking) should use TransferFromBucketLabeled
 // with descriptive metadata per cross-cutting §8.2.
+//
+// F5 Phase 5A.4.b: computes the synthetic-transfer EventID via
+// CanonicalSyntheticID before calling the refactored TransferFromBucketLabeled.
 func (l *TransferLedger) TransferFromBucket(fromID crypto.AgentID, toID crypto.AgentID, amount uint64) error {
-	return l.TransferFromBucketLabeled(fromID, toID, amount, "onboarding allocation", true)
+	const (
+		genesisMemo  = "onboarding allocation"
+		genesisFlag  = true
+	)
+	eid, err := CanonicalSyntheticID(fromID, toID, amount, genesisMemo, genesisFlag)
+	if err != nil {
+		return fmt.Errorf("ledger: TransferFromBucket: %w", err)
+	}
+	return l.TransferFromBucketLabeled(eid, fromID, toID, amount, genesisMemo, genesisFlag)
 }
 
 // TransferFromBucketLabeled moves amount from a virtual bucket to a
-// recipient with explicit metadata. Per cross-cutting §8.2: non-genesis
-// synthetic transfers set isGenesis=false and a descriptive memo so the
-// ledger is auditable and genesis events are distinguishable from
-// settlement distributions.
-func (l *TransferLedger) TransferFromBucketLabeled(fromID crypto.AgentID, toID crypto.AgentID, amount uint64, memo string, isGenesis bool) error {
+// recipient with an explicit caller-supplied EventID and metadata. Per
+// cross-cutting §8.2: non-genesis synthetic transfers set isGenesis=false
+// and a descriptive memo so the ledger is auditable and genesis events
+// are distinguishable from settlement distributions.
+//
+// F5 Phase 5A.4.b refactor (architect direction): the EventID is now an
+// input parameter rather than computed internally from a process-local
+// counter (bucketCounter — REMOVED). Callers compute the EventID via
+// CanonicalSyntheticID (canonical_id.go), which content-addresses the
+// transfer via SHA-256 + RFC 8785 JCS over (fromID, toID, amount, memo,
+// isGenesis). This makes synthetic-transfer EventIDs cross-node
+// deterministic and aligns the applicator surface with F5 Phase 5B's
+// derivation-layer ID-production model.
+func (l *TransferLedger) TransferFromBucketLabeled(eid event.EventID, fromID crypto.AgentID, toID crypto.AgentID, amount uint64, memo string, isGenesis bool) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -497,8 +528,6 @@ func (l *TransferLedger) TransferFromBucketLabeled(fromID crypto.AgentID, toID c
 			ErrInsufficientBalance, fromID, available, amount)
 	}
 
-	n := bucketCounter.Add(1)
-	eid := event.EventID(fmt.Sprintf("bucket:%s:%s:%d:%d", fromID, toID, amount, n))
 	if _, exists := l.entries[eid]; exists {
 		return fmt.Errorf("%w: %s", ErrDuplicateEntry, eid)
 	}

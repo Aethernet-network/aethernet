@@ -64,7 +64,7 @@ func TestCalibration_AppliesOnRoundFinalization(t *testing.T) {
 	}
 
 	// Build the consumer with calibration wired; slashing nil.
-	consumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, nil, calibration)
+	consumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, nil, calibration, nil)
 
 	payload, _ := json.Marshal(event.TaskVerificationConsensusPayload{
 		Version:              1,

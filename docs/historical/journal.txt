@@ -1,0 +1,778 @@
+AetherNet engineering journal
+=============================
+
+Format: dated entries, single paragraph per major event. Lean reverse-
+chronological within a session; oldest-first across sessions. Purpose:
+preserve the narrative of what happened and why, complementing the git
+log (which records what changed) and docs/lessons.md (which records
+what to remember).
+
+
+2026-04-23 — F4B bug closure (selection-race)
+---------------------------------------------
+F4B achieved selection-race bug-class closure. The F4B LogicalKeyConsumer
+interface (Type E admission) keys admission on RoundID rather than event
+content hash, so per-RoundID Apply fires once regardless of how many
+byte-distinct TaskVerificationConsensus events the cluster emits. The
+dispatcher-integrated harness at internal/verification/cross_node/
+PASSES the multi-emit three-node scenario. Verdict: selection-race bug
+class closed at the in-process harness grain. F4B became the combined-
+branch foundation for F4C.
+
+
+2026-04-23 — F4C merge + fresh 5-node testnet deploy
+----------------------------------------------------
+Merged the integer-migration branch into F4B, producing combined commit
+114d304. Resolved merge conflicts in tv_consensus_lk_consumer_test.go
+(IM's 8th shadowMode arg) and cross_node/cluster.go (projections/lint
+pragma). Captured F4C-merged performance baseline at 0e93f48 — max
+cumulative drift +4.32% on ConcurrentSameEvent, under the +10% D-5 halt
+threshold and the +5% founder early-warn threshold. Built image
+f4-combined-0e93f48 on EC2 build node, pushed to ECR, wiped + redeployed
+all 5 AWS testnet nodes. First boot had peer-handshake EOF errors from
+missing validator-manifest env vars; second redeploy with
+AETHERNET_VALIDATOR_MANIFEST + AETHERNET_ANALYZER_CONFIG converged the
+cluster at 5 active seats and a uniform digest.
+
+
+2026-04-23 — F4C halt on cross-node settlement-emission divergence
+------------------------------------------------------------------
+The §11.15 accept-corpus run triggered a halt: treasury balances split
+180K/160K/120K across the 5 nodes, persisting across consecutive polls
+(not transient sync lag). Halted worker, killed monitors, preserved
+evidence under /tmp/f4c-halt-evidence/, and left the cluster frozen at
+image f4-combined-0e93f48 for post-mortem. Founder approved the halt
+with "F4 still closed its bug; the next layer of the onion has
+surfaced."
+
+
+2026-04-23 — Characterization document (cross-node settlement emission)
+-----------------------------------------------------------------------
+Produced docs/plans/implementation/cross-node-settlement-emission-
+characterization.md (commit 51bce89). Ten sections: exec summary,
+evidence, mechanism with file:line, F4/F3-B/Divergence(A) relationships,
+fix space (7 candidates), verification discipline, F4 status, open
+questions. Key finding: F4B removed dispatch.TVConsensusConsumer.taskMu
+on the basis of an incorrect claim that per-(consumer, key) admission
+serializes per-RoundID. The StateApplied short-circuit in
+admitOneLogicalKey is a POST-condition, not a PRE-condition; concurrent
+events for the same RoundID can both pass it and both invoke
+escrow.ReleaseSettlement, draining the bucket non-deterministically per
+node. Characterization cites F3-B's in-code comment documenting this
+exact bug class as the most load-bearing piece of evidence.
+
+
+2026-04-23 — F5 workstream decision + three diagnostics
+-------------------------------------------------------
+Founder requested three read-only diagnostics before finalizing
+workstream shape. D1: RecordCanonicalStake / RecordCanonicalUnstake are
+NOT idempotent at API level but are guarded by transfer.Settle's atomic
+state-transition barrier at the only callsite, so Divergence (A) is a
+different mechanism than the TVConsensus race — defers to its own
+future characterization, not F5 scope. D2: per-(consumer, key) mutex in
+Dispatcher.admitOneLogicalKey between LogicalAdmissionKey and
+reserveOrLoadLogical is the correct fix; no deadlock risk (d.mu already
+released); generalizes across all LogicalKeyConsumers. D3: the
+FailedRetryable retry loop converges the admission record (flips to
+StateApplied via HasSettlementStarted pre-check short-circuit) but the
+ledger divergence is PERMANENT — no self-healing. Fix is prevention,
+not healing. Workstream shape: F4 stays frozen at 114d304+51bce89; F5 =
+concurrent-Apply race fix (blocks F4 merge to main); F6 = silent-zero
+family (queued, non-blocking); F7 = stake-manager defense-in-depth
+(queued, non-blocking); Divergence (A) = separate future
+characterization.
+
+
+2026-04-23 — F4 completion tag + journal entry (this file)
+----------------------------------------------------------
+Created annotated git tag f4-complete-selection-race-closed-pending-f5
+on commit 51bce89 with a message describing F4's scope closure, the
+concurrent-Apply race discovered during F4C testnet verification, and
+why F4 does not merge to main until F5 closes. Serves as the rebase
+reference point if F5 work needs re-alignment after Grok + ChatGPT
+multi-AI review. Founder taking characterization + fix direction to
+multi-AI review; no code changes in-flight; cluster remains frozen;
+awaiting F5 plan v1 draft.
+
+
+2026-04-23 — F5 plan v1 → v2 → v3 cycle and founder approval
+------------------------------------------------------------
+F5 plan v1 (Phase 5A — input-domain canonicalization) drafted post
+multi-AI review of cross-node-settlement-emission characterization.
+v2 absorbed Grok findings (Q-C as default, shadowMode in audit scope,
+pre-derivation control-flow reads, out-of-scope adjacent surfaces,
+float-path excision implication) and ChatGPT findings (taxonomy split
+canonical-derived vs non-canonical-artifact, retrieval-mode field,
+Input-Domain-4 invariant, canonical Q projection distinct from advisory,
+expanded ancestry semantics, synthetic-ID consumer audit, payout
+artifact schema, cutover preparation matrix). v3 absorbed Claude Code
+plan-mode review's 10 findings (CanonicalQProjection historical-read
+semantics, frozen-DAG-at-anchor primitive requirement, 5B-plan-v1
+demoted from gate criterion, schema-lock precedes ancestry, CI lint
+in 5A.4, uniqueness invariant clause, testnet-wipe-at-merge statement,
+six explicit hidden-input audit targets, manifest consumer contract,
+test-failure halt trigger). Founder approved v3 and directed start of
+Phase 5A.1.
+
+
+2026-04-23 — Phase 5A.1 settlement input audit completed
+--------------------------------------------------------
+Five parallel subagent walks executed against the F4-frozen branch:
+settler core + payout math + applicator (Agent A, 81 reads), generation
+ledger + Q-score resolution (Agent B, traced production wiring through
+tvReputationStore.ValidatorQScore + DAGAncestorReader live-DAG read),
+hidden-input sweep on 11 targets (Agent C, PASS on all), escrow
+ReleaseSettlement (Agent D, 5 paid-flag race patterns documented with
+file:line tables), ledger TransferFromBucketLabeled + bucketCounter
+(Agent E, 16 callsites enumerated, ZERO breaking consumers — refactor
+de-risked). Two deliverables produced: docs/audits/2026-04-23-
+settlement-input-audit.md and docs/architecture/settlement-input-
+manifest.yaml. ~132 reads enumerated and classified per Plan v3 §3.1
+taxonomy. Cutover preparation matrix (Plan v3 §7) populated. NO
+halt-trigger fired. 7 open questions for architect session including
+treasuryID classification, task.Status retrieval mode target, and
+DAG-reader option (a)/(b) confirmation. Awaiting Gate 5A.1 review
+(architect + multi-AI).
+
+
+2026-04-23 — Gate 5A.1 architect decisions accepted
+---------------------------------------------------
+Architect-session review of Phase 5A.1 deliverables accepted findings;
+decisions on the seven open questions: (1) treasuryID canonical-frozen
+confirmed; (2) task.Status option (b) accepted — idempotency pattern
+sufficient under pure derivation, with reopen condition if 5B discovers
+status influences payout math; (3) DAG-reader option (a) confirmed —
+5A.3 designs ReadAtAnchor; (4) removed inputs kept with
+target_classification: removed for 5D regression detection;
+(5) escrow persistence stays non-canonical, derivation-purity provides
+defense-in-depth; (6) 5A.4 consumer audit includes all 16
+TransferFromBucketLabeled callsites in test surface, fees/staking
+fixes treated as inherited cleanup; (7) M2 polish comment accepted
+as in-scope 5A.4 polish. Manifest and audit doc updated with
+decisions; units-clarification note added to manifest statistics
+distinguishing input rows from read sites. Next: multi-AI review
+(Grok + ChatGPT) with Grok pushing on ambition/scope and ChatGPT on
+structural correctness. After multi-AI absorption, Gate 5A.1 fully
+closes and Phase 5A.2 (Q-score canonicalization design) begins.
+
+
+2026-04-24 — Filename-version discipline correction: 5B plan split into v1.md + v2.md
+-------------------------------------------------------------------------------------
+Architect caught: 12 multi-AI-review changes had been applied IN-PLACE
+to f5-phase-5b-plan-v1.md (status header said v2, filename was still
+v1). Convention from 5A is one-file-per-major-version (plan-v1.md →
+plan-v2.md → plan-v3.md). Recovery: copied current state to f5-
+phase-5b-plan-v2.md (629 lines, post-multi-AI-review content
+preserved); reverse-applied each of the 12 edits to f5-phase-5b-
+plan-v1.md to restore the pre-multi-AI-review state (440 lines,
+18 subsections, §2.1-§2.5 original structure). v1.md is now the
+submitted-to-multi-AI-review artifact; v2.md is the post-review
+v2 with all 12 changes. Filename-version discipline restored to
+match 5A precedent. Lifecycle continues from v2.md.
+
+
+2026-04-24 — F5 5B Plan v1 drafted + v2 multi-AI-review patches applied
+-----------------------------------------------------------------------
+F5 Phase 5B Plan v1 drafted at docs/plans/implementation/f5-phase-
+5b-plan-v1.md per Plan v3 shape (11 sections): 9 locked decisions;
+load-bearing framing; core derivation function spec (DeriveSettlement
+signature + semantics + purity + deferral + D-1/D-2 determinism
+properties); applicator refactor spec (ReleaseSettlement → Apply-
+SettlementRecords keyed on canonical_id); discovery-tax handling
+for 5 items; 8 halt-and-surface triggers; deliverables; 13 success
+criteria; sign-off sequence; scope boundaries; risks; meta-observation
+with 4 hidden-error candidates.
+
+Gate 5B Plan v1 multi-AI review (Grok + ChatGPT): Grok validated
+scope and structure; ChatGPT surfaced DerivationInputs-boundary-
+contract as the load-bearing structural finding — the 5B analogue
+of V-1 pattern (convergent identification from both reviewers). 12
+changes applied to produce v2:
+
+Structural (7): (1) new §2.1 DerivationInputs contract — every field
+must be canonical-frozen OR deterministic replayable lookup at
+cutoff, forbidding non-canonical state from sneaking through the
+input bundle; (2) §3.3 applicator crash atomicity resolved via
+ledger-level idempotency (verified at internal/ledger/transfer.go:531
+post-5A.4.b — ErrDuplicateEntry makes paid-flag projection strictly
+observability, never load-bearing for correctness); (3) §2.2
+DerivationResult updated with ResolvedCutoffAnchor field + Status/
+Cause enums replacing Deferred-bool + metadata Summary field;
+(4) §2.3 step 7 JCS encoding discipline — explicit null for
+canonical_cutoff_anchor nil case; (5) §2.6 D-2 sharpened —
+distinguish divergence-in-progress from divergence-in-derived-
+meaning; (6) §5 three new halt triggers (schema-reopen, applied-
+key-growth, partial-apply atomicity); (7) §11 hidden-error reframe
+with DerivationInputs boundary leak as PRIMARY V-1 analogue + 4
+secondary candidates.
+
+Precision (5): (8) §3.3 sync.Map-intra-node-only distinction;
+(9) §7 criterion 12 expanded with 12a (crash-mid-apply recovery)
+and 12b (genesis-replay convergence); (10) §0 decision 9 + §7
+criterion 6 reframing-tests tightening — old-asserts-mechanism
+/new-asserts-behavior documented per rewritten test; (11) §2.3
+step 6 BFS seed-inclusive reminder per 5A.3 §2.2.1; (12) §2.3
+step 7 schema-implements-to statement.
+
+Forward notes applied: (a) ledger verified to provide canonical_id
+idempotency post-5A.4.b (informs §3.3 decision); (b) §4.6 added
+with Grok's 4 implementation discovery-tax predictions (V-1 edge
+case at activation boundary, paid-flag projection wiring bug,
+ordinal ordering subtlety, task.Status reopen trigger); (c) §0
+decision 10 added locking float-path removal as companion-PR, NOT
+5B scope.
+
+Cross-reference cleanup post-§2 renumber (v2 inserts new §2.1 +
+shifts §2.2-§2.6 by one). Section structure now: §2.1 (contract),
+§2.2 (Signature), §2.3 (Semantics), §2.4 (Purity), §2.5 (Deferral),
+§2.6 (Determinism D-1/D-2). All internal cross-refs updated.
+
+Next: Claude Code plan-mode review of v2 → revisions → v3 →
+founder approval → 5B implementation.
+
+
+2026-04-24 — F5 PHASE 5A CLOSED
+-------------------------------
+Architect reviewed F5 Phase 5A completion gate report at
+docs/plans/implementation/f5-phase-5a-completion-gate-report.md;
+confirmed accurate consolidation of all architect decisions, forward
+notes, and meta-lessons across 5A.1-5A.4. Founder confirmation
+recorded. Phase 5A CLOSED.
+
+State at closure:
+- Cluster frozen at f4-combined-0e93f48 (testnet image; AWS 5-node).
+- Branch base: 51bce89 (F4-frozen).
+- F4 tag preserved: f4-complete-selection-race-closed-pending-f5 → 51bce89.
+- All 5A deliverables on disk, full repo `go test ./...` green.
+- Working tree contains uncommitted 5A.4.b refactor + 5A.4.c lint
+  package + 6 design/audit/manifest/schema/plan documents.
+- No git commits made during 5A per architect-direction discipline.
+
+Next session: 5B plan v1 drafting. CC starts from §5 of the completion
+gate report as the brief (forward notes for 5B: testnet-wipe reminder;
+what 5B consumes from 5A — interfaces, schemas, primitives, patterns;
+what 5B produces — pure derivation function replacing imperative
+ReleaseSettlement; 5 discovery-tax predictions). Same plan-lifecycle
+discipline as Plan v3 for 5A: CC drafts v1 → architect reviews v1 in
+full → multi-AI review (Grok + ChatGPT) → revisions to v2 → CC plan-
+mode review → revisions to v3 → founder approval → 5B implementation.
+
+No inter-session action required. Architect waiting on next turn.
+
+
+2026-04-24 — F5 Phase 5A completion gate report drafted
+-------------------------------------------------------
+docs/plans/implementation/f5-phase-5a-completion-gate-report.md
+drafted per architect-specified structure (8 sections, ~3-5 page
+executive summary): sub-phase gate closures chronologically;
+8-artifact deliverables list with paths/sizes/cross-references;
+architect sign-offs consolidated (sequencing option-b, Q-C, epoch-
+coarse cutoff, V-1 canonical-position-bound, SHA-256, RFC 8785 JCS,
+ordinal-assignment rule, Fix A nil semantic, cycle-exclusion
+transparent-residual, CI lint warnings-now/failures-at-5D, same-
+epoch-exclusion sign-off, plus 5A.1 task.Status reopen condition,
+AdmissionRecord.DAGAnchor MUST NOT directive, R.canonical_seal_
+context vs SubmissionEventID disambiguation); three F5 gate-report
+notes (Grok cycle-exclusion wording for ship docs, Grok first-
+encounter determinism warning, ChatGPT economic-substrate-vs-
+semantics deferral); forward notes for 5B (testnet-wipe reminder;
+what 5B consumes from 5A; what 5B produces — pure derivation
+function replacing imperative ReleaseSettlement; 5 discovery-tax
+predictions carried forward); meta-lessons for future workstreams
+(V-1 pattern generalization, locked-workstream inventory discipline,
+multi-AI review ROI at gate boundaries, mid-draft-discovery cleanup
+discipline); 5B readiness assessment with 13 explicit ✅ criteria.
+Awaiting architect review + founder confirmation. After that,
+Phase 5A closes and 5B plan v1 drafting begins next session.
+
+
+2026-04-24 — Gate 5A.4.c CLOSED + Gate 5A.4.d CLOSED — Gate 5A.4 ENTIRELY CLOSED
+--------------------------------------------------------------------------------
+Gate 5A.4.c closed: internal/settlement/lint package shipped. Background
+agent delivered 5 production files (1086 lines: doc.go, input_manifest.go,
+manifest_loader.go, extractor.go, matcher.go) + 4 test files (1265 lines,
+23 tests) + 3 testdata fixtures. All tests pass including TestLintRepository.
+Key design decisions: no new YAML dep (focused parser handles manifest
+shape including comma-list and range shorthands); no go/analysis dep
+(followed projections/lint precedent using golang.org/x/tools/go/packages
+directly); two-pass AST extraction (extractReadSites for read-shape nodes
++ extractActiveLines for any AST activity) — distinguishes truly-orphaned
+manifest references from legitimate declaration-site references, avoiding
+false-positive stale-entry findings on protocol constants. Architect
+confirmed warnings-now/failures-at-5D scoping for undeclared in-scope
+reads (~97 manifest source_locations vs ~2363 in-scope AST-read sites
+today; capability proven via TestLint_FailsOnUndeclaredRead synthetic-
+module test; comprehensive enforcement is 5D's responsibility — threshold
+change is a one-line edit). Posture documented in lint package's doc.go
+to prevent future maintainers from reading "warns but doesn't fail" as
+a bug. Failure-causing categories TODAY: manifest-integrity issues,
+stale manifest entries, insufficient pragmas. Warning-only TODAY:
+undeclared in-scope reads.
+
+Gate 5A.4.d closed: consumer audit reconciliation. (1) `bucket:` in test
+files unchanged at 2 hits, both descriptive t.Fatalf error messages — no
+synthetic-ID format assertions. (2) TransferFromBucketLabeled in test
+files: zero hits — refactor's signature change had zero test-surface
+blast radius. (3) bucketCounter in test files: zero hits; remaining
+references in production code are historical comments + manifest
+entries (per Gate 5A.1 §9.4 removed-inputs-kept-for-5D-regression-
+detection convention). (4) 16-callsite survey shows consistent
+CanonicalSyntheticID idiom across all callers; pattern clean. Two
+non-trivial inherited cleanups noted but DEFERRED (per architect
+"no mandate to fix unless trivial"): duplicated 5-line idiom could
+be wrapped into TransferFromBucketCanonical helper (different callers
+have different error-handling needs — wrapper would obscure
+distinctions); bucketCounter historical comments could be condensed
+(documentation polish, defer). 5A.1 audit §4.7 zero-breaking-consumers
+prediction CONFIRMED through actual refactor.
+
+Gate 5A.4 ENTIRELY CLOSED. F5 Phase 5A all four sub-phases (5A.1, 5A.2,
+5A.3, 5A.4) complete. Next: F5 Phase 5A completion gate report.
+
+
+2026-04-24 — Gate 5A.4.a CLOSED + Gate 5A.4.b CLOSED
+-----------------------------------------------------
+Gate 5A.4.a closed (Q-1 SHA-256 locked; canonical JSON specified as
+RFC 8785 JCS; Q-2 Fix A applied — canonical_cutoff_anchor: EventID|nil
+with V-1 symmetry; Q-3 ordinal-assignment 4-step rule LOCKED at schema
+level). docs/architecture/payout-artifact-schema.yaml v1.1 committed
+to disk.
+
+Gate 5A.4.b closed: synthetic-ID refactor complete. Created
+internal/ledger/canonical_id.go with CanonicalSyntheticID(fromID, toID,
+amount, memo, isGenesis) → EventID using SHA-256 + RFC 8785 JCS over
+the canonical inputs (matches payout-artifact-schema.yaml hash spec).
+TransferFromBucketLabeled signature refactored to accept caller-
+supplied eid as first parameter (architect direction: derivation-
+layer-equivalent for 5A.4.b interim; F5 Phase 5B will centralize via
+PayoutRecord derivation). bucketCounter and sync/atomic import
+removed. 14 external callsites updated across fees (2), staking (2),
+escrow (10) plus internal wrapper TransferFromBucket. 3 tests pass:
+Determinism (6 sub-cases), Uniqueness (5 sub-cases per varied field),
+CrossNodeByteEquality (3-node simulation). Full repo test suite
+green for all packages except in-progress internal/settlement/lint
+(5A.4.c background agent's work). Gate 5A.1 Finding 10 halt-trigger
+check passed: zero existing tests failed on the refactor; 5A.1 audit
+§4.7's "zero breaking consumers" prediction confirmed at HEAD.
+
+5A.4.c (CI lint) in progress — background agent shipping the
+internal/settlement/lint/ package following internal/projections/lint/
+precedent. Awaiting agent completion notification.
+
+
+2026-04-23 — Gate 5A.3 CLOSED (multi-AI review absorbed; v1.2 + v2.2 patches landed)
+------------------------------------------------------------------------------------
+Multi-AI review (Grok + ChatGPT) of generation-ledger-canonical-
+derivation.md v1.1 returned with: Grok validated cleanly with two
+small strengthenings; ChatGPT surfaced four substantive precision
+findings plus reframed the analogous-hidden-error pattern. No halt.
+Five 5A.3 v1.1 → v1.2 changes applied: (1) terminology precision —
+R.canonical_seal_context (5A.2 V-1) vs R.SubmissionEventID (5A.3 BFS
+root) disambiguated as distinct canonical handles, with companion
+5A.2 v2.1 → v2.2 §7.2 cross-doc patch landed (NOT reopening Gate 5A.2);
+(2) "ancestor set" → "BFS result / anchor-scoped causal subgraph"
+terminology fix (BFS is seed-inclusive, not strict-ancestors-only);
+A-2 clarified (result is not necessarily empty even when anchor is
+unreachable — root is always included); (3) NeutralQualityStub
+future-versioning made explicit (extension via new interface version
+per V-1 §7.5, NOT source-compatible signature extension);
+(4) test-adapter migration items added to §2.1 (cluster.go stub +
+survey of other test stubs satisfying old interfaces);
+(5) Tips() preserved-for-shared-primitive rationale documented (kept
+for V-1 + VerifyAnchor reuse, not for gen-ledger BFS). Three F5
+completion gate-report notes captured externally for the F5 gate:
+(a) Grok cycle-exclusion honesty-clause wording (final form for ship
+docs); (b) Grok first-encounter determinism warning (lex-sort on
+EventID at every hop is load-bearing; downstream allocator sort is
+defense-in-depth only; same bug class as 5A.1 §4.3 float remainder
+absorption); (c) ChatGPT economic-substrate-vs-semantics framing
+(5A.3 canonicalizes the substrate; economic correctness of layered
+semantics is downstream / future workstream concern). Architect
+sign-off recorded: epoch-coarse same-epoch-ancestor-exclusion
+accepted as deliberate consequence of cutoff alignment with W;
+Grok validated no material gaming incentive. §9.4 (unbounded
+CausalRefs) forward-noted to 5A.4 as a polish item or follow-on
+event-validation workstream (MaxCausalRefs = 8 or 16 alongside
+locked plan §16 cardinality bounds). All §9 open questions
+resolved. Gate 5A.3 closes. 5A.4 begins next turn.
+
+
+2026-04-23 — Phase 5A.3 design v1 drafted; ready for Gate 5A.3 review
+---------------------------------------------------------------------
+Phase 5A.3 (generation-ledger ancestry canonicalization) drafted at
+docs/architecture/generation-ledger-canonical-derivation.md per
+architect-directed dependency order: spec 6 (ReadAtAnchor) → spec 3
+(traversal order, lex-sort on EventID at each hop) → specs 1+2
+(ancestor selection = all CausalRefs; dedup = first-encounter wins) →
+spec 4 (cycle exclusion DEFERRED to locked workstream's pair-aggregate
++ challenge-path; risk-assessed at gen-ledger 2% pool) → spec 5
+(NeutralQualityStub stays neutral; future swap follows V-1 pattern
+analogous to NeutralBPStubW). Two Grok forward-notes integrated:
+materialization-lag in genesis replay (settler defers on
+ErrEventNotFound, reusing F3-B causal-prerequisite-gating D-1 to D-8
+pattern; V-1-preserving) and first-round-of-epoch boundary race
+(epoch-coarse cutoff excludes within-epoch ancestors not in cutoff's
+past). Shared-primitive consolidation per architect direction:
+DAGAnchorReader moves from internal/dispatch/ to internal/dag/;
+settlement.DAGAncestorReader retired; ReadAtAnchor is an algorithm
+on the consolidated reader, not a new interface method. F5 5A.2 v2.1
+patch landed concurrent: §7.2 pseudocode now includes explicit
+ErrEventNotFound deferral semantic + R.canonical_seal_context warning
+("MUST NOT use AdmissionRecord.DAGAnchor; that field is C-15 non-
+canonical node-local"). No halt-trigger fired. Three open questions
+surfaced (§9.1 result ordering, §9.2 NeutralQualityStub interface
+lock, §9.3 cycle-exclusion temporary-residual messaging). Awaiting
+Gate 5A.3 multi-AI review.
+
+
+2026-04-23 — Gate 5A.2 CLOSED
+-----------------------------
+Architect final read of q-score-canonicalization-design.md v2 complete.
+V-1 invariant correctly and consistently expressed throughout. §7
+rewrite, §0.8.7 invalid-input contract, §9 absence-of-data expansions,
+§15.4 forward notes, §15.5 meta-observation all landed cleanly. One
+residue cleaned: §12.5 deleted (it specified "F5 does not prescribe"
+which contradicted §12.3's now-prescribed 2-4× LRU requirement;
+§12.5 was stale from before §12.3 added the prescription). With that
+deletion, Gate 5A.2 closes. Phase 5A.3 begins (generation-ledger
+ancestry canonicalization with DAGAncestorReader.ReadAtAnchor design,
+six specifications per Plan v3 §3.3, plus the three Grok forward-note
+predictions: materialization-lag in genesis replay, BFS lex-sort on
+EventID, first-round-of-epoch boundary race with ReadAtAnchor cutoff).
+
+
+2026-04-23 — Gate 5A.2 multi-AI review absorbed; design v2 issued
+-----------------------------------------------------------------
+Multi-AI review (Grok + ChatGPT) of Phase 5A.2 q-score-canonicalization-
+design.md returned with one convergent load-bearing finding under two
+framings: ChatGPT — "W implementation for round R is selected by R's
+canonical ordering relative to the activation event, not by node's
+runtime activation state at settler execution time"; Grok — "F5
+activation must precede ReputationActivation in canonical DAG order."
+ChatGPT's framing is the load-bearing invariant (V-1 in §7.1 of the
+updated doc); Grok's is the operational prerequisite (§7.3 emission
+ordering constraint with admission-gate enforcement). Six change areas
+applied to the design: §7 substantially rewritten with V-1 invariant +
+canonical-ancestor enforcement mechanism + emission ordering constraint
++ replay/catch-up semantic; §0.8.7 invalid-input contract added (4
+degenerate input cases with deterministic behavior); §5.2 four-factor
+wording strengthened ("real W MUST NOT ship until locked-workstream
+owner confirms"); §9 absence-of-data expanded with 4 new rows (opaque
+contributor, out-of-enum family/category, pre-retention epoch, epoch
+zero); §12.3 LRU sizing locked at 2-4× active validator count; forward
+notes for 5A.3 (materialization-lag, BFS lex-sort, first-round-of-epoch
+race) and 5A.4 (preimage uniqueness invariant) captured (§15.4); meta-
+observation on the analogous hidden error pattern documented (§15.5)
+— same shape as F4 mutex-claim error and 5A.1 task.Status looseness:
+per-node observation mistaken for cluster-uniform canonical fact.
+Multi-AI discipline value confirmed: independent identification of the
+gap from two different framings is high-confidence signal. Awaiting
+architect final read; if clean, Gate 5A.2 closes and 5A.3 begins.
+
+
+2026-04-23 — Phase 5A.2 design complete; ready for Gate 5A.2 review
+-------------------------------------------------------------------
+Phase 5A.2 (Q-score canonicalization design) drafted at
+docs/architecture/q-score-canonicalization-design.md. Major architectural
+discovery during substantive design surfaced as §13.1: the locked
+Reputation-and-Consensus-Integrity workstream (docs/plans/2026-04-12-...)
+already specifies the W projection (Independence Weight, 5 tiers T0-T4)
+that replaces ValidatorQScoreFn entirely, with ReputationEvidence as the
+canonical record, snapshot framework, cold-start states. F5 5A.2 shifts
+scope from "design canonical Q from scratch" to "extension to locked W";
+architect confirmed §13.1 = extension, not separate. Three verifications
+completed: §13.2 snapshot timing convention end-of-E (verified against
+locked plan §5.2); §13.3 epoch-coarse cutoff is correct (W update
+semantics: aggregate updates continuously but query reads snapshot
+indexed by epoch — round-precise reads same value); §13.4 equivocation
+is INERT (RecordEquivocation has zero production callers,
+EventTypeSlashingChallenge defined but never instantiated, locked
+workstream §17 step 7 owns canonical anchoring). §13.5 sequencing
+resolved by architect: option (b) F5 ships with NeutralBPStubW,
+locked workstream swaps to real W via canonical ReputationActivation
+event. CanonicalWProjection interface verified against locked plan
+§4.1: 6 parameters (validator, family, category, contributor,
+escrowBudget, epoch), uint64 return, explicit epoch parameter. One
+ambiguity flagged: `contributor` parameter's semantic role not visible
+in §4.1 W computation rules; not a blocker, coordinate with locked
+workstream author when real W lands. All 12 deliverable items drafted.
+No halt-trigger fired. Awaiting Gate 5A.2 multi-AI review.
+
+
+2026-04-23 — Gate 5A.1 multi-AI review complete; Gate 5A.1 CLOSED
+-----------------------------------------------------------------
+Both Grok and ChatGPT validated audit substance. Five 5A.1 closure
+changes absorbed: (1) semantic_role column added to manifest with
+three values (derivation / control-flow-idempotency / observability),
+every in-scope row classified, control-flow-idempotency rows get
+proof_obligation field; (2) task_status row formally exempted from
+Input-Domain-4 with proof_obligation requiring 5B to guarantee early-
+exit produces ledger state indistinguishable from full derivation+apply
+path; (3) validator_q_score upgraded to HIGH mixed-version-risk,
+projection-version-binding rule added as 5A.2 requirement enforced at
+gate time; (4) Finding 6 (escrow paid-flag persistence) disposition
+rewritten with explicit 5B obligation a/b/c (derive canonical record
+first, apply flags as pure projection only, never use persisted flag
+prefixes to determine canonical behavior); (5) other rows classified —
+control-flow-idempotency: applicator_applied_set, escrow_entry_paid_
+flags, escrow_has_settlement_started; observability: metrics callbacks,
+time.Now() sites, time_now_recorded_at. 5A.2 deliverable list expanded
+from 5 to 12 items (ChatGPT added 5: evidence-domain definition,
+version-binding rule, bootstrap/recovery behavior, absence-of-data
+policy, interaction with generation-ledger quality; Grok added 2:
+cutoff anchor precision, scaling target p99 < 100µs at 10k QPS).
+Forward notes captured (not 5A.1 scope): 5C production-cutover
+strategy for synthetic_transfer_id (one-time migration vs dual-read
+fallback); 5D verification matrix gets explicit Q-C performance gate.
+Plan v3 written to docs/plans/implementation/f5-phase-5a-plan-v3.md
+with all 5A.1 closure decisions and 5A.2 expansion. Phase 5A.2 begins.
+
+
+2026-04-24 — F5 Phase 5B Plan v3 founder-approved; 5B implementation begins
+---------------------------------------------------------------------------
+F5 Phase 5B Plan v3 closed Gate 5B Plan after architect final read +
+three residue fixes (§4.1 and §6.2 Deferred=true → Status=StatusDeferred
+prose residues; §4.1-§4.5 subsection labels "Plan v1 position" →
+"Position"). Founder confirmed; cluster stays frozen at
+f4-combined-0e93f48; no main-merge until F5 closes. 5B branch
+feat/f5-5b-derivation opened carrying uncommitted 5A.4 working tree.
+Standing discipline: halt-and-surface on any §5 trigger; check-in at
+natural breakpoints (derivation skeleton, applicator refactor, test
+suite expansion, integration).
+
+Breakpoint 1 (derivation function skeleton) landed clean: new package
+internal/settlement/derivation/ — 11 files, 1015 lines including tests,
+go build + go test -race green. Package shape locked in: types.go
+(StatusDerived/StatusDeferred + 4-variant DeferredCause enums),
+record.go (PayoutRecord materialized from YAML schema with Fix A nil
+discriminator), projections.go (stub+real bundle per V-1 §2.3 step 4
+semantics), stubs.go (NeutralBPStubW + NeutralQualityStub), lookups.go
+(narrow EscrowLookup + TaskLookup interfaces), inputs.go
+(DerivationInputs with per-field §2.1 contract-clause attribution),
+activation.go (const ActivationEventID placeholders + ActivationCheck
+func type), canonical_id.go (SHA-256 + RFC 8785 JCS via existing
+auth.CanonicalizeJSON), derive.go (DeriveSettlement signature with
+errNotImplemented body for breakpoint 1). Four of five design decisions
+confirmed by architect at breakpoint 1 read; V-1 hole flagged for §1
+ReputationActivationEventID const-flip at upgrade time — captured in
+internal/settlement/derivation/FORWARD_NOTES.md as the open
+architectural question for 5B completion gate (canonical-state-sourced
+activation ID vs canonical bootstrap pattern vs protocol hard-fork
+discipline; coordination required with locked Reputation-and-
+Consensus-Integrity workstream). Proceeding to breakpoint 2
+(DeriveSettlement body fill-in per plan §2.3 steps 1-9 + ReadAtAnchor
+helper per 5A.3 §2.2).
+
+
+2026-04-24 — F5 5B secondary halt: canonical-epoch scope absorbed per founder ruling
+------------------------------------------------------------------------------------
+Two plan-to-code gaps surfaced in sequence during 5B breakpoint-2 opening
+moves, both on the round-finalization→settlement wiring path.
+
+Gap 1: Plan v3 §2.3 steps 1-2 referenced R.canonical_seal_context and
+epoch_of(R) as round-intrinsic canonical state but neither was threaded
+into the settler's invocation point. TaskVerificationRound had no
+ConsensusEventID field; settler.Settle(ctx, payload, round) received no
+TVConsensus event ID. Halt surfaced. Architect ruled Option A: extend
+TaskVerificationRound with CanonicalSealContext event.EventID and
+EpochAtFinalization uint64 populated by the finalizing consumer at
+terminal-transition time. Plan-to-code wiring, not architecture reopen.
+
+Gap 2: Option A's EpochAtFinalization = RoundCounter.Total() /
+RoundsPerEpoch assumed canonical counter ordering. Verification of the
+commit-bus dispatch path showed the counter is non-canonical across
+nodes under concurrent dispatch: DefaultWorkers=4 means events from
+different rounds are processed in parallel; counter.Apply atomicity
+serializes only per-call, not per-canonical-DAG-order. The post-commit
+hook at dag.go:230-237 fires outside the DAG write lock, so even the
+lock order is not the same as the commit-bus emission order. Secondary
+halt surfaced. Founder review: locked Option 1 (absorb canonical-epoch
+scope into 5B rather than sequence around it) per build standard +
+mission framing: shipping F5 with an epoch primitive that's
+almost-canonical isn't good enough for the trust-substrate standard.
+Option 3b locked: new canonical DAG event type EpochBoundary;
+epoch_of(R) = count of EpochBoundary ancestors of R.canonical_seal_context
+(canonical by construction). Sub-spec drafting proceeds before code
+changes per 5A-precedent discipline (architect review + multi-AI review
+before implementation).
+
+Plan v3 §0 decision 2 ("5A primitives consumed, not re-designed")
+explicitly amended: RoundCounter-as-canonical-sequence was assumed
+canonical at plan time but implementation-stage verification showed it
+isn't. 5B absorbs the canonical-epoch-event scope to close the
+primitive gap.
+
+Meta-lesson for 5B completion gate (to capture at closure): plan
+reviews pressure-tested invariants abstractly but did not verify
+canonical primitives under concurrent access. Two plan-to-code gaps
+surfaced in two days — both on the same wiring path, both traceable to
+plan-level "X is canonical" claims that held semantically but not
+under the concrete concurrency model. Future plan reviews should
+include a discipline: for every canonical-state claim about a stateful
+infrastructure primitive, verify canonicality under the primitive's
+real-world concurrent-access pattern before locking the claim.
+
+5B implementation paused at breakpoint-1 skeleton. Sub-spec at
+docs/architecture/canonical-epoch-event.md is architect-directed
+proceed. R.CanonicalSealContext wiring held until sub-spec closes
+(same struct, same consumer, same fixtures — doing one now means
+touching the surface twice).
+
+
+2026-04-24 — Canonical epoch event sub-spec v1 → v2 (multi-AI review applied)
+-----------------------------------------------------------------------------
+Gate sub-spec v1 multi-AI review closed. Grok near-clean "ship it" verdict
+with 3 implementation-alertness predictions; ChatGPT surfaced 4 structural
+findings + 1 cross-doc ambiguity catch + 1 operational-risk elevation.
+No halt. Nine changes produced v2.
+
+Structural / load-bearing (5): §3.1 CountAncestorsByType all-or-defer
+sentence (prevents partial-count misimplementation); §1.4 signer
+canonical-position binding (replaces wall-clock "time of emission" with
+validator-seat-snapshot-at-trigger-canonical-position, matching V-1 W
+selection discipline); §5.2 fifth reputation-workstream coordination
+item (epoch 0 / stub-W/stub-quality acceptability); §8.2 consumer-DAG-
+view discipline (same canonical reader as activation + settlement
+ancestry, no shadow caches); new §6.4 Fix A orthogonality (cutoff_epoch
+and canonical_cutoff_anchor are distinct canonical handles).
+
+Hidden-error restructuring (2): §12.1 reframed to lead with Grok's
+sharper framing — local-admission-state-vs-canonical-DAG pattern is
+the exact defect this sub-spec exists to fix; payload forgery retained
+as sub-case. New §12.6 stacked canonical-deferral retry-storm
+amplification — operational-risk elevation flagged as highest-priority
+operational risk for 5B implementation; testnet §7 criterion 11b must
+exercise stacked defers.
+
+Implementation-alertness (2): §2.4 Candidate C rejection strengthened
+with concrete future-use-case list (snapshots, reputation deltas,
+slashing evidence, audit tooling, light-client proofs); new §12.7
+Grok discovery-tax predictions (logical-key on Epoch not content-hash,
+CountAncestorsByType cache at genesis replay, TriggerEventID rollback
+edge case).
+
+Status header updated to v2. §13 sign-off marked step 3 complete; step 4
+(reputation-workstream coordination per §5.2's now-5 confirmation items)
+⏳ next. Sub-spec v2 locked pending coordination response. Cluster frozen.
+
+
+2026-04-24 — Reputation-workstream coordination closed; sub-spec v2 → v2.1
+--------------------------------------------------------------------------
+Architect-driven reputation-workstream coordination against the canonical
+epoch sub-spec's 5 §5.2 confirmation items closed with all 5 COMPATIBLE
+against docs/plans/2026-04-12-reputation-and-consensus-integrity.md:
+(1) snapshot emission gated on EpochBoundary — sub-spec supplies missing
+spec; locked plan §5.2-§5.3 compatible; (2) snapshot content canonical-
+state-bounded — locked plan SN-2/SN-3 stronger than ask; (3) W.Real.Lookup
+purity — locked plan §4.1 W-1 stronger than ask; (4) RoundsPerEpoch=1000
+— locked plan §5.4 + §16 exact match; (5) epoch 0 / stub-W at NeutralBP
+acceptable — inherent V-1 activation-discontinuity pattern, accepted as
+design property.
+
+Two documentation-precision items folded in-place (avoided v3 churn for
+docs-only): §5.1 states that locked plan §5.2's "at an epoch boundary"
+is operationalized concretely by sub-spec EventTypeEpochBoundary events;
+§5.3 adds a paragraph acknowledging the stub-to-real W value
+discontinuity at ReputationActivation (NeutralBP → locked plan §6
+Bootstrap W=T0=7000) as an accepted V-1 pattern, not a defect. Both
+values are canonical at their respective canonical positions; every
+correct node computes identical pre- and post-activation W values for
+the same validator.
+
+Status bumped to v2.1; §13 sign-off step 4 (coordination) ✅ Complete,
+step 5 "v3 not needed", step 6 architect final read ⏳ Next. Sub-spec
+locked pending architect final read + founder approval; then sub-spec
+implementation; then 5B breakpoint-2 resumes. Cluster stays frozen.
+
+
+2026-04-24 — Sub-spec v2.1 → v2.2: admission-cross-check mechanism (Option A locked)
+-----------------------------------------------------------------------------------
+Sub-spec implementation breakpoint B opened with the EpochBoundary
+LogicalKeyConsumer wiring task. Survey of dag.Add at internal/dag/dag.go
+revealed that the substrate has only signature + causal-refs validation;
+no per-type payload-validation hook exists. But sub-spec v2.1 §1.4
+stated validation is "Enforced at dag.Add admission time + at
+LogicalKeyConsumer.Apply." Real sub-spec/code gap.
+
+Halted. Surfaced three resolution options. Architect locked Option A
+(substrate change: add restricted-API admission-cross-check mechanism
+to *dag.DAG; canonical-state cross-checks only, not generic policy
+validation) with explicit reframing — the new hook is named
+RegisterAdmissionCrossCheck and documented as for canonical-state
+cross-checks only. WhileLockedReader interface provides lock-free DAG
+reads (including a lock-free CountAncestorsByType variant) safely under
+the dag.Add write lock without reentrancy.
+
+Option B (projection-side validity filter) rejected: would put validity
+check on the same commit-bus path whose canonicality v2 was built to
+close. Option C (accept Byzantine attack surface) rejected: Byzantine
+EpochBoundary inflation produces cross-node agreement on a corrupted
+semantic — D-1 holds within an inflated frame but epoch_of(R) drifts
+from canonical truth. Founder's mission framing applied at the
+secondary halt rules out semantic drift even with cross-node consensus.
+
+Sub-spec patched in-place to v2.2: §1.4 intro rewritten to reference
+admission-cross-check mechanism; new §1.4.1 describes the API +
+restricted-API discipline + EpochBoundary as first user; new §5.4
+flags reusable infrastructure for future canonical primitives
+(per-epoch snapshots, reputation evidence, slashing challenges,
+protocol-parameter changes) — informational, not blocking for the
+locked workstream; new §9 halt trigger: "Admission-cross-check
+validator mis-implemented (reentrant lock, non-pure, I/O, runtime
+state) — halt; validator must be pure canonical function."
+
+Plan v3 §0 decision 2 ("5A primitives consumed, not re-designed")
+amended again — F5 5B absorbs the substrate addition required to make
+§1.4 enforceable. Two scope expansions now (canonical-epoch-event +
+admission-cross-check); both traceable to plan-time assumptions about
+substrate capabilities that didn't hold under implementation.
+
+Implementation proceeds at breakpoint B with the new mechanism per
+architect direction. Cluster stays frozen.
+
+
+2026-04-24 — F5 5B #134 closure: CanonicalSyntheticID stays as non-settlement utility
+-------------------------------------------------------------------------------------
+F5 5B #134 ("CanonicalSyntheticID interim helper removal" per Plan v3
+§0.4) opened with the architect-stated scope of deletion + "verify zero
+callers." Pre-deletion survey surfaced that 10 production callers
+remain post-#133 across non-settlement domains: escrow.Refund (1),
+escrow.ReleaseNet (4 — Plan v3 §0.7 explicitly excludes ReleaseNet from
+F5 5B), staking.Lock + staking.Unlock (2), fees.collectValidator +
+fees.collectTreasury (2), and the legacy ledger.TransferFromBucket
+internal wrapper (1). None of these is a settlement-via-DeriveSettlement
+path; none has a canonical-record-producing equivalent in its domain.
+
+Original 5A.4.b audit's "14 external callsites + 1 internal wrapper"
+enumeration (per journal entry of 5A.4.b closure) was fees(2) +
+staking(2) + escrow(10) + internal wrapper(1) = 15 total. Of escrow's
+10 callsites, only 5 lived inside ReleaseSettlement (the settlement-
+path); the other 5 lived in Refund (1) + ReleaseNet (4), neither of
+which is settlement. Plan v3 §0.4 + §6.1 framed the helper as wholly
+"becoming dead code at 5B completion" without distinguishing the
+settlement-path callsites (subsumable by DeriveSettlement) from the
+non-settlement-path callsites (no DeriveSettlement equivalent).
+
+Architect ruling at #134: Option A locked. Helper stays as
+non-settlement utility. Plan v3 §0.4 amended via this journal entry
+plus a doc-comment update on internal/ledger/canonical_id.go that
+replaces the "interim helper for 5A.4.b → 5B" framing with explicit
+post-5B scope clarification ("deterministic-synthetic-ID utility for
+ledger transfers across all domains; settlement-path callers use
+DeriveSettlement; non-settlement domains call CanonicalSyntheticID
+directly"). No code deletion; no breaking-rename. The helper's
+algorithm + interface stay unchanged.
+
+Plan v3 §0.4's "becomes dead code" assertion is now formally amended:
+settlement-path invocations were subsumed via DeriveSettlement during
+#133 (5 callsites in deleted ReleaseSettlement); non-settlement
+callers retain the helper as a deterministic-synthetic-ID utility per
+their respective domains. The architectural intent of §0.4 (settlement
+canonical_ids come from DeriveSettlement, not the synthetic-ID helper)
+is preserved + sharpened.
+
+Task #134 retitled "CanonicalSyntheticID scope-clarification doc + Plan
+v3 §0.4 amendment." Status: closed. Cluster stays frozen. Next: read
+admitOneLogicalKey for FORWARD_NOTES.md §3 dispatcher LK race
+investigation; report Path A (fix) vs Path B (formalize correctness)
+scope to architect for decision before #135 testnet verification.

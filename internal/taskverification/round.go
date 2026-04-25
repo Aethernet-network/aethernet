@@ -58,6 +58,29 @@ type TaskVerificationRound struct {
 	// rounds persisted before step 2 deserialize with zero-value false,
 	// which is correct — the first replay catches up and sets the flag.
 	CalibrationApplied bool `json:"calibration_applied,omitempty"`
+
+	// CanonicalSealContext is the canonical TaskVerificationConsensus
+	// event ID that finalized this round. Populated by the finalizing
+	// consumer at terminal-transition time (per F5 5B canonical-epoch
+	// sub-spec v2.2 §8 + prior-halt Option A). Canonical-frozen once set;
+	// downstream consumers (DeriveSettlement) read it for V-1 ActivationCheck.
+	//
+	// Empty string for rounds finalized before F5 5B implementation —
+	// migrating populated rounds is out of scope (testnet wipe at F5
+	// merge per Plan v3 §0.5).
+	CanonicalSealContext event.EventID `json:"canonical_seal_context,omitempty"`
+
+	// EpochAtFinalization is the canonical epoch in which this round was
+	// finalized, derived from the count of EpochBoundary canonical
+	// ancestors of CanonicalSealContext (per sub-spec v2.2 §8.2). Pure
+	// canonical-DAG-state read; no RoundCounter dependence (the
+	// secondary-halt motivation for the entire canonical-epoch sub-spec).
+	//
+	// Zero for rounds finalized before F5 5B implementation. After F5
+	// merge, every round R has EpochAtFinalization equal to the number
+	// of canonical EpochBoundary events ancestral to R's
+	// CanonicalSealContext.
+	EpochAtFinalization uint64 `json:"epoch_at_finalization,omitempty"`
 }
 
 // TaskVerificationVoteRecord captures a single validator's vote within a round.
@@ -304,6 +327,8 @@ func (r *TaskVerificationRound) Canonical() ([]byte, error) {
 		FinalScoreBP:          r.FinalScoreBP,
 		FinalizationTime:      r.FinalizationTime,
 		CalibrationApplied:    r.CalibrationApplied,
+		CanonicalSealContext:  r.CanonicalSealContext,
+		EpochAtFinalization:   r.EpochAtFinalization,
 	}
 
 	data, err := json.Marshal(proj)

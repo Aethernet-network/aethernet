@@ -188,6 +188,22 @@ const (
 	// observation period. See
 	// docs/plans/2026-04-20-canonical-distribution-integer-migration-v2.md §4.5.
 	EventTypeIntegerMigrationActivation EventType = "IntegerMigrationActivation"
+
+	// EventTypeEpochBoundary marks the canonical transition to a new epoch.
+	// Per F5 5B canonical-epoch sub-spec (docs/architecture/canonical-epoch-event.md):
+	// epochs are numbered 1, 2, 3, ...; epoch 0 is the implicit pre-boundary
+	// genesis state. Emission is canonical-trigger-conditioned via
+	// CountAncestorsByType — every node observing a TaskVerificationConsensus
+	// event whose canonical_tvc_rank crosses N * RoundsPerEpoch is eligible
+	// to emit EpochBoundary(N). Multi-emit is dedup'd by a logical-key
+	// consumer keyed on Epoch (NOT content-hash, per sub-spec §12.6(i)).
+	//
+	// Downstream consumers compute epoch_of(R) =
+	// CountAncestorsByType(R.canonical_seal_context, EventTypeEpochBoundary).
+	// Reference EpochBoundary(N) by canonical-presence in the ancestor set,
+	// never by specific content-hash (different validator emitters produce
+	// distinct content-hashes via AgentID; sub-spec §1.5).
+	EventTypeEpochBoundary EventType = "EpochBoundary"
 )
 
 // SettlementState tracks an event's position in the Optimistic Capability Settlement
@@ -859,4 +875,43 @@ type IntegerMigrationActivationPayload struct {
 	// EmittedAtUnix is the unix timestamp at which the emitter constructed
 	// the event. Informational only; not used for protocol decisions.
 	EmittedAtUnix int64 `json:"emitted_at_unix"`
+}
+
+// EpochBoundaryPayload marks the canonical transition to a new epoch.
+// One canonical boundary per epoch-number; logical-key dedup ensures
+// cluster convergence under multi-emit (sub-spec §2.2 Candidate A).
+//
+// The boundary's canonical identity is carried by its content-hash
+// EventID (which differs per emitter via AgentID per sub-spec §1.5)
+// and its CausalRefs (which pin the canonical position through
+// TriggerEventID). Payload fields are either canonical-frozen or
+// redundant-with-content-hash — they do NOT introduce state the
+// emitter can manipulate without admission rejection.
+//
+// Admission validation per sub-spec §1.4 (enforced at the LogicalKey
+// consumer): Payload.Epoch MUST equal CountAncestorsByType(
+// TriggerEventID, EventTypeEpochBoundary) + 1. A Byzantine emitter
+// that writes a wrong Payload.Epoch produces an event whose epoch
+// claim contradicts the canonical DAG; honest validators reject at
+// admission.
+type EpochBoundaryPayload struct {
+	// Version is the payload schema version. Must be 1 for current
+	// protocol. Future cadence or content changes require a coordinated
+	// upgrade.
+	Version uint8 `json:"v"`
+
+	// Epoch is the epoch index this boundary opens. Epochs are
+	// numbered starting at 1 — genesis state (no boundaries committed
+	// yet) is epoch 0. EpochBoundary(1) opens epoch 1 (closes epoch 0);
+	// EpochBoundary(N) opens epoch N (closes epoch N-1). Validated at
+	// admission against canonical DAG state per sub-spec §1.4.
+	Epoch uint64 `json:"epoch"`
+
+	// TriggerEventID is the canonical TaskVerificationConsensus event
+	// whose commit caused the emitter to observe the epoch threshold
+	// crossing. Always Type == EventTypeTaskVerificationConsensus;
+	// always satisfies canonical_tvc_rank(TriggerEventID) ==
+	// Epoch * RoundsPerEpoch per sub-spec §2.1. Included in CausalRefs
+	// as well; redundant but auditable at payload level.
+	TriggerEventID EventID `json:"trigger_event_id"`
 }

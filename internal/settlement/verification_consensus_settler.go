@@ -7,10 +7,12 @@ import (
 	"sync"
 
 	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/dag"
 	"github.com/Aethernet-network/aethernet/internal/escrow"
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/protocolmath"
+	"github.com/Aethernet-network/aethernet/internal/settlement/derivation"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/taskverification"
 )
@@ -46,6 +48,14 @@ type VerificationConsensusSettler struct {
 	genLedger  *GenerationLedgerCalculator
 	treasuryID crypto.AgentID
 	qScoreFn   ValidatorQScoreFn // nil → even-split fallback
+
+	// dagReader is the canonical AnchorReader passed to DeriveSettlement
+	// (V-1 ActivationCheck closure + ReadAtAnchor + CountAncestorsByType
+	// for cutoff_epoch). MUST be the same canonical view used by the
+	// finalizing consumer's CountAncestorsByType call (sub-spec §8.2
+	// canonical-DAG-view discipline). nil until set via SetDAGReader at
+	// construction.
+	dagReader derivation.AnchorReader
 
 	// mu guards shadowMode. Reads happen on every settlement call (via
 	// isShadowMode); writes happen rarely (once per IntegerMigration
@@ -114,10 +124,35 @@ func NewVerificationConsensusSettler(
 	}
 }
 
+// SetDAGReader installs the canonical AnchorReader used by
+// DeriveSettlement. Called by tests that wire a fake reader directly.
+// Production code paths use SetDAG, which wraps *dag.DAG in the
+// dagAnchorReaderAdapter.
+//
+// Per F5 5B canonical-epoch sub-spec §8.2 canonical-DAG-view discipline:
+// the reader MUST be the same canonical view used by the finalizing
+// consumer's CountAncestorsByType call. Shadow caches, stale wrappers,
+// or local-only views are forbidden.
+func (s *VerificationConsensusSettler) SetDAGReader(r derivation.AnchorReader) {
+	s.dagReader = r
+}
+
+// SetDAG is the production wiring entry point: wraps *dag.DAG in the
+// canonical dagAnchorReaderAdapter and stores it as the settler's
+// AnchorReader. Per multi-AI Item 1 composite (2026-04-25), the
+// explicit adapter struct documents the canonical-frozen-read intent
+// at the wiring boundary instead of relying on implicit interface
+// upcasting from the wide *dag.DAG surface.
+func (s *VerificationConsensusSettler) SetDAG(d *dag.DAG) {
+	s.SetDAGReader(dagAnchorReaderAdapter{dag: d})
+}
+
 // SettleResult captures the outcome of a settlement application.
 type SettleResult struct {
 	Applied              bool
 	AlreadyApplied       bool
+	Deferred             bool                    // F5 5B: DeriveSettlement returned StatusDeferred
+	DeferredCause        derivation.DeferredCause // populated when Deferred == true
 	Verdict              string
 	WorkerPayout         uint64
 	PosterRefund         uint64
@@ -125,12 +160,28 @@ type SettleResult struct {
 	GenerationLedger     GenerationLedgerDistribution
 	TreasuryAmount       uint64
 	TotalDistributed     uint64
+
+	// Records is the canonical PayoutRecord slice produced by
+	// DeriveSettlement (F5 5B). Empty when Deferred=true or when the
+	// legacy ReleaseSettlement path is taken (dagReader not wired).
+	Records []derivation.PayoutRecord
 }
 
 // Settle applies the v4.1 economic distribution for a verification consensus.
 // Idempotent: tasks already in a terminal state produce AlreadyApplied=true.
+//
+// F5 5B integration: when dagReader is wired, Settle routes through
+// derivation.DeriveSettlement → escrow.ApplySettlementRecords (the
+// canonical pure-derivation path). When dagReader is nil (legacy /
+// pre-5B test environments), falls back to the imperative
+// settleAccept/Reject/Dispute path (which calls escrow.ReleaseSettlement).
+//
+// The dagReader-nil fallback is dead code at 5B closure (cmd/node/main.go
+// always wires dagReader); it remains for the float-path companion-PR's
+// transitional window per Plan v3 §0.10. Companion-PR removal eliminates
+// the legacy branch entirely.
 func (s *VerificationConsensusSettler) Settle(
-	_ context.Context,
+	ctx context.Context,
 	payload *event.TaskVerificationConsensusPayload,
 	round *taskverification.TaskVerificationRound,
 ) (SettleResult, error) {
@@ -142,7 +193,9 @@ func (s *VerificationConsensusSettler) Settle(
 		return result, fmt.Errorf("verification_settler: task %s not found: %w", payload.TaskID, err)
 	}
 
-	// Idempotent: already in terminal state.
+	// Idempotent: already in terminal state. Per Gate 5A.1 §9.2 option-b
+	// the task.Status read here is an EARLY-EXIT short-circuit, NOT a
+	// payout-math dependency — the §4.4 reopen condition does not fire.
 	switch task.Status {
 	case tasks.TaskStatusCompleted, tasks.TaskStatusRejected,
 		tasks.TaskStatusDisputedResolved, tasks.TaskStatusCancelled:
@@ -177,206 +230,174 @@ func (s *VerificationConsensusSettler) Settle(
 		}
 	}
 
-	budget := entry.Amount
-	escrowBucket := crypto.AgentID("escrow:" + payload.TaskID)
-	workerID := crypto.AgentID(payload.WorkerID)
-	posterID := crypto.AgentID(payload.PosterID)
+	// Suppress unused-variable warnings; entry/budget/etc. are read by
+	// settleViaDerivation via the inputs bundle, not as locals here.
+	_ = entry
 
-	switch payload.FinalVerdict {
-	case "pass":
-		return s.settleAccept(budget, escrowBucket, workerID, posterID, payload, round, result)
-	case "fail":
-		return s.settleReject(budget, escrowBucket, posterID, payload, round, result)
-	case "abstain":
-		return s.settleDispute(budget, escrowBucket, workerID, posterID, payload, result)
+	// F5 5B: route through DeriveSettlement. dagReader MUST be wired
+	// at construction (cmd/node/main.go:tvSettler.SetDAGReader). The
+	// legacy settleAccept/Reject/Dispute paths were removed in #133;
+	// nil dagReader is now a precondition violation.
+	if s.dagReader == nil {
+		return result, fmt.Errorf("verification_settler: dagReader not wired — SetDAGReader must be called before Settle (post-F5 5B canonical path requires the DAG view for DeriveSettlement)")
+	}
+	return s.settleViaDerivation(ctx, payload, round, result)
+}
+
+// settleViaDerivation is the F5 5B canonical path: build
+// DerivationInputs, call DeriveSettlement, route Status to apply or
+// defer, then call ApplySettlementRecords + finalize task state.
+//
+// Per Plan v3 §3.5 caller-code shape:
+//
+//	result, err := deriveSettlement(ctx, round, inputs)
+//	if err != nil { return err }
+//	if result.Status == StatusDeferred { deferRound(round); return nil }
+//	return e.escrowMgr.ApplySettlementRecords(taskID, result.Records)
+func (s *VerificationConsensusSettler) settleViaDerivation(
+	ctx context.Context,
+	payload *event.TaskVerificationConsensusPayload,
+	round *taskverification.TaskVerificationRound,
+	result SettleResult,
+) (SettleResult, error) {
+	inputs, err := s.buildDerivationInputs()
+	if err != nil {
+		return result, fmt.Errorf("verification_settler: buildDerivationInputs: %w", err)
+	}
+
+	derived, err := derivation.DeriveSettlement(ctx, round, inputs)
+	if err != nil {
+		return result, fmt.Errorf("verification_settler: DeriveSettlement: %w", err)
+	}
+
+	// Exhaustive Status enum dispatch (multi-AI Item 2, V#4 hardening
+	// 2026-04-25). Switch with explicit StatusDerived case + default
+	// error catches future enum additions at runtime — without the
+	// default branch, a new StatusXxx variant would silently fall
+	// through to ApplySettlementRecords with empty Records, masking
+	// the integration regression.
+	switch derived.Status {
+	case derivation.StatusDeferred:
+		// Re-enqueue handled by the recognition fabric / dispatcher
+		// retry mechanism (F3-B causal-prerequisite-gating). Caller
+		// observes Deferred=true and does NOT mark the task as
+		// terminal — it'll re-fire when canonical state advances.
+		result.Deferred = true
+		result.DeferredCause = derived.Cause
+		slog.Info("verification_settler: deferred (canonical state not yet materialized)",
+			"task_id", payload.TaskID,
+			"round_id", payload.RoundID,
+			"cause", derived.Cause.String(),
+		)
+		return result, nil
+	case derivation.StatusDerived:
+		// Fall through to the apply path below.
 	default:
-		return result, fmt.Errorf("verification_settler: unknown verdict %q", payload.FinalVerdict)
-	}
-}
-
-// settleAccept distributes the task budget per the v4.1 model:
-// worker: 73%, validators (Q-weighted): 23%, gen-ledger: 2%, treasury: 2%.
-// Integer arithmetic remainders from the share calculations are routed to
-// treasury so the sum across all recipients equals the budget exactly.
-// Cross-node conservation is verified by §10 success criterion 6.
-func (s *VerificationConsensusSettler) settleAccept(
-	budget uint64,
-	escrowBucket, workerID, posterID crypto.AgentID,
-	payload *event.TaskVerificationConsensusPayload,
-	round *taskverification.TaskVerificationRound,
-	result SettleResult,
-) (SettleResult, error) {
-	workerAmount := budget * workerShareBP / 10000
-	validatorPool := budget * validatorShareBP / 10000
-	genPool := budget * generationShareBP / 10000
-	treasuryAmount := budget - workerAmount - validatorPool - genPool // absorbs rounding
-
-	// Compute per-validator Q-weighted payouts without executing transfers.
-	agreeing := collectAgreeingValidators(round, taskverification.VerdictPass)
-	validators := make(map[crypto.AgentID]uint64)
-	if len(agreeing) == 0 {
-		slog.Warn("verification_settler: no agreeing validators on accept — routing validator pool to treasury",
-			"task_id", payload.TaskID)
-		treasuryAmount += validatorPool
-	} else {
-		validators = s.computeValidatorPayouts(payload.TaskID, agreeing, validatorPool, round.Category)
-		result.ValidatorPayouts = validators
+		return result, fmt.Errorf("verification_settler: DeriveSettlement returned unknown Status %v (enum extension without dispatch update)", derived.Status)
 	}
 
-	// Compute gen-ledger royalty payouts without executing transfers.
-	genRecipients := make(map[crypto.AgentID]uint64)
-	if s.genLedger != nil {
-		dist := s.genLedger.Calculate(event.EventID(payload.SubmissionEventID), genPool)
-		for _, r := range dist.Recipients {
-			if r.Amount > 0 {
-				genRecipients[crypto.AgentID(r.AgentID)] = r.Amount
+	// Apply the canonical records.
+	if applyErr := s.escrowMgr.ApplySettlementRecords(payload.TaskID, derived.Records); applyErr != nil {
+		return result, fmt.Errorf("verification_settler: ApplySettlementRecords: %w", applyErr)
+	}
+
+	// Last step: terminal task-state transition. If Settle is interrupted
+	// after ApplySettlementRecords but before this transition, retry's
+	// pre-check (task.Status terminal) will short-circuit, AND the
+	// escrow.ApplySettlementRecords paid-flag projection will skip-
+	// optimize the records on retry. No double-pay risk per Plan v3
+	// §3.4 obligation a/b/c + crash-position table.
+	taskVerdictString := payload.FinalVerdict
+	if transErr := s.taskMgr.ApplyVerificationConsensusResolution(
+		payload.TaskID, taskVerdictString, payload.FinalScoreBP, payload.RoundID,
+	); transErr != nil {
+		return result, fmt.Errorf("verification_settler: task state: %w", transErr)
+	}
+
+	// Populate observability fields on SettleResult from the derived
+	// records (back-compat with downstream observers that read these
+	// fields; future-work to switch downstream observers to
+	// result.Records directly).
+	result.Records = derived.Records
+	result.Applied = true
+	for _, r := range derived.Records {
+		switch r.Recipient.Role {
+		case derivation.RoleWorker:
+			result.WorkerPayout = r.Amount.Value
+		case derivation.RolePosterRefund:
+			result.PosterRefund = r.Amount.Value
+		case derivation.RoleValidator:
+			if result.ValidatorPayouts == nil {
+				result.ValidatorPayouts = make(map[crypto.AgentID]uint64)
 			}
+			result.ValidatorPayouts[r.Recipient.ID] = r.Amount.Value
+		case derivation.RoleTreasury:
+			result.TreasuryAmount = r.Amount.Value
 		}
-		treasuryAmount += dist.Treasury
-		result.GenerationLedger = dist
-	} else {
-		treasuryAmount += genPool
+		result.TotalDistributed += r.Amount.Value
 	}
 
-	// Execute all transfers via ReleaseSettlement with per-recipient
-	// paid-flag idempotency guards (C-11).
-	if err := s.escrowMgr.ReleaseSettlement(
-		payload.TaskID,
-		workerID, workerAmount,
-		posterID, 0,
-		validators,
-		genRecipients,
-		s.treasuryID, treasuryAmount,
-	); err != nil {
-		return result, fmt.Errorf("verification_settler: release settlement: %w", err)
-	}
-
-	result.WorkerPayout = workerAmount
-	result.TreasuryAmount = treasuryAmount
-
-	// Task state transition — last step; if we reach here, all payouts
-	// completed (or were already completed on a prior attempt via paid flags).
-	if err := s.taskMgr.ApplyVerificationConsensusResolution(
-		payload.TaskID, "pass", payload.FinalScoreBP, payload.RoundID); err != nil {
-		return result, fmt.Errorf("verification_settler: task state: %w", err)
-	}
-	result.Applied = true
-	result.TotalDistributed = workerAmount + sumPayouts(validators) +
-		sumGenLedger(result.GenerationLedger) + treasuryAmount
-
-	slog.Info("verification_settler: accept settled",
-		"task_id", payload.TaskID, "budget", budget,
-		"worker", workerAmount, "validator_pool", validatorPool,
-		"gen_ledger", genPool, "treasury", treasuryAmount,
-		"agreeing_validators", len(agreeing))
+	slog.Info("verification_settler: settled via derivation",
+		"task_id", payload.TaskID,
+		"round_id", payload.RoundID,
+		"verdict", payload.FinalVerdict,
+		"records", len(derived.Records),
+		"total_distributed", result.TotalDistributed,
+	)
 	return result, nil
 }
 
-func (s *VerificationConsensusSettler) settleReject(
-	budget uint64,
-	escrowBucket, posterID crypto.AgentID,
-	payload *event.TaskVerificationConsensusPayload,
-	round *taskverification.TaskVerificationRound,
-	result SettleResult,
-) (SettleResult, error) {
-	posterAmount := budget * workerShareBP / 10000
-	validatorPool := budget * validatorShareBP / 10000
-	treasuryAmount := budget - posterAmount - validatorPool
-
-	agreeing := collectAgreeingValidators(round, taskverification.VerdictFail)
-	validators := make(map[crypto.AgentID]uint64)
-	if len(agreeing) == 0 {
-		slog.Warn("verification_settler: no agreeing validators on reject — routing to treasury",
-			"task_id", payload.TaskID)
-		treasuryAmount += validatorPool
-	} else {
-		validators = s.computeValidatorPayouts(payload.TaskID, agreeing, validatorPool, round.Category)
-		result.ValidatorPayouts = validators
+// buildDerivationInputs assembles the DerivationInputs bundle via the
+// derivation package's NewDerivationInputs constructor. Built per-call
+// (lightweight; no expensive resource construction). Per F5 5B
+// canonical-epoch sub-spec §1.4.1 + DerivationInputs §2.1 contract:
+// every field is canonical-frozen or deterministic-replayable-lookup.
+//
+// **Multi-AI Item 1 composite (2026-04-25)**: the prior in-line
+// `activationCheck` closure that captured `s.dagReader` was deleted.
+// Activation now flows through the canonical-frozen
+// {Reputation,Quality}ActivationEventID arguments (clause-(a) values
+// pulled directly from the locked package-level constants);
+// DeriveSettlement's `isActivated` helper combines them with the
+// dagReader. The function-field surface that previously could have
+// hidden runtime-flag capture is GONE.
+//
+// NewDerivationInputs validates required-non-nil services and the
+// canonical TreasuryID at construction time; an error here indicates a
+// wiring bug at start-of-settlement (not at first DeriveSettlement
+// call). Adapter wrappers (escrowDerivationLookup, qScoreFnAsCanonicalW)
+// satisfy the §2.1 contract by exposing only canonical-frozen reads of
+// their underlying services.
+func (s *VerificationConsensusSettler) buildDerivationInputs() (derivation.DerivationInputs, error) {
+	wStub := derivation.CanonicalWProjection(qScoreFnAsCanonicalW{fn: s.qScoreFn})
+	if s.qScoreFn == nil {
+		// Pre-reputation-store wiring case: use the package's universal
+		// NeutralBP stub to keep V-1 semantics intact (every validator
+		// returns NeutralBP).
+		wStub = derivation.NeutralBPStubW{}
 	}
 
-	if err := s.escrowMgr.ReleaseSettlement(
-		payload.TaskID,
-		crypto.AgentID(""), 0, // no worker payout on reject
-		posterID, posterAmount,
-		validators,
-		nil, // no gen-ledger on reject
-		s.treasuryID, treasuryAmount,
-	); err != nil {
-		return result, fmt.Errorf("verification_settler: release settlement: %w", err)
-	}
-
-	result.PosterRefund = posterAmount
-	result.TreasuryAmount = treasuryAmount
-
-	if err := s.taskMgr.ApplyVerificationConsensusResolution(
-		payload.TaskID, "fail", 0, payload.RoundID); err != nil {
-		return result, fmt.Errorf("verification_settler: task state: %w", err)
-	}
-	result.Applied = true
-	result.TotalDistributed = posterAmount + sumPayouts(validators) + treasuryAmount
-
-	slog.Info("verification_settler: reject settled",
-		"task_id", payload.TaskID, "budget", budget,
-		"poster", posterAmount, "treasury", treasuryAmount,
-		"agreeing_validators", len(agreeing))
-	return result, nil
+	return derivation.NewDerivationInputs(
+		derivation.WProjections{
+			Stub: wStub,
+			// Real: nil — locked Reputation-and-Consensus-Integrity
+			// workstream's real W ships separately. The V-1 isActivated
+			// check returns false today (empty ReputationActivationEventID),
+			// so the Real slot is never selected.
+		},
+		derivation.QualityProjections{
+			Stub: derivation.NeutralQualityStub{},
+			// Real: nil — quality canonicalization is deferred to a
+			// future workstream per sub-spec §3.
+		},
+		s.dagReader,
+		escrowDerivationLookup{escrow: s.escrowMgr},
+		derivation.ReputationActivationEventID,
+		derivation.QualityActivationEventID,
+		s.treasuryID,
+	)
 }
 
-func (s *VerificationConsensusSettler) settleDispute(
-	budget uint64,
-	escrowBucket, workerID, posterID crypto.AgentID,
-	payload *event.TaskVerificationConsensusPayload,
-	result SettleResult,
-) (SettleResult, error) {
-	workerPortion := budget * workerShareBP / 10000
-	workerAmount := workerPortion / 2
-	posterAmount := workerPortion - workerAmount
-	treasuryAmount := budget - workerPortion
-
-	if err := s.escrowMgr.ReleaseSettlement(
-		payload.TaskID,
-		workerID, workerAmount,
-		posterID, posterAmount,
-		nil, // no validator payouts on dispute
-		nil, // no gen-ledger on dispute
-		s.treasuryID, treasuryAmount,
-	); err != nil {
-		return result, fmt.Errorf("verification_settler: release settlement: %w", err)
-	}
-
-	result.WorkerPayout = workerAmount
-	result.PosterRefund = posterAmount
-	result.TreasuryAmount = treasuryAmount
-
-	if err := s.taskMgr.ApplyVerificationConsensusResolution(
-		payload.TaskID, "abstain", 0, payload.RoundID); err != nil {
-		return result, fmt.Errorf("verification_settler: task state: %w", err)
-	}
-	result.Applied = true
-	result.TotalDistributed = workerAmount + posterAmount + treasuryAmount
-
-	slog.Info("verification_settler: dispute settled",
-		"task_id", payload.TaskID, "budget", budget,
-		"worker", workerAmount, "poster", posterAmount,
-		"treasury", treasuryAmount)
-	return result, nil
-}
-
-// collectAgreeingValidators returns the AgentIDs of validators whose vote
-// matches the given verdict.
-func collectAgreeingValidators(round *taskverification.TaskVerificationRound, verdict taskverification.Verdict) []crypto.AgentID {
-	seen := make(map[crypto.AgentID]struct{})
-	var result []crypto.AgentID
-	for _, v := range round.Votes {
-		if v.Verdict == verdict {
-			if _, ok := seen[v.ValidatorID]; !ok {
-				seen[v.ValidatorID] = struct{}{}
-				result = append(result, v.ValidatorID)
-			}
-		}
-	}
-	return result
-}
 
 // computeValidatorPayouts calculates Q-weighted per-validator amounts
 // without executing transfers. The returned map is passed to
@@ -610,19 +631,4 @@ func (s *VerificationConsensusSettler) logShadowDelta(
 // so the helper's signature stays readable.
 func context_noop() context.Context { return context.Background() }
 
-func sumPayouts(m map[crypto.AgentID]uint64) uint64 {
-	var s uint64
-	// safe: iteration order does not affect canonical state (non-canonical local surface, or commutative effect)
-	for _, v := range m {
-		s += v
-	}
-	return s
-}
 
-func sumGenLedger(d GenerationLedgerDistribution) uint64 {
-	var s uint64
-	for _, r := range d.Recipients {
-		s += r.Amount
-	}
-	return s
-}

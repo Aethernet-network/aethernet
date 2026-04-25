@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 
 	"github.com/Aethernet-network/aethernet/internal/event"
 )
@@ -106,6 +107,23 @@ func (d *Dispatcher) snapshotInterestedLogicalKeyConsumersLocked(ev *event.Event
 // dispatcher prevents the consumer from accidentally deriving
 // canonical state from the triggering event's (potentially advisory)
 // payload fields.
+//
+// **Per-(consumer, key) lock** (F5 5B post-#133 LK race fix, Path A):
+// the read-modify-write region (reserve → gate → IsComplete →
+// DeriveOutcome → Apply → persist) is serialized by a per-storeKey
+// mutex from d.keyLocks. Without it, two concurrent commit-bus
+// workers processing byte-distinct events for the same logical key
+// could both pass the line-127 StateApplied gate and both invoke
+// consumer.Apply.
+//
+// Defense-in-depth framing per d.keyLocks doc: the lock is INTRA-NODE
+// only; cross-node correctness rests on each LK consumer's Apply
+// canonicality + ledger ErrDuplicateEntry idempotency + the F4B
+// contract that LK Apply is idempotent or no-op for byte-distinct
+// events with the same logical key. The lock prevents wasted intra-
+// node Apply calls on race-loss; it is NOT the canonical-correctness
+// mechanism. Same V-1-class layer separation as
+// internal/escrow/applicator.go's recordLocks.
 func (d *Dispatcher) admitOneLogicalKey(ctx context.Context, ev *event.Event, c LogicalKeyConsumer) error {
 	key, err := c.Key(ev)
 	if err != nil {
@@ -113,6 +131,15 @@ func (d *Dispatcher) admitOneLogicalKey(ctx context.Context, ev *event.Event, c 
 	}
 
 	storeKey := LogicalAdmissionKey(c.Name(), key)
+
+	// Acquire per-(consumer, key) intra-node lock for the duration of
+	// the read-modify-write region below. Defense-in-depth only;
+	// canonical correctness is guaranteed by downstream idempotency
+	// per d.keyLocks doc.
+	lockI, _ := d.keyLocks.LoadOrStore(storeKey, &sync.Mutex{})
+	lock := lockI.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
 
 	rec, err := d.reserveOrLoadLogical(storeKey, ev, c, key)
 	if err != nil {

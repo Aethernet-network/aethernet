@@ -25,14 +25,37 @@ import (
 // via its Interested() filter. This consumer retains only the local-node
 // replay-safe and best-effort sidework (round state, calibration,
 // slashing) that does not require cross-node ledger convergence.
+// EpochAncestorReader is the narrow read surface this consumer needs to
+// populate round.EpochAtFinalization at terminal-transition time. Per
+// F5 5B canonical-epoch sub-spec v2.2 §8.2: the reader MUST be backed by
+// the same canonical DAG view used by activation checks and settlement
+// ancestry reads — shadow caches, stale wrappers, or local-only views
+// are forbidden, as consistency with canonical-state queries elsewhere
+// is load-bearing for cross-node byte-equality at round finalization.
+//
+// *dag.DAG satisfies this interface structurally.
+type EpochAncestorReader interface {
+	CountAncestorsByType(descendant event.EventID, eventType event.EventType) (uint64, error)
+}
+
 type TaskVerificationConsensusConsumer struct {
 	rounds      taskverification.Store
 	slashing    *taskverification.SlashingEvaluator // nil if slashing not wired
 	calibration *taskverification.CalibrationStore  // nil if calibration not wired
+	dagReader   EpochAncestorReader                 // nil ONLY in tests; production MUST wire stack.dag
 }
 
 // NewTaskVerificationConsensusConsumer creates a consensus consumer.
 // slashing and calibration may be nil (graceful degradation).
+//
+// dagReader: per F5 5B canonical-epoch sub-spec v2.2 §8.2, this is the
+// canonical reader used to compute round.EpochAtFinalization at
+// terminal transition. In production, MUST be wired to *dag.DAG (the
+// canonical DAG view). nil is permitted ONLY for tests that do not
+// exercise the canonical-epoch field-population path; when nil, the
+// consumer skips epoch field population and round.EpochAtFinalization
+// stays zero. cmd/node/main.go is the production wiring site;
+// regression risk surfaces if main.go is changed to pass nil.
 //
 // The settler parameter was removed in Part E.1: settlement now flows
 // exclusively through the DispatcherAdmissionConsumer →
@@ -41,11 +64,13 @@ func NewTaskVerificationConsensusConsumer(
 	rounds taskverification.Store,
 	slashing *taskverification.SlashingEvaluator,
 	calibration *taskverification.CalibrationStore,
+	dagReader EpochAncestorReader,
 ) *TaskVerificationConsensusConsumer {
 	return &TaskVerificationConsensusConsumer{
 		rounds:      rounds,
 		slashing:    slashing,
 		calibration: calibration,
+		dagReader:   dagReader,
 	}
 }
 
@@ -101,6 +126,31 @@ func (c *TaskVerificationConsensusConsumer) Consume(_ context.Context, ev *event
 		if err := round.Transition(targetState, payload.FinalizationTimeUnix); err == nil {
 			round.FinalVerdict = verdict
 			round.FinalScoreBP = payload.FinalScoreBP
+
+			// Per F5 5B canonical-epoch sub-spec v2.2 §8.2: populate the
+			// canonical-epoch fields at terminal-transition time, atomically
+			// with verdict + score. CanonicalSealContext = the TVConsensus
+			// event ID being admitted (this event); EpochAtFinalization =
+			// canonical count of EpochBoundary ancestors of that event.
+			//
+			// dagReader is nil in test environments that don't exercise this
+			// path; production wires stack.dag (the canonical view).
+			round.CanonicalSealContext = ev.ID
+			if c.dagReader != nil {
+				epoch, countErr := c.dagReader.CountAncestorsByType(ev.ID, event.EventTypeEpochBoundary)
+				if countErr != nil {
+					// Per sub-spec §8.4 + §3.1 all-or-defer: ErrEventNotFound
+					// signals materialization lag. Under dag.Add's strict
+					// CausalRefs invariant this is unreachable for events
+					// arriving via the recognition fabric (the event itself
+					// AND all its ancestors are in the DAG by then), but the
+					// defensive branch surfaces canonical-state corruption
+					// loudly rather than silently writing a zero epoch.
+					return fmt.Errorf("task_verification_consensus: count epoch-boundary ancestors of %s: %w", ev.ID, countErr)
+				}
+				round.EpochAtFinalization = epoch
+			}
+
 			if err := c.rounds.SaveRound(context.Background(), round); err != nil {
 				return fmt.Errorf("task_verification_consensus: save: %w", err)
 			}
@@ -110,6 +160,7 @@ func (c *TaskVerificationConsensusConsumer) Consume(_ context.Context, ev *event
 				"verdict", payload.FinalVerdict,
 				"score_bp", payload.FinalScoreBP,
 				"event_id", ev.ID,
+				"epoch_at_finalization", round.EpochAtFinalization,
 			)
 		}
 	}

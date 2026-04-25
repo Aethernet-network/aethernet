@@ -13,7 +13,7 @@ import (
 )
 
 // canonicalPayloadReflectTypes is the authoritative reflection-time list
-// of the 17 canonical event payload types. Kept in sync with the AST
+// of the 18 canonical event payload types. Kept in sync with the AST
 // lint's hardcoded list at internal/event/lint/canonical_float_lint.go
 // via TestCanonicalPayloadList_Complete below.
 //
@@ -40,10 +40,11 @@ var canonicalPayloadReflectTypes = []reflect.Type{
 	reflect.TypeOf(PrerequisiteWithholdingPayload{}),
 	reflect.TypeOf(TrajectoryCommitPayload{}),
 	reflect.TypeOf(IntegerMigrationActivationPayload{}),
+	reflect.TypeOf(EpochBoundaryPayload{}),
 }
 
 // TestCanonicalPayloadTypes_FloatFree is the runtime-mechanism defense
-// for the canonical-payload float-freedom invariant. Walks each of the 17
+// for the canonical-payload float-freedom invariant. Walks each of the 18
 // types via reflect and asserts no float fields exist transitively. Uses
 // a different mechanism (reflection) than the AST lint at internal/event/
 // lint/canonical_float_lint.go, so a bug in one defense does not mask a
@@ -142,12 +143,12 @@ func TestCanonicalPayloadList_Complete(t *testing.T) {
 	}
 }
 
-// TestCanonicalPayloadList_Has18Entries pins the list length. Changing
+// TestCanonicalPayloadList_Has19Entries pins the list length. Changing
 // the count requires explicit intent (a future protocol change adding a
 // new canonical payload type will update this test).
-func TestCanonicalPayloadList_Has18Entries(t *testing.T) {
-	if got := len(canonicalPayloadReflectTypes); got != 18 {
-		t.Fatalf("canonicalPayloadReflectTypes len = %d; want 18", got)
+func TestCanonicalPayloadList_Has19Entries(t *testing.T) {
+	if got := len(canonicalPayloadReflectTypes); got != 19 {
+		t.Fatalf("canonicalPayloadReflectTypes len = %d; want 19", got)
 	}
 }
 

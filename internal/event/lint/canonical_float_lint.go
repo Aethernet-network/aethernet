@@ -23,7 +23,7 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
-// canonicalPayloadTypeNames is the authoritative hardcoded list of the 17
+// canonicalPayloadTypeNames is the authoritative hardcoded list of the 18
 // canonical event payload types defined in internal/event/ that must stay
 // float-free. Adding a new canonical payload type requires updating this
 // list AND the reflection-test list at
@@ -51,6 +51,7 @@ var canonicalPayloadTypeNames = []string{
 	"PrerequisiteWithholdingPayload",
 	"TrajectoryCommitPayload",
 	"IntegerMigrationActivationPayload",
+	"EpochBoundaryPayload",
 }
 
 // Violation records one offending field path within a canonical payload.

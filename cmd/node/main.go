@@ -845,6 +845,17 @@ func buildStack(s *store.Store, kp *crypto.KeyPair, cfg *config.ProtocolConfig) 
 		reg = identity.NewRegistry()
 	}
 
+	// F5 5B canonical-epoch sub-spec v2.2 §1.4.1: register the EpochBoundary
+	// admission cross-check on the DAG before any live Add path executes.
+	// addFromStore (replay) does NOT invoke cross-checks — replayed events
+	// were already validated at original admission. Live emissions
+	// (BoundaryEmitter via localpub.Publisher → dag.Add) are gated by the
+	// validator from this point forward.
+	if err := d.RegisterAdmissionCrossCheck(event.EventTypeEpochBoundary, epoch.BoundaryAdmissionValidator); err != nil {
+		slog.Error("dag: register EpochBoundary admission cross-check failed", "err", err)
+		os.Exit(1)
+	}
+
 	sm := ledger.NewSupplyManager(tl, gl)
 	ocsCfg := ocs.DefaultConfig()
 	ocsCfg.MaxPendingItems = cfg.OCS.MaxPendingItems
@@ -1963,6 +1974,14 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			validatorQFn,
 			true,
 		)
+		// F5 5B settler integration: wire stack.dag as the canonical
+		// AnchorReader for DeriveSettlement. MUST be the SAME canonical
+		// view as the finalizing consumer's CountAncestorsByType call
+		// (sub-spec §8.2 canonical-DAG-view discipline). SetDAG wraps
+		// *dag.DAG in the explicit dagAnchorReaderAdapter (multi-AI
+		// Item 1 composite, 2026-04-25) so the canonical-frozen-read
+		// surface is documented at the wiring boundary.
+		tvSettler.SetDAG(stack.dag)
 		// tvCalibrationStore and tvReputationStore are used by the slashing evaluator above.
 
 		tvSlashingEvaluator := taskverification.NewSlashingEvaluator(
@@ -1970,7 +1989,13 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 			tvReputationStore,
 			tvCalibrationStore,
 		)
-		tvConsensusConsumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, tvSlashingEvaluator, tvCalibrationStore)
+		// F5 5B canonical-epoch sub-spec v2.2 §8.2: pass stack.dag as the
+		// canonical reader for round.EpochAtFinalization population at
+		// terminal transition. The reader MUST be the same canonical view
+		// used by activation checks + settlement ancestry reads — shadow
+		// caches or stale wrappers are forbidden per sub-spec §8.2
+		// canonical-DAG-view discipline.
+		tvConsensusConsumer := recognition.NewTaskVerificationConsensusConsumer(tvStore, tvSlashingEvaluator, tvCalibrationStore, stack.dag)
 
 		// Commit 9 of §9: wire the CanonicalEventDispatcher for exactly-once
 		// settlement mediation. The dispatcher owns the admission state machine
@@ -2012,6 +2037,20 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		taskSettlementLKConsumer := dispatch.NewTaskSettlementLogicalKeyConsumer()
 		if err := eventDispatcher.RegisterLogicalKey(taskSettlementLKConsumer); err != nil {
 			slog.Error("dispatch: register TaskSettlementLogicalKeyConsumer failed", "err", err)
+			os.Exit(1)
+		}
+
+		// F5 5B canonical-epoch sub-spec v2.2 §2.2 Candidate A:
+		// EpochBoundary admission is logical-key-keyed on Payload.Epoch
+		// (NOT content-hash per §12.6(i)). Multi-emit from validators
+		// converges to one canonical EpochBoundary per epoch via this
+		// consumer's per-(consumer, key) dispatcher state machine.
+		// Apply is a no-op — canonical-state validation already happened
+		// at dag.Add via the BoundaryAdmissionValidator (registered above
+		// at DAG setup).
+		epochBoundaryLKConsumer := dispatch.NewEpochBoundaryLogicalKeyConsumer()
+		if err := eventDispatcher.RegisterLogicalKey(epochBoundaryLKConsumer); err != nil {
+			slog.Error("dispatch: register EpochBoundaryLogicalKeyConsumer failed", "err", err)
 			os.Exit(1)
 		}
 
@@ -2074,6 +2113,17 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		}
 		stack.roundCounter = roundCounter
 		_ = commitBus.Register(epoch.NewRoundCountConsumer(roundCounter))
+
+		// F5 5B canonical-epoch sub-spec v2.2 §2.2 Candidate A:
+		// BoundaryEmitter watches every committed TaskVerificationConsensus
+		// event; when canonical_tvc_rank crosses N * EpochLength, emits
+		// EpochBoundary(N) via localpub.Publisher. Multi-emit across
+		// validators is dedup'd by the EpochBoundary LogicalKey consumer
+		// (registered above) keyed on Epoch. Pure canonical-state reads
+		// only via *dag.DAG.CountAncestorsByType — no RoundCounter or
+		// local-counter reads (sub-spec §12.1 primary hidden-error pattern;
+		// boundary_emitter_purity_test.go enforces zero-hits at CI).
+		_ = commitBus.Register(epoch.NewBoundaryEmitter(stack.dag, pub, stack.kp))
 
 		projReg := projections.NewProjectionRegistry(func() uint64 {
 			return roundCounter.CurrentEpoch()

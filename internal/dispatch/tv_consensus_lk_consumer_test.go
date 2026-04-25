@@ -13,6 +13,7 @@ import (
 	"github.com/Aethernet-network/aethernet/internal/event"
 	"github.com/Aethernet-network/aethernet/internal/ledger"
 	"github.com/Aethernet-network/aethernet/internal/settlement"
+	"github.com/Aethernet-network/aethernet/internal/settlement/derivation"
 	"github.com/Aethernet-network/aethernet/internal/tasks"
 	"github.com/Aethernet-network/aethernet/internal/taskverification"
 )
@@ -36,6 +37,7 @@ func newTestTVLKConsumer(t *testing.T, activeWeight uint64) (
 
 	settler := settlement.NewVerificationConsensusSettler(
 		tm, tl, em, &tvStubDAG{}, nil, "genesis:treasury", nil, true)
+	settler.SetDAGReader(tvStubAnchorReader{})
 	aw := func() uint64 { return activeWeight }
 	c := dispatch.NewTVConsensusLogicalKeyConsumer(settler, store, tm, em, aw)
 	return c, tm, tl, em, store
@@ -73,7 +75,14 @@ func setupTaskLK(
 		WorkerID: "worker",
 		PosterID: "poster",
 		Category: "research",
-		Votes:    votes,
+		// F5 5B: round must be terminal at settler invocation. See
+		// setupTask in tv_consensus_consumer_test.go for the full rationale.
+		// Default to FinalizedAccept; tests that exercise reject/dispute
+		// branches mutate the State + FinalVerdict explicitly after
+		// setupTaskLK returns.
+		State:        taskverification.RoundStateFinalizedAccept,
+		FinalVerdict: taskverification.VerdictPass,
+		Votes:        votes,
 	}
 	if err := store.SaveRound(context.Background(), round); err != nil {
 		t.Fatalf("SaveRound: %v", err)
@@ -429,16 +438,32 @@ func TestTVConsensusLKConsumer_Apply_HasSettlementStarted_NoOp(t *testing.T) {
 	c, tm, tl, em, store := newTestTVLKConsumer(t, 300)
 	taskID, _ := setupTaskLK(t, tm, tl, em, store, 10_000, "round-1", passVotes(3, 7000))
 
-	// Drive a partial settlement: one recipient paid, then error so
-	// the entry persists with WorkerPaid=true.
-	_ = em.ReleaseSettlement(
-		taskID,
-		crypto.AgentID("worker"), 5000,
-		crypto.AgentID(""), 0,
-		map[crypto.AgentID]uint64{"v-extra": 10000}, // too big, fails after worker pays
-		nil,
-		crypto.AgentID("genesis:treasury"), 0,
-	)
+	// Drive a partial settlement via the F5 5B canonical applicator:
+	// worker record (5000 ≤ 10000) succeeds; treasury record (20000 > 5000
+	// remaining) fails. Result: entry persists with WorkerPaid=true and
+	// no other flags. Equivalent state to the legacy ReleaseSettlement
+	// partial-failure case (Plan v3 §0 decision 9 reframe; the
+	// behavioral invariant tested — HasSettlementStarted pre-check
+	// short-circuits subsequent Apply — is preserved).
+	partialRecords := []derivation.PayoutRecord{
+		{
+			CanonicalID:       "test-lk-mid-settlement-worker",
+			DerivationVersion: derivation.DerivationVersion,
+			SettlementKey:     derivation.SettlementKey{TaskID: taskID, RoundID: "round-1", FundingReference: "funding-1"},
+			Recipient:         derivation.Recipient{ID: "worker", Role: derivation.RoleWorker},
+			Amount:            derivation.Amount{Value: 5000, Currency: derivation.CurrencyAET},
+			Purpose:           derivation.Purpose{Tag: derivation.TagWorkerPayout},
+		},
+		{
+			CanonicalID:       "test-lk-mid-settlement-treasury-fails",
+			DerivationVersion: derivation.DerivationVersion,
+			SettlementKey:     derivation.SettlementKey{TaskID: taskID, RoundID: "round-1", FundingReference: "funding-1"},
+			Recipient:         derivation.Recipient{ID: "genesis:treasury", Role: derivation.RoleTreasury},
+			Amount:            derivation.Amount{Value: 20000, Currency: derivation.CurrencyAET},
+			Purpose:           derivation.Purpose{Tag: derivation.TagTreasuryRemainder},
+		},
+	}
+	_ = em.ApplySettlementRecords(taskID, partialRecords)
 	if !em.HasSettlementStarted(taskID) {
 		t.Fatalf("test setup: HasSettlementStarted should be true after partial payout")
 	}
@@ -484,7 +509,16 @@ func TestTVConsensusLKConsumer_RecoveryProbe_Finalized_Completed(t *testing.T) {
 // so the dispatcher's next Admit drives a retry.
 func TestTVConsensusLKConsumer_RecoveryProbe_Open_NotStarted(t *testing.T) {
 	c, tm, tl, em, store := newTestTVLKConsumer(t, 300)
-	_, _ = setupTaskLK(t, tm, tl, em, store, 10_000, "round-open", passVotes(3, 7000))
+	_, round := setupTaskLK(t, tm, tl, em, store, 10_000, "round-open", passVotes(3, 7000))
+
+	// Override setupTaskLK's default FinalizedAccept state — this test
+	// specifically exercises the Open-round case, so the round must be
+	// non-terminal. Save the override back to the store.
+	round.State = taskverification.RoundStateOpen
+	round.FinalVerdict = taskverification.Verdict(0)
+	if err := store.SaveRound(context.Background(), round); err != nil {
+		t.Fatalf("SaveRound: %v", err)
+	}
 
 	status, err := c.RecoveryProbe(context.Background(), "round-open")
 	if err != nil {
@@ -582,7 +616,18 @@ func TestTVConsensusLKConsumer_EndToEnd_OneApplyPerRoundID(t *testing.T) {
 // derive VerdictReject from the vote set and settle accordingly.
 func TestTVConsensusLKConsumer_EndToEnd_AdvisoryVerdictIgnored(t *testing.T) {
 	c, tm, tl, em, store := newTestTVLKConsumer(t, 300)
-	taskID, _ := setupTaskLK(t, tm, tl, em, store, 10_000, "round-f", failVotes(3))
+	taskID, round := setupTaskLK(t, tm, tl, em, store, 10_000, "round-f", failVotes(3))
+
+	// Override setupTaskLK's default FinalizedAccept state — this test
+	// exercises the reject path (3/3 FAIL votes). In production the
+	// recognition fabric's TaskVerificationConsensusConsumer transitions
+	// the round to FinalizedReject based on the canonical vote set; the
+	// test mirrors that pre-Apply state.
+	round.State = taskverification.RoundStateFinalizedReject
+	round.FinalVerdict = taskverification.VerdictFail
+	if err := store.SaveRound(context.Background(), round); err != nil {
+		t.Fatalf("SaveRound (reject override): %v", err)
+	}
 
 	d, _ := newTestDispatcherForLK(t)
 	if err := d.RegisterLogicalKey(c); err != nil {
