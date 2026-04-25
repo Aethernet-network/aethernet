@@ -1,0 +1,1109 @@
+# Settlement Input Manifest — F5 Phase 5A.1
+# Status: Draft — initial pass. Escrow + ledger entries pending Agents D + E.
+# Commit: 51bce89 (F4-frozen, tag f4-complete-selection-race-closed-pending-f5).
+# Date: 2026-04-23
+# Plan reference: F5 Phase 5A Plan v3 §3.1.
+#
+# Consumer contract between phases (plan v3 §3.1, Finding 9):
+# - Phase 5B derivation consumes `target_classification`, `target_retrieval_mode`,
+#   and `derived_source` as the implementation target.
+# - `classification`, `retrieval_mode`, and `legacy_source` are the audit baseline
+#   that Phase 5D regression detection compares against. Any deviation from these
+#   baseline facts in 5B indicates a 5A audit miss.
+#
+# Classification taxonomy (plan v3 §3.1):
+#   canonical-frozen       — fixed at round-seal, does not change. Permitted.
+#   canonical-live         — canonical source, may change after round-seal.
+#                            Permitted IFF retrieval_mode defined + Input-Domain-4 satisfiable.
+#   canonical-derived      — deterministic from canonicalized inputs. Permitted.
+#   non-canonical-artifact — process-local representation. Forbidden in derivation meaning.
+#   local-live             — mutable local state not sourced from canonical. Forbidden.
+#   advisory               — event payload fields, diagnostics only.
+#
+# Retrieval modes (plan v3 §3.1):
+#   inline-on-round        — data in round struct, O(1).
+#   canonical-projection   — read from named canonical projection at cutoff.
+#   replay-derived         — recomputed from canonical event stream up to cutoff.
+#   mutable-store-read     — reads mutable in-memory/on-disk store that accepts writes.
+#   not-yet-available      — no retrieval mechanism exists; 5A must propose one or forbid.
+#
+# Semantic role classification (added at Gate 5A.1 closure post multi-AI review):
+#   derivation               — input feeds into canonical payout computation
+#   control-flow-idempotency — input gates control flow; does NOT influence canonical
+#                              effect because end-state is idempotent under pure derivation.
+#                              Formally exempt from Input-Domain-4. Each such row carries
+#                              a proof_obligation field stating the 5B guarantee that
+#                              must hold for the exemption to be valid.
+#   observability            — input is for diagnostics/metrics; no semantic effect.
+
+# Semantic-role assignments (every in-scope row classified per Gate 5A.1 closure
+# direction). Per-row notes on control-flow-idempotency rows include explicit
+# proof_obligation field below.
+
+semantic_role_assignments:
+  derivation:
+    - round_votes
+    - round_category
+    - payload_task_id
+    - payload_worker_id
+    - payload_poster_id
+    - payload_submission_event_id
+    - payload_final_verdict       # advisory but currently used in routing switch; 5B redirects to Outcome.Verdict
+    - payload_final_score_bp      # advisory but currently passed to ApplyVerificationConsensusResolution; 5B redirects to Outcome.ScoreBP
+    - task_poster_id
+    - task_budget
+    - escrow_entry_amount
+    - escrow_entry_task_id
+    - escrow_entry_poster_id
+    - validator_q_score
+    - quality_fn
+    - dag_event_lookup
+    - ancestor_event_causal_refs
+    - worker_share_bp
+    - validator_share_bp
+    - generation_share_bp
+    - treasury_share_bp
+    - generation_ledger_max_depth
+    - treasury_id
+    - shadow_mode               # currently affects derivation; removed post-excision
+    - float_path_result         # currently affects derivation; removed post-excision
+    - active_weight             # pre-settlement admission guard; derivation-shape input to seal decision
+    - bucket_counter            # currently affects ID; removed/refactored in 5A.4
+    - synthetic_transfer_id     # currently non-deterministic; refactored to canonical-derived in 5A.4
+    - valid_ledger_transitions  # state-transition table is canonical
+  control-flow-idempotency:
+    - task_status               # proof_obligation in row notes
+    - applicator_applied_set    # proof_obligation in row notes
+    - escrow_entry_paid_flags   # proof_obligation in row notes (Finding 6 disposition)
+    - escrow_has_settlement_started  # proof_obligation in row notes
+    - escrow_entries_map        # in-memory cache supporting idempotency lookups
+    - ledger_settle_lock        # atomic-barrier mechanism for Settle()
+  observability:
+    - payload_finalization_time_unix  # advisory wall-clock, never read by settler
+    - time_now_recorded_at            # wall-clock at TransferEntry creation; not in balance arithmetic
+
+inputs:
+
+  # ----- Round state (canonical-frozen, inline-on-round) -----
+
+  - id: round_votes
+    source: internal/taskverification.TaskVerificationRound.Votes
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:215  # settleAccept: collectAgreeingValidators
+      - internal/settlement/verification_consensus_settler.go:286  # settleReject: collectAgreeingValidators
+      - internal/settlement/verification_consensus_settler.go:370  # collectAgreeingValidators body
+      - internal/dispatch/tv_consensus_lk_consumer.go:228          # IsComplete iteration
+      - internal/dispatch/tv_consensus_lk_consumer.go:288          # DeriveOutcome iteration
+    type: "[]taskverification.TaskVerificationVoteRecord"
+    classification: canonical-frozen
+    target_classification: canonical-frozen
+    retrieval_mode: inline-on-round
+    target_retrieval_mode: inline-on-round
+    treatment: use-directly
+    legacy_source: same
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: replays-from-DAG-trivially
+    mixed_version_risk: none
+    downstream: [IsComplete, DeriveOutcome, collectAgreeingValidators, computeValidatorPayouts]
+
+  - id: round_category
+    source: internal/taskverification.TaskVerificationRound.Category
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:222
+      - internal/settlement/verification_consensus_settler.go:293
+    type: string
+    classification: canonical-frozen
+    target_classification: canonical-frozen
+    retrieval_mode: inline-on-round
+    target_retrieval_mode: inline-on-round
+    treatment: use-directly
+    legacy_source: same
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: replays-from-DAG-trivially
+    mixed_version_risk: none
+    downstream: [computeValidatorPayouts, qScoreFn]
+
+  # ----- TVConsensus payload (mix of canonical-frozen and advisory) -----
+
+  - id: payload_task_id
+    source: event.TaskVerificationConsensusPayload.TaskID
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:140
+      - internal/settlement/verification_consensus_settler.go:181
+      - internal/dispatch/tv_consensus_lk_consumer.go:413
+    type: string
+    classification: canonical-frozen
+    target_classification: canonical-frozen
+    retrieval_mode: inline-on-round
+    target_retrieval_mode: inline-on-round
+    treatment: use-directly
+    legacy_source: same
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: replays-from-DAG-trivially
+    mixed_version_risk: none
+    downstream: [taskMgr.Get, escrowMgr.Get, ReleaseSettlement, ApplyVerificationConsensusResolution]
+
+  - id: payload_worker_id
+    source: event.TaskVerificationConsensusPayload.WorkerID
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:182
+      - internal/dispatch/tv_consensus_lk_consumer.go:415
+    type: string
+    classification: canonical-frozen
+    target_classification: canonical-frozen
+    retrieval_mode: inline-on-round
+    target_retrieval_mode: inline-on-round
+    treatment: use-directly
+    legacy_source: same
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: replays-from-DAG-trivially
+    mixed_version_risk: none
+    downstream: [settleAccept, settleDispute, ReleaseSettlement]
+
+  - id: payload_poster_id
+    source: event.TaskVerificationConsensusPayload.PosterID
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:183
+    type: string
+    classification: canonical-frozen
+    target_classification: canonical-frozen
+    retrieval_mode: inline-on-round
+    target_retrieval_mode: inline-on-round
+    treatment: use-directly
+    legacy_source: same
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: replays-from-DAG-trivially
+    mixed_version_risk: none
+    downstream: [settleAccept, settleReject, settleDispute, ReleaseSettlement]
+
+  - id: payload_submission_event_id
+    source: event.TaskVerificationConsensusPayload.SubmissionEventID
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:229
+      - internal/dispatch/tv_consensus_lk_consumer.go:414
+    type: string
+    classification: canonical-frozen
+    target_classification: canonical-frozen
+    retrieval_mode: inline-on-round
+    target_retrieval_mode: inline-on-round
+    treatment: use-directly
+    legacy_source: same
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: replays-from-DAG-trivially
+    mixed_version_risk: none
+    downstream: [GenerationLedgerCalculator.Calculate]
+
+  - id: payload_final_verdict
+    source: event.TaskVerificationConsensusPayload.FinalVerdict
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:137
+      - internal/settlement/verification_consensus_settler.go:185
+    type: string
+    classification: advisory
+    target_classification: advisory
+    retrieval_mode: inline-on-round
+    target_retrieval_mode: inline-on-round
+    treatment: forbidden-in-derivation-meaning
+    notes: |
+      Advisory per F4 C-17 (Serialization-2). Used ONLY for switch at :185 to route to
+      settleAccept/Reject/Dispute. This USE is structurally equivalent to deriving from
+      the canonical Outcome.Verdict, since the dispatcher's DeriveOutcome guarantees
+      FinalVerdict reflects Outcome. 5B derivation should route on Outcome.Verdict
+      directly, not on payload.FinalVerdict — closes the advisory dependence.
+    legacy_source: advisory payload field
+    derived_source: Outcome.Verdict from canonical vote set
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: same-either-way (DeriveOutcome is deterministic)
+    mixed_version_risk: none
+    downstream: [Settle verdict switch]
+
+  - id: payload_final_score_bp
+    source: event.TaskVerificationConsensusPayload.FinalScoreBP
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:260
+      - internal/settlement/verification_consensus_settler.go:312
+    type: uint64
+    classification: advisory
+    target_classification: advisory
+    retrieval_mode: inline-on-round
+    target_retrieval_mode: inline-on-round
+    treatment: replace-with-Outcome.ScoreBP
+    notes: |
+      Advisory per F4 C-17. 5B should use Outcome.ScoreBP directly, not payload.FinalScoreBP.
+    legacy_source: advisory payload field
+    derived_source: Outcome.ScoreBP from DeriveOutcome
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: same-either-way
+    mixed_version_risk: none
+    downstream: [ApplyVerificationConsensusResolution]
+
+  - id: payload_finalization_time_unix
+    source: event.TaskVerificationConsensusPayload.FinalizationTimeUnix
+    source_locations:
+      - internal/dispatch/tv_consensus_lk_consumer.go:419  # populated, never read by settler
+    type: int64
+    classification: non-canonical-artifact
+    target_classification: non-canonical-artifact
+    retrieval_mode: inline-on-round
+    target_retrieval_mode: inline-on-round
+    treatment: forbidden-in-derivation
+    notes: |
+      Populated from nowFn() at dispatcher Apply time. Never read by settler code.
+      Remains in payload for observability diagnostics only. grep across
+      internal/settlement/ confirms zero references.
+    legacy_source: nowFn() wall-clock
+    derived_source: same (remains advisory)
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: differs-per-node (wall-clock), but does not influence derivation
+    mixed_version_risk: none
+    downstream: []
+
+  # ----- Task state (canonical-live; open question §4.4 + §9.2) -----
+
+  - id: task_status
+    source: internal/tasks.Task.Status via taskMgr.Get
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:140  # taskMgr.Get call
+      - internal/settlement/verification_consensus_settler.go:146  # switch on task.Status
+    type: tasks.TaskStatus
+    classification: canonical-live
+    semantic_role: control-flow-idempotency  # Gate 5A.1 closure
+    target_classification: canonical-live
+    retrieval_mode: mutable-store-read
+    target_retrieval_mode: mutable-store-read  # formally exempt from Input-Domain-4 (Gate 5A.1)
+    treatment: accepted-as-idempotency-pattern (architect decision §9.2 — Gate 5A.1)
+    proof_obligation: |
+      5B MUST guarantee the early-exit path (task.Status terminal → AlreadyApplied=true →
+      return) produces ledger-state indistinguishable from the full derivation + apply
+      path. Terminal status implies canonical payout record already fully materialized
+      on the cluster. No canonical artifact emission is suppressed by early-exit that
+      another node would emit. If 5B's derivation produces per-node-rather-than-cluster-
+      uniform canonical artifacts, the early-exit path must reconstruct them.
+    notes: |
+      Architect decision (Gate 5A.1, §9.2): task.Status classified canonical-live with
+      retrieval_mode = mutable-store-read; accepted because the downstream effect is
+      idempotent under pure derivation. The read is for early-exit optimization (terminal-
+      state short-circuit at verification_consensus_settler.go:146-150). Under 5B's pure
+      derivation, the end-state is deterministic from canonical inputs regardless of
+      control-flow divergence; if Node A short-circuits and Node B proceeds, both reach
+      the same canonical ledger effect.
+
+      Gate 5A.1 closure (post multi-AI review): formally exempted from Input-Domain-4
+      via semantic_role = control-flow-idempotency classification. The proof_obligation
+      field above is the precondition that makes the exemption valid.
+
+      REOPEN CONDITION: this decision reopens if 5B discovers that task.Status influences
+      PAYOUT MATH (e.g., a code path where status affects amount calculations or
+      recipient set), not just the short-circuit branch. If reopened, the canonicalization
+      target reverts to anchor-scoped task-status projection (option a).
+    legacy_source: taskMgr.Get (mutable projection)
+    derived_source: same (architect-accepted)
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: replays-from-canonical-events; idempotent end-state
+    mixed_version_risk: low  # idempotency-bounded
+    downstream: [Settle idempotency branch — short-circuit only, NOT payout math]
+
+  - id: task_poster_id
+    source: internal/tasks.Task.PosterID via taskMgr.Get
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:164
+      - internal/settlement/verification_consensus_settler.go:168
+    type: string
+    classification: canonical-frozen
+    target_classification: canonical-frozen
+    retrieval_mode: mutable-store-read  # via projection, but underlying value is frozen at TaskPosted
+    target_retrieval_mode: canonical-projection
+    treatment: canonicalize-projection-read
+    notes: PosterID is sealed at TaskPosted event; projection value is immutable post-task-creation.
+    legacy_source: taskMgr.Get
+    derived_source: same-via-anchor-scoped-projection
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: replays-from-canonical-events
+    mixed_version_risk: none  # value is frozen once task exists
+    downstream: [LookupEscrowLockTransfer, RegisterEscrow catch-up]
+
+  - id: task_budget
+    source: internal/tasks.Task.Budget via taskMgr.Get
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:164
+      - internal/settlement/verification_consensus_settler.go:168
+    type: uint64
+    classification: canonical-frozen
+    target_classification: canonical-frozen
+    retrieval_mode: mutable-store-read
+    target_retrieval_mode: canonical-projection
+    treatment: canonicalize-projection-read
+    notes: Budget is sealed at TaskPosted; projection value is immutable post-task-creation.
+    legacy_source: taskMgr.Get
+    derived_source: same-via-anchor-scoped-projection
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: replays-from-canonical-events
+    mixed_version_risk: none
+    downstream: [LookupEscrowLockTransfer, RegisterEscrow catch-up]
+
+  # ----- Escrow state (entries pending Agent D for full detail) -----
+
+  - id: escrow_entry_amount
+    source: internal/escrow.Entry.Amount via escrowMgr.Get
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:180  # budget := entry.Amount
+    type: uint64
+    classification: canonical-frozen
+    target_classification: canonical-frozen
+    retrieval_mode: mutable-store-read
+    target_retrieval_mode: canonical-projection
+    treatment: canonicalize-projection-read
+    notes: |
+      Amount is set at RegisterEscrow (called from applicator.applyTransfer on
+      canonical Transfer event) and never mutated. Entry itself lives in a mutable
+      in-memory map; underlying value is frozen per task. Awaiting Agent D for
+      full classification of Escrow struct fields.
+    legacy_source: escrowMgr.Get
+    derived_source: same-via-anchor-scoped-projection
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: replays-from-canonical-Transfer-events
+    mixed_version_risk: low
+    downstream: [settleAccept share math, settleReject share math, settleDispute share math]
+
+  # ----- Validator Q-score (LOAD-BEARING finding §4.1) -----
+
+  - id: validator_q_score
+    source: settlement.ValidatorQScoreFn invoked via s.qScoreFn
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:444  # float path (shadowMode)
+      - internal/settlement/verification_consensus_settler.go:500  # integer path
+    wiring_location: cmd/node/main.go:1949-1954
+    concrete_implementation: internal/taskverification/reputation.go:74-89,208-216
+    type: protocolmath.BasisPoints
+    classification: local-live
+    semantic_role: derivation  # Gate 5A.1 closure
+    target_classification: canonical-live
+    retrieval_mode: mutable-store-read
+    target_retrieval_mode: canonical-projection
+    treatment: canonicalize-via-Q-C
+    notes: |
+      LOAD-BEARING FINDING (§4.1). Reads BadgerDB per-node with async RecordVote
+      updates. Cross-node divergence at same round cutoff is confirmed possible
+      (see audit doc §4.1 for divergence arithmetic). Q-C design in 5A.2 introduces
+      CanonicalQProjection with historical-read semantics at cutoff anchor, parallel
+      to the existing advisory reputation projection.
+
+      Gate 5A.1 closure (post multi-AI review): mixed_version_risk UPGRADED to HIGH.
+      Rationale: cross-cluster divergence at projection-version mismatch is a load-
+      bearing failure mode, not a transitional concern. 5A.2 deliverable item 7
+      (version-binding rule) makes the projection schema/version part of gate
+      semantics, NOT an implicit binary detail. Two nodes with different projection
+      versions reading the "same" cutoff anchor return well-defined behavior (either
+      both succeed at the same version-bound value, or one returns an explicit
+      version-mismatch error). Mixed-version cluster operation is impossible by
+      design under the version-binding rule.
+    legacy_source: tvReputationStore.ValidatorQScore (mutable BadgerDB)
+    derived_source: CanonicalQProjection.Lookup(validator, category, cutoff_anchor)
+    available_pre_gate: true  # via legacy
+    available_post_gate: true  # via canonical projection
+    replay_behavior: canonical-projection-replays-from-canonical-evidence
+    mixed_version_risk: HIGH  # upgraded at Gate 5A.1 closure; projection-version-binding required
+    downstream: [computeValidatorPayoutsFloat, computeValidatorPayoutsInteger]
+
+  # ----- Generation-ledger quality function (currently neutral stub) -----
+
+  - id: quality_fn
+    source: settlement.GenerationLedgerCalculator.qualityFn
+    source_locations:
+      - internal/settlement/generation_ledger_calculator.go:199  # float path
+      - internal/settlement/generation_ledger_calculator.go:319  # integer path
+    wiring_location: cmd/node/main.go:1935-1939
+    concrete_implementation: neutral stub — always returns protocolmath.NeutralBP
+    type: "func(event.EventID) protocolmath.BasisPoints"
+    classification: non-canonical-artifact  # stub neutral; value-invariant today
+    target_classification: canonical-live  # when real quality is wired
+    retrieval_mode: inline-on-round  # stub is O(1) constant
+    target_retrieval_mode: canonical-projection  # when wired, shares Q-C infrastructure
+    treatment: canonicalize-via-Q-C-extension-when-wired
+    notes: |
+      Currently a neutral stub (NeutralBP = 10000). When real quality is wired
+      (planned Reputation Step 4), must be canonical-live via the Q-C canonical
+      projection. 5A.3 §5 locks this dependency.
+    legacy_source: neutral stub
+    derived_source: CanonicalQProjection (when wired)
+    available_pre_gate: true (via stub)
+    available_post_gate: true (via projection when wired)
+    replay_behavior: deterministic-today; projection-when-wired
+    mixed_version_risk: none-today; medium-when-wired
+    downstream: [GenerationLedgerCalculator.calculateFloat, calculateInteger]
+
+  # ----- DAG ancestor reader (LOAD-BEARING finding §4.2) -----
+
+  - id: dag_event_lookup
+    source: dag.DAG.Get invoked via DAGAncestorReader interface
+    source_locations:
+      - internal/settlement/generation_ledger_calculator.go:286  # seed BFS
+      - internal/settlement/generation_ledger_calculator.go:314  # BFS loop ancestor lookup
+    concrete_implementation: internal/dag/dag.go:405-413
+    type: "(*event.Event, error)"
+    classification: canonical-frozen  # underlying event content
+    target_classification: canonical-frozen  # unchanged
+    retrieval_mode: mutable-store-read  # LIVE DAG, no cutoff parameter
+    target_retrieval_mode: canonical-projection  # anchor-scoped reader (5A.3 spec #6)
+    treatment: canonicalize-reader-via-ReadAtAnchor
+    notes: |
+      LOAD-BEARING FINDING (§4.2). DAGAncestorReader interface has no cutoff
+      parameter. Concrete Get reads d.events map under RLock. TaskVerificationRound
+      has no DAGCutoffEventID. BFS traversal from submission event over CausalRefs
+      at depth ≤ GenerationLedgerMaxDepth=3 is not anchor-equivalent in general
+      because a node with incomplete ancestor materialization produces a shorter
+      traversal. 5A.3 spec #6 requires designing anchor-scoped reader.
+      Recommendation (audit §9.3): option (a) — design ReadAtAnchor rather than
+      attempting live-reader-equivalence proof.
+    legacy_source: dag.DAG.Get (live)
+    derived_source: DAGAncestorReader.ReadAtAnchor(anchor_id) (5A.3 design)
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: anchor-scoped-reader-replays-from-canonical-DAG-at-anchor
+    mixed_version_risk: low  # underlying events immutable once in DAG
+    downstream: [GenerationLedgerCalculator ancestor traversal]
+
+  - id: ancestor_event_causal_refs
+    source: event.Event.CausalRefs via dag.Get return value
+    source_locations:
+      - internal/settlement/generation_ledger_calculator.go:167  # seed from submission event
+      - internal/settlement/generation_ledger_calculator.go:338  # BFS parent enqueue
+    type: "[]event.EventID"
+    classification: canonical-frozen  # immutable per event once in DAG
+    target_classification: canonical-frozen
+    retrieval_mode: mutable-store-read  # via dag.Get (live)
+    target_retrieval_mode: canonical-projection  # via anchor-scoped reader
+    treatment: read-via-anchor-scoped-reader (inherits from dag_event_lookup)
+    legacy_source: dag.Get (live)
+    derived_source: anchor-scoped reader
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: deterministic-from-event
+    mixed_version_risk: none
+    downstream: [BFS ancestor traversal]
+
+  # ----- Protocol constants (canonical-frozen, compile-time) -----
+
+  - id: worker_share_bp
+    source: settlement.workerShareBP
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:20  # const 7300
+    type: const int
+    classification: canonical-frozen
+    target_classification: canonical-frozen
+    retrieval_mode: inline-on-round
+    target_retrieval_mode: inline-on-round
+    treatment: use-directly
+    legacy_source: same
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: deterministic-constant
+    mixed_version_risk: none
+    downstream: [settleAccept, settleReject, settleDispute share math]
+
+  - id: validator_share_bp
+    source: settlement.validatorShareBP
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:21  # const 2300
+    type: const int
+    classification: canonical-frozen
+    target_classification: canonical-frozen
+    retrieval_mode: inline-on-round
+    target_retrieval_mode: inline-on-round
+    treatment: use-directly
+    legacy_source: same
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: deterministic-constant
+    mixed_version_risk: none
+    downstream: [settleAccept, settleReject share math]
+
+  - id: generation_share_bp
+    source: settlement.generationShareBP
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:22  # const 200
+    type: const int
+    classification: canonical-frozen
+    target_classification: canonical-frozen
+    retrieval_mode: inline-on-round
+    target_retrieval_mode: inline-on-round
+    treatment: use-directly
+    legacy_source: same
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: deterministic-constant
+    mixed_version_risk: none
+    downstream: [settleAccept gen-pool math]
+
+  - id: treasury_share_bp
+    source: settlement.treasuryShareBP
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:23  # const 200
+    type: const int
+    classification: canonical-frozen
+    target_classification: canonical-frozen
+    retrieval_mode: inline-on-round
+    target_retrieval_mode: inline-on-round
+    treatment: use-directly
+    legacy_source: same
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: deterministic-constant
+    mixed_version_risk: none
+    downstream: [settleAccept, settleReject, settleDispute treasury math]
+
+  - id: generation_ledger_max_depth
+    source: settlement.GenerationLedgerMaxDepth
+    source_locations:
+      - internal/settlement/generation_ledger_calculator.go:45  # const int = 3
+    type: const int
+    classification: canonical-frozen
+    target_classification: canonical-frozen
+    retrieval_mode: inline-on-round
+    target_retrieval_mode: inline-on-round
+    treatment: use-directly
+    legacy_source: same
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: deterministic-constant
+    mixed_version_risk: none
+    downstream: [BFS depth bound]
+
+  - id: treasury_id
+    source: VerificationConsensusSettler.treasuryID
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:47,111  # field + constructor
+      - internal/settlement/verification_consensus_settler.go:249,303,342  # usage
+    type: crypto.AgentID
+    classification: canonical-frozen  # no setter exists today (§9.1 architect confirm)
+    target_classification: canonical-frozen
+    retrieval_mode: inline-on-round
+    target_retrieval_mode: inline-on-round
+    treatment: use-directly
+    notes: |
+      §9 open question 1: Agent A classified canonical-live citing theoretical
+      mutability; Agent C classified canonical-frozen. No setter in current code.
+      Recommendation: canonical-frozen absent a setter. Architect confirm.
+    legacy_source: construction-time parameter
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: deterministic-from-node-config
+    mixed_version_risk: none (shared cluster-wide config)
+    downstream: [ReleaseSettlement treasury routing]
+
+  # ----- Shadow mode + non-canonical flags (forbidden in derivation) -----
+
+  - id: shadow_mode
+    source: VerificationConsensusSettler.shadowMode + GenerationLedgerCalculator.shadowMode
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:56  # field
+      - internal/settlement/verification_consensus_settler.go:64  # isShadowMode read
+      - internal/settlement/verification_consensus_settler.go:401 # read site
+      - internal/settlement/generation_ledger_calculator.go:64    # gen-ledger field
+      - internal/settlement/generation_ledger_calculator.go:128   # gen-ledger read
+    type: bool (RWMutex-guarded)
+    classification: non-canonical-artifact
+    target_classification: forbidden-in-derivation (removed post-excision)
+    retrieval_mode: mutable-store-read (in-memory RWMutex-guarded field)
+    target_retrieval_mode: N/A (removed)
+    treatment: forbidden-in-derivation; remove alongside float-path excision
+    notes: |
+      Process-local flag. Transitions only on canonical activation event projection
+      (IntegerMigrationActivationConsumer, Part E.1). Within a single Settle call
+      stable. Per plan §0.6 + §3.5: forbidden in derivation; float path excised
+      alongside F5 Phase 5B.
+    legacy_source: RWMutex-guarded in-memory bool
+    derived_source: N/A (removed)
+    available_pre_gate: true (for migration)
+    available_post_gate: false (removed)
+    replay_behavior: N/A
+    mixed_version_risk: forces-integer-only-cluster-post-excision
+    downstream: [computeValidatorPayouts path selection, calculateFloat/Integer selection]
+
+  - id: float_path_result
+    source: settlement.computeValidatorPayoutsFloat + calculateFloat return value
+    source_locations:
+      - internal/settlement/verification_consensus_settler.go:402,406  # shadow-mode selection
+      - internal/settlement/verification_consensus_settler.go:467      # float remainder absorption
+      - internal/settlement/generation_ledger_calculator.go:229        # float remainder absorption (CRITICAL)
+    type: "map[crypto.AgentID]uint64"
+    classification: non-canonical-artifact
+    target_classification: forbidden-in-derivation (removed)
+    retrieval_mode: N/A
+    target_retrieval_mode: N/A
+    treatment: excised-with-shadowMode-removal (plan §3.5)
+    notes: |
+      Float path remainder-absorption is non-deterministic across nodes because
+      collectAgreeingValidators does not sort round.Votes by CanonicalKey before
+      iteration. Documented at verification_consensus_settler.go:420-425.
+      Integer path (protocolmath.AllocateWithCeiling) sorts recipients before
+      allocation — deterministic.
+    legacy_source: float arithmetic with remainder-absorption
+    derived_source: N/A (removed)
+    available_pre_gate: true
+    available_post_gate: false (removed)
+    replay_behavior: non-deterministic — pre-F5 only
+    mixed_version_risk: none (post-excision)
+    downstream: [ReleaseSettlement payouts (pre-excision path)]
+
+  - id: applicator_applied_set
+    source: settlement.Applicator.applied
+    source_locations:
+      - internal/settlement/applicator.go:144  # check
+      - internal/settlement/applicator.go:274  # set after all mutations
+    type: "map[event.EventID]struct{}"
+    classification: non-canonical-artifact
+    semantic_role: control-flow-idempotency  # Gate 5A.1 closure
+    target_classification: non-canonical-artifact (idempotency guard, NOT derivation input)
+    retrieval_mode: mutable-store-read (in-memory + persisted)
+    target_retrieval_mode: same
+    treatment: permitted-as-idempotency-guard-only
+    proof_obligation: |
+      5B MUST guarantee that the applied-set check at applicator.go:144 controls
+      ONLY the early-exit branch and never feeds into the derivation function's
+      output. The derivation function takes (canonical inputs at cutoff) → payout
+      record; the applied-set is consulted to decide WHETHER to invoke the apply
+      step on this node, not WHAT to compute. If 5B violates this, the applied
+      set becomes a hidden derivation input.
+    notes: |
+      Local idempotency tracking for Applicator.Apply. Set AFTER all mutations
+      complete (applicator.go:274). Does not flow into derivation meaning — it
+      prevents double-apply on the same node. Cross-node replication relies on
+      each node running its own Applicator. Persisted for crash recovery.
+    legacy_source: in-memory + BadgerDB persistence
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: per-node persistence replays locally
+    mixed_version_risk: none (node-local)
+    downstream: [Applicator.Apply idempotency branch]
+
+  # ----- Dispatcher pre-derivation (tv_consensus_lk_consumer.Apply pre-checks) -----
+
+  - id: active_weight
+    source: activeWeightFn in TVConsensusLogicalKeyConsumer
+    source_locations:
+      - internal/dispatch/tv_consensus_lk_consumer.go:87     # field
+      - internal/dispatch/tv_consensus_lk_consumer.go:219    # IsComplete read
+    type: "func() uint64"
+    classification: canonical-derived
+    target_classification: canonical-derived
+    retrieval_mode: canonical-projection (via validator-seat snapshot)
+    target_retrieval_mode: canonical-projection
+    treatment: use-directly
+    notes: |
+      Pre-settlement admission guard, not settlement derivation. Per plan §3.1
+      §3.1 scope includes pre-derivation control-flow reads. activeWeight is
+      derived from canonical validator-seat snapshot at round-open (F4 pattern).
+      Cluster-uniform.
+    legacy_source: validator-seat snapshot
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: replays-from-canonical-validator-events
+    mixed_version_risk: none
+    downstream: [IsComplete supermajority threshold]
+
+  - id: escrow_has_settlement_started
+    source: Escrow.HasSettlementStarted via escrowMgr
+    source_locations:
+      - internal/dispatch/tv_consensus_lk_consumer.go:400   # pre-check 2
+    type: bool
+    classification: non-canonical-artifact (idempotency guard)
+    semantic_role: control-flow-idempotency  # Gate 5A.1 closure
+    target_classification: non-canonical-artifact
+    retrieval_mode: mutable-store-read
+    target_retrieval_mode: same (guard only; doesn't flow into derivation)
+    treatment: permitted-as-idempotency-guard-only
+    proof_obligation: |
+      5B MUST guarantee that HasSettlementStarted's return value gates the apply
+      step's early-exit branch ONLY. The function reads paid-flag prefixes; under
+      5B pure derivation those flags are written as a pure projection of the
+      canonical payout record (Finding 6 disposition obligation a/b/c). The
+      pre-check returning true means "this node has already started applying",
+      which is safely idempotent because the canonical record is the same; it
+      does not select a different payout set.
+    notes: |
+      Pre-check 2 in Apply. Returns true if any per-recipient paid flag is set
+      on the escrow entry. The characterization (docs/plans/implementation/
+      cross-node-settlement-emission-characterization.md §10.3) documents that
+      HasSettlementStarted short-circuits the retry loop WITHOUT completing
+      partial drains — i.e., the flag is an idempotency guard only, not a
+      completion-driving mechanism. Classification as non-canonical-artifact
+      reflects this role: it does not flow into derivation meaning.
+    legacy_source: escrowMgr (mutable in-memory)
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: per-node persistence replays locally
+    mixed_version_risk: none (node-local)
+    downstream: [Apply pre-check 2 short-circuit]
+
+  # ----- Escrow state (Agent D walk) -----
+
+  - id: escrow_entry_task_id
+    source: internal/escrow.EscrowEntry.TaskID
+    source_locations:
+      - internal/escrow/escrow.go:306  # set at RegisterEscrow
+    type: string
+    classification: canonical-frozen
+    target_classification: canonical-frozen
+    retrieval_mode: mutable-store-read
+    target_retrieval_mode: canonical-projection
+    treatment: canonicalize-projection-read
+    notes: Set at RegisterEscrow from canonical Transfer event payload; immutable thereafter.
+    legacy_source: escrowMgr.Get
+    derived_source: same-via-anchor-scoped-projection
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: replays-from-canonical-Transfer
+    mixed_version_risk: none
+    downstream: [ReleaseSettlement, IsLocked]
+
+  - id: escrow_entry_poster_id
+    source: internal/escrow.EscrowEntry.PosterID
+    source_locations:
+      - internal/escrow/escrow.go:307  # set at RegisterEscrow
+    type: crypto.AgentID
+    classification: canonical-frozen
+    target_classification: canonical-frozen
+    retrieval_mode: mutable-store-read
+    target_retrieval_mode: canonical-projection
+    treatment: canonicalize-projection-read
+    notes: Sealed at TaskPosted; copied to entry at RegisterEscrow.
+    legacy_source: escrowMgr.Get
+    derived_source: same-via-anchor-scoped-projection
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: replays-from-canonical-events
+    mixed_version_risk: none
+    downstream: [ReleaseSettlement]
+
+  - id: escrow_entry_paid_flags
+    source: |
+      internal/escrow.EscrowEntry.{WorkerPaid, ValidatorPaid, ValidatorsPaid[vid],
+      TreasuryPaid, GenLedgerPaid[rid], PosterRefundPaid}
+    source_locations:
+      - internal/escrow/applicator.go:200  # isRecordApplied (paid-flag READ; skip-optimization only)
+      - internal/escrow/applicator.go:228  # updatePaidFlag (paid-flag WRITE; pure projection per Plan v3 §3.4 obligation b)
+      - internal/escrow/escrow.go:180-185  # HasSettlementStarted reads all under RLock
+      - internal/escrow/escrow.go:417      # ReleaseNet path entry.WorkerPaid (out-of-scope per Plan v3 §0.7)
+    type: "bool / map[string]bool"
+    classification: non-canonical-artifact
+    semantic_role: control-flow-idempotency  # Gate 5A.1 closure
+    target_classification: non-canonical-artifact (idempotency-guard-only, NOT derivation input)
+    retrieval_mode: mutable-store-read
+    target_retrieval_mode: same (per-node persistence retained as defense-in-depth)
+    treatment: permitted-as-idempotency-guard-only; pure-derivation-makes-flag-set-deterministic
+    proof_obligation: |
+      Paid-flag persistence may remain non-canonical, provided 5B:
+      (a) derives the canonical payout record FIRST (pure function of canonical
+          inputs at cutoff anchor),
+      (b) applies flags as a pure projection of that record only (flags are
+          emitted/written as a function of the derived record, never read back
+          to influence the record's content), AND
+      (c) NEVER uses previously-persisted flag prefixes to determine canonical
+          semantic behavior (paid flags serve strictly as node-local crash-
+          recovery cache; they do not gate WHICH payouts to make, only WHETHER
+          to skip a payout that's already been applied on this node).
+
+      This obligation is the precondition for the "defense-in-depth only"
+      framing. If 5B violates any of (a)/(b)/(c), the persistence layer becomes
+      a hidden derivation input and 5A.1 reopens.
+
+      To be captured in docs/architecture/locked-invariants-review-f5a.md when
+      that document is created at end of Phase 5A.
+    notes: |
+      Per audit §4.6: 5 paid-flag race patterns (Worker, PosterRefund, Per-Validator,
+      Per-GenRecipient, Treasury) all check-then-transfer-then-set without atomic
+      sequencing. Per-node BadgerDB persistence at lines 537, 564 creates cross-node
+      divergence under concurrent-Apply race (Plan v3 characterization §3.1).
+      Under 5B's pure derivation (per proof_obligation above), same canonical inputs
+      produce same paid-flag sequences across nodes — divergence does not arise.
+      Persistence layer remains as crash-recovery idempotency guard.
+
+      Gate 5A.1 closure (post multi-AI review): proof_obligation field above is
+      the formal 5B architectural obligation that makes the "defense-in-depth
+      only" framing valid. Architect decision §9.5 confirmed (escrow persistence
+      stays non-canonical), conditional on 5B honoring the obligation.
+    legacy_source: per-node BadgerDB + in-memory map
+    derived_source: same (semantically deterministic under pure derivation)
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: per-node persistence replays locally
+    mixed_version_risk: none (node-local; pure derivation produces same flag set)
+    downstream: [ReleaseSettlement idempotency, HasSettlementStarted pre-check]
+
+  - id: escrow_entries_map
+    source: internal/escrow.Escrow.entries
+    source_locations:
+      - internal/escrow/applicator.go:89  # ApplySettlementRecords entry lookup (post-F5 5B)
+      - internal/escrow/escrow.go:511     # Get
+      - internal/escrow/escrow.go:148     # IsLocked
+      - internal/escrow/escrow.go:258     # RegisterEscrow
+    type: "map[string]*EscrowEntry"
+    classification: non-canonical-artifact
+    target_classification: non-canonical-artifact (per-node cache, reconstructed at startup from store)
+    retrieval_mode: mutable-store-read
+    target_retrieval_mode: same
+    treatment: permitted-as-cache-only
+    notes: |
+      Process-local in-memory cache. Reconstructed at startup from BadgerDB via
+      LoadFromStore. Mutated by RegisterEscrow / ReleaseSettlement / Refund / Release.
+      Cross-node consistency depends on each node receiving the same canonical
+      Transfer events (which under pure derivation it does).
+    legacy_source: in-memory + BadgerDB persistence
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: per-node persistence replays locally
+    mixed_version_risk: none
+    downstream: [Get, IsLocked, ReleaseSettlement, RegisterEscrow]
+
+  # ----- Ledger transfer.go (Agent E walk) -----
+
+  - id: bucket_counter
+    source: internal/ledger/transfer.go.bucketCounter
+    source_locations:
+      - internal/ledger/transfer.go:49   # declaration: var bucketCounter atomic.Uint64
+      - internal/ledger/transfer.go:500  # n := bucketCounter.Add(1)
+      - internal/ledger/transfer.go:501  # interpolated into format string
+    type: atomic.Uint64
+    classification: non-canonical-artifact
+    target_classification: forbidden-in-derivation (REMOVED in 5A.4)
+    retrieval_mode: mutable-store-read (process-local atomic, NOT persisted, NOT cross-node-synchronized)
+    target_retrieval_mode: N/A (removed)
+    treatment: forbidden-in-derivation; refactor to content-hash in 5A.4
+    notes: |
+      Per audit §4.7: process-local counter resets on restart. Same (fromID, toID,
+      amount) tuple produces different IDs on different nodes. 5A.4 refactor: replace
+      with BLAKE3(canonical-payout-record). Restart-collision risk (Agent E §8.B)
+      closed as side effect of content-hash refactor.
+    legacy_source: process-local atomic counter
+    derived_source: BLAKE3 of canonical payout record (5A.4)
+    available_pre_gate: true (legacy)
+    available_post_gate: true (derived)
+    replay_behavior: legacy IDs differ per-process; derived IDs deterministic from canonical record
+    mixed_version_risk: HIGH — atomic cluster-wide cutover required (per §7 cutover matrix)
+    downstream: [TransferFromBucketLabeled — 16 callsites enumerated in audit §4.7]
+
+  - id: synthetic_transfer_id
+    source: internal/ledger/transfer.go synthetic-ID format
+    source_locations:
+      - internal/ledger/transfer.go:501  # eid := event.EventID(fmt.Sprintf("bucket:%s:%s:%d:%d", fromID, toID, amount, n))
+    type: event.EventID (string)
+    classification: non-canonical-artifact
+    target_classification: canonical-derived (in 5A.4 — content hash of canonical payout record)
+    retrieval_mode: id-generation
+    target_retrieval_mode: deterministic-from-payout-record
+    treatment: refactor-to-content-hash (5A.4 primary deliverable)
+    notes: |
+      Current format uses bucketCounter (process-local). 5A.4 refactor moves ID
+      generation from ledger helper to derivation layer; ledger applicator accepts
+      records as input. Uniqueness invariant: (settlement_key, recipient,
+      purpose.ordinal) triple in hash preimage prevents collision. Per audit §4.7
+      consumer survey: ZERO repo sites parse `bucket:` prefix; ZERO test sites
+      assert exact synthetic IDs — refactor has no breaking consumers.
+
+      Architect decision (Gate 5A.1, §9.6): 5A.4 test surface includes ALL 16
+      callsites of TransferFromBucketLabeled (settlement + escrow + fees + staking).
+      Out-of-scope-but-adjacent failures (fees, staking) get fixed as inherited
+      cleanup within F5 scope; not a scope expansion. The ID generator is shared,
+      so all 16 callsites inherit the new content-hash semantics automatically;
+      verification covers all sites to catch any unexpected coupling.
+
+      Architect decision (Gate 5A.1, §9.7): in-scope 5A.4 polish includes the
+      `// safe: result map iteration order irrelevant; recipients re-sorted at
+      escrow ReleaseSettlement before transfer execution` comment at
+      verification_consensus_settler.go:516.
+    legacy_source: bucketCounter-based format
+    derived_source: BLAKE3 of canonical payout record (per payout artifact schema)
+    available_pre_gate: true (legacy)
+    available_post_gate: true (derived)
+    replay_behavior: IDs differ pre/post gate — gate coordination required
+    mixed_version_risk: HIGH
+    downstream: [TransferEntry.EventID storage, balance/history queries — all 16 callsites in 5A.4 test surface]
+
+  - id: valid_ledger_transitions
+    source: internal/ledger/transfer.go.validLedgerTransitions
+    source_locations:
+      - internal/ledger/transfer.go:280-289  # static const map
+      - internal/ledger/transfer.go:306,310  # Settle precondition lookup
+    type: "map[event.SettlementState]map[event.SettlementState]bool"
+    classification: canonical-frozen
+    target_classification: canonical-frozen
+    retrieval_mode: inline-on-round
+    target_retrieval_mode: inline-on-round
+    treatment: use-directly
+    notes: |
+      Static transition table: Optimistic→{Settled,Adjusted}, Settled→Adjusted only.
+      [Settled][Settled]=false is the atomic barrier guarding stake-manager callsites
+      from double-apply (Plan v3 characterization §10.1 confirmation). Settle holds
+      write lock for entire read-validate-mutate-persist sequence (transfer.go:297-321).
+    legacy_source: static const map
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: deterministic-constant
+    mixed_version_risk: none
+    downstream: [Settle precondition gate]
+
+  - id: ledger_settle_lock
+    source: internal/ledger.TransferLedger.mu (write lock during Settle)
+    source_locations:
+      - internal/ledger/transfer.go:298  # l.mu.Lock()
+      - internal/ledger/transfer.go:299  # defer l.mu.Unlock()
+    type: sync.Mutex
+    classification: non-canonical-artifact
+    target_classification: non-canonical-artifact (atomic-barrier mechanism)
+    retrieval_mode: N/A
+    target_retrieval_mode: same
+    treatment: permitted-as-atomic-barrier-implementation
+    notes: |
+      Lock held for entire Settle() body. Serializes concurrent Settle calls on the
+      same TransferLedger. Per Plan v3 characterization §10.1, this is the
+      stake-manager protective barrier — second Settle(eventID, Settled) returns
+      ErrInvalidTransition before reaching state mutation.
+    legacy_source: in-memory mutex
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: N/A
+    mixed_version_risk: none
+    downstream: [Settle atomicity, RecordFromSync atomicity]
+
+  - id: time_now_recorded_at
+    source: time.Now() in TransferEntry.RecordedAt
+    source_locations:
+      - internal/ledger/transfer.go:515  # entry.RecordedAt
+      - internal/ledger/transfer.go:268  # RecordFromSync RecordedAt
+    type: time.Time
+    classification: non-canonical-artifact (advisory)
+    target_classification: non-canonical-artifact
+    retrieval_mode: mutable-store-read (wall-clock)
+    target_retrieval_mode: same (or remove — observability only)
+    treatment: forbidden-in-derivation; observability-only field
+    notes: |
+      Wall-clock at transfer creation. Differs per-node. NOT used in balance
+      arithmetic, NOT in canonical effect derivation. Stored for audit/log
+      observability.
+    legacy_source: time.Now()
+    derived_source: same
+    available_pre_gate: true
+    available_post_gate: true
+    replay_behavior: differs-per-node; not load-bearing
+    mixed_version_risk: none
+    downstream: [observability/audit logs]
+
+# ----- Out-of-scope-but-adjacent (captured for future workstreams) -----
+
+out_of_scope:
+
+  - id: stake_manager_record_canonical_stake
+    source: staking.StakeManager.RecordCanonicalStake + RecordCanonicalUnstake
+    source_locations:
+      - internal/staking/staking.go:292  # RecordCanonicalStake
+      - internal/staking/staking.go:309  # RecordCanonicalUnstake
+    owner: F8 (stake-manager defense-in-depth)
+    notes: |
+      Non-idempotent at API level. Guarded by transfer.Settle atomic state-transition
+      barrier at the only callsite (settlement/applicator.go:326,331). Any future
+      callsite bypassing Settle would double-apply. Defense-in-depth fix: add
+      per-(agent, epoch) idempotency guard. Captured per plan §3.1 out-of-scope
+      requirement.
+
+  - id: general_transfer_emission
+    source: ledger.TransferFromBucketLabeled usage outside settlement
+    owner: post-F5 broader transfer workstream
+    notes: |
+      Pending Agent E for repo-wide consumer survey of bucket: synthetic-ID format.
+      Settlement-emitted transfers are in-scope for F5 synthetic-ID refactor (5A.4);
+      non-settlement TransferFromBucketLabeled usage (if any) is out-of-scope but
+      captured for future workstream.
+
+  - id: identity_manager_record_task
+    source: identity.RecordTaskCompletion + RecordTaskFailure
+    source_locations:
+      - internal/settlement/applicator.go:209-211  # post-settlement side effects
+    owner: tied to Reputation Step 4
+    notes: |
+      Fire AFTER settlement as side effects. Errors discarded (best-effort).
+      Do not flow into payout computation. Canonicalization tied to Reputation
+      Step 4, which is paused until F5 completes.
+
+# ----- Manifest statistics (updates as walks complete) -----
+
+statistics:
+  commit: "51bce89"
+  audit_date: "2026-04-23"
+  status: "gate-5A.1-architect-decisions-accepted; awaiting multi-AI review"
+  units_note: |
+    `inputs_classified` and `inputs_in_scope` count UNIQUE INPUT ROWS in this manifest
+    (one row per logical input, regardless of how many call sites read it). The audit
+    document (`docs/audits/2026-04-23-settlement-input-audit.md` §3) reports ~132 READ
+    SITES — distinct file:line locations where any input is read. The two units are
+    NOT contradictory: a single input row (e.g., `payload_task_id`) typically
+    corresponds to multiple read sites enumerated in the audit doc.
+  inputs_classified: 35  # input rows; includes the 3 out-of-scope rows
+  inputs_in_scope: 32    # input rows excluding out-of-scope-adjacent
+  audit_doc_read_sites: 132  # distinct file:line read locations across all five walks
+  by_classification:
+    canonical-frozen: 17  # round_*, payload.TaskID/WorkerID/PosterID/SubmissionEventID, task constants, escrow constants, valid_ledger_transitions
+    canonical-live: 2     # task.Status, validator_q_score (target)
+    canonical-derived: 2  # active_weight, payload-field-derivations
+    non-canonical-artifact: 10  # shadowMode, float-result, applied-set, paid-flags, escrow-entries-map, bucketCounter, synthetic-id, ledger-mu, time-now-recorded-at, FinalizationTimeUnix
+    local-live: 1         # validator_q_score (current, pre-Q-C)
+    advisory: 3           # FinalVerdict, FinalScoreBP, persist
+  pending_walks: []
+  high_mixed_version_risk_inputs:
+    - bucket_counter
+    - synthetic_transfer_id
+    - validator_q_score  # upgraded at Gate 5A.1 closure post multi-AI review
+  medium_mixed_version_risk_inputs: []  # validator_q_score moved to HIGH
+  architect_decisions_gate_5A_1:
+    - "§9.1 treasuryID: canonical-frozen confirmed."
+    - "§9.2 task.Status: option (b) accepted — idempotency pattern sufficient under pure derivation. Reopen condition documented in row notes."
+    - "§9.3 DAG reader: option (a) confirmed; 5A.3 designs DAGAncestorReader.ReadAtAnchor."
+    - "§9.4 removed inputs: keep with target_classification: removed for 5D regression detection."
+    - "§9.5 escrow persistence: stays non-canonical; defense-in-depth provided by derivation purity."
+    - "§9.6 5A.4 consumer audit: includes all 16 callsites of TransferFromBucketLabeled in test surface."
+    - "§9.7 M2 polish comment: accepted as in-scope 5A.4 polish."
+  gate_5A_1_closure_changes:
+    - "semantic_role column added to manifest with three values: derivation, control-flow-idempotency, observability. Every in-scope row classified."
+    - "task_status row formally exempted from Input-Domain-4 with proof_obligation requiring 5B early-exit equivalence guarantee."
+    - "validator_q_score upgraded to HIGH mixed-version-risk; projection-version-binding rule added as 5A.2 deliverable item 7 enforced at gate time."
+    - "Finding 6 (escrow paid-flag persistence) disposition rewritten with explicit 5B obligation a/b/c (derive canonical record first; apply flags as pure projection only; never read persisted flag prefixes to determine canonical behavior)."
+    - "Other rows classified: applicator_applied_set, escrow_entry_paid_flags, escrow_has_settlement_started, escrow_entries_map, ledger_settle_lock = control-flow-idempotency. payload_finalization_time_unix, time_now_recorded_at = observability."
+  forward_notes:
+    - "5C: production-cutover strategy for synthetic_transfer_id (one-time migration vs dual-read with legacy fallback). Documented in docs/plans/implementation/f5-phase-5a-plan-v3.md."
+    - "5D: explicit Q-C performance gate in verification matrix — p99 lookup < 100µs at 10k QPS sustained. Aligned with 5A.2 deliverable item 12."
+  notes:
+    - "Per audit §4.7 consumer survey: ZERO repo sites parse `bucket:` prefix; ZERO test sites assert exact synthetic IDs. 5A.4 refactor de-risked."
+    - "Per audit §6: NO halt-trigger fired."
+    - "Architect decisions accepted on all 7 open questions (Gate 5A.1)."
+    - "Next: multi-AI review (Grok + ChatGPT). Once absorbed, Gate 5A.1 fully closes and 5A.2 begins."

@@ -1,0 +1,18 @@
+# Fixture manifest for testdata-driven analyzer tests. Matches the
+# read sites in testdata/src/internal/settlement/compliant.go.txt and
+# leaves the second read in noncompliant.go.txt deliberately undeclared.
+#
+# This fixture exercises the analyzer in a deterministic, hand-curated
+# environment isolated from the live repository.
+
+inputs:
+
+  - id: compliant_task_id
+    source: synthetic.Payload.TaskID
+    source_locations:
+      - internal/settlement/compliant.go:14
+
+  - id: noncompliant_task_id
+    source: synthetic.Payload.TaskID
+    source_locations:
+      - internal/settlement/noncompliant.go:15

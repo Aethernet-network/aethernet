@@ -1,0 +1,523 @@
+# Payout Artifact Schema — F5 Phase 5A.4.a deliverable
+#
+# Status: v1.1 — post-Gate-5A.4.a architect review; ready for commit.
+# Workstream: F5 — Canonical Settlement Derivation
+# Phase: 5A.4.a — payout artifact schema (lock-gate).
+# Commit: 51bce89 (F4-frozen branch).
+# Date: 2026-04-23
+#
+# Plan reference: F5 Phase 5A Plan v3 §3.4 (deliverable 3 — payout artifact schema).
+# Cross-references:
+#   - F5 5A.1 manifest: docs/architecture/settlement-input-manifest.yaml
+#     (Plan v3 Finding 6 uniqueness invariant — preimage triple)
+#   - F5 5A.2 design: docs/architecture/q-score-canonicalization-design.md
+#     (V-1 invariant §7.1; canonical-cutoff-anchor §11; CanonicalWProjection §0.8)
+#   - F5 5A.3 design: docs/architecture/generation-ledger-canonical-derivation.md
+#     (cutoff_anchor_for(R) semantic §11; ReadAtAnchor §2.2)
+#
+# This schema defines the PayoutRecord — the canonical record that 5B's
+# pure derivation function produces, that 5C's version gate keys on
+# (via derivation_version), and that 5D's verification harness asserts
+# byte-equality over.
+#
+# ------------------------------------------------------------------
+# DESIGN PRINCIPLES (V-1 + Input-Domain-1/2/3/4 compliance)
+# ------------------------------------------------------------------
+#
+# Every field in PayoutRecord MUST be:
+#   1. canonical-frozen (fixed at round-seal, does not change), OR
+#   2. canonical-derived (deterministic from canonicalized inputs).
+#
+# FORBIDDEN field shapes:
+#   - local-live (mutable local state not sourced from canonical state)
+#   - non-canonical-artifact (process-local representation)
+#   - advisory (event payload fields with no canonical authority)
+#   - float64 (cross-architecture determinism violation)
+#   - time.Time (wall-clock-coupled; V-1 violation)
+#   - wall-clock-derived strings (same as above)
+#   - unbounded variable-length collections without locked cardinality
+#     (storage DoS surface)
+#
+# Per V-1 (F5 5A.2 §7.1): selection of derivation behavior is bound to
+# the round's canonical position, not to runtime state. This schema
+# is the OUTPUT of derivation; its identity (canonical_id) is a pure
+# function of canonical inputs.
+#
+# ------------------------------------------------------------------
+# UNIQUENESS INVARIANT (Plan v3 Finding 6)
+# ------------------------------------------------------------------
+#
+# Invariant U-1: canonical_id is globally unique across all PayoutRecords
+# in the protocol's lifetime.
+#
+# Uniqueness is carried by the (settlement_key, recipient, purpose.ordinal)
+# triple appearing in the hash preimage:
+#   - settlement_key.round_id prevents cross-round collision (different
+#     rounds have different round_ids).
+#   - recipient.id + purpose.ordinal prevents within-settlement collision
+#     (two payouts to the same recipient with different ordinal positions
+#     hash differently; two payouts to different recipients hash
+#     differently regardless of ordinal).
+#
+# A future refactor that shrinks the preimage and removes any of these
+# fields breaks U-1 and is a halt-worthy regression.
+#
+# ------------------------------------------------------------------
+# CANONICAL HASH ALGORITHM (LOCKED at Gate 5A.4.a)
+# ------------------------------------------------------------------
+#
+# canonical_id = SHA-256 hex digest of the canonically-serialized
+# PayoutRecord (excluding the canonical_id field itself; otherwise
+# self-referential).
+#
+# Canonical serialization: RFC 8785 (JCS — JSON Canonicalization
+# Scheme). Existing implementation at internal/auth/canonical.go;
+# SDK copy at pkg/sdk/canonical.go; cross-language test vectors at
+# internal/auth/canonical_test.go and sdk/python/tests/test_canonical_
+# crosslang.py confirm Go/Python parity. RFC 8785 specifies:
+#   - object keys sorted lex order at every nesting level
+#   - numbers in shortest round-trip representation per ECMAScript Number toString
+#   - strings escaped per RFC 8259 §7
+#   - explicit null vs absent distinction enforced by the spec
+#
+# F5 5A.4.a uses JCS (codebase convention for fresh canonical-JSON
+# work). Note: EventID computation historically uses json.Marshal
+# (Go-struct-ordered, NOT JCS) per docs/protocol-freeze-event-audit.md
+# §"EventID uses json.Marshal, not JCS"; that's a documented historical
+# artifact preserved for backward compatibility, not a precedent for
+# new canonical artifacts. New canonical artifacts (including this
+# PayoutRecord) MUST use JCS for cross-language determinism.
+#
+# Hash algorithm choice: SHA-256 LOCKED. Plan v3 §3.4 mentioned BLAKE3;
+# SHA-256 was chosen for codebase consistency with EventID hashing
+# (internal/event/event.go:221) and avoids introducing a new hash
+# primitive for one record type. Architect-confirmed at Gate 5A.4.a.
+#
+# ------------------------------------------------------------------
+
+PayoutRecord:
+
+  canonical_id:
+    type: Hash  # 64-character SHA-256 hex string
+    classification: canonical-derived
+    description: |
+      SHA-256 hex digest of the canonically-serialized PayoutRecord
+      with the canonical_id field excluded from the preimage.
+      Globally unique per Invariant U-1 (Plan v3 Finding 6).
+    notes: |
+      Per Invariant U-1: the preimage MUST include settlement_key,
+      recipient, purpose, amount, provenance, and derivation_version.
+      Removing any of these from the preimage breaks U-1 and is a
+      halt-worthy regression.
+
+  derivation_version:
+    type: uint32
+    classification: canonical-frozen
+    description: |
+      Monotone version of the derivation function that produced this
+      record. Part of canonical record identity — records with different
+      derivation_versions hash to different canonical_ids even if all
+      other fields are byte-identical.
+    notes: |
+      Aligns with locked Reputation-and-Consensus-Integrity workstream's
+      DerivationVersion field on ReputationEvidence (locked plan §2.1).
+      F5 ships derivation_version = 1; future cutovers (e.g., real-W
+      activation per F5 5A.2 §7) DO NOT bump derivation_version because
+      V-1's canonical-position-bound selection makes the implementation
+      swap transparent to record content. derivation_version bumps only
+      when the record SCHEMA or DERIVATION SEMANTICS change.
+
+  settlement_key:
+    type: composite
+    classification: canonical-frozen
+    description: Identifies which settlement this payout belongs to.
+    fields:
+      round_id:
+        type: RoundID
+        classification: canonical-frozen
+        description: |
+          The TaskVerificationRound's RoundID (from round.RoundID).
+          Set at round creation; immutable thereafter. Cross-round
+          collision prevention per Invariant U-1.
+      task_id:
+        type: TaskID
+        classification: canonical-frozen
+        description: |
+          The Task's TaskID (from round.TaskID, sealed at TaskPosted).
+          Redundant with round_id at the round level (round_id → task_id
+          is 1:1) but included for direct task-to-payout traceability
+          without requiring round-store lookup.
+      funding_reference:
+        type: EventID
+        classification: canonical-frozen
+        description: |
+          The canonical Transfer event ID that funded the escrow for
+          task_id. Derivable from escrowMgr.Get(task_id).FundingRef
+          per F5 5A.1 manifest (escrow_entry rows). Cluster-uniform.
+
+  recipient:
+    type: composite
+    classification: mixed (id: canonical-frozen; role: canonical-frozen enum)
+    description: Identifies the payout recipient.
+    fields:
+      id:
+        type: AgentID
+        classification: canonical-frozen
+        description: |
+          The recipient's canonical AgentID. For Worker/Poster/Validator
+          recipients, derived from the round's canonical fields. For
+          Treasury, the construction-time treasuryID per F5 5A.1
+          treasury_id row (canonical-frozen). For GenLedgerAncestor,
+          the EventID of the ancestor event (canonically-derived from
+          5A.3 BFS result).
+      role:
+        type: enum
+        classification: canonical-frozen
+        description: Recipient role enumeration. LOCKED at this set.
+        values:
+          - Worker
+          - Validator
+          - Treasury
+          - PosterRefund
+          - GenLedgerAncestor
+        notes: |
+          Extension of this enum is a new interface version per F5 5A.2
+          §7.5 version-binding rule, NOT a source-compatible additive
+          change. The locked set covers all settlement-emitted payouts
+          today (worker_payout, validator_distribution, gen_ledger_
+          royalty, treasury_remainder, poster_refund). Future role
+          additions require a new derivation_version + canonical
+          activation event.
+
+  amount:
+    type: composite
+    classification: mixed (value: canonical-derived; currency: canonical-frozen)
+    description: The payout amount.
+    fields:
+      value:
+        type: uint64
+        unit: µAET (micro-AET)
+        classification: canonical-derived
+        description: |
+          Computed deterministically by 5B's derivation function from
+          canonical inputs (escrow.Amount, share constants per
+          internal/settlement/verification_consensus_settler.go:19-24,
+          W projection lookup per CanonicalWProjection.Lookup, BFS
+          ancestry weight per F5 5A.3). Integer arithmetic only.
+      currency:
+        type: enum
+        classification: canonical-frozen
+        description: Currency identifier. LOCKED at "AET".
+        values:
+          - AET
+        notes: |
+          Multi-currency settlement is not in F5 scope. The currency
+          field exists for forward-compatibility schema slot; today it
+          is a single-value enum (always "AET"). Adding currencies is
+          a new interface version per V-1 version-binding.
+
+  purpose:
+    type: composite
+    classification: mixed (tag: canonical-frozen enum; ordinal: canonical-derived)
+    description: Per-payout descriptor for traceability and ordering.
+    fields:
+      tag:
+        type: enum
+        classification: canonical-frozen
+        description: |
+          Settlement-purpose identifier. LOCKED vocabulary; corresponds
+          to TransferFromBucketLabeled "label" semantic in the existing
+          codebase (per internal/escrow/escrow.go ReleaseSettlement
+          callsites at lines 487, 498, 531, 558, 569).
+        values:
+          - settlement.worker_payout
+          - settlement.poster_refund
+          - settlement.validator_distribution
+          - settlement.gen_ledger_royalty
+          - settlement.treasury_remainder
+        notes: |
+          Tag and recipient.role are related but distinct: role is the
+          recipient's category; tag is the payout's purpose. For
+          example, treasury can receive both a settlement.treasury_
+          remainder payout (rounding remainder) AND, in some flows, an
+          additional payout when no agreeing validators exist (per
+          settler.go:217-220 routing). Both have role=Treasury but
+          different tags. Future tag additions are new interface
+          version per V-1 version-binding.
+      ordinal:
+        type: uint32
+        classification: canonical-derived
+        description: |
+          Position of this payout in the canonical payout ordering for
+          this settlement. Deterministic across nodes per the locked
+          ordinal-assignment rule below. Required by U-1 (within-
+          settlement collision prevention).
+        ordinal_assignment_rule:
+          status: LOCKED at schema level (Gate 5A.4.a architect decision)
+          description: |
+            The ordinal-assignment rule is a CANONICAL CONTRACT specified
+            by this schema; not deferred to 5B implementation. 5B's
+            derivation function implements TO this specification.
+            5A.4.c CI lint verifies conformance. 5D verification
+            harness asserts cross-node byte-equality on the produced
+            (canonical_id, ordinal) pairs.
+          rule:
+            - step: 1
+              text: |
+                PayoutRecords for a single settlement are grouped by
+                purpose.tag.
+            - step: 2
+              text: |
+                Within each tag group, PayoutRecords are sorted by
+                recipient.id lex order (byte-string comparison on the
+                AgentID's canonical encoding).
+            - step: 3
+              text: |
+                Tag groups are processed in fixed sequence:
+                  1. settlement.worker_payout
+                  2. settlement.poster_refund
+                  3. settlement.validator_distribution
+                  4. settlement.gen_ledger_royalty
+                  5. settlement.treasury_remainder
+            - step: 4
+              text: |
+                Ordinal assigned sequentially starting from 0,
+                incrementing across the full ordered sequence of
+                records (does NOT reset between tag groups; the ordinal
+                is a single monotone counter across the entire settlement
+                payout list).
+        notes: |
+          The locked ordinal-assignment rule is what makes ordinal a
+          canonical-derived field rather than a settler-local choice.
+          Two nodes settling the same R with the same canonical inputs
+          produce byte-identical ordinal sequences. Within-settlement
+          collision prevention (U-1) is satisfied: two payouts with the
+          same (settlement_key, recipient) but different tags get
+          different ordinals (different tag-group positions in the
+          fixed sequence above). Two payouts with the same (settlement_
+          key, recipient, tag) tuple would have the same ordinal, but
+          that case is impossible by construction — the settler emits
+          at most one payout per (recipient, tag) tuple per settlement.
+
+  provenance:
+    type: composite
+    classification: canonical-frozen + canonical-derived
+    description: Auditable provenance metadata for verifying the payout.
+    fields:
+      round_verdict:
+        type: enum
+        classification: canonical-frozen
+        description: |
+          The Verdict from R's TaskVerificationConsensus event
+          (sealed at round finalization).
+        values:
+          - VerdictAccept
+          - VerdictReject
+          - VerdictDispute
+        notes: |
+          Derived from R's canonical Outcome.Verdict per F5 5A.2 §0.8
+          (NOT from payload.FinalVerdict per F4 C-17 advisory rule).
+      canonical_cutoff_anchor:
+        type: "EventID | nil"
+        classification: canonical-derived
+        description: |
+          The canonical event identifier of the snapshot at end of
+          R's immediately-prior epoch. Per F5 5A.2 §11.5: epoch-coarse
+          cutoff = epoch_of(R) - 1 (snapshot at end of the immediately-
+          prior epoch). Per F5 5A.3 §11.4: cutoff_anchor_for(R) is
+          identical (5A.3 BFS uses this anchor as the bound for
+          ReadAtAnchor).
+
+          Type is EventID | nil. Nil is a distinct canonical value
+          per the RFC 8785 explicit-null encoding; nil contributes
+          to the canonical_id preimage as a JSON null.
+        nil_semantic: |
+          canonical_cutoff_anchor is nil iff ReputationActivation is
+          NOT a canonical ancestor of R.canonical_seal_context — i.e.,
+          R's settlement occurs canonically before the locked workstream
+          snapshot framework is active in R's canonical past.
+          Post-ReputationActivation: field is always non-nil.
+        v1_symmetry: |
+          This field follows the same V-1 pattern as W-implementation
+          selection (F5 5A.2 §7.1-§7.2): selection is canonical-
+          position-bound, not runtime-state-bound. Nil iff
+          ReputationActivation is NOT a canonical ancestor of
+          R.canonical_seal_context; non-nil (locked workstream's
+          snapshot encoding) iff it is. Every node at every time
+          computes the same field value for the same R.
+
+          The placeholder approaches considered earlier in design
+          (empty-string sentinel, epoch-index-encoded fallback) were
+          REJECTED at Gate 5A.4.a because they reintroduced V-1-
+          violating semantics: a sentinel value queried at runtime
+          would couple the field's meaning to the node's local
+          activation state, exactly the failure mode V-1 forbids.
+          EventID | nil with canonical-position-bound semantics is
+          the only V-1-preserving encoding.
+        notes: |
+          Cluster-uniform per locked plan §5.2 SN-1: snapshot root is
+          a deterministic function of canonical state. Two nodes
+          settling R produce the same canonical_cutoff_anchor (same
+          EventID, or both nil). The field's specific non-nil
+          encoding (snapshot's content-addressed canonical event ID)
+          depends on locked workstream's snapshot implementation;
+          F5 5A.2 / 5A.3 reference the cutoff semantically; locked
+          workstream provides the concrete EventID at implementation
+          time. The nil case is fully handled at the schema level
+          and does NOT depend on locked workstream coordination.
+
+# ------------------------------------------------------------------
+# SCHEMA-LEVEL INVARIANTS
+# ------------------------------------------------------------------
+
+invariants:
+
+  U-1:  # Uniqueness (Plan v3 Finding 6)
+    statement: |
+      canonical_id is globally unique across all PayoutRecords in the
+      protocol's lifetime. Uniqueness is carried by (settlement_key,
+      recipient, purpose.ordinal) appearing in the hash preimage.
+    enforcement: |
+      Hash preimage MUST include settlement_key (composite),
+      recipient (composite), purpose (composite — both tag AND ordinal),
+      amount (composite), provenance (composite), and derivation_version.
+      A refactor that shrinks the preimage breaks U-1.
+    halt-worthy-regression: |
+      A future commit that removes any of the U-1-bearing fields from
+      the preimage is a halt-worthy regression. CI lint at
+      internal/settlement/lint/input_manifest.go (per Gate 5A.1
+      Finding 5 — F5 5A.4.c) MAY include a preimage-completeness check
+      against this invariant.
+
+  V-1-compatibility:
+    statement: |
+      No field admits non-canonical values. All fields are
+      canonical-frozen or canonical-derived per F5 5A.2 §7.1 V-1
+      invariant. The PayoutRecord identity (canonical_id) is a pure
+      function of canonical inputs; two nodes deriving the same
+      settlement produce byte-identical records.
+    enforcement: |
+      Field-level classification (above) ENFORCED in the derivation
+      function (5B). 5D verification harness asserts cross-node byte-
+      equality on the produced PayoutRecord set per round.
+
+  Input-Domain-1:
+    statement: |
+      Every input to derivation is classified per F5 5A.1 manifest
+      §3.1 taxonomy. PayoutRecord fields trace back to canonical-frozen,
+      canonical-live (with realizable retrieval), or canonical-derived
+      manifest inputs. No PayoutRecord field traces back to local-live
+      or non-canonical-artifact.
+    enforcement: |
+      F5 5A.4.c CI lint scans 5B derivation code for reads not declared
+      in F5 5A.1 manifest. Any undeclared read fails the lint.
+
+  Input-Domain-2:
+    statement: |
+      Canonical-live inputs feeding derivation are read at the canonical
+      cutoff (canonical_cutoff_anchor). PayoutRecord includes
+      canonical_cutoff_anchor in provenance for verification.
+
+  Input-Domain-3:
+    statement: |
+      canonical_cutoff_anchor is derived from round-seal state, not
+      from local wall-clock. Per F5 5A.2 §11 + F5 5A.3 §11.4.
+
+  Input-Domain-4:
+    statement: |
+      Every canonical-live or canonical-derived input has deterministic
+      replayable lookup at canonical_cutoff_anchor. CanonicalWProjection
+      satisfies for W; ReadAtAnchor satisfies for ancestry; both
+      consume the same canonical_cutoff_anchor field.
+
+# ------------------------------------------------------------------
+# SCOPE BOUNDARIES
+# ------------------------------------------------------------------
+
+scope_boundaries:
+
+  in_scope:
+    - PayoutRecord schema definition (this document).
+    - Schema-level invariants U-1, V-1, Input-Domain-1/2/3/4.
+    - Field-level type and classification specification.
+    - Hash algorithm (SHA-256) and canonical serialization rule.
+
+  out_of_scope_owned_by_other_5A.4_subphases:
+    - 5A.4.b: derivation function implementation (5B Phase delivers; 5A.4.b
+      refactors TransferFromBucketLabeled to accept content-hash IDs).
+    - 5A.4.c: CI lint package (internal/settlement/lint/input_manifest.go).
+    - 5A.4.d: consumer audit reconciliation (re-verify zero-breaking-
+      consumers post-refactor; 16-callsite test surface).
+
+  out_of_scope_for_F5:
+    - GenLedgerAncestor depth/quality fields on the record (F5 5A.3
+      §6 quality function is stubbed at NeutralBP; depth is implicit
+      via amount.value computation, not a record field).
+    - Multi-currency support (single-value AET enum today).
+    - Per-recipient breakdown of validator pool (validators get
+      individual PayoutRecords with role=Validator, not a single
+      composite record).
+    - Cross-record settlement totals or invariants (settlement-level
+      conservation is verified at the settler boundary, not in the
+      schema).
+
+  deferred_to_future_workstreams:
+    - Multi-currency: future protocol-economics workstream.
+    - Real per-event quality: future quality-canonicalization workstream
+      (per F5 5A.3 §6.4 NeutralQualityStub stub-to-real swap pattern).
+    - Cycle-exclusion-aware GenLedgerAncestor records: locked
+      Reputation-and-Consensus-Integrity workstream's challenge-path.
+
+# ------------------------------------------------------------------
+# OPEN QUESTIONS — ALL RESOLVED at Gate 5A.4.a architect review
+# ------------------------------------------------------------------
+
+open_questions:
+
+  Q-1:  # Hash algorithm — RESOLVED
+    resolution: |
+      SHA-256 LOCKED. Architect-confirmed: codebase consistency with
+      EventID hashing per internal/event/event.go:221. BLAKE3 not
+      introduced. Documented in CANONICAL HASH ALGORITHM section
+      above (no longer pending verification).
+
+  Q-2:  # canonical_cutoff_anchor concrete encoding — RESOLVED via Fix A
+    resolution: |
+      Field type is EventID | nil. Nil is a distinct canonical value
+      per the RFC 8785 explicit-null encoding; nil contributes to the
+      canonical_id preimage. Nil semantic: ReputationActivation is NOT
+      a canonical ancestor of R.canonical_seal_context. Post-
+      ReputationActivation: field is always non-nil. The placeholder
+      approaches considered earlier (empty-string sentinel, epoch-
+      index-encoded fallback) were REJECTED because they reintroduced
+      V-1-violating semantics. EventID | nil with canonical-position-
+      bound semantics is the only V-1-preserving encoding. See
+      provenance.canonical_cutoff_anchor field above for full nil
+      semantic and V-1 symmetry note.
+
+  Q-3:  # ordinal-assignment rule — RESOLVED at schema level
+    resolution: |
+      Ordinal-assignment rule LOCKED at schema level (4-step rule)
+      rather than deferred to 5B implementation. The canonical contract
+      for ordinal determinism is part of the schema; 5B implements TO
+      this specification; 5A.4.c CI lint verifies conformance; 5D
+      asserts cross-node byte-equality. See purpose.ordinal field
+      above for the full rule.
+
+# ------------------------------------------------------------------
+# STATISTICS / METADATA
+# ------------------------------------------------------------------
+
+statistics:
+  schema_version: 1
+  record_field_count: 7  # canonical_id, derivation_version, settlement_key, recipient, amount, purpose, provenance
+  composite_field_count: 5  # settlement_key, recipient, amount, purpose, provenance
+  enum_count: 4  # recipient.role, amount.currency, purpose.tag, provenance.round_verdict
+  hash_algorithm: SHA-256 (LOCKED)
+  hash_output_format: hex (64 chars)
+  canonical_serialization: RFC 8785 JCS (existing impl at internal/auth/canonical.go)
+  uniqueness_invariant: U-1 (Plan v3 Finding 6)
+  invariant_count: 6  # U-1, V-1-compatibility, Input-Domain-1, -2, -3, -4
+  ordinal_assignment_rule: LOCKED at schema level (4-step rule per purpose.ordinal field)
+  open_questions: 0
+  status: gate-5A.4.a-closed; ready for commit-to-disk

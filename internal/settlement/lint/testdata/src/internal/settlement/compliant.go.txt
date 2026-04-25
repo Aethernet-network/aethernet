@@ -1,0 +1,16 @@
+// Compliant fixture — every read site is declared in the corresponding
+// fixture manifest. Used by the synthetic-module test scaffolding.
+//
+// File extension is `.go.txt` so it is not compiled as part of `go test
+// ./...`. The synthetic-module test scaffolding rewrites it to `.go`
+// inside a temp directory before running the lint.
+package settlement
+
+type Payload struct {
+	TaskID string
+}
+
+func ReadCompliant(p *Payload) string {
+	a := p.TaskID // declared at line 14 in the fixture manifest
+	return a
+}

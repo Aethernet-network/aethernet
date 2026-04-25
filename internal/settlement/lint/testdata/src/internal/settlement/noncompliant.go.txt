@@ -1,0 +1,19 @@
+// Non-compliant fixture — contains an undeclared read. Used by the
+// synthetic-module negative test to verify the analyzer reports a
+// diagnostic for an undeclared in-scope read.
+//
+// File extension is `.go.txt` so it is not compiled as part of `go test
+// ./...`. The synthetic-module test scaffolding rewrites it to `.go`
+// inside a temp directory before running the lint.
+package settlement
+
+type Payload struct {
+	TaskID   string
+	WorkerID string
+}
+
+func ReadNonCompliant(p *Payload) (string, string) {
+	a := p.TaskID   // declared at line 15
+	b := p.WorkerID // NOT declared — must be flagged
+	return a, b
+}
