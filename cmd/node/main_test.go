@@ -23,10 +23,16 @@ package main
 //      dispatcher recovery pass.
 
 import (
+	"os"
 	"testing"
 
+	"github.com/Aethernet-network/aethernet/internal/crypto"
+	"github.com/Aethernet-network/aethernet/internal/dag"
 	"github.com/Aethernet-network/aethernet/internal/dispatch"
 	"github.com/Aethernet-network/aethernet/internal/event"
+	"github.com/Aethernet-network/aethernet/internal/genesis"
+	"github.com/Aethernet-network/aethernet/internal/ledger"
+	"github.com/Aethernet-network/aethernet/internal/localpub"
 	"github.com/Aethernet-network/aethernet/internal/store"
 )
 
@@ -196,5 +202,132 @@ func TestMigrationStoreAdapter_GetMalformedBody_ReturnsError(t *testing.T) {
 	_, _, _, err = a.GetIntegerMigrationActivated()
 	if err == nil {
 		t.Error("expected unmarshal error on malformed body; got nil")
+	}
+}
+
+// TestEmitGenesisTransfers_AppliesLocalTransfers is the regression test
+// for the founder Option C bootstrap-order race fix (2026-04-25).
+//
+// Pre-fix: emitGenesisFundingEvent only published the canonical event
+// without applying the transfer to the local TransferLedger. Result:
+// the immediately-following genesis-validator stake attempt at
+// cmd/node/main.go:1300 saw testnet-validator balance=0 and failed
+// with "insufficient balance: bucket testnet-validator balance 0 <
+// allocation 50000000000". On some nodes the funding event subsequently
+// propagated; on others it didn't, producing cross-node ledger
+// divergence on genesis bootstrap state — surfaced by F5 5B Phase 3.4
+// cluster-health verification via /v1/admin/ledger-snapshot.
+//
+// Post-fix: emitGenesisFundingEvent applies the transfer to the local
+// ledger immediately after publishing the canonical event, mirroring
+// the dual-action pattern at cmd/node/main.go:1342-1373 (node-own-agent
+// funding). This test asserts the dual-action behavior at the
+// emitGenesisTransfers level.
+func TestEmitGenesisTransfers_AppliesLocalTransfers(t *testing.T) {
+	tl := ledger.NewTransferLedger()
+	// Seed source buckets so emitGenesisTransfers has funds to move.
+	if err := tl.FundAgent(crypto.AgentID(genesis.BucketRewards), genesis.NetworkRewards); err != nil {
+		t.Fatalf("seed rewards bucket: %v", err)
+	}
+	if err := tl.FundAgent(crypto.AgentID(genesis.BucketEcosystem), genesis.EcosystemAllocation); err != nil {
+		t.Fatalf("seed ecosystem bucket: %v", err)
+	}
+
+	d := dag.New()
+	pub := localpub.New(d, nil)
+	kp, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer s.Close()
+
+	// Force the testnet branch so faucet funding emits.
+	t.Setenv("AETHERNET_TESTNET", "true")
+
+	// Pre-condition: testnet-validator + faucet balances are zero.
+	preTV, _ := tl.Balance(crypto.AgentID(genesis.GenesisValidatorID))
+	preFaucet, _ := tl.Balance(crypto.AgentID(genesis.BucketFaucet))
+	if preTV != 0 || preFaucet != 0 {
+		t.Fatalf("pre-condition: expected fresh balances 0/0, got tv=%d faucet=%d", preTV, preFaucet)
+	}
+
+	emitGenesisTransfers(d, pub, kp, kp.AgentID(), tl, s)
+
+	// Post-condition: both targets MUST be funded synchronously
+	// (not deferred to async sync handler).
+	postTV, _ := tl.Balance(crypto.AgentID(genesis.GenesisValidatorID))
+	postFaucet, _ := tl.Balance(crypto.AgentID(genesis.BucketFaucet))
+	if postTV != genesis.GenesisValidatorFund {
+		t.Errorf("testnet-validator balance after emit: got %d, want %d (founder Option C fix not applied)",
+			postTV, genesis.GenesisValidatorFund)
+	}
+	if postFaucet != genesis.FaucetAllocation {
+		t.Errorf("genesis:faucet balance after emit: got %d, want %d (founder Option C fix not applied)",
+			postFaucet, genesis.FaucetAllocation)
+	}
+
+	// Idempotency: re-running emitGenesisTransfers with the marker
+	// already set MUST NOT double-fund. The genesisTransfersKey marker
+	// is checked at the top of emitGenesisTransfers and short-circuits.
+	emitGenesisTransfers(d, pub, kp, kp.AgentID(), tl, s)
+	postTV2, _ := tl.Balance(crypto.AgentID(genesis.GenesisValidatorID))
+	postFaucet2, _ := tl.Balance(crypto.AgentID(genesis.BucketFaucet))
+	if postTV2 != postTV || postFaucet2 != postFaucet {
+		t.Errorf("idempotency violated: balances changed on second emitGenesisTransfers call (tv: %d->%d, faucet: %d->%d)",
+			postTV, postTV2, postFaucet, postFaucet2)
+	}
+}
+
+// TestEmitGenesisTransfers_StakingValidatorAfterFundingSucceeds asserts
+// the END-TO-END invariant the founder Option C fix protects: after
+// emitGenesisTransfers runs, the genesis-validator stake operation
+// (which moves GenesisValidatorStake from testnet-validator to
+// staking-pool) MUST succeed. Pre-fix this returned ErrInsufficientBalance
+// because the funding hadn't been applied locally.
+//
+// Mirrors the canonical cmdStart() startup sequence post-reorder:
+//   1. emitGenesisTransfers (funds testnet-validator)
+//   2. stakeManager.Stake(testnet-validator, GenesisValidatorStake)
+//
+// If the stake fails with insufficient-balance, the bootstrap race is
+// back.
+func TestEmitGenesisTransfers_StakingValidatorAfterFundingSucceeds(t *testing.T) {
+	tl := ledger.NewTransferLedger()
+	if err := tl.FundAgent(crypto.AgentID(genesis.BucketRewards), genesis.NetworkRewards); err != nil {
+		t.Fatalf("seed rewards: %v", err)
+	}
+	if err := tl.FundAgent(crypto.AgentID(genesis.BucketEcosystem), genesis.EcosystemAllocation); err != nil {
+		t.Fatalf("seed ecosystem: %v", err)
+	}
+
+	d := dag.New()
+	pub := localpub.New(d, nil)
+	kp, _ := crypto.GenerateKeyPair()
+	s, err := store.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer s.Close()
+	_ = os.Setenv("AETHERNET_TESTNET", "true")
+	defer os.Unsetenv("AETHERNET_TESTNET")
+
+	emitGenesisTransfers(d, pub, kp, kp.AgentID(), tl, s)
+
+	// Now simulate the staking step at cmd/node/main.go:1300 — move
+	// GenesisValidatorStake from testnet-validator to staking-pool.
+	// This is what stakeManager.Stake does internally via the ledger.
+	tvID := crypto.AgentID(genesis.GenesisValidatorID)
+	bal, _ := tl.Balance(tvID)
+	if bal < genesis.GenesisValidatorStake {
+		t.Fatalf("BOOTSTRAP RACE REGRESSION: testnet-validator balance %d < required stake %d after emitGenesisTransfers; founder Option C fix is broken",
+			bal, genesis.GenesisValidatorStake)
+	}
+	// Defensive: the actual staking transfer must succeed.
+	if err := tl.TransferFromBucket(tvID, "staking-pool", genesis.GenesisValidatorStake); err != nil {
+		t.Fatalf("BOOTSTRAP RACE REGRESSION: stake transfer failed after emitGenesisTransfers: %v", err)
 	}
 }

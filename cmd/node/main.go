@@ -1296,6 +1296,26 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		_ = stack.reg.Register(tvFP)
 	}
 
+	// Emit canonical GenesisFunding DAG events for post-mint transfers
+	// (validator bootstrap, faucet pool). These are auditable — new nodes
+	// replay them from the DAG. Idempotent: skips if already emitted.
+	//
+	// MUST happen BEFORE the genesis-validator stake attempt below
+	// (founder Option C, 2026-04-25 — pre-existing bootstrap-order race
+	// surfaced by F5 5B Phase 3.4 cluster-health verification): the
+	// stake operation moves GenesisValidatorStake (50B µAET) from
+	// testnet-validator's balance to staking-pool, so testnet-validator
+	// MUST be funded first. Pre-fix the order was reversed (stake →
+	// emit-funding), causing every node-restart to log
+	// "WARN startStack: failed to stake genesis validator
+	// err=insufficient balance: bucket testnet-validator balance 0".
+	// On some nodes the funding event subsequently propagated; on
+	// others it didn't, producing cross-node ledger divergence on
+	// genesis bootstrap state. emitGenesisFundingEvent now applies the
+	// transfer locally synchronously in addition to publishing the
+	// canonical event so the staking step sees the credit.
+	emitGenesisTransfers(stack.dag, pub, stack.kp, agentID, stack.transfer, stack.store)
+
 	// Stake the genesis validator (idempotent: skips if already staked).
 	if stack.stakeManager.StakedAmount(testnetValidatorID) == 0 {
 		if err := stack.stakeManager.Stake(testnetValidatorID, genesis.GenesisValidatorStake); err != nil {
@@ -1321,11 +1341,6 @@ func startStack(stack *nodeStack, agentID crypto.AgentID, p2pAddr, apiListenAddr
 		"balance", tvBal,
 		"staked", stack.stakeManager.StakedAmount(testnetValidatorID),
 	)
-
-	// Emit canonical GenesisFunding DAG events for post-mint transfers
-	// (validator bootstrap, faucet pool). These are auditable — new nodes
-	// replay them from the DAG. Idempotent: skips if already emitted.
-	emitGenesisTransfers(stack.dag, pub, stack.kp, agentID, stack.transfer, stack.store)
 
 	// ── Node agent setup: fund, stake, register ────────────────────────────
 	// Each node's own agentID needs funds (for transfers), stake (for OCS
@@ -3345,6 +3360,16 @@ func seedGenesisMint(tl *ledger.TransferLedger, s genesisStore) {
 	}
 }
 
+// genesisFundingMarkerKey returns the per-event idempotency-marker key
+// used by both the local-emit path (emitGenesisFundingEvent below) and
+// the peer-receive sync handler at cmd/node/main.go:2299. Mirroring the
+// key shape ensures local-emit + peer-receive deduplicate against each
+// other when an emitter's own broadcast echoes back during cluster
+// catch-up.
+func genesisFundingMarkerKey(eventID event.EventID) string {
+	return "genesis-funding:" + string(eventID)
+}
+
 // emitGenesisTransfers creates canonical GenesisFunding DAG events for
 // the post-mint transfers (validator bootstrap, faucet pool). These events
 // are auditable — new nodes replay them from the DAG to reach the same
@@ -3361,7 +3386,7 @@ func emitGenesisTransfers(d *dag.DAG, pub *localpub.Publisher, kp *crypto.KeyPai
 	// Validator bootstrap from rewards bucket.
 	validatorBal, _ := tl.Balance(crypto.AgentID(genesis.GenesisValidatorID))
 	if validatorBal == 0 {
-		emitGenesisFundingEvent(d, pub, kp, agentID,
+		emitGenesisFundingEvent(d, pub, kp, agentID, tl, s,
 			genesis.BucketRewards, genesis.GenesisValidatorID,
 			genesis.GenesisValidatorFund, "validator-genesis")
 	}
@@ -3370,7 +3395,7 @@ func emitGenesisTransfers(d *dag.DAG, pub *localpub.Publisher, kp *crypto.KeyPai
 	if os.Getenv("AETHERNET_TESTNET") == "true" {
 		faucetBal, _ := tl.Balance(crypto.AgentID(genesis.BucketFaucet))
 		if faucetBal == 0 {
-			emitGenesisFundingEvent(d, pub, kp, agentID,
+			emitGenesisFundingEvent(d, pub, kp, agentID, tl, s,
 				genesis.BucketEcosystem, genesis.BucketFaucet,
 				genesis.FaucetAllocation, "faucet-pool")
 		}
@@ -3381,8 +3406,32 @@ func emitGenesisTransfers(d *dag.DAG, pub *localpub.Publisher, kp *crypto.KeyPai
 	}
 }
 
-// emitGenesisFundingEvent creates and publishes a single GenesisFunding DAG event.
+// emitGenesisFundingEvent creates and publishes a single GenesisFunding
+// DAG event AND applies the corresponding transfer to the local
+// TransferLedger. The dual-action shape mirrors the node-own-agent
+// funding code at cmd/node/main.go:1342-1373: the canonical event is
+// what peers see and replay; the local apply is what credits this
+// node's own ledger projection so subsequent startup steps that read
+// the destination's balance (e.g., staking the genesis validator from
+// the just-funded testnet-validator bucket) see the credit
+// synchronously.
+//
+// Idempotency: marker key `genesisFundingMarkerKey(eventID)` is set on
+// the store after a successful local apply. The peer-receive sync
+// handler at cmd/node/main.go:2299 reads the same key shape and skips
+// when present, so an emitter's own broadcast echoing back via DAG
+// sync deduplicates against this marker.
+//
+// Pre-fix bug (founder Option C, 2026-04-25): the prior implementation
+// only published the event without local apply. Result: callers like
+// emitGenesisTransfers emitted testnet-validator funding events but
+// the local ledger still showed balance=0, causing the immediately-
+// following genesis-validator stake attempt at cmd/node/main.go:1300
+// to fail with "insufficient balance: bucket testnet-validator balance
+// 0 < allocation 50000000000". Surfaced by F5 5B Phase 3.4 cluster-
+// health verification via the new /v1/admin/ledger-snapshot endpoint.
 func emitGenesisFundingEvent(d *dag.DAG, pub *localpub.Publisher, kp *crypto.KeyPair, agentID crypto.AgentID,
+	tl *ledger.TransferLedger, s genesisStore,
 	fromBucket, toAgent string, amount uint64, reason string) {
 	payload := event.GenesisFundingPayload{
 		Version:    1,
@@ -3403,9 +3452,26 @@ func emitGenesisFundingEvent(d *dag.DAG, pub *localpub.Publisher, kp *crypto.Key
 	if pub != nil {
 		if err := pub.Publish(ev); err != nil {
 			slog.Warn("genesis: failed to publish funding event", "to", toAgent, "err", err)
+			return
 		}
 	} else if err := d.Add(ev); err != nil {
 		slog.Warn("genesis: failed to add funding event to DAG", "to", toAgent, "err", err)
+		return
+	}
+
+	// Apply locally so the destination's balance is visible to the
+	// remainder of startup (e.g., the testnet-validator stake operation
+	// that follows immediately after emitGenesisTransfers in cmdStart).
+	// Peers apply the same transfer via the GenesisFunding sync handler;
+	// the per-event idempotency marker dedups when a peer echoes back.
+	if tl != nil {
+		if err := tl.TransferFromBucket(crypto.AgentID(fromBucket), crypto.AgentID(toAgent), amount); err != nil {
+			slog.Warn("genesis: local apply failed", "to", toAgent, "amount", amount, "err", err)
+			return
+		}
+		if s != nil {
+			_ = s.PutMeta(genesisFundingMarkerKey(ev.ID), []byte("1"))
+		}
 	}
 	slog.Info("genesis: emitted funding event", "to", toAgent, "amount", amount, "event_id", ev.ID)
 }
